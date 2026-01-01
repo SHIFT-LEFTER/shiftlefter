@@ -1,0 +1,13 @@
+.cpcache/
+**/.DS_Store
+.nrepl-port
+.clj-kondo/.cache/
+.grok
+.lsp
+docs-private
+.calva
+reports/compliance/runs/
+reports/compliance/latest
+compliance/
+fuzz/
+target/
