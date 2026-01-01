@@ -1,0 +1,186 @@
+#!/usr/bin/env clojure -M
+(ns compliance-script
+  (:require [shiftlefter.gherkin.compliance :as compliance]
+            [clojure.pprint :as pp]
+            [clojure.string :as str]))
+
+(defn print-summary [report run-dir]
+  (let [g (:good report)
+        b (:bad report)
+        total-tokens-pass (+ (:full-pass g) (:tokens-pass g) (:ast-pass g))]
+    (println)
+    (println "=== COMPLIANCE SUMMARY ===")
+    (println)
+    (println "Good files:" (:total g))
+    (println "  Full pass (tokens+AST+pickles):" (:full-pass g))
+    (println "  Tokens pass:" (:tokens-pass g))
+    (println "  AST pass:" (:ast-pass g))
+    (println "  ─────────────────────────────")
+    (println "  Total passing tokens:" total-tokens-pass)
+    (println)
+    (println "  Parse errors:" (count (:parse-errors g)))
+    (println "  Token failures:" (count (:token-fails g)))
+    (println "  AST failures:" (count (:ast-fails g)))
+    (println "  Pickle failures:" (count (:pickle-fails g)))
+    (println)
+    (println "Bad files:" (:total b))
+    (println "  Correctly rejected:" (:passes b))
+    (println "  Should reject but didn't:" (count (:fails b)))
+    (println)
+    (if run-dir
+      (println "Reports written to:" run-dir)
+      (println "Reports written to: compliance.edn, compliance.md"))))
+
+(defn- failure-section
+  "Generate a failure section. If files is empty, shows 'ALL PASS' header."
+  [title all-pass-title description files]
+  (if (seq files)
+    (str "## " title "\n\n" description "\n\n"
+         (str/join "\n" (map #(str "- `" % "`") files)))
+    (str "## " all-pass-title)))
+
+(defn- format-pct [n total]
+  (format "%.1f" (* 100.0 (/ n total))))
+
+(defn generate-mermaid-charts [report]
+  (let [g (:good report)
+        total (:total g)
+        full-pass (:full-pass g)
+        ast-fails (count (:ast-fails g))
+        pickle-fails (count (:pickle-fails g))
+        ;; Pipeline stages
+        after-parse total  ;; all files parse (0 parse errors currently)
+        after-token total  ;; all files pass tokens
+        after-ast (- total ast-fails)
+        after-pickle full-pass
+        ;; Percentages
+        ast-survive-pct (format-pct after-ast total)
+        ast-fail-pct (format-pct ast-fails total)
+        pickle-survive-pct (format-pct after-pickle total)
+        pickle-fail-of-total-pct (format-pct pickle-fails total)
+        pickle-fail-of-reached-pct (format-pct pickle-fails after-ast)
+        full-pass-pct (format-pct full-pass total)]
+    (str/join "\n"
+      ["```mermaid"
+       "flowchart LR"
+       (str "  A[Start: " total "] --> B[After parse: " after-parse ", 100 pct]")
+       (str "  B --> C[After token: " after-token ", 100 pct]")
+       ""
+       (str "  C --> D[After AST: " after-ast ", " ast-survive-pct " pct survive]")
+       (str "  C --> X[AST failures: " ast-fails ", " ast-fail-pct " pct of total]")
+       ""
+       (str "  D --> E[After pickle: " after-pickle ", " pickle-survive-pct " pct survive]")
+       (str "  D --> Y[Pickle failures: " pickle-fails ", " pickle-fail-of-total-pct " pct of total; " pickle-fail-of-reached-pct " pct of reached]")
+       ""
+       (str "  E --> Z[Full pass: " full-pass ", " full-pass-pct " pct]")
+       "```"
+       ""
+       "```mermaid"
+       "pie showData"
+       (str "  title Outcomes (n=" total ")")
+       (str "  \"Full pass (" full-pass ", " full-pass-pct "%)\" : " full-pass)
+       (str "  \"AST failures (" ast-fails ", " ast-fail-pct "%)\" : " ast-fails)
+       (str "  \"Pickle failures (" pickle-fails ", " pickle-fail-of-total-pct "%)\" : " pickle-fails)
+       "```"])))
+
+(defn generate-markdown [report]
+  (let [g (:good report)
+        b (:bad report)
+        ;; Extract filenames from the new map structure
+        token-fail-files (map :file (:token-fails g))
+        ast-fail-files (map :file (:ast-fails g))
+        pickle-fail-files (map :file (:pickle-fails g))
+        parse-error-files (map :file (:parse-errors g))
+        charts (generate-mermaid-charts report)]
+    (str/join "\n"
+      [charts
+       ""
+       "# Compliance Report"
+       ""
+       "## Summary"
+       ""
+       "| Category | Count |"
+       "|----------|-------|"
+       (str "| Good files total | " (:total g) " |")
+       (str "| Parse errors | " (count parse-error-files) " |")
+       (str "| Token failures | " (count token-fail-files) " |")
+       (str "| AST failures | " (count ast-fail-files) " |")
+       (str "| Pickle failures | " (count pickle-fail-files) " |")
+       (str "| **Full pass** | **" (:full-pass g) "** |")
+       ""
+       "| Category | Count |"
+       "|----------|-------|"
+       (str "| Bad files total | " (:total b) " |")
+       (str "| Correctly rejected | " (:passes b) " |")
+       (str "| Should reject but didn't | " (count (:fails b)) " |")
+       ""
+       "---"
+       ""
+       ;; Sections in pipeline order
+       (failure-section "Parse Errors" "Parse Errors - ALL PASS"
+                        "Files that fail to parse (parser limitations):"
+                        parse-error-files)
+       ""
+       "---"
+       ""
+       (failure-section "Token Failures" "Token Failures - ALL PASS"
+                        "Files where tokens don't match expected format:"
+                        token-fail-files)
+       ""
+       "---"
+       ""
+       (failure-section "AST Failures" "AST Failures - ALL PASS"
+                        "Files where AST doesn't match:"
+                        ast-fail-files)
+       ""
+       "---"
+       ""
+       (failure-section "Pickle Failures" "Pickle Failures - ALL PASS"
+                        "Files where pickles don't match:"
+                        pickle-fail-files)
+       ""
+       "---"
+       ""
+       (failure-section "Bad Files Not Rejected" "Bad Files - ALL REJECTED"
+                        "Files in `bad/` that should produce errors but don't:"
+                        (:fails b))
+       ""])))
+
+(defn generate-summary-edn
+  "Generate a summary-only version of the report (no :ours/:expected content)
+   for the human-readable compliance.edn."
+  [report]
+  (let [g (:good report)
+        b (:bad report)]
+    {:good {:total (:total g)
+            :full-pass (:full-pass g)
+            :tokens-pass (:tokens-pass g)
+            :ast-pass (:ast-pass g)
+            :parse-errors (mapv :file (:parse-errors g))
+            :token-fails (mapv :file (:token-fails g))
+            :ast-fails (mapv :file (:ast-fails g))
+            :pickle-fails (mapv :file (:pickle-fails g))}
+     :bad b}))
+
+(defn -main [& args]
+  (let [run-dir (when (and (seq args) (= (first args) "--run-dir"))
+                  (second args))
+        testdata-dir (compliance/download-testdata)]
+    (println "Downloaded testdata to:" testdata-dir)
+    (let [report (compliance/run-compliance testdata-dir)
+          summary-report (generate-summary-edn report)]
+      (if run-dir
+        (do
+          ;; Write to run-dir
+          (spit (str run-dir "/compliance.edn") (with-out-str (pp/pprint summary-report)))
+          (spit (str run-dir "/compliance.md") (generate-markdown report))
+          ;; Save failure artifacts
+          (let [artifact-counts (compliance/save-failure-artifacts! run-dir report)]
+            (println "Artifacts written:" artifact-counts)))
+        (do
+          ;; Legacy mode: write to cwd
+          (spit "compliance.edn" (with-out-str (pp/pprint summary-report)))
+          (spit "compliance.md" (generate-markdown report))))
+      (print-summary report run-dir))))
+
+(apply -main *command-line-args*)
