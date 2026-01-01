@@ -1,0 +1,24 @@
+{:deps {org.clojure/clojure         {:mvn/version "1.12.3"}
+        org.clojure/spec.alpha      {:mvn/version "0.5.238"}
+        org.clojure/test.check      {:mvn/version "1.1.2"}
+        cheshire/cheshire           {:mvn/version "5.13.0"}
+        babashka/fs                 {:mvn/version "0.5.20"}
+        org.clojure/tools.cli       {:mvn/version "1.0.219"}
+        org.clojure/core.async      {:mvn/version "1.6.681"}}
+
+ :paths ["src" "resources"]
+
+ :aliases
+ {:dev  {:extra-paths ["test"]}
+  :test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
+         :extra-paths ["test"]
+         :main-opts  ["-m" "kaocha.runner"]}
+  :run {:main-opts ["-m" "shiftlefter.core"]}
+  :compliance {:extra-deps {io.cucumber/gherkin-utils {:mvn/version "28.2.0"}
+                            io.cucumber/messages      {:mvn/version "28.2.0"}}
+               :ns-default shiftlefter.gherkin.compliance}
+  :repl {:jvm-opts ["-Dclojure.spec.skip-macros=true"]}
+  :kondo {:deps {clj-kondo/clj-kondo {:mvn/version "2025.10.23"}}
+          :main-opts ["-m" "clj-kondo.main"]}
+  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.6"}}
+          :ns-default build}}}

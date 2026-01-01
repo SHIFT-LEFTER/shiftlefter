@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# ShiftLefter CLI wrapper
+# Uses standalone JAR if available, otherwise falls back to clj
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+JAR_FILE="$PROJECT_DIR/target/shiftlefter.jar"
+
+# Find Java executable
+find_java() {
+    if [[ -n "$JAVA_HOME" ]] && [[ -x "$JAVA_HOME/bin/java" ]]; then
+        echo "$JAVA_HOME/bin/java"
+    elif command -v java &>/dev/null && java -version &>/dev/null 2>&1; then
+        echo "java"
+    elif [[ -x /usr/libexec/java_home ]] && /usr/libexec/java_home &>/dev/null 2>&1; then
+        echo "$(/usr/libexec/java_home)/bin/java"
+    else
+        echo ""
+    fi
+}
+
+if [[ -f "$JAR_FILE" ]]; then
+    JAVA_CMD=$(find_java)
+    if [[ -n "$JAVA_CMD" ]]; then
+        exec "$JAVA_CMD" -jar "$JAR_FILE" "$@"
+    else
+        # Fall back to clj even with jar present (no Java found)
+        exec clj -M:run "$@"
+    fi
+else
+    exec clj -M:run "$@"
+fi

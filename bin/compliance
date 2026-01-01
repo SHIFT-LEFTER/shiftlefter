@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+#
+# Compliance test runner with artifact capture
+#
+# Runs the Gherkin compliance suite and saves all artifacts to a timestamped
+# directory under reports/compliance/runs/. Creates a 'latest' symlink for
+# convenient access to the most recent run.
+#
+# Usage:
+#   ./bin/compliance
+#
+# Output:
+#   reports/compliance/runs/YYYYMMDD-HHMMSS/
+#     stdout.log          - captured stdout
+#     stderr.log          - captured stderr
+#     exit_code.txt       - exit code from compliance-clj
+#     env.edn             - environment snapshot
+#     compliance.edn      - machine-readable summary
+#     compliance.md       - human-readable report
+#     failures/           - actual diff artifacts for failures
+#     errors/             - parse error details
+#   reports/compliance/latest -> runs/YYYYMMDD-HHMMSS/
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Create timestamped run directory
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+RUN_DIR="$PROJECT_ROOT/reports/compliance/runs/$TIMESTAMP"
+mkdir -p "$RUN_DIR"
+
+# Capture environment
+{
+  echo "{"
+  echo " :timestamp \"$TIMESTAMP\""
+  echo " :git-sha \"$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo 'unknown')\""
+  echo " :git-branch \"$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')\""
+  echo " :java-version \"$(java -version 2>&1 | head -1)\""
+  echo " :clojure-version \"$(clj -M -e '(println (clojure-version))' 2>/dev/null || echo 'unknown')\""
+  echo " :os \"$(uname -s)\""
+  echo " :os-version \"$(uname -r)\""
+  echo "}"
+} > "$RUN_DIR/env.edn"
+
+echo "Starting compliance run: $RUN_DIR"
+echo ""
+
+# Run compliance-clj with tee to capture output
+# Use script to preserve colors and capture both stdout/stderr properly
+cd "$PROJECT_ROOT"
+
+# Run and capture exit code
+set +e
+"$SCRIPT_DIR/compliance-clj" --run-dir "$RUN_DIR" 2>&1 | tee "$RUN_DIR/stdout.log"
+EXIT_CODE=${PIPESTATUS[0]}
+set -e
+
+# Save exit code
+echo "$EXIT_CODE" > "$RUN_DIR/exit_code.txt"
+
+# Create/update latest symlink
+LATEST_LINK="$PROJECT_ROOT/reports/compliance/latest"
+rm -f "$LATEST_LINK"
+ln -s "runs/$TIMESTAMP" "$LATEST_LINK"
+
+# Copy compliance.md to project root for easy access
+cp "$RUN_DIR/compliance.md" "$PROJECT_ROOT/compliance.md"
+
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo "Run complete. Artifacts saved to:"
+echo "  $RUN_DIR"
+echo ""
+echo "Quick access:"
+echo "  reports/compliance/latest/"
+echo "════════════════════════════════════════════════════════════════"
+
+exit $EXIT_CODE

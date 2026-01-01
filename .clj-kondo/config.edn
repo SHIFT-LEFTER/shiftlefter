@@ -1,0 +1,6 @@
+{:linters {:unused-binding {:level :warning}
+           :recur-mismatch {:level :warning}
+           :unresolved-symbol {:level :error}}
+ :config-in-ns {clojure.spec.alpha *}
+ :config-in-call {shiftlefter.runner/defstep {:linters {:unresolved-symbol {:level :off}}}}
+ :macros {shiftlefter.runner/defstep {:fn (fn [pattern args & body] (list* 'defn (gensym) args body))}}}
