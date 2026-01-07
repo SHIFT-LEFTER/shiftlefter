@@ -1,0 +1,7 @@
+;; ShiftLefter configuration
+;; Copy to shiftlefter.edn and customize
+
+{:parser {:dialect "en"}       ;; Language dialect (en, fr, de, etc.)
+
+ :runner {:step-paths ["steps/"]      ;; Where to find step definitions
+          :allow-pending? false}}     ;; Exit 0 even with pending steps?

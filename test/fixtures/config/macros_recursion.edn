@@ -1,0 +1,4 @@
+;; Config with recursive macro (should error at expansion)
+{:runner {:macros {:enabled? true
+                   :registry-paths ["test/fixtures/macros/recursion.ini"]}
+          :step-paths ["test/fixtures/steps/"]}}

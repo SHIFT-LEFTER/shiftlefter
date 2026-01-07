@@ -8,18 +8,18 @@
 
 (deftest read-file-utf8-valid
   (testing "Valid UTF-8 file reads successfully"
-    (let [result (io/read-file-utf8 "resources/features/toy-login.feature")]
+    (let [result (io/read-file-utf8 "examples/quickstart/features/toy-login.feature")]
       (is (= :ok (:status result)))
       (is (string? (:content result)))
-      (is (= "resources/features/toy-login.feature" (:path result))))))
+      (is (= "examples/quickstart/features/toy-login.feature" (:path result))))))
 
 (deftest read-file-utf8-invalid
   (testing "Invalid UTF-8 file returns distinct error (AC2)"
-    (let [result (io/read-file-utf8 "test/resources/testdata/bad-encoding/invalid-utf8.feature")]
+    (let [result (io/read-file-utf8 "test/fixtures/gherkin/encoding/invalid-utf8.feature")]
       (is (= :error (:status result)))
       (is (= :io/utf8-decode-failed (:reason result)))
       (is (string? (:message result)))
-      (is (= "test/resources/testdata/bad-encoding/invalid-utf8.feature" (:path result)))
+      (is (= "test/fixtures/gherkin/encoding/invalid-utf8.feature" (:path result)))
       ;; AC4: useful location (at least file-level)
       (is (= 1 (get-in result [:location :line])))
       (is (= 1 (get-in result [:location :column]))))))
@@ -34,7 +34,7 @@
 
 (deftest slurp-utf8-valid
   (testing "slurp-utf8 returns string for valid file"
-    (let [content (io/slurp-utf8 "resources/features/toy-login.feature")]
+    (let [content (io/slurp-utf8 "examples/quickstart/features/toy-login.feature")]
       (is (string? content))
       (is (pos? (count content))))))
 
@@ -42,7 +42,7 @@
   (testing "slurp-utf8 throws on invalid UTF-8"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
                           #"UTF-8"
-                          (io/slurp-utf8 "test/resources/testdata/bad-encoding/invalid-utf8.feature")))))
+                          (io/slurp-utf8 "test/fixtures/gherkin/encoding/invalid-utf8.feature")))))
 
 (deftest slurp-utf8-not-found-throws
   (testing "slurp-utf8 throws on missing file"

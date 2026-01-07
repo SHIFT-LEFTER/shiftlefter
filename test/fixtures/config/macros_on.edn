@@ -1,0 +1,6 @@
+;; Test config with macros enabled
+;; Used for Phase 2 macro integration tests
+{:runner {:macros {:enabled? true
+                   :registry-paths ["test/fixtures/macros/auth.ini"]}
+          :step-paths ["test/fixtures/steps/"]
+          :allow-pending? false}}

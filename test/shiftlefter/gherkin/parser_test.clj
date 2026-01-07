@@ -724,3 +724,30 @@
         (is (some? docstring) "Step should have docstring argument")
         (is (not (str/includes? (:content docstring) "\r"))
             (str "Docstring content should not contain CR: " (pr-str (:content docstring))))))))
+
+;; -----------------------------------------------------------------------------
+;; Error Ordering Tests
+;;
+;; Parser errors must be reported in source line order (lowest line first).
+;; This was broken when using (concat errors new-errors) because concat returns
+;; a lazy seq, and conj on a lazy seq prepends instead of appending.
+;; Fix: use (into errors new-errors) to preserve vector type.
+;; -----------------------------------------------------------------------------
+
+(deftest errors-reported-in-line-order
+  (testing "Multiple parse errors are reported in ascending line order"
+    (let [input "Feature: Test\n  Given orphan step\n  Rule: R"
+          result (parser/parse (lexer/lex input))
+          error-lines (mapv #(get-in % [:location :line]) (:errors result))]
+      (is (= 2 (count (:errors result))) "Should have 2 errors")
+      (is (= error-lines (sort error-lines))
+          (str "Errors should be in line order, got: " error-lines)))))
+
+(deftest errors-in-order-for-malformed-feature
+  (testing "Torture test file produces errors in line order"
+    (let [content (slurp "test/fixtures/gherkin/stress/gpt-tokenizer-stress.feature")
+          result (parser/parse (lexer/lex content))
+          error-lines (mapv #(get-in % [:location :line]) (:errors result))]
+      (is (pos? (count (:errors result))) "Should have parse errors")
+      (is (= error-lines (sort error-lines))
+          (str "Errors should be in ascending line order, got: " error-lines)))))

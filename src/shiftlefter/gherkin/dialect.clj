@@ -27,9 +27,9 @@
 
 (defonce official-dialects-raw
   (delay
-    (let [resource (io/resource "dialects/i18n.json")]
+    (let [resource (io/resource "shiftlefter/gherkin/i18n.json")]
       (if-not resource
-        (throw (ex-info "Missing dialects/i18n.json — fetch via curl" {}))
+        (throw (ex-info "Missing shiftlefter/gherkin/i18n.json — fetch via curl" {}))
         (json/parse-stream (io/reader resource) true)))))
 
 (defn- build-keyword-lookup

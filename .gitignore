@@ -11,4 +11,6 @@ reports/compliance/latest
 compliance/
 fuzz/
 target/
-*.jar
+
+# User config (use shiftlefter.edn.example as template)
+/shiftlefter.edn

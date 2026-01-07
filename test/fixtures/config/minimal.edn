@@ -1,0 +1,2 @@
+;; Minimal config - only overrides dialect
+{:parser {:dialect "de"}}

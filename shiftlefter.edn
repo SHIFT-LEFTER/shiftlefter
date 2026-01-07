@@ -1,4 +1,0 @@
-{:parser {:strict false
-          :dialect :en
-          :macro-paths ["macros/"]
-          :output :pretty}}

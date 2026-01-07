@@ -1,0 +1,4 @@
+;; Test config with French dialect
+{:parser {:dialect "fr"}
+ :runner {:step-paths ["steps/" "more-steps/"]
+          :allow-pending? true}}

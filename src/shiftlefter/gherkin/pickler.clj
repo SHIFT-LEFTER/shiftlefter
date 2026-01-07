@@ -51,7 +51,7 @@
 ;; Pickle Plan specs (intermediate representation)
 (s/def ::step-plan
   (s/keys :req-un [::keyword ::text ::location]
-          :opt-un [::source ::arguments]))
+          :opt-un [::arguments]))
 
 (s/def ::scenario-plan
   (s/keys :req-un [::name ::location ::tags ::steps ::type]
@@ -114,27 +114,16 @@
 (defn- step->step-plan
   "Convert an AST step to a step-plan (no UUID generation).
 
-   Handles both:
-   - Pre-expansion steps (:macro-step type → create provenance)
-   - Post-expansion steps (already have :source from macro expansion)
-
    The `origin` parameter indicates where this step comes from:
    - :feature-background - from the Feature's Background block
    - :rule-background - from a Rule's Background block
    - :scenario - from the Scenario/Outline itself (default)"
   ([step] (step->step-plan step :scenario))
   ([step origin]
-   (let [is-macro (= (:type step) :macro-step)
-         [kw txt] (parse-step-keyword-and-text step)
-         ;; Use existing :source (from macro expansion) or create new one (for macro-steps)
-         source (or (:source step)
-                    (when is-macro
-                      {:macro-name (:text step)
-                       :original-location (:location step)}))]
+   (let [[kw txt] (parse-step-keyword-and-text step)]
      {:keyword kw
       :text txt
       :location (:location step)
-      :source source
       :origin origin
       :arguments (argument->pickle-arguments (:argument step))})))
 
@@ -245,25 +234,33 @@
              tags)))
 
 (defn- step-plan->pickle-step
-  "Convert a step-plan to a final pickle step with UUID."
+  "Convert a step-plan to a final pickle step with UUID.
+   For outline-derived steps, row-map is non-nil and template-text is stored.
+   For non-outline steps, row-map is nil and template-text is nil."
   [step-plan row-map]
   {:step/id (java.util.UUID/randomUUID)
    :step/text (if row-map
                 (replace-placeholders (:text step-plan) row-map)
                 (:text step-plan))
+   :step/template-text (when row-map (:text step-plan))  ;; Original text with <placeholders>
    :step/keyword (:keyword step-plan)
    :step/location (:location step-plan)
-   :step/source (:source step-plan)
    :step/origin (:origin step-plan)
    ;; Substitute placeholders in arguments too (DataTable cells, DocString content/mediaType)
    :step/arguments (substitute-arguments (:arguments step-plan) row-map)})
 
 (defn- expand-outline-examples
   "Expand a scenario outline into multiple pickles (one per example row).
-   Tag order: feature → rule → scenario → examples (with deduplication)."
+   Tag order: feature → rule → scenario → examples (with deduplication).
+
+   Adds outline provenance fields (BIRDSONG §4.3):
+   - :pickle/template-name — scenario name before substitution
+   - :pickle/row-index — 0-based index within the Examples block
+   - :pickle/row-values — header→value map for the row"
   [scenario-plan feature-tags source-file]
   (let [rule-tags (:rule-tags scenario-plan)
-        scenario-tags (:tags scenario-plan)]
+        scenario-tags (:tags scenario-plan)
+        template-name (:name scenario-plan)]  ;; Store before substitution
     (mapcat (fn [example]
               (let [header (:table-header example)
                     ;; Use full TableRow records if available (for compliance), fall back to cell values
@@ -274,32 +271,39 @@
                     all-tags (dedupe-tags (vec (concat feature-tags rule-tags scenario-tags example-tags)))]
                 ;; If we have full rows with locations, use them
                 (if (seq body-rows)
-                  (map (fn [table-row]
-                         (let [row-values (:cells table-row)
-                               row-map (zipmap header row-values)
-                               row-location (:location table-row)]
-                           {:pickle/id (java.util.UUID/randomUUID)
-                            :pickle/name (replace-placeholders (:name scenario-plan) row-map)
-                            :pickle/source-file source-file
-                            :pickle/location row-location  ;; Use row location, not scenario location
-                            :pickle/tags all-tags
-                            :pickle/scenario-location (:location scenario-plan)  ;; Store scenario location for pickle astNodeIds
-                            :pickle/row-location row-location  ;; Store for compliance projection
-                            :pickle/steps (mapv #(step-plan->pickle-step % row-map)
-                                                (:steps scenario-plan))}))
-                       body-rows)
+                  (map-indexed (fn [row-idx table-row]
+                                 (let [row-values (:cells table-row)
+                                       row-map (zipmap header row-values)
+                                       row-location (:location table-row)]
+                                   {:pickle/id (java.util.UUID/randomUUID)
+                                    :pickle/name (replace-placeholders template-name row-map)
+                                    :pickle/template-name template-name  ;; Outline provenance
+                                    :pickle/row-index row-idx            ;; 0-based
+                                    :pickle/row-values row-map           ;; {header-string -> cell-string}
+                                    :pickle/source-file source-file
+                                    :pickle/location row-location  ;; Use row location, not scenario location
+                                    :pickle/tags all-tags
+                                    :pickle/scenario-location (:location scenario-plan)  ;; Store scenario location for pickle astNodeIds
+                                    :pickle/row-location row-location  ;; Store for compliance projection
+                                    :pickle/steps (mapv #(step-plan->pickle-step % row-map)
+                                                        (:steps scenario-plan))}))
+                               body-rows)
                   ;; Fallback for old format without TableRow records
-                  (map (fn [row-values]
-                         (let [row-map (zipmap header row-values)]
-                           {:pickle/id (java.util.UUID/randomUUID)
-                            :pickle/name (replace-placeholders (:name scenario-plan) row-map)
-                            :pickle/source-file source-file
-                            :pickle/location (:location scenario-plan)
-                            :pickle/tags all-tags
-                            :pickle/scenario-location (:location scenario-plan)
-                            :pickle/steps (mapv #(step-plan->pickle-step % row-map)
-                                                (:steps scenario-plan))}))
-                       body))))
+                  (map-indexed (fn [row-idx row-values]
+                                 (let [row-map (zipmap header row-values)]
+                                   {:pickle/id (java.util.UUID/randomUUID)
+                                    :pickle/name (replace-placeholders template-name row-map)
+                                    :pickle/template-name template-name  ;; Outline provenance
+                                    :pickle/row-index row-idx            ;; 0-based
+                                    :pickle/row-values row-map           ;; {header-string -> cell-string}
+                                    :pickle/source-file source-file
+                                    :pickle/location (:location scenario-plan)
+                                    :pickle/tags all-tags
+                                    :pickle/scenario-location (:location scenario-plan)
+                                    :pickle/row-location nil             ;; No row location in fallback
+                                    :pickle/steps (mapv #(step-plan->pickle-step % row-map)
+                                                        (:steps scenario-plan))}))
+                               body))))
             (:examples scenario-plan))))
 
 (defn- scenario-plan->pickles
@@ -312,14 +316,20 @@
     ;; Outline with examples: expand to multiple pickles
     (expand-outline-examples scenario-plan feature-tags source-file)
     ;; Regular scenario OR outline without examples: single pickle
+    ;; Outline provenance fields are nil for non-outline scenarios
     (let [rule-tags (:rule-tags scenario-plan)
           scenario-tags (:tags scenario-plan)
           all-tags (dedupe-tags (vec (concat feature-tags rule-tags scenario-tags)))]
       [{:pickle/id (java.util.UUID/randomUUID)
         :pickle/name (:name scenario-plan)
+        :pickle/template-name nil      ;; Not an outline
+        :pickle/row-index nil          ;; Not an outline
+        :pickle/row-values nil         ;; Not an outline
         :pickle/source-file source-file
         :pickle/location (:location scenario-plan)
         :pickle/tags all-tags
+        :pickle/scenario-location nil  ;; Not an outline
+        :pickle/row-location nil       ;; Not an outline
         :pickle/steps (mapv #(step-plan->pickle-step % nil)
                             (:steps scenario-plan))}])))
 

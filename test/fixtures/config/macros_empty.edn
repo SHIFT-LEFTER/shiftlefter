@@ -1,0 +1,4 @@
+;; Config with empty macro (should error at registry load)
+{:runner {:macros {:enabled? true
+                   :registry-paths ["test/fixtures/macros/empty.ini"]}
+          :step-paths ["test/fixtures/steps/"]}}
