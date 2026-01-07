@@ -1,0 +1,5 @@
+;; Test config with macros explicitly disabled
+;; Used for Phase 2 acceptance criteria verification
+{:runner {:macros {:enabled? false}
+          :step-paths ["test/fixtures/steps/"]
+          :allow-pending? false}}

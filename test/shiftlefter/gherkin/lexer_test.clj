@@ -358,20 +358,20 @@
 
 (deftest raw-roundtrip-file-lf
   (testing "Roundtrip file with LF line endings"
-    (let [input (slurp "test/resources/testdata/eol-types/lf-only.feature")]
+    (let [input (slurp "test/fixtures/gherkin/eol-types/lf-only.feature")]
       (is (= input (roundtrip input))))))
 
 (deftest raw-roundtrip-file-crlf
   (testing "Roundtrip file with CRLF line endings"
-    (let [input (slurp "test/resources/testdata/eol-types/crlf-only.feature")]
+    (let [input (slurp "test/fixtures/gherkin/eol-types/crlf-only.feature")]
       (is (= input (roundtrip input))))))
 
 (deftest raw-roundtrip-file-cr
   (testing "Roundtrip file with CR line endings"
-    (let [input (slurp "test/resources/testdata/eol-types/cr-only.feature")]
+    (let [input (slurp "test/fixtures/gherkin/eol-types/cr-only.feature")]
       (is (= input (roundtrip input))))))
 
 (deftest raw-roundtrip-file-mixed
   (testing "Roundtrip file with mixed EOL types"
-    (let [input (slurp "test/resources/testdata/eol-types/mixed-eol.feature")]
+    (let [input (slurp "test/fixtures/gherkin/eol-types/mixed-eol.feature")]
       (is (= input (roundtrip input))))))

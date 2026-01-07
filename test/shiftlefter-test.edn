@@ -1,0 +1,7 @@
+;; ShiftLefter test configuration
+;; Used by CI and test suite
+
+{:parser {:strict false
+          :dialect :en
+          :macro-paths ["test/fixtures/macros/good"]
+          :output :pretty}}

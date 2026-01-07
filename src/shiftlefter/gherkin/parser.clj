@@ -16,7 +16,6 @@
 (defrecord ScenarioOutline [type name description tags steps examples location source-text leading-ws span])
 (defrecord Background [type name description steps tags location source-text leading-ws span])
 (defrecord Step [type keyword keyword-text text argument location source-text leading-ws span])
-(defrecord MacroStep [type keyword text argument location source-text leading-ws span])
 (defrecord Examples [type name description tags table location source-text leading-ws span])
 (defrecord Docstring [type content fence mediaType location source-text leading-ws span])
 (defrecord DataTable [type rows location source-text leading-ws span])
@@ -84,8 +83,7 @@
                         :data-table ::data-table
                         :nil nil?))
 (s/def ::step (s/and (partial instance? Step) (s/keys :req-un [::type ::keyword ::text ::argument ::location ::source-text])))
-(s/def ::macro-step (s/and (partial instance? MacroStep) (s/keys :req-un [::type ::keyword ::text ::argument ::location ::source-text])))
-(s/def ::steps (s/coll-of (s/or :step ::step :macro ::macro-step)))
+(s/def ::steps (s/coll-of ::step))
 (s/def ::examples any?)
 (s/def ::scenario (s/and (partial instance? Scenario) (s/keys :req-un [::type ::name ::tags ::steps ::examples ::location ::source-text])))
 (s/def ::scenario-outline (s/and (partial instance? ScenarioOutline) (s/keys :req-un [::type ::name ::tags ::steps ::examples ::location ::source-text])))
@@ -95,7 +93,7 @@
 (s/def ::children (s/coll-of (s/or :background ::background :scenario ::scenario :scenario-outline ::scenario-outline :rule ::rule)))
 (s/def ::feature (s/and (partial instance? Feature) (s/keys :req-un [::type ::name ::description ::tags ::children ::location ::source-text])))
 (s/def ::comment (s/and (partial instance? Comment) (s/keys :req-un [::type ::text ::location ::source-text])))
-(s/def ::ast-node (s/or :feature ::feature :background ::background :scenario ::scenario :scenario-outline ::scenario-outline :step ::step :macro ::macro-step :docstring ::argument :data-table ::data-table :table-row ::table-row :blank ::blank :comment ::comment))
+(s/def ::ast-node (s/or :feature ::feature :background ::background :scenario ::scenario :scenario-outline ::scenario-outline :step ::step :docstring ::argument :data-table ::data-table :table-row ::table-row :blank ::blank :comment ::comment))
 (s/def ::ast (s/coll-of ::ast-node))
 (s/def ::error (s/keys :req-un [::type ::location] :opt-un [::message ::token]))
 (s/def ::errors (s/coll-of ::error))
@@ -238,7 +236,7 @@
     (if (or (empty? ts) (not (= (:type (first ts)) :step-line)))
       [steps ts errors]
       (let [[step remaining step-errors] (parse-step ts)]
-        (recur ts remaining (conj steps step) (concat errors step-errors))))))
+        (recur ts remaining (conj steps step) (into errors step-errors))))))
 
 (defn- parse-step [ts]
   (let [token (first ts)
@@ -260,19 +258,13 @@
                       :but "But"
                       :star "*"
                       nil)
-        is-macro (and step-text-raw (str/ends-with? step-text-raw " +"))
-        step-text (if is-macro
-                    (str/trim (subs step-text-raw 0 (- (count step-text-raw) 2)))
-                    step-text-raw)
         ;; Reconstruct full text for source-text field
         full-text (str (or (:keyword-text token) "") step-text-raw)
         remaining (rest ts)
         [argument remaining2 arg-errors] (parse-argument remaining)
         end-idx (or (token-idx (first remaining2)) (inc start-idx))
         span (make-span start-idx end-idx)]
-    [(if is-macro
-       (->MacroStep :macro-step keyword-str step-text argument (:location token) full-text (:leading-ws token) span)
-       (->Step :step keyword-str (:keyword-text token) step-text argument (:location token) full-text (:leading-ws token) span))
+    [(->Step :step keyword-str (:keyword-text token) step-text-raw argument (:location token) full-text (:leading-ws token) span)
      remaining2 arg-errors]))
 
 (defn- parse-argument [ts]
@@ -558,7 +550,7 @@
               (let [[scenario remaining scenario-errors] (parse-scenario ts3 collected-tags)]
                 (recur ts remaining
                        (conj scenarios scenario)
-                       (concat errors tag-errs scenario-errors)))
+                       (into (into errors tag-errs) scenario-errors)))
               ;; Tags followed by something else (Rule, etc) - stop, don't consume tags
               :else
               [scenarios ts1 errors]))
@@ -568,7 +560,7 @@
           (let [[scenario remaining scenario-errors] (parse-scenario ts1 [])]
             (recur ts remaining
                    (conj scenarios scenario)
-                   (concat errors scenario-errors)))
+                   (into errors scenario-errors)))
 
           ;; Anything else - stop
           :else
@@ -637,7 +629,7 @@
                                         (:location (first pending-tags))
                                         "Unexpected end of file - tag(s) not followed by Rule"
                                         :tags pending-tags)])]
-          [rules ts-trimmed (concat errors orphan-errors)])
+          [rules ts-trimmed (into errors orphan-errors)])
 
         ;; Collect tags for the next rule
         (= (:type token) :tag-line)
@@ -654,7 +646,7 @@
         (let [[rule remaining rule-errors] (parse-rule ts-trimmed pending-tags)]
           (recur ts remaining
                  (conj rules rule)
-                 (concat errors rule-errors)
+                 (into errors rule-errors)
                  []))  ; reset pending tags
 
         ;; Not a rule or tag, we're done
@@ -672,7 +664,7 @@
                                           :else
                                           (str "Unexpected tag(s) before " (name next-type)))
                                         :tags pending-tags)])]
-          [rules ts-trimmed (concat errors orphan-errors)])))))
+          [rules ts-trimmed (into errors orphan-errors)])))))
 
 (defn- parse-feature [ts tags]
   (let [token (first ts)
@@ -749,7 +741,7 @@
                                               (:location (first pending-tags))
                                               "Unexpected end of file - tag(s) not followed by Feature/Scenario/Examples"
                                               :tags pending-tags)])]
-            {:tokens tokens :ast ast :errors (concat errors orphan-tag-errors (validate-ast-order ast))})
+            {:tokens tokens :ast ast :errors (into (into errors orphan-tag-errors) (validate-ast-order ast))})
         (let [token (first ts)]
           (if (not (tokens/token? token))  ;; Skip non-tokens (errors)—the fix
             (recur (rest ts) ast errors pending-tags)
@@ -768,13 +760,13 @@
                 (recur (rest ts) ast (if tag-error (conj errors tag-error) errors) (into pending-tags rich-tags)))
               (= (:type token) :feature-line)
               (let [[node remaining feature-errors] (parse-feature ts pending-tags)]
-                (recur remaining (conj ast node) (concat errors feature-errors) []))
+                (recur remaining (conj ast node) (into errors feature-errors) []))
               (= (:type token) :background-line)
               (let [[node remaining bg-errors] (parse-background ts pending-tags)]
-                (recur remaining (conj ast node) (concat errors bg-errors) []))
+                (recur remaining (conj ast node) (into errors bg-errors) []))
               (#{:scenario-line :scenario-outline-line} (:type token))
               (let [[node remaining scenario-errors] (parse-scenario ts pending-tags)]
-                (recur remaining (conj ast node) (concat errors scenario-errors) []))
+                (recur remaining (conj ast node) (into errors scenario-errors) []))
               (= (:type token) :eof)
               (recur (rest ts) ast errors pending-tags)
               (= (:type token) :language-header)

@@ -144,13 +144,12 @@
    Returns {:status :ok/:error ...}
    - On success: {:status :ok :output \"formatted string\"}
    - On parse error: {:status :error :reason :parse-errors :details [...]}
-   - On Rules present: {:status :error :reason :canonical/rules-unsupported :message string}
 
    Canonical formatting:
    - Normalizes indentation (2 spaces)
    - Normalizes line endings to LF
    - Normalizes tag spacing to single space
-   - Does NOT support Rule: blocks (returns error)"
+   - Supports all Gherkin constructs including Rule: blocks"
   [s]
   (try
     {:status :ok :output (printer/canonical s)}

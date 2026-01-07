@@ -552,17 +552,84 @@
 ;; => {:status :ok, :path "resources/features/toy-login.feature"}
 
 ;; Parse errors block formatting (Policy B enforcement)
-(printer/fmt-check "resources/features/gpt-tokenizer-stress.feature")
+(printer/fmt-check "test/resources/testdata/bad/gpt-tokenizer-stress.feature")
 ;; => {:status :error, :reason :parse-errors, :path "...", :details [...]}
 ;; This file has intentional edge cases (inline tag comments, Rule keyword)
 ;; Token-level roundtrip still works:
-(let [content (slurp "resources/features/gpt-tokenizer-stress.feature")]
+(let [content (slurp "test/resources/testdata/bad/gpt-tokenizer-stress.feature")]
   (= content (printer/roundtrip content)))
 ;; => true
 
 ;; CLI usage: sl fmt --check <path>
 ;; $ clj -M:run fmt --check resources/features/toy-login.feature
 ;; OK: resources/features/toy-login.feature
+
+;; -----------------------------------------------------------------------------
+;; Multi-file validation (v0.1.1-A)
+;; Recursively check directories, multiple paths, with summary and exit codes
+;; -----------------------------------------------------------------------------
+
+;; Single file (unchanged behavior)
+;; $ clj -M:run fmt --check resources/features/toy-login.feature
+;; Checking resources/features/toy-login.feature... OK
+
+;; Directory - recursively find and validate all .feature files
+;; $ clj -M:run fmt --check resources/features/
+;; Checking resources/features/toy-login.feature... OK
+;; Checking test/resources/testdata/bad/gpt-tokenizer-stress.feature... INVALID
+;;   Line 30: :unexpected-token - Unexpected token: :step-line
+;;
+;; 2 files checked: 1 valid, 1 invalid
+
+;; Multiple paths
+;; $ clj -M:run fmt --check resources/features/ compliance/gherkin/testdata/good/
+;; Checking resources/features/toy-login.feature... OK
+;; ... (many files)
+;; 48 files checked: 47 valid, 1 invalid
+
+;; Full compliance suite
+;; $ clj -M:run fmt --check compliance/gherkin/testdata/good/
+;; ... (46 files)
+;; 46 files checked: 46 valid, 0 invalid
+
+;; Exit codes:
+;; 0 = all valid
+;; 1 = one or more invalid
+;; 2 = no .feature files found, or path doesn't exist
+
+;; REPL testing of internal helpers:
+(comment
+  (require '[shiftlefter.core :as core])
+
+  ;; find-feature-files - given paths, return all .feature files
+  (#'core/find-feature-files ["resources/features/"])
+  ;; => ["resources/features/toy-login.feature"]
+
+  ;; check-single-file - check one file
+  (#'core/check-single-file "resources/features/toy-login.feature")
+  ;; => {:path "resources/features/toy-login.feature", :status :ok}
+
+  ;; check-files - check multiple paths with summary
+  (#'core/check-files ["compliance/gherkin/testdata/good/"])
+  ;; => {:results [...], :valid 46, :invalid 0, :exit-code 0}
+
+  (#'core/check-files ["nonexistent/"])
+  ;; => {:results [], :valid 0, :invalid 0, :not-found 1, :exit-code 2}
+
+  ;; format-single-file - format one file in place
+  (#'core/format-single-file "/tmp/test.feature")
+  ;; => {:path "/tmp/test.feature", :status :reformatted} or :unchanged or :error
+
+  ;; format-files - format multiple paths with summary
+  (#'core/format-files ["resources/features/"])
+  ;; => {:results [...], :reformatted 1, :unchanged 0, :errors 0, :exit-code 0}
+
+  ;; CLI usage:
+  ;; $ clj -M:run fmt --write resources/features/
+  ;; Formatting resources/features/toy-login.feature... reformatted
+  ;; 1 file processed: 1 reformatted, 0 unchanged
+
+  ,)
 
 ;; -----------------------------------------------------------------------------
 ;; Canonical Formatter
@@ -585,7 +652,7 @@
 ;; => {:status :ok, :path "...", :output "Feature: Toy Login\n\n  Scenario: ..."}
 
 ;; Policy B: parse errors block formatting
-(printer/fmt-canonical "resources/features/gpt-tokenizer-stress.feature")
+(printer/fmt-canonical "test/resources/testdata/bad/gpt-tokenizer-stress.feature")
 ;; => {:status :error, :reason :parse-errors, :details [...]}
 
 ;; CLI usage: sl fmt --canonical <path>

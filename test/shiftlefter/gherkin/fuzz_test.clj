@@ -193,3 +193,213 @@
       (is (= :ok (:status result)))
       (is (= 20 (:passed result)))
       (is (= 0 (:failed result))))))
+
+;; =============================================================================
+;; FZ3: Mutation Fuzzing Tests
+;; =============================================================================
+
+;; -----------------------------------------------------------------------------
+;; Mutator version
+;; -----------------------------------------------------------------------------
+
+(deftest mutator-version-is-vector
+  (testing "mutator-version is a [major minor] vector"
+    (is (vector? fuzz/mutator-version))
+    (is (= 2 (count fuzz/mutator-version)))
+    (is (every? integer? fuzz/mutator-version))))
+
+;; -----------------------------------------------------------------------------
+;; Individual mutators
+;; -----------------------------------------------------------------------------
+
+(def test-feature-with-table
+  "Feature: Test
+  Scenario: Has table
+    Given a step
+      | a | b | c |
+      | 1 | 2 | 3 |
+    When another step
+    Then done
+")
+
+(def test-feature-with-docstring
+  "Feature: Test
+  Scenario: Has docstring
+    Given a step
+      \"\"\"
+      some content
+      \"\"\"
+    Then done
+")
+
+(def test-feature-simple
+  "Feature: Test
+  Scenario: Simple
+    Given a step
+    When another
+    Then done
+")
+
+(deftest mutate-indent-damage-changes-indentation
+  (testing "indent damage mutator changes whitespace"
+    (let [rng (java.util.Random. 42)
+          result (fuzz/apply-mutator
+                  (-> fuzz/mutators first :fn)
+                  test-feature-simple
+                  rng)]
+      ;; Should change something (indented lines exist)
+      (is (:changed? result))
+      (is (not= test-feature-simple (:mutated result))))))
+
+(deftest mutate-keyword-perturb-introduces-typos
+  (testing "keyword perturb introduces typos"
+    (let [rng (java.util.Random. 42)
+          mutator-fn (-> (filter #(= :mut/keyword-perturb (:id %)) fuzz/mutators)
+                         first :fn)
+          result (fuzz/apply-mutator mutator-fn test-feature-simple rng)]
+      (is (:changed? result))
+      ;; Should have a typo
+      (is (or (str/includes? (:mutated result) "Feture")
+              (str/includes? (:mutated result) "Scenaro")
+              (str/includes? (:mutated result) "Givn")
+              (str/includes? (:mutated result) "Whn")
+              (str/includes? (:mutated result) "Thn"))))))
+
+(deftest mutate-colon-perturb-removes-colon
+  (testing "colon perturb removes colon from keyword"
+    (let [rng (java.util.Random. 42)
+          mutator-fn (-> (filter #(= :mut/colon-perturb (:id %)) fuzz/mutators)
+                         first :fn)
+          result (fuzz/apply-mutator mutator-fn test-feature-simple rng)]
+      (is (:changed? result))
+      ;; Should have fewer colons after keywords
+      (let [orig-colons (count (re-seq #"(Feature|Scenario|Background|Examples):" test-feature-simple))
+            mut-colons (count (re-seq #"(Feature|Scenario|Background|Examples):" (:mutated result)))]
+        (is (< mut-colons orig-colons))))))
+
+(deftest mutate-delimiter-removal-removes-pipe-or-docstring
+  (testing "delimiter removal removes | or \"\"\""
+    (let [rng (java.util.Random. 42)
+          mutator-fn (-> (filter #(= :mut/delimiter-removal (:id %)) fuzz/mutators)
+                         first :fn)]
+      ;; Test with table
+      (let [result (fuzz/apply-mutator mutator-fn test-feature-with-table rng)]
+        (is (:changed? result))
+        (is (< (count (re-seq #"\|" (:mutated result)))
+               (count (re-seq #"\|" test-feature-with-table)))))
+      ;; Test with docstring
+      (let [rng2 (java.util.Random. 42)
+            result (fuzz/apply-mutator mutator-fn test-feature-with-docstring rng2)]
+        (is (:changed? result))))))
+
+(deftest mutate-table-corrupt-changes-cell-count
+  (testing "table corrupt adds or removes cells"
+    (let [rng (java.util.Random. 42)
+          mutator-fn (-> (filter #(= :mut/table-corrupt (:id %)) fuzz/mutators)
+                         first :fn)
+          result (fuzz/apply-mutator mutator-fn test-feature-with-table rng)]
+      (is (:changed? result))
+      ;; Structure should be different
+      (is (not= test-feature-with-table (:mutated result))))))
+
+(deftest mutators-return-unchanged-when-not-applicable
+  (testing "mutators return unchanged content when nothing to mutate"
+    (let [minimal "Feature: X\n"
+          rng (java.util.Random. 42)]
+      ;; Docstring delim mutator on content without docstrings
+      (let [mutator-fn (-> (filter #(= :mut/docstring-delim (:id %)) fuzz/mutators)
+                           first :fn)
+            result (fuzz/apply-mutator mutator-fn minimal rng)]
+        (is (not (:changed? result)))
+        (is (= minimal (:mutated result)))))))
+
+;; -----------------------------------------------------------------------------
+;; check-mutation-invariants
+;; -----------------------------------------------------------------------------
+
+(deftest check-mutation-invariants-returns-graceful-errors
+  (testing "mutated input with parse errors returns :graceful-errors"
+    (let [bad-content "Feture: Test\n"  ; typo should cause parse error
+          mutation-info {:mutator/type :mut/keyword-perturb :idx 0}
+          result (fuzz/check-mutation-invariants bad-content mutation-info 200)]
+      (is (= :ok (:status result)))
+      (is (= :graceful-errors (:reason result)))
+      (is (= :parse (:phase result)))
+      (is (map? (:signature result)))
+      (is (contains? (:signature result) :mutator/type))
+      (is (contains? (:signature result) :phase))
+      (is (contains? (:signature result) :error/type)))))
+
+(deftest check-mutation-invariants-returns-survived-for-valid
+  (testing "valid content returns :mutation-survived"
+    (let [mutation-info {:mutator/type :mut/indent-damage :idx 0}
+          result (fuzz/check-mutation-invariants test-feature-simple mutation-info 200)]
+      (is (= :ok (:status result)))
+      (is (= :mutation-survived (:reason result))))))
+
+(deftest check-mutation-invariants-includes-timing
+  (testing "result includes timing information"
+    (let [mutation-info {:mutator/type :mut/test :idx 0}
+          result (fuzz/check-mutation-invariants test-feature-simple mutation-info 200)]
+      (is (map? (:timing result)))
+      (is (contains? (:timing result) :parse-ms))
+      (is (contains? (:timing result) :total-ms)))))
+
+;; -----------------------------------------------------------------------------
+;; run-mutations
+;; -----------------------------------------------------------------------------
+
+(deftest run-mutations-smoke-test
+  (testing "run-mutations with smoke preset runs without exceptions"
+    (let [temp-dir (str (fs/create-temp-dir {:prefix "fuzz-mut-test-"}))
+          result (fuzz/run-mutations {:preset :smoke :seed 12345 :save temp-dir})]
+      ;; Clean up
+      (fs/delete-tree temp-dir)
+      ;; Should complete without timeout/exception failures
+      (is (= :ok (:status result)))
+      (is (= 0 (:mutations/timeout result)))
+      (is (= 0 (:mutations/exception result)))
+      ;; Should have some mutations
+      (is (pos? (:mutations/total result)))
+      ;; Should have tracked graceful + survived
+      (is (= (:mutations/total result)
+             (+ (:mutations/graceful result)
+                (:mutations/survived result)
+                (:mutations/timeout result)
+                (:mutations/exception result)))))))
+
+(deftest run-mutations-is-deterministic
+  (testing "same seed produces same results"
+    (let [temp-dir (str (fs/create-temp-dir {:prefix "fuzz-det-test-"}))
+          r1 (fuzz/run-mutations {:seed 54321 :trials 5 :save temp-dir})
+          _ (fs/delete-tree temp-dir)
+          temp-dir2 (str (fs/create-temp-dir {:prefix "fuzz-det-test2-"}))
+          r2 (fuzz/run-mutations {:seed 54321 :trials 5 :save temp-dir2})]
+      (fs/delete-tree temp-dir2)
+      (is (= (:mutations/total r1) (:mutations/total r2)))
+      (is (= (:mutations/graceful r1) (:mutations/graceful r2)))
+      (is (= (:mutations/survived r1) (:mutations/survived r2))))))
+
+(deftest run-mutations-returns-mutator-version
+  (testing "result includes mutator version"
+    (let [result (fuzz/run-mutations {:trials 1 :seed 1})]
+      (is (= fuzz/mutator-version (:mutator-version result))))))
+
+(deftest run-mutations-tracks-unique-signatures
+  (testing "unique signatures are tracked correctly"
+    (let [result (fuzz/run-mutations {:trials 10 :seed 42})]
+      ;; Should have some unique signatures
+      (is (pos? (:signatures/unique result)))
+      ;; Unique count should not exceed graceful count
+      (is (<= (:signatures/unique result) (:mutations/graceful result))))))
+
+(deftest run-mutations-with-corpus-works
+  (testing "corpus source loads and mutates compliance files"
+    (let [temp-dir (str (fs/create-temp-dir {:prefix "fuzz-corpus-test-"}))
+          result (fuzz/run-mutations {:trials 3
+                                      :seed 42
+                                      :sources :corpus
+                                      :save temp-dir})]
+      (fs/delete-tree temp-dir)
+      (is (= :ok (:status result)))
+      (is (pos? (:mutations/total result))))))

@@ -38,32 +38,18 @@ We compare AST and pickle output using parsed JSON equality (`json/parse-string`
 
 ---
 
-## E002: Canonical Formatter Does Not Support Rule: Blocks
+## E002: ~~Canonical Formatter Does Not Support Rule: Blocks~~ (RESOLVED)
 
 **Date discovered**: 2025-12-29
+**Date resolved**: 2026-01-01
 
 **Source**: ShiftLefter canonical formatter (`shiftlefter.gherkin.printer/canonical`)
 
-**Description**:
-The canonical formatter (which produces deterministic, prettified Gherkin output) does not yet support `Rule:` blocks. When a file contains `Rule:` blocks, the canonical formatter returns an error instead of silently producing incorrect output.
+**Resolution**:
+Canonical formatting now fully supports `Rule:` blocks. All 46 Cucumber compliance files (including those with Rules) format correctly.
 
-Functions affected:
-- `format-canonical` returns `{:status :error :reason :canonical/rules-unsupported ...}`
-- `fmt-canonical` returns the same error map with `:path`
-- `canonical` throws `ExceptionInfo` with the error details
-
-**Impact**:
-Files containing `Rule:` blocks cannot be canonically formatted. This is a known limitation, not a bug.
-
-**Our workaround**:
-Use the lossless roundtrip functions instead for files with rules:
-- `print-tokens` — concatenates token `:raw` fields for byte-perfect roundtrip
-- `roundtrip` / `roundtrip-ok?` — string-based roundtrip helpers
-- `fmt-check` — file-based roundtrip verification
-
-These functions work with all Gherkin constructs including `Rule:` blocks.
-
-**Upstream status**: Internal limitation. May be lifted in future when canonical formatting for rules is implemented.
+**Original issue (historical)**:
+The canonical formatter previously returned an error for files containing `Rule:` blocks. This was a temporary limitation during development, now lifted.
 
 ---
 
@@ -152,6 +138,34 @@ iconv -f ISO-8859-1 -t UTF-8 input.feature > output.feature
 ```
 
 **Upstream status**: By design for now. UTF-8 is the de facto standard for source files. Supporting legacy encodings adds complexity with minimal benefit. May revisit if real-world demand emerges.
+
+---
+
+## E006: Pickle Extensions (ShiftLefter-only)
+
+**Date discovered**: 2026-01-05
+
+**Source**: ShiftLefter pickler (`shiftlefter.gherkin.pickler`)
+
+**Description**:
+ShiftLefter adds several fields to pickles that are **not part of the Cucumber Gherkin standard**. These are ShiftLefter extensions for enhanced traceability, particularly for Scenario Outline provenance.
+
+**Pickle-level extensions:**
+- `:pickle/template-name` — For outline-generated pickles, the name of the originating Scenario Outline (nil for regular scenarios)
+- `:pickle/row-index` — 0-based index of the Examples row that generated this pickle (nil for regular scenarios)
+- `:pickle/row-values` — Map of placeholder names to substituted values for this row (nil for regular scenarios)
+
+**Step-level extensions:**
+- `:step/template-text` — For outline-generated steps, the pre-substitution text with `<placeholders>` intact (nil for regular steps)
+- `:step/origin` — Source of the step: `:feature-background`, `:rule-background`, or `:scenario`
+
+**Impact**:
+Tools consuming ShiftLefter pickle output should be aware these fields are non-standard. Downstream processors that expect strict Cucumber pickle format should ignore these fields or strip them before forwarding.
+
+**Our workaround**:
+The compliance projection layer (`shiftlefter.gherkin.compliance`) strips these fields when generating Cucumber-compatible output for compliance testing.
+
+**Upstream status**: By design. These extensions enable ShiftLefter's traceability features (macro provenance, outline debugging, requirement linking).
 
 ---
 

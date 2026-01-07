@@ -1,0 +1,4 @@
+;; Config with duplicate macro keys (should error at registry load)
+{:runner {:macros {:enabled? true
+                   :registry-paths ["test/fixtures/macros/dupe.ini"]}
+          :step-paths ["test/fixtures/steps/"]}}

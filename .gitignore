@@ -11,3 +11,6 @@ reports/compliance/latest
 compliance/
 fuzz/
 target/
+
+# User config (use shiftlefter.edn.example as template)
+/shiftlefter.edn

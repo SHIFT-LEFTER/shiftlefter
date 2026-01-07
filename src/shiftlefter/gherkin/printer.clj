@@ -17,7 +17,7 @@
 ;; -----------------------------------------------------------------------------
 
 (s/def ::status #{:ok :error})
-(s/def ::reason #{:parse-errors :mismatch :canonical/rules-unsupported
+(s/def ::reason #{:parse-errors :mismatch
                   :io/utf8-decode-failed :io/file-not-found :io/read-error})
 (s/def ::path string?)
 (s/def ::details (s/coll-of map?))
@@ -167,14 +167,12 @@
          indent-str fence)))
 
 (defn- format-step
-  "Format a Step or MacroStep."
+  "Format a Step."
   [step indent-level]
   (let [indent-str (indent indent-level)
         keyword-str (:keyword step)
         text (:text step)
-        ;; Check for macro marker (ends with " +")
-        macro? (instance? shiftlefter.gherkin.parser.MacroStep step)
-        step-line (str indent-str keyword-str " " text (when macro? " +"))
+        step-line (str indent-str keyword-str " " text)
         arg (:argument step)]
     (cond
       (nil? arg)
@@ -267,6 +265,25 @@
           lines (str/split-lines (str/trim description))]
       (str/join "\n" (map #(str indent-str %) lines)))))
 
+(defn- format-rule
+  "Format a Rule node."
+  [rule indent-level]
+  (let [indent-str (indent indent-level)
+        tags-line (format-tags (:tags rule) indent-level)
+        header (str indent-str "Rule: " (:name rule))
+        desc (format-description (:description rule) (inc indent-level))
+        bg (parser/get-background rule)
+        scenarios (parser/get-scenarios rule)
+        bg-str (when bg (format-background bg (inc indent-level)))
+        scenarios-str (->> scenarios
+                           (map #(format-scenario % (inc indent-level)))
+                           (str/join "\n\n"))]
+    (str (when tags-line (str tags-line "\n"))
+         header
+         (when desc (str "\n" desc))
+         (when bg-str (str "\n\n" bg-str))
+         (when (seq scenarios) (str "\n\n" scenarios-str)))))
+
 (defn- format-feature
   "Format a Feature node."
   [feature]
@@ -275,30 +292,26 @@
         desc (format-description (:description feature) 1)
         bg (parser/get-background feature)
         scenarios (parser/get-scenarios feature)
+        rules (parser/get-rules feature)
         bg-str (when bg (format-background bg 1))
         scenarios-str (->> scenarios
                            (map #(format-scenario % 1))
-                           (str/join "\n\n"))]
+                           (str/join "\n\n"))
+        rules-str (->> rules
+                       (map #(format-rule % 1))
+                       (str/join "\n\n"))]
     (str (when tags-line (str tags-line "\n"))
          header
          (when desc (str "\n" desc))
          (when bg-str (str "\n\n" bg-str))
          (when (seq scenarios) (str "\n\n" scenarios-str))
+         (when (seq rules) (str "\n\n" rules-str))
          "\n")))
 
 (defn- format-comment
   "Format a Comment node."
   [comment-node]
   (str "# " (:text comment-node)))
-
-(defn- find-first-rule
-  "Find the first Rule node in an AST. Returns the rule or nil."
-  [ast]
-  (let [features (filter #(instance? shiftlefter.gherkin.parser.Feature %) ast)]
-    (some (fn [feature]
-            (some #(when (instance? shiftlefter.gherkin.parser.Rule %) %)
-                  (:children feature)))
-          features)))
 
 (defn format-canonical
   "Format AST to canonical Gherkin style.
@@ -310,41 +323,30 @@
    - Single blank line between sections
 
    Returns:
-   - {:status :ok :output formatted-string} on success
-   - {:status :error :reason :canonical/rules-unsupported ...} if Rules present
-
-   Note: Canonical formatter does not yet support Rule: blocks. Use lossless
-   roundtrip (print-tokens) for files containing rules."
+   - {:status :ok :output formatted-string} on success"
   [ast]
-  ;; Check for Rule: blocks - canonical formatter doesn't support them yet
-  (if-let [rule (find-first-rule ast)]
-    {:status :error
-     :reason :canonical/rules-unsupported
-     :message "Canonical formatter does not support Rule: blocks. Use lossless roundtrip instead."
-     :location (:location rule)}
-    ;; No rules - proceed with formatting
-    (let [;; Separate comments at top from feature
-          top-comments (take-while #(or (instance? shiftlefter.gherkin.parser.Comment %)
-                                        (instance? shiftlefter.gherkin.parser.Blank %))
-                                   ast)
-          rest-ast (drop (count top-comments) ast)
-          ;; Format top comments (filter blanks, just keep comments)
-          comment-nodes (filter #(instance? shiftlefter.gherkin.parser.Comment %) top-comments)
-          comments-str (when (seq comment-nodes)
-                         (str (str/join "\n" (map format-comment comment-nodes)) "\n"))
-          ;; Format features (usually just one)
-          features (filter #(instance? shiftlefter.gherkin.parser.Feature %) rest-ast)
-          feature-str (str/join "\n" (map format-feature features))
-          ;; Combine and strip trailing whitespace from each line
-          raw-output (str comments-str
-                          (when (and comments-str (seq features)) "\n")
-                          feature-str)
-          ;; Strip trailing whitespace from each line
-          lines (str/split-lines raw-output)
-          stripped-lines (map #(str/replace % #"[ \t]+$" "") lines)]
-      {:status :ok
-       :output (str (str/join "\n" stripped-lines)
-                    (when (str/ends-with? raw-output "\n") "\n"))})))
+  (let [;; Separate comments at top from feature
+        top-comments (take-while #(or (instance? shiftlefter.gherkin.parser.Comment %)
+                                      (instance? shiftlefter.gherkin.parser.Blank %))
+                                 ast)
+        rest-ast (drop (count top-comments) ast)
+        ;; Format top comments (filter blanks, just keep comments)
+        comment-nodes (filter #(instance? shiftlefter.gherkin.parser.Comment %) top-comments)
+        comments-str (when (seq comment-nodes)
+                       (str (str/join "\n" (map format-comment comment-nodes)) "\n"))
+        ;; Format features (usually just one)
+        features (filter #(instance? shiftlefter.gherkin.parser.Feature %) rest-ast)
+        feature-str (str/join "\n" (map format-feature features))
+        ;; Combine and strip trailing whitespace from each line
+        raw-output (str comments-str
+                        (when (and comments-str (seq features)) "\n")
+                        feature-str)
+        ;; Strip trailing whitespace from each line
+        lines (str/split-lines raw-output)
+        stripped-lines (map #(str/replace % #"[ \t]+$" "") lines)]
+    {:status :ok
+     :output (str (str/join "\n" stripped-lines)
+                  (when (str/ends-with? raw-output "\n") "\n"))}))
 
 (defn fmt-canonical
   "Format a file to canonical style.
@@ -352,7 +354,6 @@
    Returns:
    - {:status :ok :path path :output formatted-string} on success
    - {:status :error :reason :parse-errors :details [...]} on parse failure
-   - {:status :error :reason :canonical/rules-unsupported ...} if Rules present
    - {:status :error :reason :io/utf8-decode-failed ...} if file is not valid UTF-8
    - {:status :error :reason :io/file-not-found ...} if file doesn't exist"
   [path]
@@ -376,15 +377,10 @@
   "Format a string to canonical style.
 
    Returns formatted string on success.
-   Throws on parse errors or if Rules are present."
+   Throws on parse errors."
   [input]
   (let [tokens (vec (lexer/lex input))
         {:keys [ast errors]} (parser/parse tokens)]
     (if (seq errors)
       (throw (ex-info "Parse errors" {:errors errors}))
-      (let [result (format-canonical ast)]
-        (if (= :ok (:status result))
-          (:output result)
-          (throw (ex-info (:message result)
-                          {:reason (:reason result)
-                           :location (:location result)})))))))
+      (:output (format-canonical ast)))))

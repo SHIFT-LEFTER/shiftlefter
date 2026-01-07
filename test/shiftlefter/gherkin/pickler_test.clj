@@ -2,19 +2,14 @@
   (:require [clojure.test :refer [deftest is testing]]
             [shiftlefter.gherkin.pickler :as pickler]
             [shiftlefter.gherkin.lexer :as lexer]
-            [shiftlefter.gherkin.parser :as parser]
-            [shiftlefter.gherkin.macros :as macros]))
-
-(def test-macros-dir "test/resources/macros/good/")
+            [shiftlefter.gherkin.parser :as parser]))
 
 (deftest test-pickles-basic
-  (testing "Generates basic flat pickles from expanded AST"
+  (testing "Generates basic flat pickles from AST"
     (let [feature-str "Feature: Test Feature\n\nScenario: Test Scenario\n    Given I do something\n    When I do another\n    Then I check result"
           tokens (lexer/lex feature-str)
-          pre-ast (:ast (parser/parse tokens))
-          registry (macros/load-macro-registry test-macros-dir)
-          expanded-ast (macros/expand-ast pre-ast registry)
-          result (pickler/pickles expanded-ast {} "test.feature")
+          ast (:ast (parser/parse tokens))
+          result (pickler/pickles ast {} "test.feature")
           pickles (:pickles result)]
       (is (empty? (:errors result)))
       (is (seq? pickles))
@@ -28,67 +23,27 @@
         (let [first-step (first (:pickle/steps pickle))]
           (is (instance? java.util.UUID (:step/id first-step)))
           (is (= "Given" (:step/keyword first-step)))
-          (is (= "I do something" (:step/text first-step)))
-          (is (nil? (:step/source first-step))))))))
+          (is (= "I do something" (:step/text first-step))))))))
 
- (deftest test-pickles-with-macros
-   (testing "Preserves macro provenance in pickles"
-     (let [feature-str "Feature: Test Feature\n\nScenario: Test Scenario\n    Given Log in as admin +\n    Then check result"
-           tokens (lexer/lex feature-str)
-           pre-ast (:ast (parser/parse tokens))
-           registry (macros/load-macro-registry test-macros-dir)
-           expanded-ast (macros/expand-ast pre-ast registry)
-           result (pickler/pickles expanded-ast {} "test.feature")
-           pickles (:pickles result)]
-       (is (empty? (:errors result)))
-       (is (seq? pickles))
-       (is (= 1 (count pickles)))
-       (let [pickle (first pickles)
-             steps (:pickle/steps pickle)]
-         (is (= "Test Scenario" (:pickle/name pickle)))
-         (is (= 6 (count steps))) ; 5 expanded + 1 original
-         ;; Check expanded steps have :source
-         (let [first-expanded (first steps)]
-           (is (= "Given" (:step/keyword first-expanded)))
-           (is (= "I am on the login page" (:step/text first-expanded)))
-           (is (map? (:step/source first-expanded)))
-           (is (= "Log in as admin" (:macro-name (:step/source first-expanded))))
-           (is (map? (:original-location (:step/source first-expanded)))))
-         ;; Check other expanded steps
-         (let [second-step (second steps)]
-           (is (= "When" (:step/keyword second-step)))
-           (is (= "I fill in \"Email\" with \"{email}\"" (:step/text second-step)))
-           (is (= "Log in as admin" (:macro-name (:step/source second-step)))))
-         ;; Check the last original step has no :source
-         (let [last-step (last steps)]
-           (is (= "Then" (:step/keyword last-step)))
-           (is (= "check result" (:step/text last-step)))
-           (is (nil? (:step/source last-step))))))))
- 
-
-(deftest test-pre-pickles-basic
-  (testing "Generates pre-expansion pickles with macro provenance"
-    (let [feature-str "Feature: Test\n  Scenario: Basic\n    Given regular step\n    Given macro +\n    Then another"
+(deftest test-pickles-literal-plus-suffix
+  (testing "Step text with ' +' suffix is preserved literally (no macro interpretation)"
+    (let [feature-str "Feature: Test Feature\n\nScenario: Test Scenario\n    Given login as alice +\n    Then check result"
           tokens (lexer/lex feature-str)
-          pre-ast (:ast (parser/parse tokens))
-          registry (macros/load-macro-registry test-macros-dir)
-          pickles (pickler/pre-pickles pre-ast registry "test.feature")]
+          ast (:ast (parser/parse tokens))
+          result (pickler/pickles ast {} "test.feature")
+          pickles (:pickles result)]
+      (is (empty? (:errors result)))
       (is (= 1 (count pickles)))
-      (let [p (first pickles)]
-        (is (= "Basic" (:pickle/name p)))
-        (is (= 3 (count (:pickle/steps p))))
-        (let [steps (:pickle/steps p)
-              first-step (nth steps 0)
-              macro-step (nth steps 1)
-              last-step (nth steps 2)]
-          (is (= "regular step" (:step/text first-step)))
-          (is (nil? (:step/source first-step)))
-          (is (= "macro" (:step/text macro-step)))
-          (is (map? (:step/source macro-step)))  ;; Has provenance
-          (is (= "macro" (:macro-name (:step/source macro-step))))
-          (is (instance? shiftlefter.gherkin.location.Location (:original-location (:step/source macro-step))))  ;; Non-nil location
-          (is (= "another" (:step/text last-step)))
-          (is (nil? (:step/source last-step))))))))
+      (let [pickle (first pickles)
+            steps (:pickle/steps pickle)]
+        (is (= 2 (count steps)))
+        ;; The " +" suffix is preserved as literal text
+        (let [first-step (first steps)]
+          (is (= "Given" (:step/keyword first-step)))
+          (is (= "login as alice +" (:step/text first-step))))
+        (let [last-step (last steps)]
+          (is (= "Then" (:step/keyword last-step)))
+          (is (= "check result" (:step/text last-step))))))))
 
 ;; (deftest test-pre-pickles-outline-stub
 ;;   (testing "Stubs outlines as single pickle with warning"
@@ -361,3 +316,131 @@ Feature: Test
           pickles (parse-and-pickle feature-str)]
       (is (= 1 (count pickles)))
       (is (= ["@f1" "@f2" "@r1" "@s1" "@s2" "@e1"] (tag-names (first pickles)))))))
+
+;; -----------------------------------------------------------------------------
+;; Outline Pickle Extensions Tests (BIRDSONG §4.3)
+;; -----------------------------------------------------------------------------
+
+(deftest test-outline-pickle-provenance-fields
+  (testing "Outline pickles have template-name, row-index, and row-values"
+    (let [feature-str "Feature: Outline Test
+  Scenario Outline: Login as <role>
+    Given I enter <username>
+  Examples:
+    | role  | username |
+    | admin | alice    |
+    | user  | bob      |"
+          pickles (parse-and-pickle feature-str)]
+      (is (= 2 (count pickles)) "Should expand to 2 pickles (one per row)")
+
+      ;; First pickle (row 0)
+      (let [p0 (first pickles)]
+        (is (= "Login as admin" (:pickle/name p0)) "Name should be substituted")
+        (is (= "Login as <role>" (:pickle/template-name p0)) "Template name preserved")
+        (is (= 0 (:pickle/row-index p0)) "Row index should be 0")
+        (is (= {"role" "admin" "username" "alice"} (:pickle/row-values p0)) "Row values map"))
+
+      ;; Second pickle (row 1)
+      (let [p1 (second pickles)]
+        (is (= "Login as user" (:pickle/name p1)) "Name should be substituted")
+        (is (= "Login as <role>" (:pickle/template-name p1)) "Template name preserved")
+        (is (= 1 (:pickle/row-index p1)) "Row index should be 1")
+        (is (= {"role" "user" "username" "bob"} (:pickle/row-values p1)) "Row values map")))))
+
+(deftest test-outline-step-template-text
+  (testing "Outline steps have template-text with placeholders"
+    (let [feature-str "Feature: Step Template Test
+  Scenario Outline: Test <var>
+    Given I have <count> items
+    When I add <more> more
+  Examples:
+    | var | count | more |
+    | foo | 5     | 3    |"
+          pickles (parse-and-pickle feature-str)
+          pickle (first pickles)
+          steps (:pickle/steps pickle)]
+      (is (= 1 (count pickles)))
+      (is (= 2 (count steps)))
+
+      ;; First step
+      (let [step1 (first steps)]
+        (is (= "I have 5 items" (:step/text step1)) "Text should be substituted")
+        (is (= "I have <count> items" (:step/template-text step1)) "Template text preserved"))
+
+      ;; Second step
+      (let [step2 (second steps)]
+        (is (= "I add 3 more" (:step/text step2)) "Text should be substituted")
+        (is (= "I add <more> more" (:step/template-text step2)) "Template text preserved")))))
+
+(deftest test-non-outline-pickle-nil-fields
+  (testing "Non-outline pickles have nil for outline provenance fields"
+    (let [feature-str "Feature: Regular Scenario
+  Scenario: Simple test
+    Given a step
+    When another step"
+          pickles (parse-and-pickle feature-str)
+          pickle (first pickles)]
+      (is (= 1 (count pickles)))
+      (is (= "Simple test" (:pickle/name pickle)))
+
+      ;; Outline-specific fields should be nil
+      (is (nil? (:pickle/template-name pickle)) "template-name should be nil")
+      (is (nil? (:pickle/row-index pickle)) "row-index should be nil")
+      (is (nil? (:pickle/row-values pickle)) "row-values should be nil")
+      (is (nil? (:pickle/scenario-location pickle)) "scenario-location should be nil")
+      (is (nil? (:pickle/row-location pickle)) "row-location should be nil")
+
+      ;; Steps should have nil template-text
+      (doseq [step (:pickle/steps pickle)]
+        (is (nil? (:step/template-text step)) "step template-text should be nil")))))
+
+(deftest test-outline-with-multiple-examples-blocks
+  (testing "Multiple Examples blocks each produce pickles with correct indices"
+    (let [feature-str "Feature: Multi Examples
+  Scenario Outline: Test <val>
+    Given step with <val>
+  Examples: First set
+    | val |
+    | a   |
+    | b   |
+  Examples: Second set
+    | val |
+    | x   |
+    | y   |"
+          pickles (parse-and-pickle feature-str)]
+      (is (= 4 (count pickles)) "Should have 4 pickles total")
+
+      ;; Row indices reset per Examples block
+      (is (= 0 (:pickle/row-index (nth pickles 0))))
+      (is (= 1 (:pickle/row-index (nth pickles 1))))
+      (is (= 0 (:pickle/row-index (nth pickles 2))))
+      (is (= 1 (:pickle/row-index (nth pickles 3))))
+
+      ;; Check values
+      (is (= {"val" "a"} (:pickle/row-values (nth pickles 0))))
+      (is (= {"val" "b"} (:pickle/row-values (nth pickles 1))))
+      (is (= {"val" "x"} (:pickle/row-values (nth pickles 2))))
+      (is (= {"val" "y"} (:pickle/row-values (nth pickles 3)))))))
+
+(deftest test-outline-fixture-file
+  (testing "Parse outline.feature fixture and verify fields"
+    (let [content (slurp "test/fixtures/features/outline.feature")
+          pickles (parse-and-pickle content)]
+      (is (= 3 (count pickles)) "Should have 3 pickles (admin, user, guest)")
+
+      ;; All should have the same template name
+      (doseq [p pickles]
+        (is (= "Login as <role>" (:pickle/template-name p))))
+
+      ;; Check specific pickles
+      (let [admin-pickle (first pickles)]
+        (is (= "Login as admin" (:pickle/name admin-pickle)))
+        (is (= 0 (:pickle/row-index admin-pickle)))
+        (is (= {"role" "admin" "username" "admin@test" "password" "secret123"}
+               (:pickle/row-values admin-pickle))))
+
+      ;; Check step template-text
+      (let [steps (:pickle/steps (first pickles))
+            step-with-placeholder (second steps)]
+        (is (= "I enter \"admin@test\" and \"secret123\"" (:step/text step-with-placeholder)))
+        (is (= "I enter \"<username>\" and \"<password>\"" (:step/template-text step-with-placeholder)))))))

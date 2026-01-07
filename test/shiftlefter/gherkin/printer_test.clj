@@ -136,7 +136,7 @@
 
 (deftest roundtrip-toy-login-file
   (testing "toy-login.feature roundtrips"
-    (let [path "resources/features/toy-login.feature"
+    (let [path "examples/quickstart/features/toy-login.feature"
           result (printer/fmt-check path)]
       (is (= :ok (:status result))
           (str "Expected :ok but got " result)))))
@@ -147,7 +147,7 @@
     ;; (inline tag comments, Rule keyword, etc.) - but the token-level
     ;; roundtrip should still work perfectly. This tests the printer,
     ;; not the parser.
-    (let [path "resources/features/gpt-tokenizer-stress.feature"
+    (let [path "test/fixtures/gherkin/stress/gpt-tokenizer-stress.feature"
           original (slurp path)
           reconstructed (printer/roundtrip original)]
       (is (= original reconstructed)
@@ -155,7 +155,7 @@
 
 (deftest roundtrip-scenario-outline-file
   (testing "scenario_outline.feature roundtrips"
-    (let [path "resources/testdata/scenario_outline.feature"
+    (let [path "test/fixtures/gherkin/outlines/scenario_outline.feature"
           result (printer/fmt-check path)]
       (is (= :ok (:status result))
           (str "Expected :ok but got " result)))))
@@ -298,14 +298,14 @@
 
 (deftest idempotence-file-toy-login
   (testing "toy-login.feature is idempotent"
-    (let [original (slurp "resources/features/toy-login.feature")
+    (let [original (slurp "examples/quickstart/features/toy-login.feature")
           once (printer/canonical original)
           twice (printer/canonical once)]
       (is (= once twice)))))
 
 (deftest idempotence-file-outline
   (testing "scenario_outline.feature is idempotent"
-    (let [original (slurp "resources/testdata/scenario_outline.feature")
+    (let [original (slurp "test/fixtures/gherkin/outlines/scenario_outline.feature")
           once (printer/canonical original)
           twice (printer/canonical once)]
       (is (= once twice)))))
@@ -361,7 +361,7 @@
 
 (deftest semantic-equivalence-file
   (testing "toy-login.feature formatting preserves semantics"
-    (let [original (slurp "resources/features/toy-login.feature")
+    (let [original (slurp "examples/quickstart/features/toy-login.feature")
           formatted (printer/canonical original)
           pickles-before (get-normalized-pickles original)
           pickles-after (get-normalized-pickles formatted)]
@@ -373,7 +373,7 @@
 
 (deftest fmt-canonical-rejects-parse-errors
   (testing "fmt-canonical returns error on parse errors"
-    (let [result (printer/fmt-canonical "resources/features/gpt-tokenizer-stress.feature")]
+    (let [result (printer/fmt-canonical "test/fixtures/gherkin/stress/gpt-tokenizer-stress.feature")]
       (is (= :error (:status result)))
       (is (= :parse-errors (:reason result)))
       (is (seq (:details result))))))
@@ -382,28 +382,30 @@
 ;; FMT1: Canonical formatter Rule: safety
 ;; -----------------------------------------------------------------------------
 
-(deftest canonical-rejects-rules
-  (testing "canonical throws on Rule: blocks"
+(deftest canonical-formats-rules
+  (testing "canonical formats Rule: blocks correctly"
     (let [with-rule "Feature: Test
   Rule: My Rule
     Scenario: S
-      Given step"]
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                            #"Rule.*blocks"
-                            (printer/canonical with-rule))))))
+      Given step"
+          result (printer/canonical with-rule)]
+      (is (string? result))
+      (is (str/includes? result "Feature: Test"))
+      (is (str/includes? result "Rule: My Rule"))
+      (is (str/includes? result "Scenario: S"))
+      (is (str/includes? result "Given step")))))
 
-(deftest format-canonical-returns-error-for-rules
-  (testing "format-canonical returns error map for Rule: blocks"
+(deftest format-canonical-formats-rules
+  (testing "format-canonical returns success for Rule: blocks"
     (let [tokens (lexer/lex "Feature: Test
   Rule: My Rule
     Scenario: S
       Given step")
           ast (:ast (parser/parse tokens))
           result (printer/format-canonical ast)]
-      (is (= :error (:status result)))
-      (is (= :canonical/rules-unsupported (:reason result)))
-      (is (some? (:location result)))
-      (is (= 2 (:line (:location result)))))))
+      (is (= :ok (:status result)))
+      (is (string? (:output result)))
+      (is (str/includes? (:output result) "Rule: My Rule")))))
 
 (deftest canonical-works-without-rules
   (testing "canonical works normally without Rules"
@@ -430,7 +432,7 @@
 
 (deftest fmt-check-invalid-utf8
   (testing "fmt-check returns distinct error for invalid UTF-8 file (AC2)"
-    (let [result (printer/fmt-check "test/resources/testdata/bad-encoding/invalid-utf8.feature")]
+    (let [result (printer/fmt-check "test/fixtures/gherkin/encoding/invalid-utf8.feature")]
       (is (= :error (:status result)))
       (is (= :io/utf8-decode-failed (:reason result)))
       (is (string? (:message result)))
@@ -445,7 +447,7 @@
 
 (deftest fmt-canonical-invalid-utf8
   (testing "fmt-canonical returns distinct error for invalid UTF-8 file"
-    (let [result (printer/fmt-canonical "test/resources/testdata/bad-encoding/invalid-utf8.feature")]
+    (let [result (printer/fmt-canonical "test/fixtures/gherkin/encoding/invalid-utf8.feature")]
       (is (= :error (:status result)))
       (is (= :io/utf8-decode-failed (:reason result))))))
 
@@ -455,7 +457,7 @@
 
 (deftest lossless-roundtrip-preserves-tag-spacing
   (testing "Lossless roundtrip preserves weird tag spacing exactly (X1 AC2)"
-    (let [input (slurp "test/resources/testdata/tag-spacing/weird-spacing.feature")
+    (let [input (slurp "test/fixtures/gherkin/tag-spacing/weird-spacing.feature")
           tokens (lexer/lex input)
           roundtrip (printer/print-tokens tokens)]
       (is (= input roundtrip)

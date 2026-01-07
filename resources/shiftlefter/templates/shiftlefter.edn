@@ -1,0 +1,7 @@
+;; ShiftLefter configuration template
+;; Copy to project root as shiftlefter.edn and customize
+
+{:parser {:strict false        ; true = fail on first error
+          :dialect :en         ; default language dialect
+          :macro-paths []      ; directories to search for macro definitions
+          :output :pretty}}    ; :pretty | :edn | :json
