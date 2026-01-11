@@ -1,0 +1,6 @@
+;; Test subject glossary
+{:subjects
+ {:alice {:desc "Standard customer account"}
+  :admin {:desc "Administrative user"}
+  :guest {:desc "Unauthenticated visitor"}
+  :system/test-setup {:desc "Harness subject for fixtures"}}}

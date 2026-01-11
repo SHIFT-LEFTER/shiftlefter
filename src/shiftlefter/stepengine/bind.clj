@@ -21,6 +21,20 @@
    - `A` = declared arity (from stepdef)
    - Valid if `A == C` (captures only) or `A == C+1` (captures + ctx)
 
+   ## SVO Extraction
+
+   For matched steps with `:metadata` containing `:svo`, extracts SVOI:
+   - `:svoi` key added to binding with extracted subject/verb/object/interface
+   - Legacy steps (no metadata) get `:svoi nil`
+
+   ## SVO Validation
+
+   When validation options are provided to `bind-suite`, extracted SVOIs are
+   validated against glossaries and interface config:
+   - `:unknown-subject :warn` — log warning, don't block
+   - `:unknown-subject :error` — log error, block execution
+   - Same for `:unknown-verb` and `:unknown-interface`
+
    ## Usage
 
    ```clojure
@@ -30,7 +44,8 @@
        (report-and-exit-2 diagnostics)
        (execute-plans plans)))
    ```"
-)
+  (:require [shiftlefter.svo.extract :as extract]
+            [shiftlefter.svo.validate :as validate]))
 
 ;; -----------------------------------------------------------------------------
 ;; Step Matching
@@ -113,15 +128,18 @@
            :binding nil
            :alternatives []}
 
-        ;; Single match - check arity
+        ;; Single match - check arity and extract SVOI
         1 (let [{:keys [stepdef captures]} (first matches)
-                arity-info (validate-arity (count captures) (:arity stepdef))]
+                arity-info (validate-arity (count captures) (:arity stepdef))
+                metadata (:metadata stepdef)
+                svoi (extract/extract-svoi metadata captures)]
             {:status :matched
              :step pickle-step
              :binding (merge (stepdef-summary stepdef)
                              {:captures captures
                               :fn (:fn stepdef)
-                              :arity (:arity stepdef)}
+                              :arity (:arity stepdef)
+                              :svoi svoi}
                              arity-info)
              :alternatives []})
 
@@ -175,32 +193,94 @@
 
 (defn- issue-counts
   "Count issues by type."
-  [{:keys [undefined ambiguous invalid-arity]}]
-  {:undefined-count (count undefined)
-   :ambiguous-count (count ambiguous)
-   :invalid-arity-count (count invalid-arity)
-   :total-issues (+ (count undefined)
-                    (count ambiguous)
-                    (count invalid-arity))})
+  [{:keys [undefined ambiguous invalid-arity svo-issues]}]
+  (let [svo-count (count svo-issues)]
+    {:undefined-count (count undefined)
+     :ambiguous-count (count ambiguous)
+     :invalid-arity-count (count invalid-arity)
+     :svo-issue-count svo-count
+     :total-issues (+ (count undefined)
+                      (count ambiguous)
+                      (count invalid-arity))}))
+
+;; -----------------------------------------------------------------------------
+;; SVO Validation
+;; -----------------------------------------------------------------------------
+
+(defn- collect-svo-issues
+  "Collect SVO validation issues from all bound steps.
+
+   For each matched step with a non-nil :svoi, validates against glossary
+   and interfaces. Returns vector of issues with step location info attached."
+  [plans glossary interfaces]
+  (when (and glossary interfaces)
+    (let [all-steps (mapcat :plan/steps plans)]
+      (->> all-steps
+           (filter #(= :matched (:status %)))
+           (keep (fn [bound-step]
+                   (when-let [svoi (-> bound-step :binding :svoi)]
+                     (let [result (validate/validate-svoi glossary interfaces svoi)]
+                       (when-not (:valid? result)
+                         ;; Attach step location to each issue
+                         (let [step (:step bound-step)
+                               location {:step-text (:step/text step)
+                                         :step-id (:step/id step)}]
+                           (mapv #(assoc % :location location)
+                                 (:issues result))))))))
+           (apply concat)
+           vec))))
+
+(defn- svo-issues-blocking?
+  "Check if any SVO issues should block execution based on config.
+
+   Returns true if any issue type is configured as :error and that issue exists."
+  [svo-issues svo-config]
+  (when (seq svo-issues)
+    (let [issue-type->config-key {:svo/unknown-subject :unknown-subject
+                                  :svo/unknown-verb :unknown-verb
+                                  :svo/unknown-interface :unknown-interface}]
+      (some (fn [issue]
+              (let [config-key (issue-type->config-key (:type issue))
+                    level (get svo-config config-key :warn)]
+                (= :error level)))
+            svo-issues))))
 
 (defn bind-suite
   "Bind all pickles to stepdefs, producing plans and diagnostics.
 
+   Parameters:
+   - pickles: Seq of pickles to bind
+   - stepdefs: Seq of step definitions
+   - opts: Optional map with SVO validation settings:
+     - :glossary — loaded glossary for SVO validation
+     - :interfaces — interface config map
+     - :svo — enforcement config {:unknown-subject :warn|:error ...}
+
    Returns:
    - :plans - seq of run plans (one per pickle)
-   - :runnable? - true iff all plans are runnable
+   - :runnable? - true iff all plans are runnable and no blocking SVO issues
    - :diagnostics - summary of binding issues
 
    Diagnostics structure:
    - :undefined - steps with no matching stepdef
    - :ambiguous - steps matching 2+ stepdefs
    - :invalid-arity - matched steps with arity mismatch
-   - :counts - {:undefined-count N :ambiguous-count N ...}"
-  [pickles stepdefs]
-  (let [plans (mapv #(bind-pickle % stepdefs) pickles)
-        issues (collect-issues plans)
-        counts (issue-counts issues)
-        runnable? (zero? (:total-issues counts))]
-    {:plans plans
-     :runnable? runnable?
-     :diagnostics (merge issues {:counts counts})}))
+   - :svo-issues - SVO validation issues (when opts provided)
+   - :counts - {:undefined-count N :ambiguous-count N :svo-issue-count N ...}"
+  ([pickles stepdefs]
+   (bind-suite pickles stepdefs nil))
+  ([pickles stepdefs opts]
+   (let [plans (mapv #(bind-pickle % stepdefs) pickles)
+         binding-issues (collect-issues plans)
+         ;; SVO validation (only if opts provided)
+         {:keys [glossary interfaces svo]} opts
+         svo-issues (collect-svo-issues plans glossary interfaces)
+         all-issues (assoc binding-issues :svo-issues (or svo-issues []))
+         counts (issue-counts all-issues)
+         ;; Runnable if no binding issues AND no blocking SVO issues
+         binding-ok? (zero? (:total-issues counts))
+         svo-ok? (not (svo-issues-blocking? svo-issues svo))
+         runnable? (and binding-ok? svo-ok?)]
+     {:plans plans
+      :runnable? runnable?
+      :diagnostics (merge all-issues {:counts counts})})))

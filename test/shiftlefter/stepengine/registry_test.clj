@@ -206,3 +206,141 @@
 
     (let [not-found (registry/find-by-pattern "nonexistent")]
       (is (nil? not-found)))))
+
+;; -----------------------------------------------------------------------------
+;; Task 3.0.4: Metadata Support Tests
+;; -----------------------------------------------------------------------------
+
+(deftest test-register-with-metadata
+  (testing "register! accepts optional metadata parameter"
+    (let [metadata {:interface :web
+                    :svo {:subject :$1 :verb :click :object :$2}}
+          stepdef (registry/register! #"(.*) clicks (.*)"
+                                      (fn [ctx s t] ctx)
+                                      {:ns 'test :file "test.clj" :line 1}
+                                      metadata)]
+      (is (= metadata (:metadata stepdef)))))
+
+  (testing "register! without metadata sets :metadata to nil"
+    (let [stepdef (registry/register! #"legacy step"
+                                      (fn [ctx] ctx)
+                                      {:ns 'test :file "test.clj" :line 2})]
+      (is (nil? (:metadata stepdef))))))
+
+(deftest test-register-metadata-with-nil
+  (testing "Explicit nil metadata is stored as nil"
+    (let [stepdef (registry/register! #"explicit nil"
+                                      (fn [] nil)
+                                      {:ns 't :file "t.clj" :line 1}
+                                      nil)]
+      (is (nil? (:metadata stepdef))))))
+
+(deftest test-defstep-with-metadata
+  (testing "defstep with metadata map stores it correctly"
+    (registry/defstep #"(.*) fills (.*)"
+      {:interface :web
+       :svo {:subject :$1 :verb :fill :object :$2}}
+      [ctx subject field]
+      ctx)
+
+    (let [sd (first (registry/all-stepdefs))]
+      (is (map? (:metadata sd)))
+      (is (= :web (get-in sd [:metadata :interface])))
+      (is (= :$1 (get-in sd [:metadata :svo :subject])))
+      (is (= :fill (get-in sd [:metadata :svo :verb])))
+      (is (= :$2 (get-in sd [:metadata :svo :object]))))))
+
+(deftest test-defstep-without-metadata-legacy
+  (testing "defstep without metadata (legacy form) still works"
+    (registry/defstep #"I do something"
+      [ctx]
+      ctx)
+
+    (let [sd (first (registry/all-stepdefs))]
+      (is (nil? (:metadata sd)))
+      (is (= "I do something" (:pattern-src sd)))
+      (is (= 1 (:arity sd))))))
+
+(deftest test-defstep-metadata-execution
+  (testing "Step with metadata is still callable"
+    (registry/defstep #"(.*) sees (.*)"
+      {:interface :web
+       :svo {:subject :$1 :verb :see :object :$2}}
+      [ctx subject element]
+      {:subject subject :element element})
+
+    (let [sd (first (registry/all-stepdefs))
+          step-fn (:fn sd)]
+      (is (= {:subject "Alice" :element "button"}
+             (step-fn {} "Alice" "button"))))))
+
+(deftest test-defstep-metadata-empty-body
+  (testing "defstep with metadata and minimal body"
+    (registry/defstep #"(.*) waits"
+      {:interface :web
+       :svo {:subject :$1 :verb :wait :object nil}}
+      [ctx subject]
+      nil)
+
+    (let [sd (first (registry/all-stepdefs))]
+      (is (= :web (get-in sd [:metadata :interface])))
+      (is (nil? ((:fn sd) {} "Alice"))))))
+
+(deftest test-metadata-warning-interface-without-svo
+  (testing "Warning is printed when :interface without :svo"
+    (let [warning-output (with-out-str
+                           (binding [*err* *out*]
+                             (registry/register! #"bad metadata step"
+                                                 (fn [] nil)
+                                                 {:ns 't :file "t.clj" :line 1}
+                                                 {:interface :web})))]
+      (is (re-find #"(?i)warning" warning-output))
+      (is (re-find #":interface without :svo" warning-output)))))
+
+(deftest test-metadata-no-warning-complete
+  (testing "No warning when metadata has both :interface and :svo"
+    (let [warning-output (with-out-str
+                           (binding [*err* *out*]
+                             (registry/register! #"good metadata step"
+                                                 (fn [] nil)
+                                                 {:ns 't :file "t.clj" :line 1}
+                                                 {:interface :web
+                                                  :svo {:subject :$1 :verb :do}})))]
+      (is (= "" warning-output)))))
+
+;; -----------------------------------------------------------------------------
+;; Task 3.0.4 Acceptance Criteria
+;; -----------------------------------------------------------------------------
+
+(deftest test-acceptance-legacy-still-works
+  (testing "Task 3.0.4 AC: Legacy defstep still works"
+    (registry/defstep #"legacy clicks"
+      [ctx]
+      ctx)
+    (let [sd (first (registry/all-stepdefs))]
+      (is (nil? (:metadata sd)))
+      (is (= "legacy clicks" (:pattern-src sd))))))
+
+(deftest test-acceptance-with-metadata
+  (testing "Task 3.0.4 AC: defstep with metadata"
+    (registry/defstep #"(.*) clicks (.*)"
+      {:interface :web
+       :svo {:subject :$1 :verb :click :object :$2}}
+      [ctx s t]
+      ctx)
+    (let [sd (first (registry/all-stepdefs))]
+      (is (map? (:metadata sd)))
+      (is (= :web (:interface (:metadata sd))))
+      (is (= {:subject :$1 :verb :click :object :$2} (:svo (:metadata sd)))))))
+
+(deftest test-acceptance-lookup-includes-metadata
+  (testing "Task 3.0.4 AC: Registry lookup includes metadata"
+    (registry/defstep #"(.*) navigates to (.*)"
+      {:interface :web
+       :svo {:subject :$1 :verb :navigate :object :$2}}
+      [ctx s url]
+      ctx)
+    (let [sd (registry/find-by-pattern "(.*) navigates to (.*)")]
+      (is (some? sd))
+      (is (= :web (get-in sd [:metadata :interface])))
+      (is (= :navigate (get-in sd [:metadata :svo :verb]))))))

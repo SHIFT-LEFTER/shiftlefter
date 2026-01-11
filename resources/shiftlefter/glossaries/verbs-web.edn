@@ -1,0 +1,20 @@
+;; ShiftLefter default verb glossary for :web interface type
+;; Projects can extend or override via :glossaries config
+
+{:type :web
+ :verbs
+ {:click {:desc "Click on an element"}
+  :fill {:desc "Enter text into an input field"}
+  :see {:desc "Assert element is visible"}
+  :navigate {:desc "Navigate to a URL"}
+  :submit {:desc "Submit a form"}
+  :hover {:desc "Hover over an element"}
+  :drag {:desc "Drag element to a target"}
+  :select {:desc "Select option from dropdown"}
+  :check {:desc "Check a checkbox"}
+  :uncheck {:desc "Uncheck a checkbox"}
+  :scroll {:desc "Scroll to element or position"}
+  :wait {:desc "Wait for condition or element"}
+  :clear {:desc "Clear input field contents"}
+  :press {:desc "Press keyboard key"}
+  :upload {:desc "Upload file to input"}}}

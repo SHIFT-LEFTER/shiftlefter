@@ -258,7 +258,8 @@
                                   ;; 8. Execute all scenarios
                                   (do
                                     (publish-run-started! bus run-id (count features) (count all-pickles))
-                                    (let [exec-result (exec/execute-suite plans)
+                                    (let [exec-opts {:bus bus :run-id run-id}
+                                          exec-result (exec/execute-suite plans exec-opts)
                                           exit-code (compute-exit-code exec-result allow-pending?)]
 
                                       ;; 9. Report results

@@ -1,0 +1,38 @@
+;; ShiftLefter SVO Demo Configuration
+;;
+;; This example demonstrates the Subject-Verb-Object (SVO) validation system.
+;; Key concepts:
+;;
+;; - INTERFACE NAME: The key you use in config and stepdefs (e.g., :web, :customer-portal)
+;; - INTERFACE TYPE: The vocabulary category (e.g., :web, :api) - determines valid verbs
+;;
+;; Simple case: name = type (:web interface uses :web verbs)
+;; Advanced case: multiple names share a type (:legacy-app and :new-app both use :web verbs)
+
+{:parser {:dialect "en"}
+
+ :runner {:step-paths ["src/stepdefs/"]
+          :allow-pending? true}
+
+ ;; Glossary configuration
+ ;; - subjects: path to subject glossary
+ ;; - verbs: map of interface-type -> verb glossary path
+ ;; Project glossaries extend (don't replace) framework defaults
+ :glossaries {:subjects "config/glossaries/subjects.edn"
+              :verbs {:web "config/glossaries/verbs-web.edn"}}
+
+ ;; Interface definitions
+ ;; Each interface NAME maps to:
+ ;; - :type — which verb vocabulary to use (determines valid verbs)
+ ;; - :adapter — which adapter to use for provisioning
+ ;; - :config — adapter-specific configuration
+ :interfaces {:web {:type :web              ; Uses :web verb glossary
+                    :adapter :etaoin        ; Browser automation
+                    :config {:headless true}}}
+
+ ;; SVO enforcement levels
+ ;; - :warn — log warning but continue execution
+ ;; - :error — fail at bind time (before execution)
+ :svo {:unknown-subject :warn    ; Typos in subject names
+       :unknown-verb :warn       ; Unknown verbs for interface type
+       :unknown-interface :error}} ; Misconfigured interfaces

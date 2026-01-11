@@ -1,14 +1,20 @@
 (ns shiftlefter.repl-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [shiftlefter.repl :as repl]
-            [shiftlefter.stepengine.registry :as registry :refer [defstep]]))
+            [shiftlefter.stepengine.registry :as registry :refer [defstep]]
+            [shiftlefter.browser.ctx :as browser.ctx]
+            [shiftlefter.subjects :as subjects]
+            [shiftlefter.subjects.profile :as profile]
+            [shiftlefter.webdriver.session-store :as store]
+            [babashka.fs :as fs]))
 
-;; Clear registry and all contexts before each test
+;; Clear registry, contexts, and surfaces before each test
 (use-fixtures :each
   (fn [f]
     (registry/clear-registry!)
     (repl/reset-ctx!)
     (repl/reset-ctxs!)
+    (repl/reset-surfaces!)
     (f)))
 
 ;; -----------------------------------------------------------------------------
@@ -268,3 +274,243 @@ Feature: Test
     (is (seq (repl/ctxs)))
     (repl/clear!)
     (is (= {} (repl/ctxs)))))
+
+;; -----------------------------------------------------------------------------
+;; Surface Tests
+;; -----------------------------------------------------------------------------
+
+(deftest test-mark-surface!
+  (testing "marks context as surface"
+    (is (= :marked (repl/mark-surface! :alice)))
+    (is (true? (repl/surface? :alice)))))
+
+(deftest test-unmark-surface!
+  (testing "unmarks context as surface"
+    (repl/mark-surface! :alice)
+    (is (true? (repl/surface? :alice)))
+    (is (= :unmarked (repl/unmark-surface! :alice)))
+    (is (false? (repl/surface? :alice)))))
+
+(deftest test-surface?
+  (testing "returns false for unmarked context"
+    (is (false? (repl/surface? :nobody))))
+
+  (testing "returns true for marked context"
+    (repl/mark-surface! :alice)
+    (is (true? (repl/surface? :alice))))
+
+  (testing "returns false after unmark"
+    (repl/mark-surface! :bob)
+    (repl/unmark-surface! :bob)
+    (is (false? (repl/surface? :bob)))))
+
+(deftest test-list-surfaces
+  (testing "returns empty when none marked"
+    (is (empty? (repl/list-surfaces))))
+
+  (testing "returns all marked surfaces"
+    (repl/mark-surface! :alice)
+    (repl/mark-surface! :bob)
+    (is (= #{:alice :bob} (set (repl/list-surfaces))))))
+
+(deftest test-reset-surfaces!
+  (testing "clears all surface markings"
+    (repl/mark-surface! :alice)
+    (repl/mark-surface! :bob)
+    (is (= 2 (count (repl/list-surfaces))))
+    (repl/reset-surfaces!)
+    (is (empty? (repl/list-surfaces)))))
+
+(deftest test-clear!-resets-surfaces
+  (testing "clear! also resets surface markings"
+    (repl/mark-surface! :alice)
+    (is (true? (repl/surface? :alice)))
+    (repl/clear!)
+    (is (false? (repl/surface? :alice)))))
+
+(deftest test-acceptance-criteria-surfaces
+  (testing "Task 2.5.8 AC: mark/unmark/check surfaces"
+    (repl/clear!)
+    (repl/mark-surface! :alice)
+    (is (true? (repl/surface? :alice)))
+    (repl/unmark-surface! :alice)
+    (is (false? (repl/surface? :alice)))))
+
+;; -----------------------------------------------------------------------------
+;; Browser Lifecycle Tests
+;; -----------------------------------------------------------------------------
+
+;; Spy store for testing lifecycle behavior
+(defrecord SpyStore [saves deletes]
+  store/ISessionStore
+  (load-session-handle [_ _surface-name] nil)
+  (save-session-handle! [_ surface-name handle]
+    (swap! saves conj {:surface surface-name :handle handle})
+    {:ok {:saved-at "test" :surface surface-name}})
+  (delete-session-handle! [_ surface-name]
+    (swap! deletes conj surface-name)
+    {:ok true}))
+
+(defn make-spy-store []
+  (->SpyStore (atom []) (atom [])))
+
+(defn- make-fake-browser
+  "Create a fake browser capability for testing lifecycle."
+  [session-id]
+  {:webdriver-url "http://127.0.0.1:9515"
+   :session session-id
+   :type :chrome})
+
+(defn- inject-browser-into-ctx!
+  "Inject a fake browser into a named context for testing."
+  [ctx-name session-id]
+  (let [current (repl/ctx ctx-name)
+        browser (make-fake-browser session-id)
+        updated (browser.ctx/assoc-active-browser current browser)]
+    ;; Directly update the named-contexts atom
+    (swap! @#'repl/named-contexts assoc ctx-name updated)))
+
+(deftest test-reset-ctxs-no-browser
+  (testing "reset-ctxs! returns :none action when no browser present"
+    (defstep #"I exist" [] {:exists true})
+    (repl/free :alice "I exist")
+    (let [actions (repl/reset-ctxs!)]
+      (is (= 1 (count actions)))
+      (is (= :none (-> actions first :action))))))
+
+(deftest test-reset-ctxs-non-surface-closes
+  (testing "reset-ctxs! returns :closed action for non-surface with browser"
+    ;; Inject a fake browser into the context
+    (defstep #"I exist" [] {:exists true})
+    (repl/free :alice "I exist")
+    (inject-browser-into-ctx! :alice "session-123")
+
+    ;; Verify browser is present
+    (is (browser.ctx/browser-present? (repl/ctx :alice)))
+
+    ;; Reset should report :closed (actual close fails gracefully)
+    (let [actions (repl/reset-ctxs!)]
+      (is (= 1 (count actions)))
+      (is (= :closed (-> actions first :action)))
+      (is (= :alice (-> actions first :ctx-name))))))
+
+(deftest test-reset-ctxs-surface-persists
+  (testing "reset-ctxs! persists session for surface contexts"
+    (let [spy-store (make-spy-store)]
+      (binding [repl/*session-store* (delay spy-store)]
+        (defstep #"I exist" [] {:exists true})
+        (repl/free :alice "I exist")
+        (inject-browser-into-ctx! :alice "session-456")
+        (repl/mark-surface! :alice)
+
+        ;; Reset should persist, not close
+        (let [actions (repl/reset-ctxs!)]
+          (is (= 1 (count actions)))
+          (is (= :persisted (-> actions first :action)))
+          (is (= :alice (-> actions first :ctx-name)))
+          (is (= "session-456" (-> actions first :handle :session-id))))
+
+        ;; Verify store received the save
+        (is (= 1 (count @(:saves spy-store))))
+        (let [saved (first @(:saves spy-store))]
+          (is (= :alice (:surface saved)))
+          (is (= "session-456" (-> saved :handle :session-id))))))))
+
+(deftest test-clear-handles-browser-lifecycle
+  (testing "clear! handles browser lifecycle before clearing"
+    (let [spy-store (make-spy-store)]
+      (binding [repl/*session-store* (delay spy-store)]
+        (defstep #"I exist" [] {:exists true})
+        (repl/free :alice "I exist")
+        (repl/free :bob "I exist")
+        (inject-browser-into-ctx! :alice "alice-session")
+        (inject-browser-into-ctx! :bob "bob-session")
+        (repl/mark-surface! :alice)
+        ;; bob is not a surface
+
+        (repl/clear!)
+
+        ;; Alice should be persisted
+        (is (= 1 (count @(:saves spy-store))))
+        (is (= :alice (-> @(:saves spy-store) first :surface)))))))
+
+(deftest test-acceptance-criteria-lifecycle
+  (testing "Task 2.5.9 AC: non-surface closes, surface persists"
+    (let [spy-store (make-spy-store)]
+      (binding [repl/*session-store* (delay spy-store)]
+        ;; Setup non-surface
+        (repl/clear!)
+        (defstep #"I exist" [] {:exists true})
+        (repl/free :alice "I exist")
+        (inject-browser-into-ctx! :alice "alice-session")
+
+        ;; Reset non-surface - should close (action = :closed)
+        (let [actions (repl/reset-ctxs!)]
+          (is (= :closed (-> actions first :action))))
+
+        ;; Setup surface
+        (repl/free :bob "I exist")
+        (inject-browser-into-ctx! :bob "bob-session")
+        (repl/mark-surface! :bob)
+
+        ;; Reset surface - should persist
+        (let [actions (repl/reset-ctxs!)]
+          (is (= :persisted (-> actions first :action)))
+          (is (= 1 (count @(:saves spy-store)))))))))
+
+;; -----------------------------------------------------------------------------
+;; Persistent Subject Re-export Tests (Task 2.6.9)
+;; -----------------------------------------------------------------------------
+
+(def ^:dynamic *test-home* nil)
+
+(defn with-temp-home-for-subjects
+  "Fixture that redirects user.home to a temp directory for subject tests."
+  [f]
+  (let [temp-dir (str (fs/create-temp-dir {:prefix "sl-repl-subjects-test-"}))]
+    (try
+      (with-redefs [profile/home-dir (constantly temp-dir)]
+        (binding [*test-home* temp-dir]
+          (f)))
+      (finally
+        (fs/delete-tree temp-dir)))))
+
+(deftest test-persistent-subject-reexports-list
+  (testing "list-persistent-subjects re-exports subjects/list-persistent"
+    (with-temp-home-for-subjects
+      (fn []
+        ;; Should return empty list when no subjects
+        (is (= [] (repl/list-persistent-subjects)))
+        ;; Create a profile manually
+        (profile/ensure-dirs! :test-reexport)
+        (profile/save-browser-meta! :test-reexport {:debug-port 9999})
+        ;; Now should list it
+        (let [result (repl/list-persistent-subjects)]
+          (is (= 1 (count result)))
+          (is (= "test-reexport" (:name (first result)))))))))
+
+(deftest test-persistent-subject-reexports-destroy
+  (testing "destroy-persistent-subject! re-exports subjects/destroy-persistent!"
+    (with-temp-home-for-subjects
+      (fn []
+        ;; Create a profile
+        (profile/ensure-dirs! :doomed)
+        (profile/save-browser-meta! :doomed {:debug-port 9999})
+        (is (profile/profile-exists? :doomed))
+        ;; Destroy via repl function
+        (let [result (repl/destroy-persistent-subject! :doomed)]
+          (is (= :destroyed (:status result)))
+          (is (not (profile/profile-exists? :doomed))))))))
+
+(deftest test-persistent-subject-reexports-not-found
+  (testing "re-exports return proper errors"
+    (with-temp-home-for-subjects
+      (fn []
+        ;; connect to nonexistent should error
+        (let [result (repl/connect-persistent-subject! :nonexistent)]
+          (is (:error result))
+          (is (= :subject/not-found (get-in result [:error :type]))))
+        ;; destroy nonexistent should error
+        (let [result (repl/destroy-persistent-subject! :nonexistent)]
+          (is (:error result))
+          (is (= :subject/not-found (get-in result [:error :type]))))))))

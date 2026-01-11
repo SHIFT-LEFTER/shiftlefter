@@ -1,0 +1,24 @@
+;; Subject Glossary for SVO Demo
+;;
+;; Subjects represent the actors in your test scenarios.
+;; Each subject is a keyword with a description.
+;;
+;; Subjects are normalized from step text:
+;;   "Alice" -> :alice
+;;   "System Admin" -> :system-admin
+;;
+;; Using a glossary helps:
+;; - Catch typos ("Alcie" vs "Alice")
+;; - Enforce consistent naming across features
+;; - Document who/what each subject represents
+
+{:subjects
+ {;; Human actors
+  :alice {:desc "Standard customer with verified account"}
+  :bob {:desc "New customer in onboarding"}
+  :admin {:desc "Administrative user with elevated privileges"}
+  :guest {:desc "Unauthenticated visitor"}
+
+  ;; System actors (for setup/teardown steps)
+  :system/test-setup {:desc "Test harness for fixture creation"}
+  :system/database {:desc "Database operations actor"}}}

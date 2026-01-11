@@ -17,7 +17,8 @@
    - `--no-color` flag passed (via opts)
    - `NO_COLOR` env var set
    - Not a TTY (future enhancement)"
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [shiftlefter.svo.validate :as validate]))
 
 ;; -----------------------------------------------------------------------------
 ;; ANSI Color Codes
@@ -225,12 +226,23 @@
          "    Matches:\n"
          (str/join "\n" (map #(str "      • " (:pattern-src %) " at " (format-location (:source %))) alts)))))
 
+(defn- format-svo-issue
+  "Format an SVO issue for display with color."
+  [issue use-color?]
+  (let [formatted (validate/format-svo-issue issue)
+        lines (str/split-lines formatted)
+        ;; First line gets ERROR: prefix
+        first-line (str "  " (colorize "ERROR: " :red use-color?) (first lines))
+        ;; Rest are indented continuation
+        rest-lines (map #(str "  " %) (rest lines))]
+    (str/join "\n" (cons first-line rest-lines))))
+
 (defn print-diagnostics!
-  "Print planning diagnostics (undefined/ambiguous steps).
+  "Print planning diagnostics (undefined/ambiguous steps, SVO issues).
    Outputs to stderr."
   [diagnostics opts]
   (let [use-color? (colors-enabled? opts)
-        {:keys [undefined ambiguous invalid-arity counts]} diagnostics]
+        {:keys [undefined ambiguous invalid-arity svo-issues counts]} diagnostics]
     (binding [*out* *err*]
       (when (seq undefined)
         (println (colorize "\nUndefined steps:" :yellow use-color?))
@@ -248,6 +260,12 @@
           (let [binding (:binding step)]
             (println (str "  - " (:step/text (:step step))
                           " (expected " (:expected binding) ", got " (:actual binding) ")")))))
+
+      (when (seq svo-issues)
+        (println (colorize "\nSVO validation issues:" :yellow use-color?))
+        (doseq [issue svo-issues]
+          (println (format-svo-issue issue use-color?))
+          (println)))
 
       (println)
       (println (colorize (str (:total-issues counts) " binding issue(s) found. Cannot execute.") :red use-color?)))))

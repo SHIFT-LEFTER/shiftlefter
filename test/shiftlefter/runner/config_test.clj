@@ -182,3 +182,269 @@
     (let [cfg {:runner {:macros {:enabled? true}}}
           st (config/normalize cfg)]
       (is (= :macro/config-missing-registry-paths (-> st :errors first :type))))))
+
+;; -----------------------------------------------------------------------------
+;; WebDriver Config Normalization Tests (Task 2.5.5)
+;; -----------------------------------------------------------------------------
+
+(deftest test-normalize-empty-config-valid
+  (testing "Empty config is valid (no browser errors)"
+    (let [st (config/normalize {})]
+      (is (nil? (:errors st))))))
+
+(deftest test-normalize-webdriver-url-direct
+  (testing "Direct :webdriver-url is used as-is"
+    (let [cfg {:webdriver-url "http://127.0.0.1:9515"}
+          st (config/normalize cfg)]
+      (is (nil? (:errors st)))
+      (is (= "http://127.0.0.1:9515" (:webdriver-url st))))))
+
+(deftest test-normalize-webdriver-host-port
+  (testing ":webdriver {:host :port} normalizes to :webdriver-url"
+    (let [cfg {:webdriver {:host "127.0.0.1" :port 9515}}
+          st (config/normalize cfg)]
+      (is (nil? (:errors st)))
+      (is (= "http://127.0.0.1:9515" (:webdriver-url st))))))
+
+(deftest test-normalize-webdriver-missing-port
+  (testing ":webdriver with missing :port produces error"
+    (let [cfg {:webdriver {:host "127.0.0.1"}}
+          st (config/normalize cfg)]
+      (is (seq (:errors st)))
+      (is (= :webdriver/invalid-config (-> st :errors first :type))))))
+
+(deftest test-normalize-webdriver-missing-host
+  (testing ":webdriver with missing :host produces error"
+    (let [cfg {:webdriver {:port 9515}}
+          st (config/normalize cfg)]
+      (is (seq (:errors st)))
+      (is (= :webdriver/invalid-config (-> st :errors first :type))))))
+
+(deftest test-normalize-webdriver-empty-map
+  (testing ":webdriver as empty map produces error"
+    (let [cfg {:webdriver {}}
+          st (config/normalize cfg)]
+      (is (seq (:errors st)))
+      (is (= :webdriver/invalid-config (-> st :errors first :type))))))
+
+(deftest test-normalize-webdriver-invalid-type
+  (testing ":webdriver as non-map produces error"
+    (let [cfg {:webdriver "not-a-map"}
+          st (config/normalize cfg)]
+      (is (seq (:errors st)))
+      (is (= :webdriver/invalid-config (-> st :errors first :type))))))
+
+(deftest test-get-webdriver-url
+  (testing "get-webdriver-url extracts normalized URL"
+    (let [cfg (config/normalize {:webdriver {:host "localhost" :port 4444}})]
+      (is (= "http://localhost:4444" (config/get-webdriver-url cfg))))
+    (is (nil? (config/get-webdriver-url {})))))
+
+;; -----------------------------------------------------------------------------
+;; Task 2.5.5 Acceptance Criteria
+;; -----------------------------------------------------------------------------
+
+(deftest test-acceptance-criteria-webdriver
+  (testing "Task 2.5.5 AC: empty config is valid"
+    (let [st (config/normalize {})]
+      (is (nil? (:errors st)))))
+
+  (testing "Task 2.5.5 AC: valid :webdriver normalizes to :webdriver-url"
+    (let [st (config/normalize {:webdriver {:host "127.0.0.1" :port 9515}})]
+      (is (= "http://127.0.0.1:9515" (:webdriver-url st)))))
+
+  (testing "Task 2.5.5 AC: invalid :webdriver produces error"
+    (let [st (config/normalize {:webdriver {:host "127.0.0.1"}})]
+      (is (= :webdriver/invalid-config (-> st :errors first :type))))))
+
+;; -----------------------------------------------------------------------------
+;; Task 3.0.3: Config Schema Extension Tests
+;; -----------------------------------------------------------------------------
+
+(deftest test-default-config-new-keys
+  (testing "Default config has glossaries, interfaces, and svo keys"
+    (let [cfg config/default-config]
+      (is (nil? (:glossaries cfg)) "glossaries nil by default")
+      (is (map? (:interfaces cfg)) "interfaces is a map")
+      (is (contains? (:interfaces cfg) :web) "has :web interface")
+      (is (map? (:svo cfg)) "svo is a map")))
+
+  (testing "Default :web interface has required keys"
+    (let [web-iface (get-in config/default-config [:interfaces :web])]
+      (is (= :web (:type web-iface)))
+      (is (= :etaoin (:adapter web-iface)))
+      (is (map? (:config web-iface)))))
+
+  (testing "Default SVO settings are :warn/:error"
+    (let [svo (:svo config/default-config)]
+      (is (= :warn (:unknown-subject svo)))
+      (is (= :warn (:unknown-verb svo)))
+      (is (= :error (:unknown-interface svo))))))
+
+;; -----------------------------------------------------------------------------
+;; Interface Validation Tests
+;; -----------------------------------------------------------------------------
+
+(deftest test-normalize-interface-missing-type
+  (testing "Interface without :type produces error"
+    (let [cfg {:interfaces {:web {:adapter :etaoin}}}
+          result (config/normalize cfg)]
+      (is (seq (:errors result)))
+      (is (= :config/invalid-interface (-> result :errors first :type)))
+      (is (re-find #":web" (-> result :errors first :message))))))
+
+(deftest test-normalize-interface-missing-adapter
+  (testing "Interface without :adapter produces error"
+    (let [cfg {:interfaces {:web {:type :web}}}
+          result (config/normalize cfg)]
+      (is (seq (:errors result)))
+      (is (= :config/invalid-interface (-> result :errors first :type)))
+      (is (re-find #"adapter" (-> result :errors first :message))))))
+
+(deftest test-normalize-interface-unknown-type
+  (testing "Interface with unknown :type produces error"
+    (let [cfg {:interfaces {:web {:type :foobar :adapter :etaoin}}}
+          result (config/normalize cfg)]
+      (is (seq (:errors result)))
+      (is (= :config/unknown-interface-type (-> result :errors first :type)))
+      (is (= :foobar (-> result :errors first :data :type))))))
+
+(deftest test-normalize-interface-valid-types
+  (testing "All known interface types are valid"
+    (doseq [itype [:web :api :sms :email]]
+      (let [cfg {:interfaces {:test {:type itype :adapter :test-adapter}}}
+            result (config/normalize cfg)]
+        (is (nil? (:errors result)) (str "Type " itype " should be valid"))))))
+
+(deftest test-normalize-multiple-interfaces
+  (testing "Multiple valid interfaces pass validation"
+    (let [cfg {:interfaces {:web {:type :web :adapter :etaoin}
+                            :api {:type :api :adapter :http-kit}}}
+          result (config/normalize cfg)]
+      (is (nil? (:errors result)))))
+
+  (testing "Multiple interfaces with one invalid produces error"
+    (let [cfg {:interfaces {:web {:type :web :adapter :etaoin}
+                            :bad {:type :web}}}  ;; missing adapter
+          result (config/normalize cfg)]
+      (is (seq (:errors result)))
+      (is (= :config/invalid-interface (-> result :errors first :type))))))
+
+(deftest test-normalize-empty-interfaces
+  (testing "Empty interfaces map is valid (uses defaults)"
+    (let [cfg {:interfaces {}}
+          result (config/normalize cfg)]
+      (is (nil? (:errors result))))))
+
+;; -----------------------------------------------------------------------------
+;; Glossary Config Accessor Tests
+;; -----------------------------------------------------------------------------
+
+(deftest test-get-glossary-config
+  (testing "get-glossary-config extracts glossary paths"
+    (let [cfg {:glossaries {:subjects "config/subjects.edn"
+                            :verbs {:web "config/verbs-web.edn"}}}]
+      (is (= {:subjects "config/subjects.edn"
+              :verbs {:web "config/verbs-web.edn"}}
+             (config/get-glossary-config cfg)))))
+
+  (testing "get-glossary-config returns nil for missing"
+    (is (nil? (config/get-glossary-config {})))
+    (is (nil? (config/get-glossary-config {:parser {:dialect "en"}})))))
+
+;; -----------------------------------------------------------------------------
+;; Interface Config Accessor Tests
+;; -----------------------------------------------------------------------------
+
+(deftest test-get-interfaces
+  (testing "get-interfaces extracts all interfaces"
+    (let [cfg {:interfaces {:web {:type :web :adapter :etaoin}
+                            :api {:type :api :adapter :http}}}]
+      (is (= 2 (count (config/get-interfaces cfg))))
+      (is (contains? (config/get-interfaces cfg) :web))
+      (is (contains? (config/get-interfaces cfg) :api)))))
+
+(deftest test-get-interface
+  (testing "get-interface extracts single interface"
+    (let [cfg {:interfaces {:web {:type :web :adapter :etaoin :config {:headless true}}}}]
+      (is (= {:type :web :adapter :etaoin :config {:headless true}}
+             (config/get-interface cfg :web)))))
+
+  (testing "get-interface returns nil for missing"
+    (is (nil? (config/get-interface {} :web)))
+    (is (nil? (config/get-interface {:interfaces {:api {}}} :web)))))
+
+(deftest test-get-interface-type
+  (testing "get-interface-type extracts type"
+    (let [cfg {:interfaces {:web {:type :web :adapter :etaoin}}}]
+      (is (= :web (config/get-interface-type cfg :web)))))
+
+  (testing "get-interface-type returns nil for missing"
+    (is (nil? (config/get-interface-type {} :web)))))
+
+(deftest test-get-interface-adapter
+  (testing "get-interface-adapter extracts adapter"
+    (let [cfg {:interfaces {:web {:type :web :adapter :etaoin}}}]
+      (is (= :etaoin (config/get-interface-adapter cfg :web)))))
+
+  (testing "get-interface-adapter returns nil for missing"
+    (is (nil? (config/get-interface-adapter {} :web)))))
+
+;; -----------------------------------------------------------------------------
+;; SVO Config Accessor Tests
+;; -----------------------------------------------------------------------------
+
+(deftest test-get-svo-settings
+  (testing "get-svo-settings extracts all settings"
+    (let [cfg {:svo {:unknown-subject :error
+                     :unknown-verb :warn
+                     :unknown-interface :error}}]
+      (is (= {:unknown-subject :error
+              :unknown-verb :warn
+              :unknown-interface :error}
+             (config/get-svo-settings cfg)))))
+
+  (testing "get-svo-settings returns nil for missing"
+    (is (nil? (config/get-svo-settings {})))))
+
+(deftest test-svo-enforcement
+  (testing "svo-enforcement extracts specific check level"
+    (let [cfg {:svo {:unknown-subject :error
+                     :unknown-verb :warn}}]
+      (is (= :error (config/svo-enforcement cfg :unknown-subject)))
+      (is (= :warn (config/svo-enforcement cfg :unknown-verb)))))
+
+  (testing "svo-enforcement returns nil for missing check"
+    (let [cfg {:svo {:unknown-subject :warn}}]
+      (is (nil? (config/svo-enforcement cfg :unknown-verb))))))
+
+;; -----------------------------------------------------------------------------
+;; Task 3.0.3 Acceptance Criteria
+;; -----------------------------------------------------------------------------
+
+(deftest test-acceptance-criteria-valid-config
+  (testing "Task 3.0.3 AC: valid config passes"
+    (let [cfg {:glossaries {:subjects "config/glossaries/subjects.edn"
+                            :verbs {:web "config/glossaries/verbs-web.edn"}}
+               :interfaces {:web {:type :web
+                                  :adapter :etaoin
+                                  :config {:headless true}}}
+               :svo {:unknown-subject :warn
+                     :unknown-verb :warn
+                     :unknown-interface :error}}
+          result (config/normalize cfg)]
+      (is (nil? (:errors result))))))
+
+(deftest test-acceptance-criteria-missing-type
+  (testing "Task 3.0.3 AC: missing :type → validation error"
+    (let [cfg {:interfaces {:web {:adapter :etaoin}}}
+          result (config/normalize cfg)]
+      (is (seq (:errors result)))
+      (is (= :config/invalid-interface (-> result :errors first :type))))))
+
+(deftest test-acceptance-criteria-unknown-type
+  (testing "Task 3.0.3 AC: unknown type → validation error"
+    (let [cfg {:interfaces {:web {:type :foobar :adapter :etaoin}}}
+          result (config/normalize cfg)]
+      (is (seq (:errors result)))
+      (is (= :config/unknown-interface-type (-> result :errors first :type))))))

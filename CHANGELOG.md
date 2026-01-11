@@ -1,3 +1,127 @@
+# Changelog: 0.3.0
+
+**Release Date:** 2026-01-10
+
+---
+
+**ShiftLefter now catches mistakes before they run.**
+
+v0.2.0 ran tests. v0.3.0 validates them — checking that your actors and actions are known before execution begins.
+
+---
+
+## What's New
+
+### SVO Validation
+
+Define who can do what in your test suite:
+
+```clojure
+;; config/glossaries/subjects.edn
+{:subjects
+ {:alice {:desc "Standard customer"}
+  :admin {:desc "Administrative user"}
+  :guest {:desc "Unauthenticated visitor"}}}
+```
+
+Add metadata to step definitions:
+
+```clojure
+(defstep #"^(\w+) clicks the (.+)$"
+  {:interface :web
+   :svo {:subject :$1 :verb :click :object :$2}}
+  [ctx subject element]
+  ...)
+```
+
+Typos are caught at bind time with suggestions:
+
+```
+Unknown subject :alcie in step "When Alcie clicks the button"
+       at features/login.feature:12
+       Known subjects: :alice, :admin, :guest
+       Did you mean: :alice?
+```
+
+Configure enforcement levels in `shiftlefter.edn`:
+
+```clojure
+{:glossaries
+ {:subjects "config/glossaries/subjects.edn"
+  :verbs {:web "config/glossaries/verbs-web.edn"}}
+
+ :interfaces
+ {:web {:type :web :adapter :etaoin :config {:headless true}}}
+
+ :svo
+ {:unknown-subject :warn    ; or :error to block execution
+  :unknown-verb :warn
+  :unknown-interface :error}}
+```
+
+### Browser Automation
+
+Built-in browser support via IBrowser protocol:
+
+```clojure
+(defstep #"^(\w+) clicks the (.+)$"
+  {:interface :web ...}
+  [ctx subject element]
+  (let [browser (get-capability ctx :web)]
+    (browser/click browser element)
+    ctx))
+```
+
+Capabilities are auto-provisioned — declare the interface, get a browser.
+
+### REPL-First Development
+
+Interactive step development with named contexts:
+
+```clojure
+(require '[shiftlefter.repl :as repl])
+
+(repl/as :alice)                    ; create/switch to Alice's browser
+(repl/step "I click the login button")
+(repl/as :bob)                      ; separate browser for Bob
+```
+
+Multi-actor scenarios use separate browser sessions per subject.
+
+### Persistent Browser Sessions
+
+Browsers survive JVM restarts and macOS sleep/wake cycles. Subject profiles stored in `~/.shiftlefter/subjects/` enable exploratory testing without session loss.
+
+Stealth mode available for sites with anti-bot detection.
+
+---
+
+## Minor Improvements
+
+- **Auto-provisioning**: Steps declaring `:interface :web` get browsers automatically
+- **Capability cleanup**: Ephemeral capabilities cleaned up after scenarios; persistent ones survive
+- **Error formatting**: Clear messages with location info and suggestions
+- **Example project**: See `examples/svo-demo/` for a complete working setup
+
+---
+
+## Documentation
+
+- `docs/SVO.md` — Full SVO validation guide with migration steps
+- `docs/GLOSSARY.md` — Updated with SVO terminology
+- `examples/svo-demo/` — Working example with glossaries and shifted stepdefs
+
+---
+
+## Test Results
+
+```
+865 tests, 2582 assertions, 0 failures
+Compliance: 46/46 good, 11/11 bad (100%)
+```
+
+---
+
 # Changelog: 0.2.0
 
 **Release Date:** 2026-01-07

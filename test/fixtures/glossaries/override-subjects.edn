@@ -1,0 +1,4 @@
+;; Subject glossary with override flag
+{:override-defaults true
+ :subjects
+ {:bob {:desc "Only Bob allowed"}}}

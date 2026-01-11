@@ -1,14 +1,16 @@
-# ShiftLefter Gherkin Parser
+# ShiftLefter
 
-**100% Cucumber-compatible Gherkin parser and formatter** with lossless roundtrip guarantees, built in Clojure.
+**Gherkin test framework with vocabulary validation** — parse, format, run, and catch mistakes before execution. 100% Cucumber-compatible parser, built in Clojure.
 
-## Status: v0.1.1 - Runner Complete
+## Status: v0.3.0 - SVO Validation
 
 ShiftLefter provides a complete BDD testing framework with Gherkin parsing, validation, formatting, and test execution. The parser is 100% Cucumber-compatible; the runner executes scenarios with step definitions written in Clojure.
 
-**Current:** Parser, formatter, runner with step binding and execution
-**Next:** Macro expansion (`+` syntax), reporter plugins, IDE integration
-**Future:** Traceability graph, cross-language step executors
+**Current:** Parser, formatter, runner, macro expansion, persistent browsers, SVO validation
+
+**Next:** Reporter plugins, IDE integration, cross-language step executors
+
+**Future:** Use case ↔ feature mapping & generation, traceability graph
 
 ---
 
@@ -18,11 +20,20 @@ ShiftLefter provides a complete BDD testing framework with Gherkin parsing, vali
 
 **Requirements:** Java 11 or later
 
-1. Download `shiftlefter-v0.1.0.jar` from [releases](https://github.com/YOU/shiftlefter/releases)
+1. Download `shiftlefter-v0.3.0.jar` from [releases](https://github.com/YOU/shiftlefter/releases)
 2. Verify Java version: `java -version`
-3. Run the jar:
+3. Create a wrapper script (optional but recommended):
    ```bash
-   java -jar shiftlefter-v0.1.0.jar fmt --check your-file.feature
+   # Create 'sl' in your PATH (e.g., /usr/local/bin/sl or ~/bin/sl)
+   echo '#!/bin/bash
+   java -jar /path/to/shiftlefter-v0.3.0.jar "$@"' > sl
+   chmod +x sl
+   ```
+4. Run:
+   ```bash
+   sl fmt --check your-file.feature
+   # Or without wrapper:
+   java -jar shiftlefter-v0.3.0.jar fmt --check your-file.feature
    ```
 
 ### From Source (Development)
@@ -45,25 +56,27 @@ ShiftLefter provides a complete BDD testing framework with Gherkin parsing, vali
 
 ## CLI
 
-The `bin/sl` command provides test execution, file validation, and formatting.
+The `sl` command provides test execution, file validation, and formatting.
+
+> **Note:** Examples use `sl` assuming you created the wrapper script. Substitute `java -jar shiftlefter-v0.3.0.jar` if running the jar directly, or `bin/sl` if running from source.
 
 ### Running Tests
 
 ```bash
 # Run all feature files in a directory
-bin/sl run features/ --step-paths steps/
+sl run features/ --step-paths steps/
 
 # Run specific files
-bin/sl run features/login.feature features/checkout.feature --step-paths steps/
+sl run features/login.feature features/checkout.feature --step-paths steps/
 
 # Dry-run (verify bindings without executing)
-bin/sl run features/ --step-paths steps/ --dry-run
+sl run features/ --step-paths steps/ --dry-run
 
 # Machine-readable EDN output
-bin/sl run features/ --step-paths steps/ --edn
+sl run features/ --step-paths steps/ --edn
 
 # Verbose output (show each step)
-bin/sl run features/ --step-paths steps/ -v
+sl run features/ --step-paths steps/ -v
 ```
 
 **CLI Flags:**
@@ -79,31 +92,31 @@ bin/sl run features/ --step-paths steps/ -v
 
 ```bash
 # Validate files/directories (checks parse + lossless roundtrip)
-bin/sl fmt --check path/to/file.feature
-bin/sl fmt --check features/           # recursive directory
+sl fmt --check path/to/file.feature
+sl fmt --check features/           # recursive directory
 
 # Format files in place (canonical style)
-bin/sl fmt --write path/to/file.feature
-bin/sl fmt --write features/           # recursive directory
+sl fmt --write path/to/file.feature
+sl fmt --write features/           # recursive directory
 
 # Canonical formatting to stdout (single file)
-bin/sl fmt --canonical path/to/file.feature
+sl fmt --canonical path/to/file.feature
 ```
 
 ### Other Commands
 
 ```bash
 # Fuzz testing (generate random valid Gherkin, verify invariants)
-bin/sl gherkin fuzz --preset smoke
+sl gherkin fuzz --preset smoke
 
 # Verify repo health (fast validator checks)
-bin/sl verify
+sl verify
 
 # Full CI verification (includes test suite, compliance, fuzz smoke)
-bin/sl verify --ci
+sl verify --ci
 
 # Machine-readable output
-bin/sl verify --edn
+sl verify --edn
 ```
 
 ---
@@ -158,6 +171,45 @@ The `ctx` argument passed to step functions is `{:step <current-step> :scenario 
       (throw (ex-info "Count mismatch" {:expected expected :actual actual})))
     (:scenario ctx)))
 ```
+
+---
+
+## SVO Validation (Optional)
+
+Add type-checking to your step definitions with Subject-Verb-Object validation. See `docs/SVO.md` for full documentation.
+
+```clojure
+;; Step with SVO metadata
+(defstep #"^(\w+) clicks the (.+)$"
+  {:interface :web
+   :svo {:subject :$1 :verb :click :object :$2}}
+  [ctx subject element]
+  ...)
+```
+
+Configure glossaries and enforcement in `shiftlefter.edn`:
+
+```clojure
+{:glossaries
+ {:subjects "config/glossaries/subjects.edn"
+  :verbs {:web "config/glossaries/verbs-web.edn"}}
+
+ :interfaces
+ {:web {:type :web :adapter :etaoin :config {:headless true}}}
+
+ :svo
+ {:unknown-subject :warn    ; or :error
+  :unknown-verb :warn
+  :unknown-interface :error}}
+```
+
+Benefits:
+- Catch typos at bind time ("Alcie" → "Did you mean :alice?")
+- Validate verbs against interface types
+- Auto-provision capabilities (browsers, API clients)
+- Emit `:step/svoi` events for traceability
+
+See `examples/svo-demo/` for a complete working example.
 
 ---
 
@@ -354,29 +406,19 @@ See [ERRATA.md](ERRATA.md) for known edge cases and workarounds.
 
 ---
 
-## Roadmap
+## Documentation
 
-### Future: Macros
-ShiftLefter will support `+` macro syntax for executable domain requirements:
-
-```gherkin
-Feature: Demo
-  Scenario: Login
-    Given Log in as admin +
-```
-
-Expands to pre-defined step sequences with provenance tracking. This bridges the gap between stakeholder language and executable tests—inspired by Christopher Alexander's *Notes on the Synthesis of Form* and the concept of separating concerns across requirement/implementation planes.
-
-### Future: Runner & Traceability
-- Event-native test runner
-- Requirements traceability graph
-- Language-agnostic step executors
+- [docs/SVO.md](docs/SVO.md) — SVO validation guide (glossaries, defstep metadata, migration)
+- [docs/GLOSSARY.md](docs/GLOSSARY.md) — Terminology reference
+- [CHANGELOG.md](CHANGELOG.md) — Release history
+- [ERRATA.md](ERRATA.md) — Known edge cases and workarounds
 
 ---
 
 ## Repository Layout
 
 **What ships in the JAR:**
+
 ```
 src/                           # Framework source code
 resources/shiftlefter/         # Runtime data and templates
@@ -385,6 +427,7 @@ resources/shiftlefter/         # Runtime data and templates
 ```
 
 **What doesn't ship:**
+
 ```
 test/                          # Framework tests
 ├── fixtures/gherkin/         # Parser test fixtures
@@ -396,14 +439,16 @@ test/                          # Framework tests
 ├── fixtures/macros/          # Macro test fixtures
 └── shiftlefter-test.edn      # Test configuration
 
-examples/quickstart/           # User-facing demo (not in JAR)
-└── features/                 # Sample .feature files
+examples/
+├── quickstart/               # Basic demo (not in JAR)
+└── svo-demo/                 # SVO validation example with glossaries
 
 compliance/                    # Cucumber official test suite (git submodule)
 fuzz/artifacts/               # Generated fuzz failures (gitignored)
 ```
 
 **Configuration:**
+
 - `shiftlefter.edn.example` — Template config (tracked, copy to `shiftlefter.edn`)
 - `shiftlefter.edn` — User config (gitignored)
 
@@ -411,7 +456,7 @@ fuzz/artifacts/               # Generated fuzz failures (gitignored)
 
 ## Testing
 
-**474 tests, 1424 assertions, 0 failures**
+**865 tests, 2582 assertions, 0 failures**
 
 ```bash
 # Run full test suite
@@ -421,7 +466,7 @@ bin/kaocha
 bin/compliance
 
 # Fuzz testing
-bin/sl gherkin fuzz --trials 1000 --seed 12345
+sl gherkin fuzz --trials 1000 --seed 12345
 ```
 
 ---
