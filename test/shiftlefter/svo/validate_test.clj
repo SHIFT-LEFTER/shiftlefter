@@ -1,5 +1,6 @@
 (ns shiftlefter.svo.validate-test
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.string :as str]
             [shiftlefter.svo.validate :as validate]))
 
 ;; -----------------------------------------------------------------------------
@@ -252,12 +253,12 @@
                             :uri "features/login.feature"
                             :line 12}}
           formatted (validate/format-unknown-subject issue)]
-      (is (clojure.string/includes? formatted "Unknown subject :alcie"))
-      (is (clojure.string/includes? formatted "When Alcie clicks the button"))
-      (is (clojure.string/includes? formatted "features/login.feature:12"))
-      (is (clojure.string/includes? formatted "Known subjects:"))
-      (is (clojure.string/includes? formatted ":alice"))
-      (is (clojure.string/includes? formatted "Did you mean: :alice?"))))
+      (is (str/includes? formatted "Unknown subject :alcie"))
+      (is (str/includes? formatted "When Alcie clicks the button"))
+      (is (str/includes? formatted "features/login.feature:12"))
+      (is (str/includes? formatted "Known subjects:"))
+      (is (str/includes? formatted ":alice"))
+      (is (str/includes? formatted "Did you mean: :alice?"))))
 
   (testing "format unknown subject without location"
     (let [issue {:type :svo/unknown-subject
@@ -265,8 +266,8 @@
                  :known [:alice :admin]
                  :suggestion nil}
           formatted (validate/format-unknown-subject issue)]
-      (is (clojure.string/includes? formatted "Unknown subject :bob"))
-      (is (not (clojure.string/includes? formatted "Did you mean"))))))
+      (is (str/includes? formatted "Unknown subject :bob"))
+      (is (not (str/includes? formatted "Did you mean"))))))
 
 (deftest format-unknown-verb-test
   (testing "Task 3.0.13 AC: format unknown verb"
@@ -280,11 +281,11 @@
                             :uri "features/login.feature"
                             :line 15}}
           formatted (validate/format-unknown-verb issue)]
-      (is (clojure.string/includes? formatted "Unknown verb :smash"))
-      (is (clojure.string/includes? formatted "When Alice smashes the button"))
-      (is (clojure.string/includes? formatted "Interface :web"))
-      (is (clojure.string/includes? formatted "Known verbs for :web:"))
-      (is (clojure.string/includes? formatted ":click")))))
+      (is (str/includes? formatted "Unknown verb :smash"))
+      (is (str/includes? formatted "When Alice smashes the button"))
+      (is (str/includes? formatted "Interface :web"))
+      (is (str/includes? formatted "Known verbs for :web:"))
+      (is (str/includes? formatted ":click")))))
 
 (deftest format-unknown-interface-test
   (testing "Task 3.0.13 AC: format unknown interface"
@@ -296,10 +297,10 @@
                             :uri "features/login.feature"
                             :line 18}}
           formatted (validate/format-unknown-interface issue)]
-      (is (clojure.string/includes? formatted "Unknown interface :foobar"))
-      (is (clojure.string/includes? formatted "Configured interfaces:"))
-      (is (clojure.string/includes? formatted ":web"))
-      (is (clojure.string/includes? formatted "Add to shiftlefter.edn:")))))
+      (is (str/includes? formatted "Unknown interface :foobar"))
+      (is (str/includes? formatted "Configured interfaces:"))
+      (is (str/includes? formatted ":web"))
+      (is (str/includes? formatted "Add to shiftlefter.edn:")))))
 
 (deftest format-provisioning-failed-test
   (testing "Task 3.0.13 AC: format provisioning failure"
@@ -312,25 +313,25 @@
                             :uri "features/login.feature"
                             :line 10}}
           formatted (validate/format-provisioning-failed issue)]
-      (is (clojure.string/includes? formatted "Provisioning failed for interface :web"))
-      (is (clojure.string/includes? formatted "Adapter :etaoin error: Browser not installed"))
-      (is (clojure.string/includes? formatted "Configured interfaces:")))))
+      (is (str/includes? formatted "Provisioning failed for interface :web"))
+      (is (str/includes? formatted "Adapter :etaoin error: Browser not installed"))
+      (is (str/includes? formatted "Configured interfaces:")))))
 
 (deftest format-svo-issue-dispatch-test
   (testing "format-svo-issue dispatches correctly"
-    (is (clojure.string/includes?
+    (is (str/includes?
          (validate/format-svo-issue {:type :svo/unknown-subject :subject :x :known []})
          "Unknown subject"))
-    (is (clojure.string/includes?
+    (is (str/includes?
          (validate/format-svo-issue {:type :svo/unknown-verb :verb :x :known []})
          "Unknown verb"))
-    (is (clojure.string/includes?
+    (is (str/includes?
          (validate/format-svo-issue {:type :svo/unknown-interface :interface :x :known []})
          "Unknown interface"))
-    (is (clojure.string/includes?
+    (is (str/includes?
          (validate/format-svo-issue {:type :svo/provisioning-failed :interface :x})
          "Provisioning failed"))
     ;; Unknown type falls back
-    (is (clojure.string/includes?
+    (is (str/includes?
          (validate/format-svo-issue {:type :svo/unknown-type :foo :bar})
          "SVO issue:"))))

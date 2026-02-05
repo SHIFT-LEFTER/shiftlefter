@@ -11,6 +11,10 @@ reports/compliance/latest
 compliance/
 fuzz/
 target/
+**/node_modules/
 
 # User config (use shiftlefter.edn.example as template)
 /shiftlefter.edn
+
+# Testing infrastructure
+_docs/testing/node_modules/

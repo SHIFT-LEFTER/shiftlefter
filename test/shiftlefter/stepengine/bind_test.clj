@@ -19,19 +19,25 @@
 ;; -----------------------------------------------------------------------------
 
 (defn make-step
-  "Create a pickle step map for testing."
-  ([text] (make-step text []))
-  ([text arguments]
-   {:step/id (java.util.UUID/randomUUID)
-    :step/text text
-    :step/arguments arguments}))
+  "Create a pickle step map for testing.
+   Optionally include location with {:line N :column N}."
+  ([text] (make-step text [] nil))
+  ([text arguments] (make-step text arguments nil))
+  ([text arguments location]
+   (cond-> {:step/id (java.util.UUID/randomUUID)
+            :step/text text
+            :step/arguments arguments}
+     location (assoc :step/location location))))
 
 (defn make-pickle
-  "Create a pickle map for testing."
-  [name steps]
-  {:pickle/id (java.util.UUID/randomUUID)
-   :pickle/name name
-   :pickle/steps (mapv #(if (string? %) (make-step %) %) steps)})
+  "Create a pickle map for testing.
+   Optionally include source-file for location tracking."
+  ([name steps] (make-pickle name steps nil))
+  ([name steps source-file]
+   (cond-> {:pickle/id (java.util.UUID/randomUUID)
+            :pickle/name name
+            :pickle/steps (mapv #(if (string? %) (make-step %) %) steps)}
+     source-file (assoc :pickle/source-file source-file))))
 
 ;; -----------------------------------------------------------------------------
 ;; match-step Tests
@@ -47,7 +53,7 @@
 (deftest test-match-step-with-captures
   (testing "Returns stepdef and captures on match"
     (let [stepdef (registry/register! #"I type \"([^\"]+)\" into \"([^\"]+)\""
-                                      (fn [val field] nil)
+                                      (fn [_val _field] nil)
                                       {:ns 't :file "t.clj" :line 1})
           result (bind/match-step "I type \"alice\" into \"username\"" stepdef)]
       (is (some? result))
@@ -66,7 +72,7 @@
 (deftest test-match-step-optional-groups
   (testing "Captures may include nil for optional groups"
     (let [stepdef (registry/register! #"I have (\d+) items?(?: in my (\w+))?"
-                                      (fn [n container] nil)
+                                      (fn [_n _container] nil)
                                       {:ns 't :file "t.clj" :line 1})]
       ;; With optional group present
       (let [result (bind/match-step "I have 5 items in my cart" stepdef)]
@@ -217,7 +223,7 @@
   (testing "Pickle with arity mismatch is not runnable"
     ;; 1 capture but arity 5
     (registry/register! #"I have (\d+) items"
-                        (fn [a b c d e] nil)
+                        (fn [_a _b _c _d _e] nil)
                         {:ns 's :file "s.clj" :line 1})
     (let [pickle (make-pickle "test" ["I have 5 items"])
           plan (bind/bind-pickle pickle (registry/all-stepdefs))]
@@ -251,7 +257,7 @@
                         {:ns 's :file "s.clj" :line 1})
     (let [pickles [(make-pickle "p1" ["I have 5 items"])
                    (make-pickle "p2" ["I click the button"])]
-          {:keys [plans runnable? diagnostics]} (bind/bind-suite pickles (registry/all-stepdefs))]
+          {:keys [runnable? diagnostics]} (bind/bind-suite pickles (registry/all-stepdefs))]
       (is (not runnable?))
       (is (= 1 (-> diagnostics :counts :undefined-count)))
       (is (= 1 (count (:undefined diagnostics)))))))
@@ -267,7 +273,7 @@
                         {:ns 's :file "s.clj" :line 2})
     ;; Bad arity step
     (registry/register! #"I click submit"
-                        (fn [a b c] nil)
+                        (fn [_a _b _c] nil)
                         {:ns 's :file "s.clj" :line 3})
     (let [pickles [(make-pickle "p1" ["I have 5 items"])      ;; ambiguous
                    (make-pickle "p2" ["undefined step"])      ;; undefined
@@ -285,7 +291,7 @@
 (deftest test-acceptance-criteria
   (testing "Spec acceptance criteria"
     (registry/register! #"I type \"([^\"]+)\" into \"([^\"]+)\""
-                        (fn [value field] nil)
+                        (fn [_value _field] nil)
                         {:ns 's :file "s.clj" :line 1})
     (let [pickle {:pickle/id #uuid "00000000-0000-0000-0000-000000000001"
                   :pickle/name "test"
@@ -521,13 +527,15 @@
       (is (empty? (-> result :diagnostics :svo-issues))))))
 
 (deftest test-bind-suite-svo-issue-has-location
-  (testing "SVO issues include step location info"
+  (testing "SVO issues include full step location info (uri, line, column)"
     (registry/register! #"(.+) clicks (.+)"
                         (fn [_ctx _s _t] nil)
                         {:ns 's :file "s.clj" :line 1}
                         {:interface :web
                          :svo {:subject :$1 :verb :click :object :$2}})
-    (let [pickle (make-pickle "test" ["BadUser clicks the button"])
+    ;; Create pickle with source-file and step with location
+    (let [step (make-step "BadUser clicks the button" [] {:line 7 :column 5})
+          pickle (make-pickle "test" [step] "features/login.feature")
           glossary {:subjects {:alice {}}
                     :verbs {:web {:click {}}}}
           interfaces {:web {:type :web :adapter :etaoin}}
@@ -535,9 +543,77 @@
                 :interfaces interfaces
                 :svo {:unknown-subject :error}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
+          issue (-> result :diagnostics :svo-issues first)
+          location (:location issue)]
+      ;; Existing assertions
+      (is (= "BadUser clicks the button" (:step-text location)))
+      (is (uuid? (:step-id location)))
+      ;; New full location assertions
+      (is (= "features/login.feature" (:uri location)))
+      (is (= 7 (:line location)))
+      (is (= 5 (:column location))))))
+
+(deftest test-bind-suite-undefined-step-has-source-file
+  (testing "Undefined steps include source-file for location reporting"
+    ;; Register a step that won't match our test step
+    (registry/register! #"I have (\d+) items"
+                        (fn [n] n)
+                        {:ns 's :file "s.clj" :line 1})
+    ;; Create pickle with source-file
+    (let [step (make-step "I click the button" [] {:line 10 :column 3})
+          pickle (make-pickle "test" [step] "features/undefined.feature")
+          {:keys [diagnostics]} (bind/bind-suite [pickle] (registry/all-stepdefs))
+          undefined-step (-> diagnostics :undefined first)]
+      ;; The bound-step should have :source-file attached
+      (is (= "features/undefined.feature" (:source-file undefined-step))))))
+
+(deftest test-bind-suite-issues-have-severity
+  (testing "All issues include :severity key (WI-031.005)"
+    ;; Register a step that matches but check SVO
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    ;; Create two pickles: one with undefined step, one with SVO issue
+    (let [undefined-pickle (make-pickle "undefined" ["I do undefined thing"])
+          svo-pickle (make-pickle "svo" ["UnknownUser clicks the button"])
+          glossary {:subjects {:alice {}}
+                    :verbs {:web {:click {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :warn}}  ;; warn, not error
+          result (bind/bind-suite [undefined-pickle svo-pickle]
+                                  (registry/all-stepdefs)
+                                  opts)
+          {:keys [undefined svo-issues]} (:diagnostics result)]
+      ;; Undefined steps should have :severity :error (always blocking)
+      (is (= 1 (count undefined)))
+      (is (= :error (:severity (first undefined))))
+      ;; SVO issues should have :severity from config (:warn in this case)
+      (is (= 1 (count svo-issues)))
+      (is (= :warn (:severity (first svo-issues))))))
+
+  (testing "SVO issues with :error config have :severity :error"
+    (registry/clear-registry!)
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "svo" ["UnknownUser clicks the button"])
+          glossary {:subjects {:alice {}}
+                    :verbs {:web {:click {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :error}}  ;; error, not warn
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
           issue (-> result :diagnostics :svo-issues first)]
-      (is (= "BadUser clicks the button" (-> issue :location :step-text)))
-      (is (uuid? (-> issue :location :step-id))))))
+      (is (= :error (:severity issue)))
+      ;; With :error severity, should not be runnable
+      (is (not (:runnable? result))))))
 
 (deftest test-bind-suite-multiple-svo-issues
   (testing "bind-suite collects multiple SVO issues"

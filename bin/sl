@@ -1,32 +1,214 @@
 #!/usr/bin/env bash
 # ShiftLefter CLI wrapper
-# Uses standalone JAR if available, otherwise falls back to clj
+#
+# Usage modes:
+#   1. JAR mode (recommended): Works from any directory
+#      - Requires: JAR built (clj -T:build uberjar) and Java installed
+#      - Run from anywhere: sl run path/to/features --step-paths path/to/steps
+#
+#   2. Source mode (development): Works only from project root
+#      - Used when JAR doesn't exist or Java isn't found
+#      - Must cd to project root first: cd /path/to/shiftlefter && bin/sl run ...
+#
+# For active development without rebuilding JAR, run from project root.
+
+set -euo pipefail
+
+# Capture user's working directory BEFORE any cd operations
+# This is passed to Clojure so relative paths resolve correctly
+USER_CWD="$PWD"
+export SL_USER_CWD="$USER_CWD"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 JAR_FILE="$PROJECT_DIR/target/shiftlefter.jar"
 
-# Find Java executable
+# Find Java executable, checking common locations
 find_java() {
-    if [[ -n "$JAVA_HOME" ]] && [[ -x "$JAVA_HOME/bin/java" ]]; then
+    # 1. Check JAVA_HOME (explicit user preference)
+    if [[ -n "${JAVA_HOME:-}" ]] && [[ -x "$JAVA_HOME/bin/java" ]]; then
         echo "$JAVA_HOME/bin/java"
-    elif command -v java &>/dev/null && java -version &>/dev/null 2>&1; then
-        echo "java"
-    elif [[ -x /usr/libexec/java_home ]] && /usr/libexec/java_home &>/dev/null 2>&1; then
+        return
+    fi
+
+    # 2. Check homebrew openjdk (common on macOS with Apple Silicon)
+    local brew_java="/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home/bin/java"
+    if [[ -x "$brew_java" ]]; then
+        echo "$brew_java"
+        return
+    fi
+
+    # 3. Check homebrew openjdk on Intel Mac
+    local brew_java_intel="/usr/local/opt/openjdk/libexec/openjdk.jdk/Contents/Home/bin/java"
+    if [[ -x "$brew_java_intel" ]]; then
+        echo "$brew_java_intel"
+        return
+    fi
+
+    # 4. Check java_home helper (macOS system Java)
+    if [[ -x /usr/libexec/java_home ]] && /usr/libexec/java_home &>/dev/null 2>&1; then
         echo "$(/usr/libexec/java_home)/bin/java"
+        return
+    fi
+
+    # 5. Check PATH (verify it actually works)
+    if command -v java &>/dev/null; then
+        local java_path
+        java_path=$(command -v java)
+        if "$java_path" -version &>/dev/null 2>&1; then
+            echo "$java_path"
+            return
+        fi
+    fi
+
+    # No working Java found
+    echo ""
+}
+
+# Check if we're in the project directory (for clj fallback)
+in_project_dir() {
+    [[ "$(pwd)" == "$PROJECT_DIR" ]] || [[ "$(pwd)/" == "$PROJECT_DIR/"* ]]
+}
+
+# Handle `sl repl` command - requires clj (Clojure CLI)
+# This is handled in shell because we need to launch clj, not java -jar
+handle_repl_cmd() {
+    local nrepl_mode=false
+    local nrepl_port=""
+
+    # Parse repl-specific args
+    shift  # remove "repl"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --nrepl)
+                nrepl_mode=true
+                shift
+                ;;
+            --port)
+                nrepl_port="$2"
+                shift 2
+                ;;
+            --help|-h)
+                echo "Usage: sl repl [--nrepl] [--port PORT]"
+                echo ""
+                echo "Start a Clojure REPL with ShiftLefter loaded."
+                echo ""
+                echo "Options:"
+                echo "  --nrepl       Start an nREPL server (for IDE integration)"
+                echo "  --port PORT   nREPL port (default: auto-select, printed on startup)"
+                echo ""
+                echo "IDE Integration (VS Code/Calva, Emacs/CIDER):"
+                echo "  1. Run: sl repl --nrepl"
+                echo "  2. Note the port number printed"
+                echo "  3. In your IDE, 'Connect to running REPL' on that port"
+                echo ""
+                echo "If you have a deps.edn in the current directory, your dependencies"
+                echo "will be merged with ShiftLefter automatically."
+                echo ""
+                echo "Requires: Clojure CLI (clj) installed"
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                echo "Use 'sl repl --help' for usage" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    # Check for clj
+    if ! command -v clj &>/dev/null; then
+        echo "Error: Clojure CLI (clj) not found." >&2
+        echo "" >&2
+        echo "The 'sl repl' command requires Clojure CLI. Install options:" >&2
+        echo "  macOS:   brew install clojure/tools/clojure" >&2
+        echo "  Ubuntu:  See https://clojure.org/guides/install_clojure" >&2
+        echo "  Windows: See https://clojure.org/guides/install_clojure" >&2
+        echo "" >&2
+        echo "Other sl commands (run, fmt, etc.) only require Java." >&2
+        exit 1
+    fi
+
+    # In dev mode, use the JAR if it exists, otherwise use project source
+    local jar_or_source=""
+    if [[ -f "$JAR_FILE" ]]; then
+        jar_or_source="$JAR_FILE"
+    elif in_project_dir; then
+        # Use project source via deps.edn :local/root to project
+        jar_or_source="$PROJECT_DIR"
     else
+        echo "Error: ShiftLefter JAR not found. Build with: clj -T:build uberjar" >&2
+        exit 1
+    fi
+
+    # Build the deps map - always include shiftlefter
+    local sl_dep="{:deps {shiftlefter/shiftlefter {:local/root \"$jar_or_source\"}"
+
+    # Add nREPL deps if needed
+    if [[ "$nrepl_mode" == "true" ]]; then
+        sl_dep="$sl_dep nrepl/nrepl {:mvn/version \"1.0.0\"} cider/cider-nrepl {:mvn/version \"0.28.5\"}"
+    fi
+
+    sl_dep="$sl_dep}}"
+
+    # Build clj args
+    local clj_args=("-Sdeps" "$sl_dep")
+
+    if [[ "$nrepl_mode" == "true" ]]; then
+        # Start nREPL server
+        local port_args=()
+        if [[ -n "$nrepl_port" ]]; then
+            port_args=("--port" "$nrepl_port")
+        fi
+
+        echo "Starting nREPL server with ShiftLefter..."
+        exec clj "${clj_args[@]}" \
+            -M -m nrepl.cmdline \
+            --middleware "[cider.nrepl/cider-middleware]" \
+            "${port_args[@]}"
+    else
+        # Interactive REPL
+        echo "Starting ShiftLefter REPL..."
+        echo "Try: (require '[shiftlefter.repl :refer :all])"
         echo ""
+        exec clj "${clj_args[@]}"
     fi
 }
+
+# Main dispatch
+# Check for repl command BEFORE other dispatch (repl uses clj, not java -jar)
+if [[ "${1:-}" == "repl" ]]; then
+    handle_repl_cmd "$@"
+fi
 
 if [[ -f "$JAR_FILE" ]]; then
     JAVA_CMD=$(find_java)
     if [[ -n "$JAVA_CMD" ]]; then
+        # JAR mode: works from anywhere
         exec "$JAVA_CMD" -jar "$JAR_FILE" "$@"
     else
-        # Fall back to clj even with jar present (no Java found)
-        exec clj -M:run "$@"
+        # JAR exists but no Java - fall back to clj if in project dir
+        if in_project_dir; then
+            exec clj -M:run "$@"
+        else
+            echo "Error: Java not found and not in ShiftLefter project directory." >&2
+            echo "" >&2
+            echo "Options:" >&2
+            echo "  1. Install Java (e.g., 'brew install openjdk')" >&2
+            echo "  2. Run from project directory: cd $PROJECT_DIR && bin/sl $*" >&2
+            exit 1
+        fi
     fi
 else
-    exec clj -M:run "$@"
+    # No JAR - must use clj from project dir
+    if in_project_dir; then
+        exec clj -M:run "$@"
+    else
+        echo "Error: ShiftLefter JAR not found and not in project directory." >&2
+        echo "" >&2
+        echo "Options:" >&2
+        echo "  1. Build the JAR: cd $PROJECT_DIR && clj -T:build uberjar" >&2
+        echo "  2. Run from project directory: cd $PROJECT_DIR && bin/sl $*" >&2
+        exit 1
+    fi
 fi

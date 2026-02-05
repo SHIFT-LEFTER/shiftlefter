@@ -51,10 +51,30 @@
     (swap! call-log-atom conj [:fill! locator text])
     this)
 
-  (element-count [_this locator]
+  (element-count [_this _locator]
     (when @fail-atom
       (throw (ex-info "invalid session id" {:type :session-error})))
-    42))
+    42)
+
+  (get-text [_this _locator]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    "mock text")
+
+  (get-url [_this]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    "https://mock.example.com")
+
+  (get-title [_this]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    "Mock Title")
+
+  (visible? [_this _locator]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    true))
 
 (defn make-mock-browser
   "Create a mock browser for testing.
@@ -162,7 +182,18 @@
                            (when @fail-with-other
                              (throw (ex-info "element not found" {})))
                            (swap! call-log conj :open)
-                           this))
+                           this)
+                         (click! [this _loc] this)
+                         (doubleclick! [this _loc] this)
+                         (rightclick! [this _loc] this)
+                         (move-to! [this _loc] this)
+                         (drag-to! [this _from _to] this)
+                         (fill! [this _loc _text] this)
+                         (element-count [_this _loc] 0)
+                         (get-text [_this _loc] "")
+                         (get-url [_this] "")
+                         (get-title [_this] "")
+                         (visible? [_this _loc] false))
           reconnect-called (atom false)
           reconnect-fn (fn [_ _]
                          (reset! reconnect-called true)

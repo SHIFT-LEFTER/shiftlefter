@@ -196,6 +196,87 @@
       (is (= [:api] persistent)))))
 
 ;; -----------------------------------------------------------------------------
+;; Subject-Keyed Capability Tests (WI-032.025)
+;; -----------------------------------------------------------------------------
+
+(deftest test-capability-key-with-subject
+  (testing "capability-key with subject constructs dotted keyword"
+    (is (= :cap/web.alice (cap/capability-key :web :alice)))
+    (is (= :cap/web.bob (cap/capability-key :web :bob)))
+    (is (= :cap/api.system (cap/capability-key :api :system))))
+
+  (testing "capability-key with nil subject falls back to interface-only"
+    (is (= :cap/web (cap/capability-key :web nil)))))
+
+(deftest test-capability-present-with-subject
+  (testing "3-arity capability-present? checks subject-keyed entry"
+    (let [ctx {:cap/web.alice {:impl :alice-browser :mode :ephemeral}}]
+      (is (true? (cap/capability-present? ctx :web :alice)))
+      (is (false? (cap/capability-present? ctx :web :bob)))
+      ;; Interface-only check does NOT find subject-keyed entries
+      (is (false? (cap/capability-present? ctx :web))))))
+
+(deftest test-get-capability-with-subject
+  (testing "3-arity get-capability returns subject-keyed impl"
+    (let [ctx {:cap/web.alice {:impl :alice-browser :mode :ephemeral}
+               :cap/web.bob {:impl :bob-browser :mode :ephemeral}}]
+      (is (= :alice-browser (cap/get-capability ctx :web :alice)))
+      (is (= :bob-browser (cap/get-capability ctx :web :bob)))
+      (is (nil? (cap/get-capability ctx :web :charlie))))))
+
+(deftest test-get-capability-entry-with-subject
+  (testing "3-arity get-capability-entry returns full subject-keyed entry"
+    (let [entry {:impl :alice-browser :mode :ephemeral}
+          ctx {:cap/web.alice entry}]
+      (is (= entry (cap/get-capability-entry ctx :web :alice)))
+      (is (nil? (cap/get-capability-entry ctx :web :bob))))))
+
+(deftest test-assoc-capability-with-subject
+  (testing "5-arity assoc-capability stores under subject-keyed key"
+    (let [ctx (cap/assoc-capability {} :web :alice-browser :ephemeral :alice)]
+      (is (= {:cap/web.alice {:impl :alice-browser :mode :ephemeral}} ctx))))
+
+  (testing "Multiple subjects for same interface"
+    (let [ctx (-> {}
+                  (cap/assoc-capability :web :alice-browser :ephemeral :alice)
+                  (cap/assoc-capability :web :bob-browser :ephemeral :bob))]
+      (is (= :alice-browser (cap/get-capability ctx :web :alice)))
+      (is (= :bob-browser (cap/get-capability ctx :web :bob))))))
+
+(deftest test-parse-capability-name
+  (testing "Parses simple interface names"
+    (is (= {:interface :web :subject nil} (cap/parse-capability-name :web)))
+    (is (= {:interface :api :subject nil} (cap/parse-capability-name :api))))
+
+  (testing "Parses subject-keyed names"
+    (is (= {:interface :web :subject :alice} (cap/parse-capability-name :web.alice)))
+    (is (= {:interface :web :subject :bob} (cap/parse-capability-name :web.bob)))
+    (is (= {:interface :api :subject :system} (cap/parse-capability-name :api.system)))))
+
+(deftest test-all-capabilities-includes-subject-keyed
+  (testing "all-capabilities returns both simple and subject-keyed entries"
+    (let [ctx (-> {}
+                  (cap/assoc-capability :web :default-browser :ephemeral)
+                  (cap/assoc-capability :web :alice-browser :ephemeral :alice)
+                  (cap/assoc-capability :api :client :persistent))
+          caps (cap/all-capabilities ctx)]
+      (is (= 3 (count caps)))
+      (is (contains? caps :web))
+      (is (contains? caps :web.alice))
+      (is (contains? caps :api)))))
+
+(deftest test-ephemeral-capabilities-includes-subject-keyed
+  (testing "ephemeral-capabilities returns subject-keyed ephemeral entries"
+    (let [ctx (-> {}
+                  (cap/assoc-capability :web :alice-browser :ephemeral :alice)
+                  (cap/assoc-capability :web :bob-browser :ephemeral :bob)
+                  (cap/assoc-capability :api :client :persistent))
+          ephemeral (set (cap/ephemeral-capabilities ctx))]
+      (is (contains? ephemeral :web.alice))
+      (is (contains? ephemeral :web.bob))
+      (is (not (contains? ephemeral :api))))))
+
+;; -----------------------------------------------------------------------------
 ;; Task 3.0.9 Acceptance Criteria
 ;; -----------------------------------------------------------------------------
 

@@ -4,7 +4,8 @@
             [shiftlefter.gherkin.dialect :as dialect]
             [shiftlefter.gherkin.io :as io]
             [clojure.string :as str]
-            [clojure.spec.alpha :as s]))
+            [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen]))
 
 ;; -----------------------------------------------------------------------------
 ;; Defrecords for AST nodes
@@ -64,6 +65,9 @@
 
 (s/def ::location ::loc/location)
 (s/def ::name string?)
+(s/def ::type keyword?)
+(s/def ::message string?)
+(s/def ::token ::tokens/token)
 ;; Rich tag format: {:name "@tagname" :location {:line L :column C}}
 (s/def ::rich-tag (s/keys :req-un [::name ::location]))
 (s/def ::tags (s/coll-of ::rich-tag))
@@ -74,25 +78,96 @@
 (s/def ::mediaType (s/or :nil nil? :str string?))
 (s/def ::cells (s/coll-of string?))
 (s/def ::source-text string?)
-(s/def ::table-row (s/and (partial instance? TableRow) (s/keys :req-un [::type ::cells ::location ::source-text])))
-(s/def ::data-table (s/and (partial instance? DataTable) (s/keys :req-un [::type ::rows ::location ::source-text])))
+(s/def ::table-row
+  (s/with-gen
+    (s/and (partial instance? TableRow) (s/keys :req-un [::type ::cells ::location ::source-text]))
+    #(gen/fmap (fn [[cells loc src]]
+                 (->TableRow :table-row cells loc src "" nil))
+               (gen/tuple (s/gen ::cells) (s/gen ::location) (s/gen ::source-text)))))
+(s/def ::rows (s/coll-of ::table-row))
+
+(s/def ::data-table
+  (s/with-gen
+    (s/and (partial instance? DataTable) (s/keys :req-un [::type ::rows ::location ::source-text]))
+    #(gen/fmap (fn [[rows loc src]]
+                 (->DataTable :data-table rows loc src "" nil))
+               (gen/tuple (s/gen ::rows) (s/gen ::location) (s/gen ::source-text)))))
 (s/def ::table (s/coll-of ::table-row))
-(s/def ::comment (s/and (partial instance? Comment) (s/keys :req-un [::type ::text ::location ::source-text])))
-(s/def ::blank (s/and (partial instance? Blank) (s/keys :req-un [::type ::location ::source-text])))
-(s/def ::argument (s/or :docstring (s/and (partial instance? Docstring) (s/keys :req-un [::type ::content ::fence ::mediaType ::location ::source-text]))
-                        :data-table ::data-table
-                        :nil nil?))
-(s/def ::step (s/and (partial instance? Step) (s/keys :req-un [::type ::keyword ::text ::argument ::location ::source-text])))
+(s/def ::comment
+  (s/with-gen
+    (s/and (partial instance? Comment) (s/keys :req-un [::type ::text ::location ::source-text]))
+    #(gen/fmap (fn [[txt loc src]]
+                 (->Comment :comment txt loc src "" nil))
+               (gen/tuple (s/gen ::text) (s/gen ::location) (s/gen ::source-text)))))
+
+(s/def ::blank
+  (s/with-gen
+    (s/and (partial instance? Blank) (s/keys :req-un [::type ::location ::source-text]))
+    #(gen/fmap (fn [[loc src]]
+                 (->Blank :blank loc src "" nil))
+               (gen/tuple (s/gen ::location) (s/gen ::source-text)))))
+;; Keyword spec for step keywords
+(s/def ::keyword #{:given :when :then :and :but :*})
+
+(s/def ::argument
+  (s/with-gen
+    (s/or :docstring (s/and (partial instance? Docstring)
+                            (s/keys :req-un [::type ::content ::fence ::mediaType ::location ::source-text]))
+          :data-table ::data-table
+          :nil nil?)
+    ;; Generator produces nil for simplicity; Docstring/DataTable generators work independently
+    #(gen/return nil)))
+
+(s/def ::step
+  (s/with-gen
+    (s/and (partial instance? Step) (s/keys :req-un [::type ::keyword ::text ::argument ::location ::source-text]))
+    #(gen/fmap (fn [[kw txt loc src]]
+                 (->Step :step kw nil txt nil loc src "" nil))
+               (gen/tuple (s/gen ::keyword) (s/gen ::text) (s/gen ::location) (s/gen ::source-text)))))
+
 (s/def ::steps (s/coll-of ::step))
 (s/def ::examples any?)
-(s/def ::scenario (s/and (partial instance? Scenario) (s/keys :req-un [::type ::name ::tags ::steps ::examples ::location ::source-text])))
-(s/def ::scenario-outline (s/and (partial instance? ScenarioOutline) (s/keys :req-un [::type ::name ::tags ::steps ::examples ::location ::source-text])))
+
+(s/def ::scenario
+  (s/with-gen
+    (s/and (partial instance? Scenario) (s/keys :req-un [::type ::name ::tags ::steps ::examples ::location ::source-text]))
+    #(gen/fmap (fn [[nm tags loc src]]
+                 (->Scenario :scenario nm "" tags [] nil loc src "" nil))
+               (gen/tuple (s/gen ::name) (s/gen ::tags) (s/gen ::location) (s/gen ::source-text)))))
+
+(s/def ::scenario-outline
+  (s/with-gen
+    (s/and (partial instance? ScenarioOutline) (s/keys :req-un [::type ::name ::tags ::steps ::examples ::location ::source-text]))
+    #(gen/fmap (fn [[nm tags loc src]]
+                 (->ScenarioOutline :scenario-outline nm "" tags [] nil loc src "" nil))
+               (gen/tuple (s/gen ::name) (s/gen ::tags) (s/gen ::location) (s/gen ::source-text)))))
+
 (s/def ::scenarios (s/coll-of (s/or :scenario ::scenario :scenario-outline ::scenario-outline)))
-(s/def ::background (s/or :background (s/and (partial instance? Background) (s/keys :req-un [::type ::steps ::tags ::location ::source-text])) :nil nil?))
-(s/def ::rule (s/and (partial instance? Rule) (s/keys :req-un [::type ::name ::description ::tags ::children ::location ::source-text])))
+
+(s/def ::background
+  (s/with-gen
+    (s/or :background (s/and (partial instance? Background) (s/keys :req-un [::type ::steps ::tags ::location ::source-text]))
+          :nil nil?)
+    #(gen/one-of [(gen/return nil)
+                  (gen/fmap (fn [[tags loc src]]
+                              (->Background :background nil "" [] tags loc src "" nil))
+                            (gen/tuple (s/gen ::tags) (s/gen ::location) (s/gen ::source-text)))])))
+
+(s/def ::rule
+  (s/with-gen
+    (s/and (partial instance? Rule) (s/keys :req-un [::type ::name ::description ::tags ::children ::location ::source-text]))
+    #(gen/fmap (fn [[nm desc tags loc src]]
+                 (->Rule :rule nm desc tags [] loc src "" nil))
+               (gen/tuple (s/gen ::name) (s/gen ::description) (s/gen ::tags) (s/gen ::location) (s/gen ::source-text)))))
+
 (s/def ::children (s/coll-of (s/or :background ::background :scenario ::scenario :scenario-outline ::scenario-outline :rule ::rule)))
-(s/def ::feature (s/and (partial instance? Feature) (s/keys :req-un [::type ::name ::description ::tags ::children ::location ::source-text])))
-(s/def ::comment (s/and (partial instance? Comment) (s/keys :req-un [::type ::text ::location ::source-text])))
+
+(s/def ::feature
+  (s/with-gen
+    (s/and (partial instance? Feature) (s/keys :req-un [::type ::name ::description ::tags ::children ::location ::source-text]))
+    #(gen/fmap (fn [[nm desc tags loc src]]
+                 (->Feature :feature nm desc tags [] loc src "" nil))
+               (gen/tuple (s/gen ::name) (s/gen ::description) (s/gen ::tags) (s/gen ::location) (s/gen ::source-text)))))
 (s/def ::ast-node (s/or :feature ::feature :background ::background :scenario ::scenario :scenario-outline ::scenario-outline :step ::step :docstring ::argument :data-table ::data-table :table-row ::table-row :blank ::blank :comment ::comment))
 (s/def ::ast (s/coll-of ::ast-node))
 (s/def ::error (s/keys :req-un [::type ::location] :opt-un [::message ::token]))
@@ -118,11 +193,16 @@
 ;; Dynamic vars
 ;; -----------------------------------------------------------------------------
 
-(def ^:dynamic *dialect* nil)
+(def ^:dynamic *dialect*
+  "Current dialect for parsing. Bind to a dialect map (from dialect/get-dialect)
+   to parse non-English Gherkin. Defaults to nil (uses English-only fallback)."
+  nil)
 
-;; Development-time assertion for detecting non-advancing loops.
-;; Set to true during testing to catch infinite loop bugs early.
-(def ^:dynamic *assert-advancing* false)
+(def ^:dynamic *assert-advancing*
+  "Development-time guard for detecting non-advancing parser loops.
+   When true, throws if a 'many' parser loop fails to advance the token stream.
+   Set to true during testing to catch infinite loop bugs early."
+  false)
 
 (defn- assert-advancing!
   "Guard for 'many' parser loops. Throws if ts hasn't advanced.
@@ -727,7 +807,17 @@
 ;; Public API
 ;; -----------------------------------------------------------------------------
 
-(defn parse [token-seq]
+(defn parse
+  "Parse a sequence of tokens into a Gherkin AST.
+
+   Returns a map with:
+   - :tokens — the realized token vector
+   - :ast — vector of AST nodes (Feature, Blank, Comment records)
+   - :errors — vector of parse errors (empty if successful)
+
+   Example:
+     (parse (lex \"Feature: Test\\n  Scenario: Demo\"))"
+  [token-seq]
   (let [tokens (vec token-seq)]  ;; Realize lazy seq for random access
     (binding [*dialect* (dialect/english-only-dialect)] ; TODO: detect from tokens
       (loop [ts tokens

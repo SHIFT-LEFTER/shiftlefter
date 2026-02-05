@@ -1,4 +1,0 @@
-#kaocha/v1
-{:kaocha/plugins [:kaocha.plugin/hooks]
- :kaocha.hooks/pre-run  [shiftlefter.test-helpers/pre-run]
- :kaocha.hooks/post-run [shiftlefter.test-helpers/post-run]}

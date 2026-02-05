@@ -13,12 +13,54 @@
    [shiftlefter.runner.core :as runner])
   (:gen-class))
 
+;; -----------------------------------------------------------------------------
+;; Path Resolution (WI-032.013)
+;; -----------------------------------------------------------------------------
+;; When sl is run from PATH, relative paths should resolve against the user's
+;; working directory, not the project directory. The bin/sl script captures
+;; the user's CWD in SL_USER_CWD before any cd operations.
+;;
+;; IMPORTANT FOR FUTURE PATH-BASED OPTIONS:
+;; When adding new CLI options that take file/directory paths (e.g., glossaries,
+;; interfaces, intent regions), use these helpers to resolve them:
+;;
+;;   (resolve-user-path path)      ; single path
+;;   (resolve-user-paths paths)    ; multiple paths
+;;
+;; This ensures paths work correctly whether the user runs:
+;;   - ./bin/sl from project root (relative to project)
+;;   - sl from PATH in any directory (relative to user's CWD)
+;;
+;; See: run-cmd, fmt-cmd, ddmin-cmd for usage examples.
+
+(defn- get-user-cwd
+  "Get the user's working directory from SL_USER_CWD env var.
+   Falls back to current directory if not set (e.g., running via clj directly)."
+  []
+  (or (System/getenv "SL_USER_CWD")
+      (System/getProperty "user.dir")))
+
+(defn- resolve-user-path
+  "Resolve a path relative to the user's working directory.
+   Absolute paths are returned unchanged.
+   Relative paths are resolved against SL_USER_CWD."
+  [path]
+  (if (fs/absolute? path)
+    (str path)
+    (str (fs/path (get-user-cwd) path))))
+
+(defn- resolve-user-paths
+  "Resolve multiple paths relative to the user's working directory."
+  [paths]
+  (mapv resolve-user-path paths))
+
 (def cli-options
   [["-c" "--check" "Check mode (verify without modifying)"]
    ["-w" "--write" "Format files in place"]
    [nil "--canonical" "Format to canonical style (stdout)"]
    [nil "--step-paths PATHS" "Step definition paths (comma-separated)"
     :parse-fn #(str/split % #",")]
+   [nil "--config-path PATH" "Config file path (default: shiftlefter.edn)"]
    [nil "--dry-run" "Bind steps without executing (verify binding only)"]
    ["-s" "--seed SEED" "Random seed for fuzz"
     :parse-fn #(Long/parseLong %)]
@@ -45,6 +87,7 @@
     :parse-fn #(Integer/parseInt %)
     :default 30000]
    [nil "--ci" "CI mode: run full test suite (kaocha, compliance, fuzz smoke)"]
+   [nil "--fuzzed" "Check fuzz artifact integrity (slow with many artifacts)"]
    [nil "--edn" "Output in EDN format (machine-readable)"]
    ["-v" "--verbose" "Verbose output"]
    ["-h" "--help"]])
@@ -53,17 +96,25 @@
   "Run Gherkin scenarios.
    Arguments:
    - paths: space-separated paths/globs to feature files
-   - opts: CLI options including :step-paths, :dry-run, :edn, :verbose"
+   - opts: CLI options including :step-paths, :dry-run, :edn, :verbose
+
+   Note: If --step-paths not specified, runner uses config or defaults to steps/"
   [paths opts]
   (let [;; Parse paths (could be single path or multiple)
         path-list (if (string? paths) [paths] paths)
-        ;; Default step path if not specified
-        step-paths (or (:step-paths opts) ["steps/"])
-        result (runner/execute! {:paths path-list
-                             :step-paths step-paths
-                             :dry-run (:dry-run opts)
-                             :edn (:edn opts)
-                             :verbose (:verbose opts)})]
+        ;; Resolve paths against user's CWD (for running from PATH)
+        resolved-paths (resolve-user-paths path-list)
+        resolved-step-paths (when (:step-paths opts)
+                              (resolve-user-paths (:step-paths opts)))
+        resolved-config-path (when (:config-path opts)
+                               (resolve-user-path (:config-path opts)))
+        ;; Pass step-paths only if CLI specified; let runner fall back to config
+        result (runner/execute! (cond-> {:paths resolved-paths
+                                         :dry-run (:dry-run opts)
+                                         :edn (:edn opts)
+                                         :verbose (:verbose opts)}
+                                  resolved-step-paths (assoc :step-paths resolved-step-paths)
+                                  resolved-config-path (assoc :config-path resolved-config-path)))]
     (:exit-code result)))
 
 
@@ -100,8 +151,8 @@
    paths))
 
 (defn- check-single-file
-  "Check a single file for roundtrip validity.
-   Returns {:path :status (:ok/:error/:not-found) :errors [...]}"
+  "Check if a single file is in canonical format.
+   Returns {:path :status (:ok/:error/:not-found) :reason? :details?}"
   [path]
   (let [read-result (io/read-file-utf8 path)]
     (if (= :error (:status read-result))
@@ -113,8 +164,7 @@
                   :status :error
                   :reason (:reason result)
                   :details (:details result)
-                  :original-length (:original-length result)
-                  :reconstructed-length (:reconstructed-length result)})))))
+                  :message (:message result)})))))
 
 (defn- path-exists?
   "Check if a path exists (file or directory)."
@@ -158,16 +208,15 @@
 
 (defn- print-check-result
   "Print the result of checking a single file."
-  [{:keys [path status reason details original-length reconstructed-length message] :as result}]
+  [{:keys [path status reason details message]}]
   (case status
     :ok (println (str "Checking " path "... OK"))
     :not-found (println (str "Checking " path "... NOT FOUND"))
     :error (do
-             (println (str "Checking " path "... INVALID"))
+             (println (str "Checking " path "... NEEDS FORMATTING"))
              (case reason
                :parse-errors (diag/print-errors-indented details)
-               :mismatch (println (format "  roundtrip mismatch (original: %d bytes, reconstructed: %d bytes)"
-                                          original-length reconstructed-length))
+               :needs-formatting nil  ;; message already says "NEEDS FORMATTING"
                (println (str "  " message))))))
 
 (defn- print-check-summary
@@ -295,85 +344,87 @@
    With --edn: output results in EDN format.
    Returns exit code 0 for success, 1 for failure, 2 for no files/path error."
   [paths {:keys [check write canonical edn]}]
-  (cond
-    ;; --check mode: verify roundtrip via API
-    check
-    (if (empty? paths)
-      (do (when-not edn
-            (println "Error: No paths specified")
-            (println "Usage: sl fmt --check <path> [<path2> ...]"))
-          (when edn
-            (println (pr-str {:status :error :reason :no-paths})))
-          2)
-      (let [{:keys [exit-code] :as summary} (check-files paths)]
-        (if edn
-          (println (pr-str (format-check-results-edn summary)))
-          (do
-            (doseq [r (:results summary)]
-              (print-check-result r))
-            (when (> (count (:results summary)) 1)
-              (print-check-summary summary))))
-        exit-code))
-
-    ;; --write mode: format files in place
-    write
-    (if (empty? paths)
-      (do (when-not edn
-            (println "Error: No paths specified")
-            (println "Usage: sl fmt --write <path> [<path2> ...]"))
-          (when edn
-            (println (pr-str {:status :error :reason :no-paths})))
-          2)
-      (let [{:keys [exit-code] :as summary} (format-files paths)]
-        (if edn
-          (println (pr-str (format-format-results-edn summary)))
-          (do
-            (doseq [r (:results summary)]
-              (print-format-result r))
-            (when (> (count (:results summary)) 1)
-              (print-format-summary summary))))
-        exit-code))
-
-    ;; --canonical mode: format via API and print (single file only)
-    canonical
-    (let [path (first paths)]
-      (when (and (> (count paths) 1) (not edn))
-        (println "Warning: --canonical only processes first file"))
-      (if (nil? path)
-        (do (if edn
-              (println (pr-str {:status :error :reason :no-path}))
-              (do (println "Error: No path specified")
-                  (println "Usage: sl fmt --canonical <path>")))
+  ;; Resolve paths against user's CWD (for running from PATH)
+  (let [resolved-paths (resolve-user-paths paths)]
+    (cond
+      ;; --check mode: verify roundtrip via API
+      check
+      (if (empty? resolved-paths)
+        (do (when-not edn
+              (println "Error: No paths specified")
+              (println "Usage: sl fmt --check <path> [<path2> ...]"))
+            (when edn
+              (println (pr-str {:status :error :reason :no-paths})))
             2)
-        (let [read-result (io/read-file-utf8 path)]
-          (if (= :error (:status read-result))
-            (do (if edn
-                  (println (pr-str {:status :error :reason :io-error :message (:message read-result)}))
-                  (print-io-error read-result))
-                1)
-            (let [result (api/fmt-canonical (:content read-result))]
-              (case (:status result)
-                :ok
-                (if edn
-                  (do (println (pr-str {:status :ok :output (:output result)})) 0)
-                  (do (print (:output result)) (flush) 0))
+        (let [{:keys [exit-code] :as summary} (check-files resolved-paths)]
+          (if edn
+            (println (pr-str (format-check-results-edn summary)))
+            (do
+              (doseq [r (:results summary)]
+                (print-check-result r))
+              (when (> (count (:results summary)) 1)
+                (print-check-summary summary))))
+          exit-code))
 
-                :error
-                (do (if edn
-                      (println (pr-str {:status :error
-                                        :reason (:reason result)
-                                        :errors (mapv diag/format-error-edn (:details result))}))
-                      (case (:reason result)
-                        :parse-errors (print-parse-errors path (:details result))
-                        (println "ERROR:" (:message result))))
-                    1)))))))
+      ;; --write mode: format files in place
+      write
+      (if (empty? resolved-paths)
+        (do (when-not edn
+              (println "Error: No paths specified")
+              (println "Usage: sl fmt --write <path> [<path2> ...]"))
+            (when edn
+              (println (pr-str {:status :error :reason :no-paths})))
+            2)
+        (let [{:keys [exit-code] :as summary} (format-files resolved-paths)]
+          (if edn
+            (println (pr-str (format-format-results-edn summary)))
+            (do
+              (doseq [r (:results summary)]
+                (print-format-result r))
+              (when (> (count (:results summary)) 1)
+                (print-format-summary summary))))
+          exit-code))
 
-    ;; No mode specified
-    :else
-    (do (println "Usage: sl fmt --check <path> [<path2> ...]   (verify roundtrip)")
-        (println "       sl fmt --write <path> [<path2> ...]   (format in place)")
-        (println "       sl fmt --canonical <path>             (format to stdout)")
-        1)))
+      ;; --canonical mode: format via API and print (single file only)
+      canonical
+      (let [path (first resolved-paths)]
+        (when (and (> (count resolved-paths) 1) (not edn))
+          (println "Warning: --canonical only processes first file"))
+        (if (nil? path)
+          (do (if edn
+                (println (pr-str {:status :error :reason :no-path}))
+                (do (println "Error: No path specified")
+                    (println "Usage: sl fmt --canonical <path>")))
+              2)
+          (let [read-result (io/read-file-utf8 path)]
+            (if (= :error (:status read-result))
+              (do (if edn
+                    (println (pr-str {:status :error :reason :io-error :message (:message read-result)}))
+                    (print-io-error read-result))
+                  1)
+              (let [result (api/fmt-canonical (:content read-result))]
+                (case (:status result)
+                  :ok
+                  (if edn
+                    (do (println (pr-str {:status :ok :output (:output result)})) 0)
+                    (do (print (:output result)) (flush) 0))
+
+                  :error
+                  (do (if edn
+                        (println (pr-str {:status :error
+                                          :reason (:reason result)
+                                          :errors (mapv diag/format-error-edn (:details result))}))
+                        (case (:reason result)
+                          :parse-errors (print-parse-errors path (:details result))
+                          (println "ERROR:" (:message result))))
+                      1)))))))
+
+      ;; No mode specified
+      :else
+      (do (println "Usage: sl fmt --check <path> [<path2> ...]   (verify roundtrip)")
+          (println "       sl fmt --write <path> [<path2> ...]   (format in place)")
+          (println "       sl fmt --canonical <path>             (format to stdout)")
+          1))))
 
 (defn fuzz-cmd
   "Fuzz command: run randomized testing on parser.
@@ -381,32 +432,39 @@
   [{:keys [seed trials preset save verbose mutation sources corpus-dir timeout-ms combos]}]
   (if mutation
     ;; Mutation fuzzing mode (FZ3)
-    (let [opts (cond-> {:verbose (boolean verbose)
-                        :save save
-                        :sources (keyword sources)
-                        :corpus-dir corpus-dir
-                        :timeout-ms timeout-ms
-                        :combos combos}
-                 seed (assoc :seed seed)
-                 trials (assoc :trials trials)
-                 preset (assoc :preset preset))
-          result (fuzz/run-mutations opts)]
-      (println)
-      (println (format "Mutation fuzz complete: %d mutations (%d graceful, %d survived, %d timeout, %d exception)"
-                       (:mutations/total result)
-                       (:mutations/graceful result)
-                       (:mutations/survived result)
-                       (:mutations/timeout result)
-                       (:mutations/exception result)))
-      (println (format "  Unique signatures: %d, Artifacts saved: %d (seed=%d)"
-                       (:signatures/unique result)
-                       (:artifacts/saved result)
-                       (:seed result)))
-      (when (seq (:failures result))
-        (println "Failures saved to:")
-        (doseq [path (:failures result)]
-          (println "  " path)))
-      (if (= :ok (:status result)) 0 1))
+    (try
+      (let [opts (cond-> {:verbose (boolean verbose)
+                          :save save
+                          :sources (keyword sources)
+                          :corpus-dir corpus-dir
+                          :timeout-ms timeout-ms
+                          :combos combos}
+                   seed (assoc :seed seed)
+                   trials (assoc :trials trials)
+                   preset (assoc :preset preset))
+            result (fuzz/run-mutations opts)]
+        (println)
+        (println (format "Mutation fuzz complete: %d mutations (%d graceful, %d survived, %d timeout, %d exception)"
+                         (:mutations/total result)
+                         (:mutations/graceful result)
+                         (:mutations/survived result)
+                         (:mutations/timeout result)
+                         (:mutations/exception result)))
+        (println (format "  Unique signatures: %d, Artifacts saved: %d (seed=%d)"
+                         (:signatures/unique result)
+                         (:artifacts/saved result)
+                         (:seed result)))
+        (when (seq (:failures result))
+          (println "Failures saved to:")
+          (doseq [path (:failures result)]
+            (println "  " path)))
+        (if (= :ok (:status result)) 0 1))
+      (catch clojure.lang.ExceptionInfo e
+        (if (= :corpus-not-found (:reason (ex-data e)))
+          (do
+            (println "Error:" (ex-message e))
+            2)
+          (throw e))))
 
     ;; Valid generation mode (FZ1/FZ2)
     (let [opts (cond-> {:verbose (boolean verbose)
@@ -430,21 +488,25 @@
   "Delta-debugging minimizer command.
    Returns exit code 0 for success, 1 for failure."
   [path {:keys [mode strategy timeout-ms budget-ms verbose]}]
-  (let [;; Check if path is a file or artifact directory
-        is-artifact-dir? (and (fs/directory? path)
-                              (fs/exists? (fs/path path "case.feature"))
-                              (fs/exists? (fs/path path "result.edn")))
+  ;; Resolve path against user's CWD (for running from PATH)
+  (let [resolved-path (resolve-user-path path)
+        ;; Check if path is a file or artifact directory
+        is-artifact-dir? (and (fs/directory? resolved-path)
+                              (fs/exists? (fs/path resolved-path "case.feature"))
+                              (fs/exists? (fs/path resolved-path "result.edn")))
 
-        opts {:mode (keyword mode)
-              :strategy (keyword strategy)
-              :timeout-ms timeout-ms
-              :budget-ms budget-ms}]
+        ;; Build opts, filtering out nil values to let ddmin use defaults
+        opts (cond-> {}
+               mode (assoc :mode (keyword mode))
+               strategy (assoc :strategy (keyword strategy))
+               timeout-ms (assoc :timeout-ms timeout-ms)
+               budget-ms (assoc :budget-ms budget-ms))]
 
     (try
       (if is-artifact-dir?
         ;; Run on fuzz artifact
-        (let [result (ddmin/ddmin-artifact path opts)]
-          (println (format "Minimized %s" path))
+        (let [result (ddmin/ddmin-artifact resolved-path opts)]
+          (println (format "Minimized %s" resolved-path))
           (println (format "  Original: %d bytes -> Minimized: %d bytes (%.0f%% reduction)"
                            (count (:original result))
                            (count (:minimized result))
@@ -457,14 +519,14 @@
           (if (:signatures-match? result) 0 1))
 
         ;; Run on single file
-        (let [content (slurp path)
+        (let [content (slurp resolved-path)
               result (ddmin/ddmin content opts)]
           (if (= :no-failure (:reason (:baseline-sig result)))
             (do
-              (println (format "Error: %s does not produce a failure" path))
+              (println (format "Error: %s does not produce a failure" resolved-path))
               1)
             (do
-              (println (format "Minimized %s" path))
+              (println (format "Minimized %s" resolved-path))
               (println (format "  Original: %d bytes -> Minimized: %d bytes (%.0f%% reduction)"
                                (count (:original result))
                                (count (:minimized result))
@@ -481,7 +543,7 @@
                 (println "Minimized content:")
                 (println (:minimized result)))
               ;; Write output
-              (let [out-path (str path ".min")]
+              (let [out-path (str resolved-path ".min")]
                 (spit out-path (:minimized result))
                 (println (format "  Output: %s" out-path)))
               (if (:signatures-match? result) 0 1)))))
@@ -496,15 +558,18 @@
 
 (defn verify-cmd
   "Verify command: run validator and optionally CI checks.
-   Returns exit code 0 for success, 1 for failures, 2 for verify errors."
-  [{:keys [ci edn]}]
+   Returns exit code 0 for success/skip, 1 for failures, 2 for verify errors."
+  [{:keys [ci fuzzed edn]}]
   (try
-    (let [result (verify/run-checks {:ci ci})]
+    (let [result (verify/run-checks {:ci ci :fuzzed fuzzed})]
       (if edn
         (println (verify/format-edn result))
-        (verify/print-human result))
+        (if (= :skip (:status result))
+          (println (:message result))
+          (verify/print-human result)))
       (case (:status result)
         :ok 0
+        :skip 0
         :fail 1))
     (catch Exception e
       (if edn
@@ -519,14 +584,15 @@
     (cond
       (:help options)
       (println "Usage:
-  sl run <path> [<path2> ...] [--step-paths p1,p2] [--dry-run] [--edn] [-v]
+  sl run <path> [<path2> ...] [--step-paths p1,p2] [--config-path FILE] [--dry-run] [--edn] [-v]
   sl fmt --check <path> [<path2> ...]   (validate files/directories)
   sl fmt --write <path> [<path2> ...]   (format in place)
   sl fmt --canonical <path>             (format to stdout)
+  sl repl [--nrepl] [--port PORT]       (interactive REPL, requires clj)
   sl gherkin fuzz [--preset smoke|quick|nightly] [--seed N] [--trials N] [-v]
   sl gherkin fuzz --mutation [--sources generated|corpus|both] [--timeout-ms N]
   sl gherkin ddmin <path> [--mode parse|pickles|lex|auto] [--strategy structured|raw-lines]
-  sl verify [--ci] [--edn]              (validator checks, optionally full CI)")
+  sl verify [--ci] [--fuzzed] [--edn]   (validator checks, optionally full CI)")
 
       (= (first arguments) "run")
       (let [paths (rest arguments)]

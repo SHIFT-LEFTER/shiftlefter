@@ -2,15 +2,15 @@
 
 **Gherkin test framework with vocabulary validation** — parse, format, run, and catch mistakes before execution. 100% Cucumber-compatible parser, built in Clojure.
 
-## Status: v0.3.0 - SVO Validation
+## Status: v0.3.5 - Browser Testing & Polish
 
 ShiftLefter provides a complete BDD testing framework with Gherkin parsing, validation, formatting, and test execution. The parser is 100% Cucumber-compatible; the runner executes scenarios with step definitions written in Clojure.
 
-**Current:** Parser, formatter, runner, macro expansion, persistent browsers, SVO validation
+**Current:** Parser, formatter, runner, macro expansion, multi-actor browser testing, SVO validation, tutorial examples
 
-**Next:** Reporter plugins, IDE integration, cross-language step executors
+**Next:** Executable traceability, intent regions, supplanting what the screenplay pattern was aiming for with the data-oriented, queryable, far simpler SVOI
 
-**Future:** Use case ↔ feature mapping & generation, traceability graph
+**Future:** Use case ↔ feature mapping & generation, observation lineage from real-world requirements through to running tests
 
 ---
 
@@ -20,21 +20,19 @@ ShiftLefter provides a complete BDD testing framework with Gherkin parsing, vali
 
 **Requirements:** Java 11 or later
 
-1. Download `shiftlefter-v0.3.0.jar` from [releases](https://github.com/YOU/shiftlefter/releases)
-2. Verify Java version: `java -version`
-3. Create a wrapper script (optional but recommended):
+1. Download `shiftlefter-v0.3.5.zip` from [releases](https://github.com/SHIFT-LEFTER/shiftlefter/releases)
+2. Unzip and add to PATH:
    ```bash
-   # Create 'sl' in your PATH (e.g., /usr/local/bin/sl or ~/bin/sl)
-   echo '#!/bin/bash
-   java -jar /path/to/shiftlefter-v0.3.0.jar "$@"' > sl
-   chmod +x sl
+   unzip shiftlefter-v0.3.5.zip
+   export PATH="$PATH:$PWD/shiftlefter-v0.3.5"
    ```
-4. Run:
+3. Run:
    ```bash
    sl fmt --check your-file.feature
-   # Or without wrapper:
-   java -jar shiftlefter-v0.3.0.jar fmt --check your-file.feature
+   sl run features/ --step-paths steps/
    ```
+
+The zip contains the `sl` wrapper script and a versioned JAR. No Clojure toolchain needed — just Java.
 
 ### From Source (Development)
 
@@ -54,11 +52,25 @@ ShiftLefter provides a complete BDD testing framework with Gherkin parsing, vali
 
 ---
 
+## Examples
+
+ShiftLefter ships with working examples that cover the most common workflows. Each one is self-contained and designed to run as-is.
+
+**Validate and format your existing feature files.** If you already have `.feature` files, start here. ShiftLefter can parse and validate any Cucumber-compatible Gherkin — no configuration, no step definitions, no Clojure. You'll also see how `sl fmt` can enforce canonical formatting in CI or reformat files in place. [→ Validate & Format](examples/01-validate-and-format/)
+
+**Run a browser test without writing any code.** ShiftLefter includes built-in step definitions for common browser operations — navigation, clicking, filling forms, and verifying results. This example drives a real browser through a complete scenario using only a `.feature` file and a one-line config. No custom steps, no Clojure. [→ Zero-Code Browser Test](examples/02-browser-zero-code/)
+
+**Run a multi-actor browser test.** Same built-in steps, but now Alice and Bob each get their own browser. ShiftLefter keeps their sessions and state completely separate. This example also includes a bonus section demonstrating vocabulary validation in shifted mode — where a glossary defines which actors are valid and the framework rejects unknown subjects at bind time. [→ Multi-Actor Browser Test](examples/02b-browser-multi-actor/)
+
+**Write your first step definitions.** When you're ready to go beyond the built-in steps, this example walks through `defstep` — pattern matching, captures, context passing, and assertions. A classic cucumbers-and-counting scenario in about 20 lines of Clojure. [→ Your First Steps](examples/03-custom-steps/)
+
+---
+
 ## CLI
 
 The `sl` command provides test execution, file validation, and formatting.
 
-> **Note:** Examples use `sl` assuming you created the wrapper script. Substitute `java -jar shiftlefter-v0.3.0.jar` if running the jar directly, or `bin/sl` if running from source.
+> **Note:** Examples use `sl` assuming you installed via the release zip. Substitute `java -jar shiftlefter-v0.3.5.jar` if running the jar directly, or `bin/sl` if running from source.
 
 ### Running Tests
 
@@ -84,6 +96,7 @@ sl run features/ --step-paths steps/ -v
 | Flag | Config equivalent | Description |
 |------|-------------------|-------------|
 | `--step-paths p1,p2` | `:runner {:step-paths [...]}` | Comma-separated paths to step definition directories |
+| `--config-path PATH` | — | Path to config file (default: `shiftlefter.edn` in current directory) |
 | `--dry-run` | — | Bind steps but don't execute (verify all steps have definitions) |
 | `--edn` | — | Output results as EDN to stdout |
 | `-v, --verbose` | — | Show each step as it executes |
@@ -128,48 +141,63 @@ Step definitions bind Gherkin steps to Clojure functions. Create `.clj` files in
 ```clojure
 ;; steps/login_steps.clj
 (ns my-project.steps.login
-  (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+  (:require [shiftlefter.stepengine.registry :refer [defstep]]
+            [shiftlefter.step :as step]))
 
-;; Simple step (no context needed)
+;; Simple step (no captures)
 (defstep #"I am on the login page"
-  []
-  {:page :login})
+  [ctx]
+  (assoc ctx :page :login))
 
 ;; Step with captures (regex groups become arguments)
 (defstep #"I enter \"([^\"]+)\" and \"([^\"]+)\""
-  [username password]
-  {:username username :password password})
+  [ctx username password]
+  (assoc ctx :username username :password password))
 
-;; Step with context (receives accumulated state from prior steps)
+;; Step with context only (no captures)
 (defstep #"I should see the dashboard"
   [ctx]
   (when-not (:logged-in ctx)
     (throw (ex-info "Not logged in!" {:ctx ctx})))
   ctx)
 
-;; Step with captures AND context (ctx is always last)
+;; Step with captures AND context (ctx is always first)
 (defstep #"I have (\d+) items in my cart"
-  [count-str ctx]
+  [ctx count-str]
   (assoc ctx :cart-count (Integer/parseInt count-str)))
 ```
 
+**Convention:** `ctx` is always the **first** argument, followed by regex captures in order. Steps that don't need context can omit it entirely (`[]`).
+
 **Return values:**
+
 - **Map** → becomes the new context for subsequent steps
 - **nil** → context unchanged
 - **`:pending`** → marks step as pending (scenario fails unless `allow-pending?` is true)
 - **Throw** → step fails with error
 
 **Context structure:**
-The `ctx` argument passed to step functions is `{:step <current-step> :scenario <accumulated-state>}`. Access your accumulated state via `(:scenario ctx)`:
+The `ctx` argument is a flat map — your accumulated state is directly on it, not nested:
 
 ```clojure
 (defstep #"I should have (\d+) items"
-  [expected-str ctx]
+  [ctx expected-str]
   (let [expected (Integer/parseInt expected-str)
-        actual (:cart-count (:scenario ctx))]
+        actual (:cart-count ctx)]
     (when (not= expected actual)
       (throw (ex-info "Count mismatch" {:expected expected :actual actual})))
-    (:scenario ctx)))
+    ctx))
+```
+
+**DataTable / DocString access:**
+Steps with a DataTable or DocString attached access them via `(step/arguments ctx)`:
+
+```clojure
+(defstep #"the following users exist:" [ctx]
+  (let [{:keys [rows]} (step/arguments ctx)
+        headers (first rows)
+        data (rest rows)]
+    (assoc ctx :users data)))
 ```
 
 ---
@@ -204,12 +232,13 @@ Configure glossaries and enforcement in `shiftlefter.edn`:
 ```
 
 Benefits:
+
 - Catch typos at bind time ("Alcie" → "Did you mean :alice?")
 - Validate verbs against interface types
 - Auto-provision capabilities (browsers, API clients)
 - Emit `:step/svoi` events for traceability
 
-See `examples/svo-demo/` for a complete working example.
+See `examples/02b-browser-multi-actor/` for a working example with glossary validation.
 
 ---
 
@@ -222,7 +251,7 @@ ShiftLefter looks for `shiftlefter.edn` in the current directory. Copy `shiftlef
 {:parser {:dialect "en"}       ;; Language dialect (en, fr, de, etc.)
 
  :runner {:step-paths ["steps/"]      ;; Where to find step definitions
-          :allow-pending? false}}     ;; Exit 0 even with pending steps?
+          :allow-pending? false}}     ;; true = pending steps don't fail the run
 ```
 
 **Precedence:**
@@ -261,6 +290,7 @@ For framework integration, use `shiftlefter.gherkin.api`:
 ```
 
 **Envelope Contract:** All API functions return maps with vector values (never nil):
+
 - `:tokens` → vector of Token records
 - `:ast` → vector of Feature records
 - `:pickles` → vector of pickle maps
@@ -276,19 +306,19 @@ For interactive development and experimentation, use `shiftlefter.repl`:
 (require '[shiftlefter.repl :as repl])
 (require '[shiftlefter.stepengine.registry :refer [defstep]])
 
-;; Define steps
-(defstep #"I have (\d+) cucumbers" [n]
-  {:count (Integer/parseInt n)})
+;; Define steps — ctx is always first, followed by captures
+(defstep #"I have (\d+) cucumbers" [ctx n]
+  (assoc ctx :count (Integer/parseInt n)))
 
-(defstep #"I eat (\d+)" [n ctx]
-  (update (:scenario ctx) :count - (Integer/parseInt n)))
+(defstep #"I eat (\d+)" [ctx n]
+  (update ctx :count - (Integer/parseInt n)))
 
-(defstep #"I should have (\d+) left" [n ctx]
+(defstep #"I should have (\d+) left" [ctx n]
   (let [expected (Integer/parseInt n)
-        actual (:count (:scenario ctx))]
+        actual (:count ctx)]
     (when (not= expected actual)
       (throw (ex-info "Mismatch" {:expected expected :actual actual})))
-    (:scenario ctx)))
+    ctx))
 ```
 
 ### Structured Mode (requires Feature/Scenario)
@@ -387,6 +417,7 @@ Use `free` for multi-user scenarios where each actor has separate state:
 
 ### Canonical Formatting
 When using `fmt --canonical` or `api/fmt-canonical`:
+
 - Normalizes line endings to LF (`\n`)
 - Normalizes indentation to 2 spaces
 - Normalizes tag spacing to single space between tags
@@ -410,6 +441,7 @@ See [ERRATA.md](ERRATA.md) for known edge cases and workarounds.
 
 - [docs/SVO.md](docs/SVO.md) — SVO validation guide (glossaries, defstep metadata, migration)
 - [docs/GLOSSARY.md](docs/GLOSSARY.md) — Terminology reference
+- [docs/FUZZ.md](docs/FUZZ.md) — Fuzz testing and delta debugging
 - [CHANGELOG.md](CHANGELOG.md) — Release history
 - [ERRATA.md](ERRATA.md) — Known edge cases and workarounds
 
@@ -423,28 +455,18 @@ See [ERRATA.md](ERRATA.md) for known edge cases and workarounds.
 src/                           # Framework source code
 resources/shiftlefter/         # Runtime data and templates
 ├── gherkin/i18n.json         # Dialect definitions (70+ languages)
+├── glossaries/               # Default glossary files
 └── templates/shiftlefter.edn # Config template for `sl init` (future)
 ```
 
-**What doesn't ship:**
+**Not in the JAR (but in the repo):**
 
 ```
-test/                          # Framework tests
-├── fixtures/gherkin/         # Parser test fixtures
-│   ├── invalid/              # Curated invalid files (error snapshots)
-│   ├── stress/               # Edge case torture tests
-│   ├── encoding/             # UTF-8 fixtures
-│   ├── eol-types/            # Line ending fixtures
-│   └── outlines/             # Scenario outline fixtures
-├── fixtures/macros/          # Macro test fixtures
-└── shiftlefter-test.edn      # Test configuration
-
-examples/
-├── quickstart/               # Basic demo (not in JAR)
-└── svo-demo/                 # SVO validation example with glossaries
-
-compliance/                    # Cucumber official test suite (git submodule)
-fuzz/artifacts/               # Generated fuzz failures (gitignored)
+docs/                          # User-facing documentation (SVO, glossary, fuzz, etc.)
+examples/                      # Worked tutorial examples (see Examples section above)
+test/                          # Test suite: fixtures, compliance snapshots, property tests
+release/                       # Release packaging (sl wrapper script for distribution zip)
+bin/                           # Dev scripts (kaocha, kondo, compliance, repl-eval)
 ```
 
 **Configuration:**
@@ -456,7 +478,7 @@ fuzz/artifacts/               # Generated fuzz failures (gitignored)
 
 ## Testing
 
-**865 tests, 2582 assertions, 0 failures**
+**945 tests, 2869 assertions, 0 failures**
 
 ```bash
 # Run full test suite
@@ -501,7 +523,7 @@ CLI commands return consistent exit codes for scripting and CI integration.
 | Code | Meaning |
 |------|---------|
 | 0 | Success (formatted output printed to stdout) |
-| 1 | File has parse errors, or contains unsupported constructs (e.g., `Rule:`) |
+| 1 | File has parse errors |
 | 2 | Path doesn't exist or I/O error |
 
 ### `sl gherkin fuzz`
@@ -523,8 +545,11 @@ CLI commands return consistent exit codes for scripting and CI integration.
 | 1 | One or more checks failed |
 | 2 | Verify itself errored (bug/unexpected exception) |
 
-**Default (fast):** CLI wiring, smoke fixtures, fuzz artifact integrity
+**Default (fast):** CLI wiring, smoke fixtures
+
 **With `--ci`:** Adds kaocha tests, compliance suite, fuzz smoke
+
+**With `--fuzzed`:** Checks fuzz artifact integrity (opt-in, can be slow with large artifact sets)
 
 ---
 

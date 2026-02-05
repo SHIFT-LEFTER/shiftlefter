@@ -32,15 +32,15 @@
     (api/pickles ast "test.feature")))
 
 (defn- compile-with-macros [pickles registry-paths]
-  (let [runner-cfg {:macros {:enabled? true
-                             :registry-paths registry-paths}}
+  (let [config {:runner {:macros {:enabled? true
+                                  :registry-paths registry-paths}}}
         stepdefs (registry/all-stepdefs)]
-    (compile/compile-suite runner-cfg (:pickles pickles) stepdefs)))
+    (compile/compile-suite config (:pickles pickles) stepdefs)))
 
 (defn- compile-without-macros [pickles]
-  (let [runner-cfg {:macros {:enabled? false}}
+  (let [config {:runner {:macros {:enabled? false}}}
         stepdefs (registry/all-stepdefs)]
-    (compile/compile-suite runner-cfg (:pickles pickles) stepdefs)))
+    (compile/compile-suite config (:pickles pickles) stepdefs)))
 
 ;; -----------------------------------------------------------------------------
 ;; Happy Path Tests

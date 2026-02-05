@@ -38,7 +38,7 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest test-compile-suite-delegates-to-bind
-  (testing "compile-suite produces same result as bind-suite"
+  (testing "compile-suite produces same result as bind-suite in vanilla mode"
     (registry/register! #"I have (\d+) items"
                         (fn [n] n)
                         {:ns 's :file "s.clj" :line 1})
@@ -48,8 +48,8 @@
     (let [pickles [(make-pickle "p1" ["I have 5 items"])
                    (make-pickle "p2" ["I add 3 more"])]
           stepdefs (registry/all-stepdefs)
-          runner-config {}  ; unused in Phase 2.1
-          compile-result (compile/compile-suite runner-config pickles stepdefs)
+          config {}  ; vanilla mode (no :svo key)
+          compile-result (compile/compile-suite config pickles stepdefs)
           bind-result (bind/bind-suite pickles stepdefs)]
       ;; Same structure
       (is (= (:runnable? compile-result) (:runnable? bind-result)))
@@ -59,18 +59,18 @@
 (deftest test-compile-suite-runnable-plan
   (testing "compile-suite returns runnable plan when all steps match"
     (registry/register! #"I have (\d+) items in my cart"
-                        (fn [n] nil)
+                        (fn [_n] nil)
                         {:ns 's :file "s.clj" :line 1})
     (registry/register! #"I add (\d+) more items"
-                        (fn [n] nil)
+                        (fn [_n] nil)
                         {:ns 's :file "s.clj" :line 2})
     (registry/register! #"I should have (\d+) items total"
-                        (fn [n] nil)
+                        (fn [_n] nil)
                         {:ns 's :file "s.clj" :line 3})
     (let [pickle (make-pickle "basic" ["I have 5 items in my cart"
                                        "I add 3 more items"
                                        "I should have 8 items total"])
-          {:keys [plans runnable? diagnostics]} (compile/compile-suite {} [pickle] (registry/all-stepdefs))]
+          {:keys [plans runnable? diagnostics]} (compile/compile-suite {:runner {}} [pickle] (registry/all-stepdefs))]
       (is runnable?)
       (is (= 1 (count plans)))
       (is (:plan/runnable? (first plans)))
@@ -82,25 +82,24 @@
                         (fn [n] n)
                         {:ns 's :file "s.clj" :line 1})
     (let [pickle (make-pickle "test" ["I have 5 items" "undefined step"])
-          {:keys [runnable? diagnostics]} (compile/compile-suite {} [pickle] (registry/all-stepdefs))]
+          {:keys [runnable? diagnostics]} (compile/compile-suite {:runner {}} [pickle] (registry/all-stepdefs))]
       (is (not runnable?))
       (is (= 1 (-> diagnostics :counts :undefined-count))))))
 
-(deftest test-compile-suite-accepts-runner-config
-  (testing "compile-suite accepts runner-config parameter (for future use)"
+(deftest test-compile-suite-accepts-full-config
+  (testing "compile-suite accepts full config parameter"
     (registry/register! #"a step"
                         (fn [] nil)
                         {:ns 's :file "s.clj" :line 1})
-    (let [runner-config {:macros {:enabled? false}
-                         :step-paths ["steps/"]}
+    (let [config {:runner {:macros {:enabled? false}
+                           :step-paths ["steps/"]}}
           pickle (make-pickle "test" ["a step"])
-          {:keys [runnable?]} (compile/compile-suite runner-config [pickle] (registry/all-stepdefs))]
-      ;; Config is accepted without error (currently unused)
+          {:keys [runnable?]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
       (is runnable?))))
 
 (deftest test-compile-suite-empty-pickles
   (testing "compile-suite handles empty pickle list"
-    (let [{:keys [plans runnable? diagnostics]} (compile/compile-suite {} [] (registry/all-stepdefs))]
+    (let [{:keys [plans runnable? diagnostics]} (compile/compile-suite {:runner {}} [] (registry/all-stepdefs))]
       (is (empty? plans))
       (is runnable?)  ; no issues = runnable
       (is (zero? (-> diagnostics :counts :total-issues))))))
@@ -128,7 +127,7 @@
                               ["I have 5 items in my cart"
                                "I add 3 more items"
                                "I should have 8 items total"])
-          {:keys [plans runnable?]} (compile/compile-suite {} [pickle] (registry/all-stepdefs))]
+          {:keys [plans runnable?]} (compile/compile-suite {:runner {}} [pickle] (registry/all-stepdefs))]
       (is runnable?)
       (is (= 1 (count plans)))
       (is (every? #(= :matched (:status %)) (-> plans first :plan/steps))))))
@@ -144,8 +143,8 @@
                         {:ns 's :file "s.clj" :line 1})
     (let [pickle (make-pickle "test" ["I have 5 items"])
           ;; Macros explicitly disabled
-          runner-config {:macros {:enabled? false}}
-          {:keys [runnable? plans]} (compile/compile-suite runner-config [pickle] (registry/all-stepdefs))]
+          config {:runner {:macros {:enabled? false}}}
+          {:keys [runnable? plans]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
       (is runnable?)
       (is (= 1 (count plans)))
       ;; No macro metadata on steps
@@ -171,8 +170,8 @@
                         {:ns 's :file "s.clj" :line 5})
     ;; Use auth.ini macro fixture
     (let [macro-path "test/fixtures/macros/auth.ini"
-          runner-config {:macros {:enabled? true
-                                  :registry-paths [macro-path]}}
+          config {:runner {:macros {:enabled? true
+                                    :registry-paths [macro-path]}}}
           ;; Pickle with macro call
           pickle {:pickle/id (java.util.UUID/randomUUID)
                   :pickle/name "test"
@@ -181,7 +180,7 @@
                                   :step/text "login as alice +"
                                   :step/location {:line 5 :column 5}
                                   :step/arguments []}]}
-          {:keys [runnable? plans]} (compile/compile-suite runner-config [pickle] (registry/all-stepdefs))]
+          {:keys [runnable? plans]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
       (is runnable?)
       (is (= 1 (count plans)))
       ;; Expanded: wrapper + 5 children = 6 steps
@@ -193,10 +192,10 @@
 (deftest test-compile-suite-macros-registry-load-error
   (testing "macro registry load error returns not runnable"
     (let [;; Non-existent file
-          runner-config {:macros {:enabled? true
-                                  :registry-paths ["nonexistent/macros.ini"]}}
+          config {:runner {:macros {:enabled? true
+                                    :registry-paths ["nonexistent/macros.ini"]}}}
           pickle (make-pickle "test" ["some step"])
-          {:keys [runnable? diagnostics]} (compile/compile-suite runner-config [pickle] (registry/all-stepdefs))]
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
       (is (not runnable?))
       (is (seq (:macro-errors diagnostics)))
       (is (= :macro/file-not-found (-> diagnostics :macro-errors first :type))))))
@@ -205,8 +204,8 @@
   (testing "macro expansion error (undefined macro) returns not runnable"
     ;; Use auth.ini but call undefined macro
     (let [macro-path "test/fixtures/macros/auth.ini"
-          runner-config {:macros {:enabled? true
-                                  :registry-paths [macro-path]}}
+          config {:runner {:macros {:enabled? true
+                                    :registry-paths [macro-path]}}}
           ;; Pickle with undefined macro call
           pickle {:pickle/id (java.util.UUID/randomUUID)
                   :pickle/name "test"
@@ -215,7 +214,7 @@
                                   :step/text "undefined macro +"
                                   :step/location {:line 5 :column 5}
                                   :step/arguments []}]}
-          {:keys [runnable? diagnostics]} (compile/compile-suite runner-config [pickle] (registry/all-stepdefs))]
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
       (is (not runnable?))
       (is (seq (:macro-errors diagnostics)))
       (is (= :macro/undefined (-> diagnostics :macro-errors first :type))))))
@@ -226,11 +225,11 @@
                         (fn [n] n)
                         {:ns 's :file "s.clj" :line 1})
     (let [macro-path "test/fixtures/macros/auth.ini"
-          runner-config {:macros {:enabled? true
-                                  :registry-paths [macro-path]}}
+          config {:runner {:macros {:enabled? true
+                                    :registry-paths [macro-path]}}}
           ;; Regular step (no + suffix)
           pickle (make-pickle "test" ["I have 5 items"])
-          {:keys [runnable? plans]} (compile/compile-suite runner-config [pickle] (registry/all-stepdefs))]
+          {:keys [runnable? plans]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
       (is runnable?)
       (is (= 1 (count plans)))
       ;; No expansion, just 1 step
@@ -258,8 +257,8 @@
                         (fn [n] n)
                         {:ns 's :file "s.clj" :line 6})
     (let [macro-path "test/fixtures/macros/auth.ini"
-          runner-config {:macros {:enabled? true
-                                  :registry-paths [macro-path]}}
+          config {:runner {:macros {:enabled? true
+                                    :registry-paths [macro-path]}}}
           pickle1 {:pickle/id (java.util.UUID/randomUUID)
                    :pickle/name "with macro"
                    :pickle/steps [{:step/id (java.util.UUID/randomUUID)
@@ -268,10 +267,82 @@
                                    :step/location {:line 5 :column 5}
                                    :step/arguments []}]}
           pickle2 (make-pickle "without macro" ["I have 5 items"])
-          {:keys [runnable? plans]} (compile/compile-suite runner-config [pickle1 pickle2] (registry/all-stepdefs))]
+          {:keys [runnable? plans]} (compile/compile-suite config [pickle1 pickle2] (registry/all-stepdefs))]
       (is runnable?)
       (is (= 2 (count plans)))
       ;; First pickle: expanded (wrapper + 5 children = 6 steps)
       (is (= 6 (count (-> plans first :plan/steps))))
       ;; Second pickle: not expanded (1 step)
       (is (= 1 (count (-> plans second :plan/steps)))))))
+
+;; -----------------------------------------------------------------------------
+;; Shifted Mode Tests (WI-031.001)
+;; -----------------------------------------------------------------------------
+
+(deftest test-shifted-mode-vanilla-no-svo-key
+  (testing "vanilla mode (no :svo key) preserves existing behavior"
+    (registry/register! #"I have (\d+) items"
+                        (fn [n] n)
+                        {:ns 's :file "s.clj" :line 1})
+    (let [config {}  ; no :svo key = vanilla mode
+          pickle (make-pickle "test" ["I have 5 items"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
+      (is runnable?)
+      ;; No SVO issues in vanilla mode
+      (is (empty? (:svo-issues diagnostics))))))
+
+(deftest test-shifted-mode-happy-path
+  (testing "shifted mode loads glossary and passes opts to bind-suite"
+    (registry/register! #"I have (\d+) items"
+                        (fn [n] n)
+                        {:ns 's :file "s.clj" :line 1})
+    (let [config {:svo {:unknown-subject :warn :unknown-verb :error}
+                  :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
+                               :verbs {:web "test/fixtures/glossaries/verbs-web-project.edn"}}
+                  :interfaces {:web {:type :web :adapter :etaoin}}}
+          pickle (make-pickle "test" ["I have 5 items"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
+      (is runnable?)
+      ;; SVO issues empty (no SVOI metadata on our simple step)
+      (is (= 0 (-> diagnostics :counts :svo-issue-count))))))
+
+(deftest test-shifted-mode-missing-glossaries-config
+  (testing "shifted mode + missing :glossaries key returns error"
+    (registry/register! #"a step"
+                        (fn [] nil)
+                        {:ns 's :file "s.clj" :line 1})
+    (let [config {:svo {:unknown-subject :warn}}  ; no :glossaries key
+          pickle (make-pickle "test" ["a step"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
+      (is (not runnable?))
+      (is (seq (:errors diagnostics)))
+      (is (= :svo/missing-glossaries-config (-> diagnostics :errors first :type))))))
+
+(deftest test-shifted-mode-glossary-file-not-found
+  (testing "shifted mode + glossary file not found returns error"
+    (registry/register! #"a step"
+                        (fn [] nil)
+                        {:ns 's :file "s.clj" :line 1})
+    (let [config {:svo {:unknown-subject :warn}
+                  :glossaries {:subjects "nonexistent/subjects.edn"}}
+          pickle (make-pickle "test" ["a step"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
+      (is (not runnable?))
+      (is (seq (:errors diagnostics)))
+      (is (= :svo/glossary-file-not-found (-> diagnostics :errors first :type)))
+      (is (= "nonexistent/subjects.edn" (-> diagnostics :errors first :path))))))
+
+(deftest test-shifted-mode-verb-glossary-file-not-found
+  (testing "shifted mode + verb glossary file not found returns error"
+    (registry/register! #"a step"
+                        (fn [] nil)
+                        {:ns 's :file "s.clj" :line 1})
+    (let [config {:svo {:unknown-verb :error}
+                  :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
+                               :verbs {:web "nonexistent/verbs.edn"}}}
+          pickle (make-pickle "test" ["a step"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
+      (is (not runnable?))
+      (is (seq (:errors diagnostics)))
+      (is (= :svo/glossary-file-not-found (-> diagnostics :errors first :type)))
+      (is (= "nonexistent/verbs.edn" (-> diagnostics :errors first :path))))))

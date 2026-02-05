@@ -35,6 +35,20 @@
 (s/def ::line pos-int?)
 (s/def ::column pos-int?)
 
+;; Common specs for JSON output structures
+(s/def ::id string?)
+(s/def ::keyword string?)
+(s/def ::keywordType #{"Context" "Action" "Outcome" "Conjunction" "Unknown"})
+(s/def ::name string?)
+(s/def ::description string?)
+(s/def ::text string?)
+(s/def ::language string?)
+(s/def ::tags (s/coll-of map?))
+(s/def ::steps (s/coll-of map?))
+(s/def ::examples (s/coll-of map?))
+(s/def ::children (s/coll-of map?))
+(s/def ::location ::json-location)
+
 (s/def ::json-step
   (s/keys :req-un [::id ::keyword ::keywordType ::location ::text]))
 

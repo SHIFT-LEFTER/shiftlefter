@@ -1,13 +1,15 @@
 (ns shiftlefter.gherkin.verify
   "Validator and CI trust checks for ShiftLefter.
 
-   Two modes:
+   Three modes:
    - Default (validator-only): Fast checks for local dev
    - --ci: Full umbrella including kaocha, compliance, fuzz smoke
+   - --fuzzed: Include fuzz artifact integrity checks (can be slow)
 
    Usage:
-     (run-checks {})           ; validator-only
-     (run-checks {:ci true})   ; full CI mode"
+     (run-checks {})                    ; validator-only (fast)
+     (run-checks {:ci true})            ; full CI mode
+     (run-checks {:fuzzed true})        ; include artifact checks"
   (:require [babashka.fs :as fs]
             [clojure.java.shell :as shell]
             [shiftlefter.gherkin.api :as api]
@@ -72,7 +74,7 @@
                       :details {:path path :errors errors}))))))
 
 (defn check-smoke-fmt
-  "Check that a smoke fixture passes fmt --check (roundtrip)."
+  "Check that a smoke fixture is in canonical format (fmt --check)."
   [path]
   (let [read-result (io/read-file-utf8 path)]
     (if (= :error (:status read-result))
@@ -82,13 +84,11 @@
       (let [result (api/fmt-check (:content read-result))]
         (if (= :ok (:status result))
           (make-check :smoke-fmt :ok
-                      :message (str "Roundtrip OK: " path))
+                      :message (str "Canonical format OK: " path))
           (make-check :smoke-fmt :fail
-                      :message (str "Roundtrip failed: " path)
+                      :message (str "Needs formatting: " path)
                       :details {:path path
-                                :reason (:reason result)
-                                :original-length (:original-length result)
-                                :reconstructed-length (:reconstructed-length result)}))))))
+                                :reason (:reason result)}))))))
 
 (defn check-smoke-roundtrip
   "Check that a smoke fixture passes api/roundtrip-ok?."
@@ -247,8 +247,10 @@
   ["examples/quickstart/features/toy-login.feature"])
 
 (defn run-validator-checks
-  "Run validator-only checks (fast, default mode)."
-  []
+  "Run validator-only checks (fast, default mode).
+   Options:
+   - :fuzzed - Include fuzz artifact integrity checks (can be slow)"
+  [{:keys [fuzzed]}]
   (let [checks (atom [])]
     ;; CLI wiring
     (swap! checks conj (check-cli-wiring))
@@ -259,8 +261,9 @@
         (swap! checks conj (check-smoke-parse path))
         (swap! checks conj (check-smoke-fmt path))))
 
-    ;; Artifact integrity (if present)
-    (swap! checks into (check-all-artifacts))
+    ;; Artifact integrity (only when --fuzzed flag is set)
+    (when fuzzed
+      (swap! checks into (check-all-artifacts)))
 
     @checks))
 
@@ -271,29 +274,42 @@
    (check-compliance)
    (check-fuzz-smoke)])
 
+(defn in-project-context?
+  "Check if we're running from the ShiftLefter project directory."
+  []
+  (and (fs/exists? "bin/sl")
+       (fs/exists? "deps.edn")))
+
 (defn run-checks
   "Run all verification checks.
    Options:
    - :ci - Include CI mode checks (kaocha, compliance, fuzz smoke)
+   - :fuzzed - Include fuzz artifact integrity checks (can be slow)
 
    Returns:
-   {:status :ok/:fail
+   {:status :ok/:fail/:skip
     :checks [...]
     :failures [...]
     :summary {:total N :passed N :failed N}}"
-  [{:keys [ci]}]
-  (let [validator-checks (run-validator-checks)
-        ci-checks (when ci (run-ci-checks))
-        all-checks (vec (concat validator-checks ci-checks))
-        failures (filterv #(not (check-passed? %)) all-checks)
-        passed (count (filter check-passed? all-checks))
-        failed (count failures)]
-    {:status (if (empty? failures) :ok :fail)
-     :checks all-checks
-     :failures failures
-     :summary {:total (count all-checks)
-               :passed passed
-               :failed failed}}))
+  [{:keys [ci fuzzed]}]
+  (if-not (in-project-context?)
+    {:status :skip
+     :message "Not in ShiftLefter project directory. sl verify is a development tool."
+     :checks []
+     :failures []
+     :summary {:total 0 :passed 0 :failed 0}}
+    (let [validator-checks (run-validator-checks {:fuzzed fuzzed})
+          ci-checks (when ci (run-ci-checks))
+          all-checks (vec (concat validator-checks ci-checks))
+          failures (filterv #(not (check-passed? %)) all-checks)
+          passed (count (filter check-passed? all-checks))
+          failed (count failures)]
+      {:status (if (empty? failures) :ok :fail)
+       :checks all-checks
+       :failures failures
+       :summary {:total (count all-checks)
+                 :passed passed
+                 :failed failed}})))
 
 ;; -----------------------------------------------------------------------------
 ;; Output formatting

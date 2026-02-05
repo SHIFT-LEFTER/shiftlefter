@@ -43,19 +43,33 @@
 (defn capability-key
   "Construct the ctx key for a capability.
 
-   Interface name :web => :cap/web"
-  [interface-name]
-  (keyword "cap" (name interface-name)))
+   1-arity: interface only — :web => :cap/web
+   2-arity: interface + subject — :web :alice => :cap/web.alice
+
+   Subject-keyed capabilities allow multiple instances per interface
+   (e.g., separate browsers for Alice and Bob)."
+  ([interface-name]
+   (keyword "cap" (name interface-name)))
+  ([interface-name subject]
+   (if subject
+     (keyword "cap" (str (name interface-name) "." (name subject)))
+     (keyword "cap" (name interface-name)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Predicates
 ;; -----------------------------------------------------------------------------
 
 (defn capability-present?
-  "Returns true if ctx has a capability for the given interface name."
-  [ctx interface-name]
-  (let [k (capability-key interface-name)]
-    (boolean (get ctx k))))
+  "Returns true if ctx has a capability for the given interface name.
+
+   2-arity: checks interface only (:cap/web)
+   3-arity: checks interface+subject (:cap/web.alice)"
+  ([ctx interface-name]
+   (let [k (capability-key interface-name)]
+     (boolean (get ctx k))))
+  ([ctx interface-name subject]
+   (let [k (capability-key interface-name subject)]
+     (boolean (get ctx k)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Accessors
@@ -64,10 +78,14 @@
 (defn get-capability
   "Returns the capability implementation for interface name, or nil if not present.
 
-   Returns the :impl value, not the full capability map."
-  [ctx interface-name]
-  (let [k (capability-key interface-name)]
-    (get-in ctx [k :impl])))
+   Returns the :impl value, not the full capability map.
+   3-arity version checks subject-keyed capability."
+  ([ctx interface-name]
+   (let [k (capability-key interface-name)]
+     (get-in ctx [k :impl])))
+  ([ctx interface-name subject]
+   (let [k (capability-key interface-name subject)]
+     (get-in ctx [k :impl]))))
 
 (defn get-capability-mode
   "Returns the capability mode (:ephemeral or :persistent), or nil if not present."
@@ -77,9 +95,12 @@
 
 (defn get-capability-entry
   "Returns the full capability entry map {:impl ... :mode ...}, or nil if not present."
-  [ctx interface-name]
-  (let [k (capability-key interface-name)]
-    (get ctx k)))
+  ([ctx interface-name]
+   (let [k (capability-key interface-name)]
+     (get ctx k)))
+  ([ctx interface-name subject]
+   (let [k (capability-key interface-name subject)]
+     (get ctx k))))
 
 ;; -----------------------------------------------------------------------------
 ;; Mutators (pure — return new ctx)
@@ -93,11 +114,16 @@
    - interface-name: Keyword like :web, :api
    - impl: The capability implementation
    - mode: :ephemeral or :persistent
+   - subject: Optional subject keyword for per-subject storage
 
-   Returns updated ctx with capability stored under :cap/<interface-name>."
-  [ctx interface-name impl mode]
-  (let [k (capability-key interface-name)]
-    (assoc ctx k {:impl impl :mode mode})))
+   Returns updated ctx with capability stored under :cap/<interface-name>
+   or :cap/<interface-name>.<subject>."
+  ([ctx interface-name impl mode]
+   (let [k (capability-key interface-name)]
+     (assoc ctx k {:impl impl :mode mode})))
+  ([ctx interface-name impl mode subject]
+   (let [k (capability-key interface-name subject)]
+     (assoc ctx k {:impl impl :mode mode}))))
 
 (defn dissoc-capability
   "Remove a capability from ctx for the given interface name.
@@ -116,6 +142,25 @@
     (if (get ctx k)
       (assoc-in ctx [k :impl] new-impl)
       ctx)))
+
+;; -----------------------------------------------------------------------------
+;; Subject Key Parsing
+;; -----------------------------------------------------------------------------
+
+(defn parse-capability-name
+  "Parse a capability name into interface and optional subject.
+
+   :web        => {:interface :web :subject nil}
+   :web.alice  => {:interface :web :subject :alice}
+
+   Used by cleanup to find the right interface config for subject-keyed capabilities."
+  [cap-name]
+  (let [n (name cap-name)
+        dot-idx (.indexOf n ".")]
+    (if (neg? dot-idx)
+      {:interface cap-name :subject nil}
+      {:interface (keyword (subs n 0 dot-idx))
+       :subject (keyword (subs n (inc dot-idx)))})))
 
 ;; -----------------------------------------------------------------------------
 ;; Enumeration

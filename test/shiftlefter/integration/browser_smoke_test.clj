@@ -61,9 +61,27 @@
     (require '[etaoin.api :as eta])
     ((resolve 'etaoin.api/fill) driver (:q locator) text)
     this)
-  (element-count [this locator]
+  (element-count [_this locator]
     (require '[etaoin.api :as eta])
-    (count ((resolve 'etaoin.api/query-all) driver (:q locator)))))
+    (count ((resolve 'etaoin.api/query-all) driver (:q locator))))
+
+  (get-text [_this locator]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/get-element-text) driver (:q locator)))
+
+  (get-url [_this]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/get-url) driver))
+
+  (get-title [_this]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/get-title) driver))
+
+  (visible? [_this locator]
+    (require '[etaoin.api :as eta])
+    (try
+      ((resolve 'etaoin.api/displayed?) driver (:q locator))
+      (catch Exception _ false))))
 
 ;; -----------------------------------------------------------------------------
 ;; Integration Tests
@@ -102,7 +120,7 @@
   (if live-webdriver?
     (testing "Session can be detached and reattached"
       (let [driver (session/make-driver webdriver-url)
-            {:keys [ok etaoin-driver]} (session/create-session! driver)]
+            {:keys [ok]} (session/create-session! driver)]
         (when ok
           (try
             (let [session-id (:session ok)

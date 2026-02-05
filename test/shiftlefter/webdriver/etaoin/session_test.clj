@@ -139,20 +139,22 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest build-debugger-capabilities-test
-  (testing "builds capabilities with debuggerAddress"
+  (testing "builds capabilities with debuggerAddress only"
+    ;; Stealth options (excludeSwitches, useAutomationExtension) are NOT included
+    ;; in connect capabilities — they're Chrome launch options handled by
+    ;; browser.chrome/build-chrome-args. ChromeDriver rejects them when connecting
+    ;; to an already-running Chrome.
     (let [caps (sess/build-debugger-capabilities {:port 9222})]
       (is (= "127.0.0.1:9222" (get-in caps [:goog:chromeOptions :debuggerAddress])))
-      (is (nil? (get-in caps [:goog:chromeOptions :excludeSwitches])))))
+      (is (nil? (get-in caps [:goog:chromeOptions :excludeSwitches])))
+      (is (nil? (get-in caps [:goog:chromeOptions :useAutomationExtension])))))
 
-  (testing "adds stealth options when stealth true"
+  (testing "stealth option is ignored (handled at Chrome launch time)"
+    ;; Even if stealth is passed, it shouldn't affect connect capabilities
     (let [caps (sess/build-debugger-capabilities {:port 9333 :stealth true})]
       (is (= "127.0.0.1:9333" (get-in caps [:goog:chromeOptions :debuggerAddress])))
-      (is (= ["enable-automation"] (get-in caps [:goog:chromeOptions :excludeSwitches])))
-      (is (false? (get-in caps [:goog:chromeOptions :useAutomationExtension])))))
-
-  (testing "stealth false doesn't add stealth opts"
-    (let [caps (sess/build-debugger-capabilities {:port 9222 :stealth false})]
-      (is (nil? (get-in caps [:goog:chromeOptions :excludeSwitches]))))))
+      (is (nil? (get-in caps [:goog:chromeOptions :excludeSwitches])))
+      (is (nil? (get-in caps [:goog:chromeOptions :useAutomationExtension]))))))
 
 ;; Integration test for connect-to-existing! requires Chrome already running
 ;; with --remote-debugging-port. This is harder to test automatically because

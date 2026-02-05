@@ -12,6 +12,9 @@
 (def check-files #'core/check-files)
 (def format-single-file #'core/format-single-file)
 (def format-files #'core/format-files)
+(def get-user-cwd #'core/get-user-cwd)
+(def resolve-user-path #'core/resolve-user-path)
+(def resolve-user-paths #'core/resolve-user-paths)
 
 ;; Test fixture for temp files
 (def ^:dynamic *temp-dir* nil)
@@ -61,23 +64,31 @@
       (is (= :not-found (:status result))))))
 
 (deftest check-files-test
-  (testing "all valid files returns exit-code 0"
+  (testing "canonical file returns exit-code 0"
+    ;; Use a file we know is canonical (we formatted it)
     (let [result (check-files ["examples/quickstart/features/toy-login.feature"])]
       (is (= 0 (:exit-code result)))
       (is (= 1 (:valid result)))
       (is (= 0 (:invalid result)))))
 
-  (testing "directory with valid files returns exit-code 0"
-    (let [result (check-files ["compliance/gherkin/testdata/good/"])]
-      (is (= 0 (:exit-code result)))
-      (is (= 46 (:valid result)))
-      (is (= 0 (:invalid result)))))
+  (testing "file needing formatting returns exit-code 1"
+    (let [path (str (jio/file *temp-dir* "needs-fmt.feature"))
+          ;; Non-canonical: extra spaces, missing blank line after Feature
+          content "Feature:  Test\n  Scenario: S\n    Given step\n"]
+      (spit path content)
+      (let [result (check-files [path])]
+        (is (= 1 (:exit-code result)))
+        (is (= 0 (:valid result)))
+        (is (= 1 (:invalid result))))))
 
-  (testing "directory with invalid files returns exit-code 1"
-    (let [result (check-files ["compliance/gherkin/testdata/bad/"])]
-      (is (= 1 (:exit-code result)))
-      (is (= 0 (:valid result)))
-      (is (pos? (:invalid result)))))
+  (testing "file with parse errors returns exit-code 1"
+    (let [path (str (jio/file *temp-dir* "parse-error.feature"))
+          content "Not valid gherkin at all!!!"]
+      (spit path content)
+      (let [result (check-files [path])]
+        (is (= 1 (:exit-code result)))
+        (is (= 0 (:valid result)))
+        (is (= 1 (:invalid result))))))
 
   (testing "non-existent path returns exit-code 2"
     (let [result (check-files ["nonexistent/"])]
@@ -88,11 +99,16 @@
       (is (= 2 (:exit-code result)))
       (is (= 0 (:total result)))))
 
-  (testing "multiple paths works"
-    (let [result (check-files ["examples/quickstart/features/toy-login.feature"
-                               "compliance/gherkin/testdata/good/minimal.feature"])]
-      (is (= 0 (:exit-code result)))
-      (is (= 2 (:valid result))))))
+  (testing "multiple canonical files works"
+    ;; Create two canonical files
+    (let [path1 (str (jio/file *temp-dir* "canonical1.feature"))
+          path2 (str (jio/file *temp-dir* "canonical2.feature"))
+          content "Feature: Test\n\n  Scenario: S\n    Given step\n"]
+      (spit path1 content)
+      (spit path2 content)
+      (let [result (check-files [path1 path2])]
+        (is (= 0 (:exit-code result)))
+        (is (= 2 (:valid result)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Format tests (--write mode)
@@ -180,3 +196,64 @@
       (let [r2 (format-files [(str *temp-dir*)])]
         (is (= 0 (:reformatted r2)))
         (is (= 1 (:unchanged r2)))))))
+
+;; -----------------------------------------------------------------------------
+;; Path Resolution tests (for PATH-based usage)
+;; -----------------------------------------------------------------------------
+
+(deftest get-user-cwd-test
+  (testing "returns SL_USER_CWD when set"
+    ;; Can't easily test this without modifying env, but we test the fallback
+    (is (string? (get-user-cwd)))
+    (is (not (str/blank? (get-user-cwd)))))
+
+  (testing "falls back to user.dir when SL_USER_CWD not set"
+    ;; The default behavior when env var not set
+    (let [cwd (get-user-cwd)]
+      (is (= cwd (or (System/getenv "SL_USER_CWD")
+                     (System/getProperty "user.dir")))))))
+
+(deftest resolve-user-path-test
+  (testing "absolute paths returned unchanged"
+    (is (= "/absolute/path/file.feature"
+           (resolve-user-path "/absolute/path/file.feature")))
+    (is (= "/tmp/test.feature"
+           (resolve-user-path "/tmp/test.feature"))))
+
+  (testing "relative paths resolved against user CWD"
+    (let [resolved (resolve-user-path "relative/path.feature")
+          user-cwd (get-user-cwd)]
+      ;; Should start with the user CWD
+      (is (str/starts-with? resolved user-cwd))
+      ;; Should end with the relative path
+      (is (str/ends-with? resolved "relative/path.feature"))))
+
+  (testing "current directory reference works"
+    (let [resolved (resolve-user-path "./file.feature")
+          user-cwd (get-user-cwd)]
+      (is (str/starts-with? resolved user-cwd))))
+
+  (testing "simple filename resolves to CWD"
+    (let [resolved (resolve-user-path "smoke.feature")
+          user-cwd (get-user-cwd)]
+      (is (str/starts-with? resolved user-cwd))
+      (is (str/ends-with? resolved "smoke.feature")))))
+
+(deftest resolve-user-paths-test
+  (testing "resolves multiple paths"
+    (let [resolved (resolve-user-paths ["file1.feature" "/absolute/file2.feature" "dir/file3.feature"])
+          user-cwd (get-user-cwd)]
+      (is (= 3 (count resolved)))
+      ;; First: relative -> resolved
+      (is (str/starts-with? (first resolved) user-cwd))
+      (is (str/ends-with? (first resolved) "file1.feature"))
+      ;; Second: absolute -> unchanged
+      (is (= "/absolute/file2.feature" (second resolved)))
+      ;; Third: relative with dir -> resolved
+      (is (str/starts-with? (nth resolved 2) user-cwd))))
+
+  (testing "empty list returns empty"
+    (is (= [] (resolve-user-paths []))))
+
+  (testing "handles nil gracefully"
+    (is (= [] (resolve-user-paths nil)))))

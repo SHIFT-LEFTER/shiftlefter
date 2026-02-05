@@ -32,7 +32,8 @@
    ```clojure
    (validate-svoi glossaries interfaces svoi)
    ```"
-  (:require [shiftlefter.svo.glossary :as glossary]))
+  (:require [clojure.string :as str]
+            [shiftlefter.svo.glossary :as glossary]))
 
 ;; -----------------------------------------------------------------------------
 ;; Levenshtein Distance (for typo suggestions)
@@ -179,7 +180,7 @@
   [known max-display]
   (let [items (take max-display known)
         remaining (- (count known) max-display)
-        formatted (clojure.string/join ", " (map #(str ":" (name %)) items))]
+        formatted (str/join ", " (map #(str ":" (name %)) items))]
     (if (pos? remaining)
       (str formatted ", ... (+" remaining " more)")
       formatted)))

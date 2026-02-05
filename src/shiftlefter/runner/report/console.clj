@@ -71,16 +71,33 @@
 
 (defn- format-location
   "Format a location map as file:line:col string."
-  [{:keys [file line column] :as loc}]
+  [{:keys [file line column]}]
   (cond
     (and file line column) (str file ":" line ":" column)
     (and file line) (str file ":" line)
     file file
     :else "<unknown>"))
 
+(defn- format-macro-provenance
+  "Format macro provenance lines for a failed step."
+  [step source-file use-color?]
+  (when-let [macro (:step/macro step)]
+    (let [role (:role macro)
+          call-site (:call-site macro)
+          def-step (:definition-step macro)]
+      (str
+       ;; Call-site: where the macro was invoked in the feature file
+       (when call-site
+         (str "     " (colorize "macro call-site: " :gray use-color?)
+              source-file ":" (:line call-site) ":" (:column call-site) "\n"))
+       ;; Definition-step: where this step is defined in the INI file (expanded steps only)
+       (when (and (= :expanded role) def-step)
+         (str "     " (colorize "definition-step: " :gray use-color?)
+              (:file def-step) ":" (:line def-step) ":" (:column def-step) "\n"))))))
+
 (defn- format-step-failure
   "Format a single step failure for display."
-  [step-result idx use-color?]
+  [step-result idx source-file use-color?]
   (let [step (:step step-result)
         error (:error step-result)
         binding (:binding step-result)]
@@ -88,6 +105,7 @@
          (colorize (:step/text step) :bold use-color?) "\n"
          (when-let [src (:source binding)]
            (str "     at " (format-location src) "\n"))
+         (format-macro-provenance step source-file use-color?)
          (when error
            (str "     " (colorize (str "Error: " (:message error)) :red use-color?) "\n"))
          (when-let [data (:data error)]
@@ -97,9 +115,10 @@
   "Format a scenario with its failed steps."
   [scenario-result use-color?]
   (let [pickle (-> scenario-result :plan :plan/pickle)
+        source-file (:pickle/source-file pickle)
         failed-steps (filter #(= :failed (:status %)) (:steps scenario-result))]
     (str (colorize (str "Scenario: " (:pickle/name pickle)) :bold use-color?) "\n"
-         (str/join "\n" (map-indexed #(format-step-failure %2 %1 use-color?) failed-steps)))))
+         (str/join "\n" (map-indexed #(format-step-failure %2 %1 source-file use-color?) failed-steps)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Macro Step Helpers
@@ -109,16 +128,6 @@
   "Check if a step result is a macro wrapper."
   [step-result]
   (true? (-> step-result :step :step/synthetic?)))
-
-(defn- expanded-step?
-  "Check if a step result is an expanded macro child."
-  [step-result]
-  (= :expanded (-> step-result :step :step/macro :role)))
-
-(defn- get-macro-key
-  "Get the macro key from a wrapper or expanded step."
-  [step-result]
-  (-> step-result :step :step/macro :key))
 
 ;; -----------------------------------------------------------------------------
 ;; Verbose Output
@@ -212,10 +221,15 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- format-undefined-step
-  "Format an undefined step for diagnostics."
+  "Format an undefined step for diagnostics with location."
   [bound-step use-color?]
-  (let [step (:step bound-step)]
-    (str "  - " (colorize (:step/text step) :yellow use-color?))))
+  (let [step (:step bound-step)
+        step-loc (:step/location step)
+        loc {:file (:source-file bound-step)
+             :line (:line step-loc)
+             :column (:column step-loc)}]
+    (str "  - " (colorize (:step/text step) :yellow use-color?)
+         " (" (format-location loc) ")")))
 
 (defn- format-ambiguous-step
   "Format an ambiguous step for diagnostics."

@@ -1,0 +1,4 @@
+{:interfaces {:web {:type :web
+                   :adapter :etaoin}}
+ :svo {:unknown-subject :error
+       :unknown-verb :error}}

@@ -2,7 +2,8 @@
   (:require [shiftlefter.gherkin.location :as loc]
             [shiftlefter.gherkin.dialect :as dialect]
             [clojure.string :as str]
-            [clojure.spec.alpha :as s]))
+            [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen]))
 
 ;; -----------------------------------------------------------------------------
 ;; Token type hierarchy
@@ -254,8 +255,18 @@
 ;; Specs (for generative testing later)
 ;; -----------------------------------------------------------------------------
 
-(s/def ::token
-  (s/and (partial instance? shiftlefter.gherkin.tokens.Token)
-         (s/keys :req-un [::type ::value ::location])))
-
 (s/def ::type token-types)
+(s/def ::value any?)  ; value varies by token type
+(s/def ::location ::loc/location)
+(s/def ::leading-ws (s/nilable string?))
+(s/def ::idx (s/nilable nat-int?))
+(s/def ::raw (s/nilable string?))
+(s/def ::keyword-text (s/nilable string?))
+
+(s/def ::token
+  (s/with-gen
+    (s/and (partial instance? shiftlefter.gherkin.tokens.Token)
+           (s/keys :req-un [::type ::value ::location]))
+    #(gen/fmap (fn [[type loc]]
+                 (->Token type nil loc "" 0 "" nil))
+               (gen/tuple (s/gen ::type) (s/gen ::location)))))

@@ -191,14 +191,45 @@
 (defmacro defstep
   "Define and register a step definition.
 
-   Usage (legacy, no metadata):
+   ## Basic Usage (ctx-first)
+
+   Step functions that need accumulated state take ctx as FIRST argument:
    ```clojure
-   (defstep #\"I have (\\d+) items\"
-     [count-str]
-     (Integer/parseInt count-str))
+   (defstep #\"I have (\\d+) cucumbers\" [ctx n]
+     (assoc ctx :cucumbers (parse-long n)))
+
+   (defstep #\"I eat (\\d+)\" [ctx n]
+     (update ctx :cucumbers - (parse-long n)))
+
+   (defstep #\"I should have (\\d+) cucumbers\" [ctx n]
+     (assert (= (:cucumbers ctx) (parse-long n)))
+     ctx)
    ```
 
-   Usage (with metadata):
+   ## Without ctx (captures only)
+
+   Steps that don't need accumulated state can omit ctx:
+   ```clojure
+   (defstep #\"I print hello\" []
+     (println \"hello\"))  ;; returns nil, ctx unchanged
+   ```
+
+   ## DataTable / DocString Access
+
+   Use the `shiftlefter.step` helpers to access step arguments:
+   ```clojure
+   (require '[shiftlefter.step :as step])
+
+   (defstep #\"the following users exist:\" [ctx]
+     (when-let [table (step/arguments ctx)]
+       (doseq [[name email] (rest (:rows table))]
+         (create-user! name email)))
+     ctx)
+   ```
+
+   ## With SVO Metadata
+
+   For Shifted mode with subject/verb/object validation:
    ```clojure
    (defstep #\"(.*) clicks (.*)\"
      {:interface :web

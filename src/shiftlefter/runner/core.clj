@@ -29,7 +29,25 @@
             [shiftlefter.runner.step-loader :as step-loader]
             [shiftlefter.stepengine.compile :as compile]
             [shiftlefter.stepengine.exec :as exec]
-            [shiftlefter.stepengine.registry :as registry]))
+            [shiftlefter.stepengine.registry :as registry]
+            ;; NOTE: Built-in step definitions (shiftlefter.stepdefs.browser)
+            ;; are NOT required here — they must be loaded AFTER the step-loader
+            ;; clears the registry. See `load-built-in-steps!` below.
+            ;; TODO(EP-033): make this config-driven via :built-in-steps in
+            ;; shiftlefter.edn so users can opt out.
+            ))
+
+;; -----------------------------------------------------------------------------
+;; Built-in Step Loading
+;; -----------------------------------------------------------------------------
+
+(defn- load-built-in-steps!
+  "Load built-in step definitions into the registry.
+   Must be called AFTER step-loader/load-step-paths! (which clears the
+   registry). Uses :reload to force defstep forms to re-execute even if
+   the namespace was previously loaded."
+  []
+  (require 'shiftlefter.stepdefs.browser :reload))
 
 ;; -----------------------------------------------------------------------------
 ;; Pipeline Helpers
@@ -84,7 +102,7 @@
 (defn- compute-exit-code
   "Compute exit code from execution result."
   [exec-result allow-pending?]
-  (let [{:keys [passed failed pending]} (:counts exec-result)]
+  (let [{:keys [failed pending]} (:counts exec-result)]
     (cond
       (pos? (or failed 0)) 1
       (and (pos? (or pending 0)) (not allow-pending?)) 1
@@ -158,6 +176,7 @@
                 allow-pending? (config/allow-pending? config)]
 
             ;; 2. Discover feature files
+            #_{:clj-kondo/ignore [:redundant-let]}
             (let [discover-result (discover/discover-feature-files-or-error (:paths opts))]
               (if (= :error (:status discover-result))
                 ;; Discovery error → exit 2
@@ -177,6 +196,7 @@
                 (let [feature-paths (:files discover-result)]
 
                   ;; 3-4. Parse all features
+                  #_{:clj-kondo/ignore [:redundant-let]}
                   (let [parse-result (parse-all-features feature-paths)]
                     (if (= :error (:status parse-result))
                       ;; Parse errors → exit 2
@@ -200,6 +220,7 @@
                             features (:features parse-result)]
 
                         ;; 5. Load step definitions
+                        #_{:clj-kondo/ignore [:redundant-let]}
                         (let [load-result (step-loader/load-step-paths! step-paths)]
                           (if (= :error (:status load-result))
                             ;; Step load error → exit 2
@@ -219,70 +240,79 @@
                                :status :planning-failed
                                :errors (:errors load-result)})
 
-                            ;; 6. Compile suite (bind all pickles)
-                            (let [stepdefs (registry/all-stepdefs)
-                                  {:keys [plans runnable? diagnostics]} (compile/compile-suite (:runner config) all-pickles stepdefs)]
+                            ;; 5b. Load built-in step definitions.
+                            ;; Must happen AFTER step-loader clears the registry
+                            ;; and loads user steps, so built-ins coexist with
+                            ;; user-defined steps.
+                            (do
+                              (load-built-in-steps!)
 
-                              (if-not runnable?
-                                ;; Binding issues → exit 2
-                                (let [exit-code 2]
-                                  (when-not (:edn opts)
-                                    (console/print-diagnostics! diagnostics report-opts))
-                                  (when (:edn opts)
-                                    (report-edn/prn-summary
-                                     (report-edn/build-summary run-id exit-code nil
-                                                               {:diagnostics diagnostics})))
-                                  {:exit-code exit-code
-                                   :run-id run-id
-                                   :status :planning-failed
-                                   :diagnostics diagnostics})
+                              ;; 6. Compile suite (bind all pickles)
+                              (let [stepdefs (registry/all-stepdefs)
+                                    {:keys [plans runnable? diagnostics]} (compile/compile-suite config all-pickles stepdefs)]
 
-                                ;; 7. Dry run check
-                                (if (:dry-run opts)
-                                  (let [exit-code 0]
+                                (if-not runnable?
+                                  ;; Binding issues → exit 2
+                                  (let [exit-code 2]
                                     (when-not (:edn opts)
-                                      (binding [*out* *err*]
-                                        (println (str (count plans) " scenario(s) bound successfully (dry run)"))))
+                                      (console/print-diagnostics! diagnostics report-opts))
                                     (when (:edn opts)
                                       (report-edn/prn-summary
-                                       {:run/id run-id
-                                        :run/exit-code exit-code
-                                        :run/status :dry-run
-                                        :counts {:scenarios (count plans)
-                                                 :steps (reduce + (map #(count (:plan/steps %)) plans))}}))
+                                       (report-edn/build-summary run-id exit-code nil
+                                                                 {:diagnostics diagnostics})))
                                     {:exit-code exit-code
                                      :run-id run-id
-                                     :status :dry-run
-                                     :plans plans})
+                                     :status :planning-failed
+                                     :diagnostics diagnostics})
 
-                                  ;; 8. Execute all scenarios
-                                  (do
-                                    (publish-run-started! bus run-id (count features) (count all-pickles))
-                                    (let [exec-opts {:bus bus :run-id run-id}
-                                          exec-result (exec/execute-suite plans exec-opts)
-                                          exit-code (compute-exit-code exec-result allow-pending?)]
-
-                                      ;; 9. Report results
+                                  ;; 7. Dry run check
+                                  (if (:dry-run opts)
+                                    (let [exit-code 0]
                                       (when-not (:edn opts)
-                                        (when (:verbose opts)
-                                          (doseq [scenario (:scenarios exec-result)]
-                                            (console/print-scenario! scenario report-opts)))
-                                        (console/print-failures! (:scenarios exec-result) report-opts)
-                                        (console/print-summary! exec-result report-opts))
-
+                                        (binding [*out* *err*]
+                                          (println (str (count plans) " scenario(s) bound successfully (dry run)"))))
                                       (when (:edn opts)
                                         (report-edn/prn-summary
-                                         (report-edn/build-summary run-id exit-code exec-result {})))
-
-                                      (publish-run-finished! bus run-id exit-code (:counts exec-result))
-                                      (events/bus-close! bus)
-
-                                      ;; 10. Return result
+                                         {:run/id run-id
+                                          :run/exit-code exit-code
+                                          :run/status :dry-run
+                                          :counts {:scenarios (count plans)
+                                                   :steps (reduce + (map #(count (:plan/steps %)) plans))}}))
                                       {:exit-code exit-code
                                        :run-id run-id
-                                       :status (if (zero? exit-code) :passed :failed)
-                                       :counts (:counts exec-result)
-                                       :result exec-result}))))))))))))))))
+                                       :status :dry-run
+                                       :plans plans})
+
+                                    ;; 8. Execute all scenarios
+                                    (do
+                                      (publish-run-started! bus run-id (count features) (count all-pickles))
+                                      (let [exec-opts {:bus bus :run-id run-id
+                                                       :interfaces (:interfaces config)}
+                                            exec-result (exec/execute-suite plans exec-opts)
+                                            exit-code (compute-exit-code exec-result allow-pending?)]
+
+                                        ;; 9. Report results
+                                        (when-not (:edn opts)
+                                          (when (:verbose opts)
+                                            (doseq [scenario (:scenarios exec-result)]
+                                              (console/print-scenario! scenario report-opts)))
+                                          (console/print-failures! (:scenarios exec-result) report-opts)
+                                          (console/print-summary! exec-result report-opts))
+
+                                        (when (:edn opts)
+                                          (report-edn/prn-summary
+                                           (report-edn/build-summary run-id exit-code exec-result
+                                                                     {:diagnostics diagnostics})))
+
+                                        (publish-run-finished! bus run-id exit-code (:counts exec-result))
+                                        (events/bus-close! bus)
+
+                                        ;; 10. Return result
+                                        {:exit-code exit-code
+                                         :run-id run-id
+                                         :status (if (zero? exit-code) :passed :failed)
+                                         :counts (:counts exec-result)
+                                         :result exec-result})))))))))))))))))
 
       ;; Catch any uncaught exceptions → exit 3
       (catch Throwable t

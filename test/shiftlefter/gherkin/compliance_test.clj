@@ -64,21 +64,30 @@
       (is (str/includes? result "(3:1)Other://")
           "Blank after comment should be Other"))))
 
-;; (deftest
-;;   (let [report (compliance/run-compliance "compliance/testdata")]
-;;     (is (map? report))
-;;     (is (contains? report :good))
-;;     (is (contains? report :bad))
-;;     (is (contains? (:good report) :total))
-;;     (is (contains? (:good report) :passes))
-;;     (is (contains? (:good report) :fails))
-;;     (is (contains? (:bad report) :total))
-;;     (is (contains? (:bad report) :passes))
-;;     (is (contains? (:bad report) :fails))
-;;     (is (vector? (:fails (:good report))))
-;;     (is (vector? (:fails (:bad report))))
-;;     (is (every? string? (:fails (:good report))))
-;;     (is (every? string? (:fails (:bad report))))))
+(deftest run-compliance-test
+  (testing "Full Cucumber compliance suite - 46 good files, 11 bad files"
+    (let [report (compliance/run-compliance "compliance/gherkin/testdata")
+          good (:good report)
+          bad (:bad report)]
+      ;; Report structure
+      (is (map? report))
+      (is (contains? report :good))
+      (is (contains? report :bad))
+
+      ;; Good files: all should pass tokens, AST, and pickles
+      (is (= 46 (:total good)) "Expected 46 good feature files")
+      (is (= 46 (:full-pass good))
+          (str "All good files should fully pass. Failures: "
+               (pr-str {:parse-errors (:parse-errors good)
+                        :token-fails (mapv :file (:token-fails good))
+                        :ast-fails (mapv :file (:ast-fails good))
+                        :pickle-fails (mapv :file (:pickle-fails good))})))
+
+      ;; Bad files: all should fail to parse
+      (is (= 11 (:total bad)) "Expected 11 bad feature files")
+      (is (= 11 (:passes bad))
+          (str "All bad files should be rejected. Unexpected passes: "
+               (pr-str (:fails bad)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Snapshot Tests - Known-good AST → Expected JSON

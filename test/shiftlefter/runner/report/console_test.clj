@@ -298,3 +298,71 @@
                     :steps []}
           output (with-err-str (console/print-pickle! scenario {:no-color true}))]
       (is (str/includes? output "Alias test")))))
+
+;; -----------------------------------------------------------------------------
+;; Macro Provenance Tests (WI-031.003)
+;; -----------------------------------------------------------------------------
+
+(deftest test-print-failures-shows-macro-call-site
+  (testing "Failed macro step shows call-site location"
+    (let [scenarios [{:status :failed
+                      :plan {:plan/pickle {:pickle/name "Login test"
+                                           :pickle/source-file "features/login.feature"}}
+                      :steps [{:status :failed
+                               :step {:step/text "I click login button"
+                                      :step/macro {:role :expanded
+                                                   :key "login as alice"
+                                                   :call-site {:line 12 :column 5}
+                                                   :definition-step {:file "macros/auth.ini"
+                                                                     :line 5
+                                                                     :column 3}}}
+                               :binding {:source {:file "src/steps/auth.clj" :line 42 :column 3}}
+                               :error {:type :step/exception :message "Element not found"}}]}]
+          output (with-err-str (console/print-failures! scenarios {:no-color true}))]
+      ;; Shows step text
+      (is (str/includes? output "I click login button"))
+      ;; Shows binding location
+      (is (str/includes? output "src/steps/auth.clj:42:3"))
+      ;; Shows macro call-site
+      (is (str/includes? output "macro call-site:"))
+      (is (str/includes? output "features/login.feature:12:5"))
+      ;; Shows definition-step for expanded role
+      (is (str/includes? output "definition-step:"))
+      (is (str/includes? output "macros/auth.ini:5:3")))))
+
+(deftest test-print-failures-wrapper-shows-call-site-only
+  (testing "Failed wrapper step shows call-site but no definition-step"
+    (let [scenarios [{:status :failed
+                      :plan {:plan/pickle {:pickle/name "Test"
+                                           :pickle/source-file "features/test.feature"}}
+                      :steps [{:status :failed
+                               :step {:step/text "login as alice"
+                                      :step/synthetic? true
+                                      :step/macro {:role :call
+                                                   :key "login as alice"
+                                                   :call-site {:line 8 :column 5}}}
+                               :binding {}
+                               :error {:type :step/exception :message "Failed"}}]}]
+          output (with-err-str (console/print-failures! scenarios {:no-color true}))]
+      ;; Shows call-site
+      (is (str/includes? output "macro call-site:"))
+      (is (str/includes? output "features/test.feature:8:5"))
+      ;; Does NOT show definition-step (wrapper role)
+      (is (not (str/includes? output "definition-step:"))))))
+
+(deftest test-print-failures-non-macro-no-provenance
+  (testing "Non-macro step failure shows no macro provenance"
+    (let [scenarios [{:status :failed
+                      :plan {:plan/pickle {:pickle/name "Regular test"
+                                           :pickle/source-file "features/basic.feature"}}
+                      :steps [{:status :failed
+                               :step {:step/text "I do something"}
+                               :binding {:source {:file "steps.clj" :line 10}}
+                               :error {:message "Error"}}]}]
+          output (with-err-str (console/print-failures! scenarios {:no-color true}))]
+      ;; Shows step and location
+      (is (str/includes? output "I do something"))
+      (is (str/includes? output "steps.clj:10"))
+      ;; No macro provenance
+      (is (not (str/includes? output "macro call-site:")))
+      (is (not (str/includes? output "definition-step:"))))))

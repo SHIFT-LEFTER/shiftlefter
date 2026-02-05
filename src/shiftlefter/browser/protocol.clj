@@ -22,12 +22,20 @@
    - `move-to!`     — move mouse to element
    - `drag-to!`     — drag from one element to another
    - `fill!`        — fill text input
-   - `count`        — count matching elements
+   - `element-count` — count matching elements
+
+   ## Query Operations (added 0.3.5)
+
+   - `get-text`     — visible text of element
+   - `get-url`      — current page URL
+   - `get-title`    — current page title
+   - `visible?`     — is element displayed?
 
    ## Return Values
 
    Mutating ops (`!` suffix) return the browser instance for chaining.
-   Query ops (`count`) return their result directly.")
+   Query ops (`element-count`, `get-text`, `get-url`, `get-title`, `visible?`)
+   return their result directly.")
 
 (defprotocol IBrowser
   "Protocol for browser operations.
@@ -60,4 +68,18 @@
     "Count elements matching locator. Returns a long.
 
      Named `element-count` to avoid shadowing `clojure.core/count`.
-     Stepdefs may alias this as needed."))
+     Stepdefs may alias this as needed.")
+
+  (get-text [this locator]
+    "Return visible text content of element matching locator.
+     Use `{:tag :body}` locator for full page visible text.")
+
+  (get-url [this]
+    "Return the current page URL as a string.")
+
+  (get-title [this]
+    "Return the current page title as a string.")
+
+  (visible? [this locator]
+    "Return true if element matching locator is displayed.
+     Returns false if element does not exist or is not displayed."))

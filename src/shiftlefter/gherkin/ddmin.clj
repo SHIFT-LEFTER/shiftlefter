@@ -159,7 +159,7 @@
    Returns {:tokens [...] :units [{:type kw :span {:start-idx N :end-idx M}} ...]}
    Units are sorted by start-idx."
   [content]
-  (let [{:keys [tokens ast errors]} (api/parse-string content)]
+  (let [{:keys [tokens ast]} (api/parse-string content)]
     (if (empty? ast)
       ;; No AST - can't do structured deletion
       {:tokens tokens :units [] :parse-failed? true}
@@ -219,8 +219,7 @@
   "Core ddmin algorithm operating on deletion units.
    Returns {:minimized content :steps N :units-removed N}."
   [tokens units predicate-fn {:keys [max-iterations] :or {max-iterations 1000}}]
-  (let [original-content (tokens->content tokens)
-        steps (atom 0)
+  (let [steps (atom 0)
         units-removed (atom 0)]
 
     (loop [current-tokens tokens
@@ -438,6 +437,9 @@
               timeout-ms 200
               budget-ms 30000
               max-iterations 1000}} opts
+
+        ;; Normalize nil mode to :auto (CLI may pass nil when no --mode specified)
+        mode (or mode :auto)
 
         ;; Get baseline failure
         initial-mode (if (= mode :auto) :parse mode)

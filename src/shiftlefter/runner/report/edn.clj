@@ -43,18 +43,39 @@
 ;; Failure Extraction
 ;; -----------------------------------------------------------------------------
 
+(defn- extract-macro-provenance
+  "Extract macro provenance for EDN output.
+   Returns nil if step has no macro metadata."
+  [step source-file]
+  (when-let [macro (:step/macro step)]
+    (let [role (:role macro)
+          call-site (:call-site macro)
+          def-step (:definition-step macro)]
+      (cond-> {:key (:key macro)}
+        ;; Call-site with assembled file path
+        call-site
+        (assoc :call-site {:file source-file
+                           :line (:line call-site)
+                           :column (:column call-site)})
+        ;; Definition-step (expanded steps only)
+        (and (= :expanded role) def-step)
+        (assoc :definition-step def-step)))))
+
 (defn- extract-step-failure
   "Extract failure info from a failed step result."
   [step-result scenario-result]
   (let [step (:step step-result)
         binding (:binding step-result)
-        pickle (-> scenario-result :plan :plan/pickle)]
-    {:step/text (:step/text step)
-     :step/id (:step/id step)
-     :scenario/name (:pickle/name pickle)
-     :scenario/id (:pickle/id pickle)
-     :location (:source binding)
-     :error (serialize-error (:error step-result))}))
+        pickle (-> scenario-result :plan :plan/pickle)
+        source-file (:pickle/source-file pickle)
+        macro-info (extract-macro-provenance step source-file)]
+    (cond-> {:step/text (:step/text step)
+             :step/id (:step/id step)
+             :scenario/name (:pickle/name pickle)
+             :scenario/id (:pickle/id pickle)
+             :location (:source binding)
+             :error (serialize-error (:error step-result))}
+      macro-info (assoc :macro macro-info))))
 
 (defn- extract-failures
   "Extract all failures from scenario results."
@@ -70,12 +91,17 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- extract-planning-issue
-  "Extract a planning issue (undefined/ambiguous/invalid-arity) for EDN."
+  "Extract a planning issue (undefined/ambiguous/invalid-arity) for EDN.
+   Includes full location: :uri, :line, :column from enriched bound-step."
   [bound-step issue-type]
-  (let [step (:step bound-step)]
+  (let [step (:step bound-step)
+        step-loc (:step/location step)]
     (cond-> {:type issue-type
              :step/text (:step/text step)
-             :step/id (:step/id step)}
+             :step/id (:step/id step)
+             :uri (:source-file bound-step)
+             :line (:line step-loc)
+             :column (:column step-loc)}
       (= :ambiguous issue-type)
       (assoc :alternatives (mapv #(select-keys % [:stepdef/id :pattern-src :source])
                                  (:alternatives bound-step)))
@@ -85,16 +111,29 @@
                      :actual (:actual (:binding bound-step))}))))
 
 (defn- extract-planning-diagnostics
-  "Extract planning diagnostics for EDN output."
+  "Extract planning diagnostics for EDN output (exit code 2).
+   Includes binding issues and SVO issues."
   [diagnostics]
   (when diagnostics
-    (let [{:keys [undefined ambiguous invalid-arity counts]} diagnostics
-          issues (concat
-                  (map #(extract-planning-issue % :undefined) undefined)
-                  (map #(extract-planning-issue % :ambiguous) ambiguous)
-                  (map #(extract-planning-issue % :invalid-arity) invalid-arity))]
-      {:issues (vec issues)
-       :counts counts})))
+    (let [{:keys [undefined ambiguous invalid-arity svo-issues counts]} diagnostics
+          binding-issues (concat
+                          (map #(extract-planning-issue % :undefined) undefined)
+                          (map #(extract-planning-issue % :ambiguous) ambiguous)
+                          (map #(extract-planning-issue % :invalid-arity) invalid-arity))]
+      (cond-> {:issues (vec binding-issues)
+               :counts counts}
+        (seq svo-issues) (assoc :svo-issues svo-issues)))))
+
+(defn- extract-execution-diagnostics
+  "Extract diagnostics for EDN output on successful execution (exit code 0/1).
+   Only includes SVO issues (warnings that didn't block execution).
+   Returns nil if no diagnostics to report."
+  [diagnostics]
+  (when diagnostics
+    (let [{:keys [svo-issues counts]} diagnostics]
+      (when (seq svo-issues)
+        {:svo-issues svo-issues
+         :counts (select-keys counts [:svo-issue-count])}))))
 
 ;; -----------------------------------------------------------------------------
 ;; Summary Building
@@ -119,15 +158,20 @@
                             2 :planning-failed
                             3 :crashed)}]
     (case exit-code
-      ;; Success or failure - include counts and failures
+      ;; Success or failure - include counts, failures, and diagnostics if present
       (0 1) (let [scenarios (:scenarios result)
-                  step-count (reduce + (map #(count (:steps %)) scenarios))]
+                  step-count (reduce + (map #(count (:steps %)) scenarios))
+                  exec-diagnostics (extract-execution-diagnostics (:diagnostics opts))]
               (cond-> (assoc base
                              :counts (assoc (:counts result)
                                             :scenarios (count scenarios)
                                             :steps step-count))
                 (= 1 exit-code)
-                (assoc :failures (vec (extract-failures scenarios)))))
+                (assoc :failures (vec (extract-failures scenarios)))
+
+                ;; Include :diagnostics only if non-empty (no noise on clean runs)
+                exec-diagnostics
+                (assoc :diagnostics exec-diagnostics)))
 
       ;; Planning failure - include diagnostics
       2 (assoc base

@@ -115,16 +115,15 @@
 
    Options:
    - :port — Chrome debug port (required)
-   - :stealth — if true, add anti-automation flags (default: false)
+
+   Note: Stealth options (excludeSwitches, useAutomationExtension) are NOT
+   included here — they're Chrome launch options, not WebDriver connect options.
+   Stealth is applied when Chrome is launched (see browser.chrome/build-chrome-args).
 
    Returns capabilities map suitable for Etaoin."
-  [{:keys [port stealth]}]
-  (let [debugger-address (str "127.0.0.1:" port)
-        base-opts {:debuggerAddress debugger-address}
-        stealth-opts (when stealth
-                       {:excludeSwitches ["enable-automation"]
-                        :useAutomationExtension false})]
-    {:goog:chromeOptions (merge base-opts stealth-opts)}))
+  [{:keys [port]}]
+  (let [debugger-address (str "127.0.0.1:" port)]
+    {:goog:chromeOptions {:debuggerAddress debugger-address}}))
 
 (defn connect-to-existing!
   "Connect to an already-running Chrome via debuggerAddress.

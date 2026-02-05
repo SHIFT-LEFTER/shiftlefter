@@ -194,6 +194,18 @@
             {:subjects {}})
         {:subjects (:subjects result)}))))
 
+(defn- load-subject-glossary-strict
+  "Load subject glossary strictly. Returns {:ok {:subjects ...}} or {:error ...}."
+  [path]
+  (if (nil? path)
+    {:ok {:subjects {}}}
+    (let [result (load-glossary path)]
+      (if (glossary-error? result)
+        {:error {:type :svo/glossary-file-not-found
+                 :path path
+                 :message (:message result)}}
+        {:ok {:subjects (:subjects result)}}))))
+
 (defn- load-verb-glossary
   "Load verb glossary from path for an interface type.
    Returns {:verbs {type {...}}} or empty on error."
@@ -205,6 +217,19 @@
         (do (warn "Could not load verb glossary for" interface-type ":" (:message result))
             {:verbs {}})
         {:verbs {interface-type (:verbs result)}}))))
+
+(defn- load-verb-glossary-strict
+  "Load verb glossary strictly. Returns {:ok {:verbs {type ...}}} or {:error ...}."
+  [interface-type path]
+  (if (nil? path)
+    {:ok {:verbs {}}}
+    (let [result (load-glossary path)]
+      (if (glossary-error? result)
+        {:error {:type :svo/glossary-file-not-found
+                 :path path
+                 :interface-type interface-type
+                 :message (:message result)}}
+        {:ok {:verbs {interface-type (:verbs result)}}}))))
 
 (defn load-all-glossaries
   "Load all glossaries per config paths, merged with defaults.
@@ -237,6 +262,47 @@
         project {:subjects (:subjects subject-glossary)
                  :verbs (:verbs verb-glossaries)}]
     (merge-glossaries defaults project)))
+
+(defn load-all-glossaries-strict
+  "Load all glossaries strictly for Shifted mode.
+
+   Unlike `load-all-glossaries`, this fails on missing/invalid files instead
+   of warning. Use this when :svo config is present.
+
+   Config shape:
+   {:subjects \"path/to/subjects.edn\"
+    :verbs {:web \"path/to/verbs-web.edn\"
+            :api \"path/to/verbs-api.edn\"}}
+
+   Returns:
+   {:ok {:subjects {...} :verbs {...}}}
+   or
+   {:error {:type :svo/glossary-file-not-found :path \"...\" ...}}"
+  [config-paths]
+  (let [defaults (load-default-glossaries)
+        ;; Load subject glossary strictly
+        subject-path (:subjects config-paths)
+        subject-result (load-subject-glossary-strict subject-path)]
+    (if (:error subject-result)
+      subject-result
+      ;; Subject loaded, try verb glossaries
+      (let [verb-paths (or (:verbs config-paths) {})
+            verb-results (reduce-kv
+                          (fn [acc iface-type path]
+                            (if (:error acc)
+                              acc  ; short-circuit on first error
+                              (let [result (load-verb-glossary-strict iface-type path)]
+                                (if (:error result)
+                                  result
+                                  (update-in acc [:ok :verbs] merge (-> result :ok :verbs))))))
+                          {:ok {:verbs {}}}
+                          verb-paths)]
+        (if (:error verb-results)
+          verb-results
+          ;; All loaded successfully, merge with defaults
+          (let [project {:subjects (-> subject-result :ok :subjects)
+                         :verbs (-> verb-results :ok :verbs)}]
+            {:ok (merge-glossaries defaults project)}))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API: Querying

@@ -10,6 +10,7 @@ Persistent subjects are named browser instances that survive JVM restarts. Use t
 
 ```clojure
 (require '[shiftlefter.repl :as repl])
+(require '[shiftlefter.stepdefs.browser])  ;; Load built-in browser steps
 
 ;; Create a new persistent subject
 (repl/init-persistent-subject! :finance {:stealth true})
@@ -130,9 +131,11 @@ Status values:
 
 ## Using the Browser
 
-After connecting, use the browser via REPL free mode:
+After connecting, use the browser via REPL free mode. Make sure the browser stepdefs are loaded:
 
 ```clojure
+(require '[shiftlefter.stepdefs.browser])  ;; If not already loaded
+
 ;; Navigate
 (repl/free :finance "I open the browser to 'https://app.example.com'")
 

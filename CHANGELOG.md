@@ -1,3 +1,117 @@
+# Changelog: 0.3.5
+
+**Release Date:** 2026-02-05
+
+---
+
+**ShiftLefter now runs browser tests with zero custom code.**
+
+v0.3.0 added browser automation and SVO validation. v0.3.5 makes them usable — multi-actor browser testing with auto-provisioning, tutorial examples, and a distributable release zip.
+
+---
+
+## What's New
+
+### Multi-Actor Browser Steps
+
+13 new built-in steps with named-subject routing. Each subject gets its own browser session:
+
+```gherkin
+Scenario: Two users collaborate
+  When :alice opens the browser to 'https://app.com'
+  And :alice fills {:id "message"} with 'Hello Bob'
+  And :alice clicks {:css "button.send"}
+  Then :bob should see 'Hello Bob'
+  And :bob should see the title 'App - Messages'
+```
+
+7 action steps (navigate, click, double-click, right-click, move, drag, fill) and 6 verification steps (see text, see element, not see element, element count, URL check, title check). All include SVO metadata for shifted-mode validation.
+
+### Zero-Code Browser Tests
+
+Browser sessions auto-provision from `shiftlefter.edn`. No setup steps, no custom Clojure — just a feature file and a config:
+
+```clojure
+;; shiftlefter.edn
+{:interfaces {:web {:type :web :adapter :etaoin :config {:headless true}}}}
+```
+
+The framework sees `:alice` needs a `:web` capability, looks up the interface config, and provisions a browser keyed to that subject on first use.
+
+### Auto-Retry on Browser Steps
+
+Action and verification steps automatically retry on transient browser errors — stale element references, elements not yet in the DOM, assertion mismatches during page transitions. 3-second timeout with 100ms backoff. No configuration needed.
+
+### Tutorial Examples
+
+Four new worked examples in `examples/`:
+
+| Example | What it covers |
+|---------|---------------|
+| `01-validate-and-format` | Parse, validate, and format feature files |
+| `02-browser-zero-code` | Browser test with zero custom Clojure |
+| `02b-browser-multi-actor` | Two-actor browser test with SVO |
+| `03-custom-steps` | Custom step definitions with `defstep` |
+
+Each has a README with step-by-step instructions.
+
+### Release Distribution Zip
+
+Ship as a single zip. Users unzip, add to PATH, done:
+
+```bash
+unzip shiftlefter-v0.3.5.zip
+export PATH="$PATH:$PWD/shiftlefter-v0.3.5"
+sl fmt --check myfile.feature
+```
+
+No Clojure toolchain required — just Java 11+.
+
+### REPL Shifted Mode
+
+Toggle SVO validation interactively:
+
+```clojure
+(shifted!)   ;; enable SVO validation against glossaries
+(vanilla!)   ;; back to vanilla mode
+```
+
+---
+
+## Bug Fixes
+
+- **`sl fmt --check`** — Previously always reported "OK". Now correctly exits 1 when files need formatting.
+- **`sl gherkin ddmin`** — No longer crashes with "no matching clause" when called without `--mode`.
+- **`sl gherkin fuzz --mutation --sources corpus`** — Clear error message when run outside the project directory instead of cryptic "bound must be positive".
+- **`sl verify`** — Fuzz artifact scanning removed from default mode (was slow/crashy with large artifact sets). Use `--fuzzed` to opt in.
+- **CLI path resolution** — `sl` installed on PATH now resolves relative arguments against the user's working directory, not the install directory.
+
+---
+
+## Minor Improvements
+
+- **Undefined step locations** — Console output includes `file:line:column` for undefined steps
+- **SVO diagnostics in `--edn` output** — SVO issues include full location info; macro-expanded steps show both call site and definition location in failure messages
+- **Browser stability** — PersistentBrowser reconnect handles more error types; Chrome window verified before navigation; stealth options cleaned from WebDriver capabilities
+- **Spec health** — All specs in the registry can now generate sample data; spec health test catches dangling references and missing generators in CI
+
+---
+
+## Breaking Changes
+
+- **ctx-first step convention** — Step functions now receive `ctx` as the first argument with flat context shape. Old: `[subject element ctx]` → New: `[ctx subject element]`. DataTable/DocString accessible via `(step/arguments ctx)`.
+
+---
+
+## Test Results
+
+```
+945 tests, 2869 assertions, 0 failures
+Compliance: 46/46 good, 11/11 bad (100%)
+```
+
+---
+
 # Changelog: 0.3.0
 
 **Release Date:** 2026-01-10

@@ -242,6 +242,92 @@
          {:status :dead})))))
 
 ;; -----------------------------------------------------------------------------
+;; Window/Target Management
+;; -----------------------------------------------------------------------------
+
+(defn- cdp-list-url
+  "Build the CDP list targets endpoint URL for a given port."
+  [port]
+  (str "http://127.0.0.1:" port "/json/list"))
+
+(defn- cdp-new-url
+  "Build the CDP new target endpoint URL for a given port."
+  [port]
+  (str "http://127.0.0.1:" port "/json/new?about:blank"))
+
+(defn list-targets
+  "List all targets (windows/tabs) in Chrome.
+
+   Returns:
+   - Success: `{:targets [...]}` where targets is a vector of target maps
+   - Error: `{:error ...}`"
+  [port]
+  (try
+    (let [url (URL. (cdp-list-url port))
+          conn ^HttpURLConnection (.openConnection url)]
+      (try
+        (.setRequestMethod conn "GET")
+        (.setConnectTimeout conn default-probe-timeout-ms)
+        (.setReadTimeout conn default-probe-timeout-ms)
+        (let [response-code (.getResponseCode conn)]
+          (if (= 200 response-code)
+            (let [body (slurp (.getInputStream conn))
+                  targets (json/parse-string body true)]
+              {:targets targets})
+            {:error {:message (str "Unexpected response: " response-code)}}))
+        (finally
+          (.disconnect conn))))
+    (catch Exception e
+      {:error {:message (ex-message e)}})))
+
+(defn create-window!
+  "Create a new window/tab in Chrome via CDP.
+
+   Opens about:blank in a new target.
+
+   Returns:
+   - Success: `{:target {...}}` with the new target info
+   - Error: `{:error ...}`"
+  [port]
+  (try
+    (let [url (URL. (cdp-new-url port))
+          conn ^HttpURLConnection (.openConnection url)]
+      (try
+        (.setRequestMethod conn "PUT")
+        (.setConnectTimeout conn default-probe-timeout-ms)
+        (.setReadTimeout conn 5000) ; Give it more time to create window
+        (let [response-code (.getResponseCode conn)]
+          (if (= 200 response-code)
+            (let [body (slurp (.getInputStream conn))
+                  target (json/parse-string body true)]
+              {:target target})
+            {:error {:message (str "Unexpected response: " response-code)}}))
+        (finally
+          (.disconnect conn))))
+    (catch Exception e
+      {:error {:message (ex-message e)}})))
+
+(defn ensure-window!
+  "Ensure Chrome has at least one window/tab.
+
+   Checks /json/list, and if empty, creates a new window via /json/new.
+
+   Returns:
+   - Success: `{:status :ok}` or `{:status :created}`
+   - Error: `{:error ...}`"
+  [port]
+  (let [list-result (list-targets port)]
+    (if (:error list-result)
+      list-result
+      (if (seq (:targets list-result))
+        {:status :ok}
+        ;; No targets — create a window
+        (let [create-result (create-window! port)]
+          (if (:error create-result)
+            create-result
+            {:status :created :target (:target create-result)}))))))
+
+;; -----------------------------------------------------------------------------
 ;; Chrome Launcher
 ;; -----------------------------------------------------------------------------
 
@@ -380,10 +466,30 @@
 ;; Process Management
 ;; -----------------------------------------------------------------------------
 
+(def ^:private default-kill-wait-ms
+  "Default timeout waiting for process to exit after kill signal."
+  2000)
+
+(def ^:private kill-poll-interval-ms
+  "Interval between alive checks when waiting for process exit."
+  50)
+
+(defn- wait-for-exit
+  "Wait for a ProcessHandle to exit, with timeout.
+   Returns true if process exited, false if timeout."
+  [^java.lang.ProcessHandle handle timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (cond
+        (not (.isAlive handle)) true
+        (> (System/currentTimeMillis) deadline) false
+        :else (do (Thread/sleep kill-poll-interval-ms) (recur))))))
+
 (defn kill-by-pid!
-  "Kill a Chrome process by PID.
+  "Kill a Chrome process by PID and wait for it to exit.
 
    Uses `kill -TERM` for graceful shutdown, falls back to `kill -KILL` if needed.
+   Waits up to 2 seconds for the process to actually terminate.
 
    Returns:
    - Success: `{:killed true :pid <pid>}`
@@ -402,11 +508,19 @@
         (let [handle (.get process-handle)
               destroyed (.destroy handle)]
           (if destroyed
-            {:killed true :pid pid}
-            ;; Try forcible kill
-            (if (.destroyForcibly handle)
+            ;; Wait for graceful exit
+            (if (wait-for-exit handle default-kill-wait-ms)
               {:killed true :pid pid}
-              {:killed false :pid pid :reason :failed})))
+              ;; Still alive after timeout — force kill
+              (do
+                (.destroyForcibly handle)
+                (wait-for-exit handle 500) ; Brief wait after force kill
+                {:killed true :pid pid :forced true}))
+            ;; Try forcible kill
+            (do
+              (.destroyForcibly handle)
+              (wait-for-exit handle 500)
+              {:killed true :pid pid :forced true})))
         {:killed false :pid pid :reason :not-running}))
     (catch Exception e
       {:killed false :pid pid :reason :error :message (ex-message e)})))

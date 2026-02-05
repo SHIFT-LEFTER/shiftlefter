@@ -6,17 +6,24 @@
    ## Invocation Dispatch
 
    Based on step arity (A) vs capture count (C):
-   - `A == C` → call with captures only (legacy mode)
-   - `A == C+1` → call with captures + ctx as last arg
+   - `A == C` → call with captures only (no ctx)
+   - `A == C+1` → call with ctx as FIRST arg, then captures
 
-   ## Context Shape
+   ## Context Shape (passed to steps)
 
+   Step functions receive flat scenario state as ctx:
    ```clojure
-   {:step <pickle-step>       ;; current step being executed
-    :scenario <scenario-ctx>} ;; accumulated state from prior steps
+   {:cucumbers 12, :user \"alice\", ...}  ;; just your scenario data
    ```
 
-   Docstring/DataTable available at `(-> ctx :step :step/arguments)`.
+   Step metadata is available via `(meta ctx)`:
+   - `:step/arguments` — DataTable or DocString
+   - `:step/text` — step text after substitution
+   - `:step/keyword` — Given/When/Then/And/But
+
+   Use helpers: `(require '[shiftlefter.step :as step])`
+   - `(step/arguments ctx)` — get DataTable/DocString
+   - `(step/text ctx)` — get step text
 
    ## Return Handling
 
@@ -56,6 +63,18 @@
    - captures: vector of captured groups from regex match
    - ctx: execution context {:step step-map :scenario scenario-ctx}
 
+   ## Dispatch Rules
+
+   Based on step function arity (A) vs capture count (C):
+   - `A == C` → call with captures only (no ctx)
+   - `A == C+1` → call with ctx as FIRST arg, then captures
+
+   ## Context Shape
+
+   The ctx passed to step functions is:
+   - Flat scenario state (accumulated from previous steps)
+   - Step metadata available via `(meta ctx)` with `:step/*` keys
+
    Returns:
    - {:status :passed :scenario <new-ctx>}
    - {:status :pending :scenario <ctx>}
@@ -65,8 +84,17 @@
         arity (or (:arity binding) 0)
         capture-count (count captures)
         ctx-aware? (= arity (inc capture-count))
+        ;; Extract scenario and step from nested ctx
+        scenario-ctx (:scenario ctx)
+        step (:step ctx)
+        ;; Attach step metadata to ctx (not in ctx map, in metadata)
+        ctx-with-meta (with-meta (or scenario-ctx {})
+                        {:step/arguments (:step/arguments step)
+                         :step/text (:step/text step)
+                         :step/keyword (:step/keyword step)})
+        ;; ctx-first: [ctx-with-meta & captures]
         args (if ctx-aware?
-               (conj (vec captures) ctx)
+               (into [ctx-with-meta] captures)
                (vec captures))]
     (try
       (let [result (apply step-fn args)]
@@ -74,7 +102,7 @@
           ;; :pending → step pending, scenario fails
           (= :pending result)
           {:status :pending
-           :scenario (:scenario ctx)}
+           :scenario scenario-ctx}
 
           ;; map → new scenario context
           (map? result)
@@ -84,12 +112,12 @@
           ;; nil → ctx unchanged, step passed
           (nil? result)
           {:status :passed
-           :scenario (:scenario ctx)}
+           :scenario scenario-ctx}
 
           ;; anything else → invalid return type
           :else
           {:status :failed
-           :scenario (:scenario ctx)
+           :scenario scenario-ctx
            :error {:type :step/invalid-return
                    :message (str "Step returned invalid type: " (type result)
                                  ". Expected map, nil, or :pending.")
@@ -97,7 +125,7 @@
 
       (catch Throwable t
         {:status :failed
-         :scenario (:scenario ctx)
+         :scenario scenario-ctx
          :error {:type :step/exception
                  :message (ex-message t)
                  :exception-class (.getName (class t))
@@ -135,11 +163,34 @@
                    :adapter-error (get-in result [:error :message])}}
           {:ok {:impl (:ok result) :mode :ephemeral}})))))
 
-(defn- ensure-capability
-  "Ensure capability is available for step's interface.
+(defn- bridge-to-browser-ctx
+  "Bridge a provisioned capability into browser.ctx for step compatibility.
 
-   If step has :svoi with :interface, and capability not yet provisioned,
-   provisions it automatically.
+   Steps use browser.ctx/get-session to find browsers by subject name.
+   After provisioning via capabilities/ctx, we mirror the browser into
+   browser.ctx so subject-extracting steps can find it.
+
+   Parameters:
+   - ctx: scenario context (already has cap/ entry)
+   - subject: subject keyword (e.g., :alice) or nil for :default
+   - browser: the browser implementation (e.g., EtaoinBrowser)
+
+   Returns updated ctx with browser.ctx entry."
+  [ctx subject browser]
+  (let [session-key (or subject :default)]
+    (browser.ctx/assoc-active-browser ctx session-key browser)))
+
+(defn- ensure-capability
+  "Ensure capability is available for step's interface and subject.
+
+   If step has :svoi with :interface, and capability not yet provisioned
+   for the given subject, provisions it automatically.
+
+   Subject-aware: each subject (Alice, Bob) gets its own capability instance
+   stored under :cap/web.alice, :cap/web.bob etc.
+
+   After provisioning, bridges to browser.ctx so subject-extracting steps
+   can find browsers via browser.ctx/get-session.
 
    Parameters:
    - scenario-ctx: current scenario context
@@ -151,29 +202,38 @@
    - {:error {...}} if provisioning fails"
   [scenario-ctx bound-step interfaces]
   (let [svoi (get-in bound-step [:binding :svoi])
-        interface-name (:interface svoi)]
+        interface-name (:interface svoi)
+        subject (:subject svoi)]
     (cond
       ;; No SVOI or no interface → no provisioning needed
       (or (nil? svoi) (nil? interface-name))
       {:ok scenario-ctx}
 
-      ;; Capability already present → use existing
-      (cap/capability-present? scenario-ctx interface-name)
+      ;; Capability already present for this subject → use existing
+      ;; (subject-keyed check if subject present, else interface-only check)
+      (if subject
+        (cap/capability-present? scenario-ctx interface-name subject)
+        (cap/capability-present? scenario-ctx interface-name))
       {:ok scenario-ctx}
 
-      ;; No interfaces config → can't provision
+      ;; No interfaces config → skip provisioning (step may still work
+      ;; if capability was set up elsewhere, e.g., REPL or setup step)
       (nil? interfaces)
-      {:error {:type :svo/provisioning-failed
-               :interface interface-name
-               :message "No interfaces config provided"}}
+      {:ok scenario-ctx}
 
       ;; Provision capability
       :else
       (let [result (provision-capability interface-name interfaces)]
         (if (:error result)
           result
-          (let [{:keys [impl mode]} (:ok result)]
-            {:ok (cap/assoc-capability scenario-ctx interface-name impl mode)}))))))
+          (let [{:keys [impl mode]} (:ok result)
+                browser (:browser impl)
+                ctx' (cap/assoc-capability scenario-ctx interface-name impl mode subject)
+                ;; Bridge to browser.ctx if this is a web capability with a browser
+                ctx'' (if browser
+                        (bridge-to-browser-ctx ctx' subject browser)
+                        ctx')]
+            {:ok ctx''}))))))
 
 ;; -----------------------------------------------------------------------------
 ;; SVOI Event Emission
@@ -235,7 +295,7 @@
 
 (defn- make-step-result
   "Create a step result map."
-  [bound-step status scenario-ctx error]
+  [bound-step status _scenario-ctx error]
   (cond-> {:step (:step bound-step)
            :binding (dissoc (:binding bound-step) :fn)  ;; Don't include fn in result
            :status status}
@@ -381,8 +441,11 @@
 (defn- cleanup-capability!
   "Clean up a single capability using its adapter.
 
+   Handles subject-keyed capability names (e.g., :web.alice) by parsing
+   to find the base interface name (:web) for adapter config lookup.
+
    Parameters:
-   - interface-name: keyword like :web, :api
+   - cap-name: keyword like :web, :api, :web.alice (from all-capabilities)
    - capability-entry: {:impl <instance> :mode :ephemeral/:persistent}
    - interfaces: interface config map
 
@@ -390,27 +453,29 @@
    - {:action :closed :interface <name>} on success
    - {:action :close-failed :interface <name> :error <msg>} on failure
    - {:action :skipped :interface <name> :reason <msg>} if can't clean up"
-  [interface-name capability-entry interfaces]
+  [cap-name capability-entry interfaces]
   (let [impl (:impl capability-entry)
-        interface-config (get interfaces interface-name)]
+        ;; Parse subject-keyed names: :web.alice → {:interface :web :subject :alice}
+        {:keys [interface]} (cap/parse-capability-name cap-name)
+        interface-config (get interfaces interface)]
     (if-not interface-config
       {:action :skipped
-       :interface interface-name
+       :interface cap-name
        :reason "No interface config"}
       (let [adapter-name (:adapter interface-config)
             adapter (registry/get-adapter adapter-name)]
         (if (:error adapter)
           {:action :skipped
-           :interface interface-name
+           :interface cap-name
            :reason (str "Unknown adapter: " adapter-name)}
           (try
             ((:cleanup adapter) impl)
             {:action :closed
-             :interface interface-name
+             :interface cap-name
              :adapter adapter-name}
             (catch Exception e
               {:action :close-failed
-               :interface interface-name
+               :interface cap-name
                :adapter adapter-name
                :error (ex-message e)})))))))
 
@@ -418,6 +483,8 @@
   "Clean up all ephemeral capabilities in scenario context.
 
    Iterates all :cap/* keys with :mode :ephemeral and calls adapter cleanup.
+   Handles subject-keyed capabilities (e.g., :web.alice) by parsing to find
+   the base interface for adapter lookup.
    Persistent capabilities are skipped.
 
    Returns:
@@ -428,9 +495,9 @@
     (if (empty? ephemeral-names)
       {:cleaned []
        :skipped persistent-names}
-      {:cleaned (mapv (fn [iface-name]
-                        (let [entry (cap/get-capability-entry scenario-ctx iface-name)]
-                          (cleanup-capability! iface-name entry interfaces)))
+      {:cleaned (mapv (fn [cap-name]
+                        (let [entry (cap/get-capability-entry scenario-ctx cap-name)]
+                          (cleanup-capability! cap-name entry interfaces)))
                       ephemeral-names)
        :skipped persistent-names})))
 

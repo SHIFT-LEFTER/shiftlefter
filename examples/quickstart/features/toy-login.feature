@@ -1,4 +1,5 @@
 Feature: Toy Login
+
   Scenario: Successful login
     Given I am on the login page
     When I type "user" into "username"

@@ -31,7 +31,23 @@
     this)
   (element-count [_ loc]
     (swap! calls-atom conj [:element-count loc])
-    42))
+    42)
+
+  (get-text [_ loc]
+    (swap! calls-atom conj [:get-text loc])
+    "fake text content")
+
+  (get-url [_]
+    (swap! calls-atom conj [:get-url])
+    "https://example.com/page")
+
+  (get-title [_]
+    (swap! calls-atom conj [:get-title])
+    "Fake Page Title")
+
+  (visible? [_ loc]
+    (swap! calls-atom conj [:visible? loc])
+    true))
 
 (defn make-fake-browser []
   (->FakeBrowser (atom [])))
@@ -111,6 +127,36 @@
           result (bp/element-count b loc)]
       (is (= 42 result))
       (is (= [[:element-count loc]] (get-calls b))))))
+
+(deftest get-text-test
+  (testing "get-text returns element text"
+    (let [b (make-fake-browser)
+          loc {:q {:css "#content"}}
+          result (bp/get-text b loc)]
+      (is (= "fake text content" result))
+      (is (= [[:get-text loc]] (get-calls b))))))
+
+(deftest get-url-test
+  (testing "get-url returns current URL"
+    (let [b (make-fake-browser)
+          result (bp/get-url b)]
+      (is (= "https://example.com/page" result))
+      (is (= [[:get-url]] (get-calls b))))))
+
+(deftest get-title-test
+  (testing "get-title returns page title"
+    (let [b (make-fake-browser)
+          result (bp/get-title b)]
+      (is (= "Fake Page Title" result))
+      (is (= [[:get-title]] (get-calls b))))))
+
+(deftest visible?-test
+  (testing "visible? returns boolean"
+    (let [b (make-fake-browser)
+          loc {:q {:css ".element"}}
+          result (bp/visible? b loc)]
+      (is (true? result))
+      (is (= [[:visible? loc]] (get-calls b))))))
 
 (deftest chaining-test
   (testing "operations can be chained"

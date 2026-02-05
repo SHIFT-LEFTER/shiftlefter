@@ -43,8 +43,23 @@
     (eta/fill driver (:q locator) text)
     this)
 
-  (element-count [this locator]
-    (count (eta/query-all driver (:q locator)))))
+  (element-count [_this locator]
+    (count (eta/query-all driver (:q locator))))
+
+  (get-text [_this locator]
+    (eta/get-element-text driver (:q locator)))
+
+  (get-url [_this]
+    (eta/get-url driver))
+
+  (get-title [_this]
+    (eta/get-title driver))
+
+  (visible? [_this locator]
+    (try
+      (eta/displayed? driver (:q locator))
+      (catch Exception _
+        false))))
 
 ;; -----------------------------------------------------------------------------
 ;; Factory

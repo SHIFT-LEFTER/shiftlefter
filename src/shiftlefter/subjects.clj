@@ -77,12 +77,14 @@
         (let [{:keys [debug-port user-data-dir]} meta
               probe-result (chrome/probe-cdp debug-port)]
           (if (= :alive (:status probe-result))
-            ;; Chrome alive — just reconnect
-            (let [connect-result (session/connect-to-existing!
-                                  {:port debug-port :stealth stealth})]
-              (when-not (:error connect-result)
-                (profile/save-browser-meta! subject-name meta)
-                (:browser connect-result)))
+            ;; Chrome alive — ensure window exists, then reconnect
+            (do
+              (chrome/ensure-window! debug-port)
+              (let [connect-result (session/connect-to-existing!
+                                    {:port debug-port :stealth stealth})]
+                (when-not (:error connect-result)
+                  (profile/save-browser-meta! subject-name meta)
+                  (:browser connect-result))))
             ;; Chrome dead — relaunch
             (let [launch-result (chrome/launch!
                                  {:port debug-port
@@ -90,6 +92,8 @@
                                   :stealth stealth})]
               (when-not (:errors launch-result)
                 (let [{:keys [pid port]} launch-result
+                      ;; Ensure window exists after launch
+                      _ (chrome/ensure-window! port)
                       connect-result (session/connect-to-existing!
                                       {:port port :stealth stealth})]
                   (if (:error connect-result)
@@ -158,8 +162,9 @@
              (do
                (profile/delete-profile! subject-name)
                (init-failed-error subject-name "Chrome launch failed" launch-result))
-             ;; Connect via WebDriver
+             ;; Ensure window exists, then connect via WebDriver
              (let [{:keys [pid port]} launch-result
+                   _ (chrome/ensure-window! port)
                    connect-result (session/connect-to-existing!
                                    {:port port :stealth stealth})]
                (if (:error connect-result)
@@ -219,20 +224,22 @@
         (let [{:keys [debug-port chrome-pid stealth user-data-dir]} meta
               probe-result (chrome/probe-cdp debug-port)]
           (if (= :alive (:status probe-result))
-            ;; Chrome alive — just reconnect
-            (let [connect-result (session/connect-to-existing!
-                                  {:port debug-port :stealth stealth})]
-              (if (:error connect-result)
-                (connect-failed-error subject-name "WebDriver connection failed" connect-result)
-                ;; Update last-connected timestamp and wrap with PersistentBrowser
-                (let [persistent-browser (pbrowser/make-persistent-browser
-                                          (:browser connect-result) subject-name stealth do-reconnect)]
-                  (profile/save-browser-meta! subject-name meta)
-                  {:status :connected
-                   :subject subject-name
-                   :port debug-port
-                   :pid chrome-pid
-                   :browser persistent-browser})))
+            ;; Chrome alive — ensure window exists, then reconnect
+            (do
+              (chrome/ensure-window! debug-port)
+              (let [connect-result (session/connect-to-existing!
+                                    {:port debug-port :stealth stealth})]
+                (if (:error connect-result)
+                  (connect-failed-error subject-name "WebDriver connection failed" connect-result)
+                  ;; Update last-connected timestamp and wrap with PersistentBrowser
+                  (let [persistent-browser (pbrowser/make-persistent-browser
+                                            (:browser connect-result) subject-name stealth do-reconnect)]
+                    (profile/save-browser-meta! subject-name meta)
+                    {:status :connected
+                     :subject subject-name
+                     :port debug-port
+                     :pid chrome-pid
+                     :browser persistent-browser}))))
             ;; Chrome dead — relaunch
             (let [launch-result (chrome/launch!
                                  {:port debug-port
@@ -240,8 +247,9 @@
                                   :stealth stealth})]
               (if (:errors launch-result)
                 (connect-failed-error subject-name "Chrome relaunch failed" launch-result)
-                ;; Connect to relaunched Chrome
+                ;; Ensure window exists, then connect to relaunched Chrome
                 (let [{:keys [pid port]} launch-result
+                      _ (chrome/ensure-window! port)
                       connect-result (session/connect-to-existing!
                                       {:port port :stealth stealth})]
                   (if (:error connect-result)

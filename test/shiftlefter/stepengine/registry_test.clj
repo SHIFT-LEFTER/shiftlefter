@@ -216,7 +216,7 @@
     (let [metadata {:interface :web
                     :svo {:subject :$1 :verb :click :object :$2}}
           stepdef (registry/register! #"(.*) clicks (.*)"
-                                      (fn [ctx s t] ctx)
+                                      (fn [ctx _s _t] ctx)
                                       {:ns 'test :file "test.clj" :line 1}
                                       metadata)]
       (is (= metadata (:metadata stepdef)))))

@@ -25,7 +25,10 @@
 ;; Load official dialects from i18n.json
 ;; -----------------------------------------------------------------------------
 
-(defonce official-dialects-raw
+(defonce ^{:doc "Delay containing the raw parsed i18n.json data from Cucumber's official dialect definitions.
+   Each language maps JSON keyword keys to localized keyword strings.
+   Deref with @official-dialects-raw to access the map."}
+  official-dialects-raw
   (delay
     (let [resource (io/resource "shiftlefter/gherkin/i18n.json")]
       (if-not resource
@@ -44,7 +47,11 @@
        (sort-by (comp - count first))
        vec))
 
-(defonce official-dialects
+(defonce ^{:doc "Delay containing the processed dialect lookup table for all 70+ languages.
+   Maps language code (string) to a vector of [prefix canonical-keyword] pairs,
+   sorted by prefix length descending for longest-match-first semantics.
+   Deref with @official-dialects to access the map."}
+  official-dialects
   (delay
     (into {}
           (for [[lang data] @official-dialects-raw]

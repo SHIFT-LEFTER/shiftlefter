@@ -10,7 +10,7 @@
  :paths ["src" "resources"]
 
  :aliases
- {:dev  {:extra-paths ["test"]}
+ {:dev  {:extra-paths ["dev" "test"]}
   :test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
          :extra-paths ["test"]
          :main-opts  ["-m" "kaocha.runner"]}
@@ -18,7 +18,10 @@
   :compliance {:extra-deps {io.cucumber/gherkin-utils {:mvn/version "28.2.0"}
                             io.cucumber/messages      {:mvn/version "28.2.0"}}
                :ns-default shiftlefter.gherkin.compliance}
-  :repl {:jvm-opts ["-Dclojure.spec.skip-macros=true"]}
+  :repl {:extra-deps {nrepl/nrepl {:mvn/version "1.5.0"}
+                    cider/cider-nrepl {:mvn/version "0.50.0"}}
+        :jvm-opts ["-Dclojure.spec.skip-macros=true"]
+        :main-opts ["-m" "nrepl.cmdline" "--middleware" "[cider.nrepl/cider-middleware]"]}
   :kondo {:deps {clj-kondo/clj-kondo {:mvn/version "2025.10.23"}}
           :main-opts ["-m" "clj-kondo.main"]}
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.6"}}

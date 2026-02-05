@@ -179,17 +179,28 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- collect-issues
-  "Collect all binding issues from plans for diagnostics."
+  "Collect all binding issues from plans for diagnostics.
+   Attaches :source-file and :severity to each bound-step for location reporting.
+   Binding issues are always :error severity (they block execution)."
   [plans]
-  (let [all-steps (mapcat :plan/steps plans)
-        undefined (filter #(= :undefined (:status %)) all-steps)
-        ambiguous (filter #(= :ambiguous (:status %)) all-steps)
-        invalid-arity (filter #(and (= :matched (:status %))
-                                    (not (:arity-ok? (:binding %))))
-                              all-steps)]
-    {:undefined (vec undefined)
-     :ambiguous (vec ambiguous)
-     :invalid-arity (vec invalid-arity)}))
+  (let [;; Enrich each step with source-file from its plan's pickle
+        all-steps (mapcat (fn [plan]
+                            (let [source-file (-> plan :plan/pickle :pickle/source-file)]
+                              (map #(assoc % :source-file source-file)
+                                   (:plan/steps plan))))
+                          plans)
+        ;; Binding issues always have :error severity (blocking)
+        undefined (->> (filter #(= :undefined (:status %)) all-steps)
+                       (mapv #(assoc % :severity :error)))
+        ambiguous (->> (filter #(= :ambiguous (:status %)) all-steps)
+                       (mapv #(assoc % :severity :error)))
+        invalid-arity (->> (filter #(and (= :matched (:status %))
+                                         (not (:arity-ok? (:binding %))))
+                                   all-steps)
+                           (mapv #(assoc % :severity :error)))]
+    {:undefined undefined
+     :ambiguous ambiguous
+     :invalid-arity invalid-arity}))
 
 (defn- issue-counts
   "Count issues by type."
@@ -207,43 +218,58 @@
 ;; SVO Validation
 ;; -----------------------------------------------------------------------------
 
+(def ^:private issue-type->config-key
+  "Map SVO issue types to their config keys."
+  {:svo/unknown-subject :unknown-subject
+   :svo/unknown-verb :unknown-verb
+   :svo/unknown-interface :unknown-interface})
+
+(defn- compute-severity
+  "Compute severity for an SVO issue based on config.
+   Returns :error or :warn (default :warn if not configured)."
+  [issue svo-config]
+  (let [config-key (issue-type->config-key (:type issue))]
+    (get svo-config config-key :warn)))
+
 (defn- collect-svo-issues
   "Collect SVO validation issues from all bound steps.
 
    For each matched step with a non-nil :svoi, validates against glossary
-   and interfaces. Returns vector of issues with step location info attached."
-  [plans glossary interfaces]
+   and interfaces. Returns vector of issues with full location and severity:
+   :step-text, :step-id, :uri, :line, :column, :severity."
+  [plans glossary interfaces svo-config]
   (when (and glossary interfaces)
-    (let [all-steps (mapcat :plan/steps plans)]
-      (->> all-steps
-           (filter #(= :matched (:status %)))
-           (keep (fn [bound-step]
-                   (when-let [svoi (-> bound-step :binding :svoi)]
-                     (let [result (validate/validate-svoi glossary interfaces svoi)]
-                       (when-not (:valid? result)
-                         ;; Attach step location to each issue
-                         (let [step (:step bound-step)
-                               location {:step-text (:step/text step)
-                                         :step-id (:step/id step)}]
-                           (mapv #(assoc % :location location)
-                                 (:issues result))))))))
-           (apply concat)
-           vec))))
+    (->> plans
+         (mapcat (fn [plan]
+                   (let [source-file (-> plan :plan/pickle :pickle/source-file)]
+                     (->> (:plan/steps plan)
+                          (filter #(= :matched (:status %)))
+                          (keep (fn [bound-step]
+                                  (when-let [svoi (-> bound-step :binding :svoi)]
+                                    (let [result (validate/validate-svoi glossary interfaces svoi)]
+                                      (when-not (:valid? result)
+                                        ;; Attach full location and severity to each issue
+                                        (let [step (:step bound-step)
+                                              step-loc (:step/location step)
+                                              location {:step-text (:step/text step)
+                                                        :step-id (:step/id step)
+                                                        :uri source-file
+                                                        :line (:line step-loc)
+                                                        :column (:column step-loc)}]
+                                          (mapv (fn [issue]
+                                                  (assoc issue
+                                                         :location location
+                                                         :severity (compute-severity issue svo-config)))
+                                                (:issues result))))))))
+                          (apply concat)))))
+         vec)))
 
 (defn- svo-issues-blocking?
-  "Check if any SVO issues should block execution based on config.
+  "Check if any SVO issues should block execution.
 
-   Returns true if any issue type is configured as :error and that issue exists."
-  [svo-issues svo-config]
-  (when (seq svo-issues)
-    (let [issue-type->config-key {:svo/unknown-subject :unknown-subject
-                                  :svo/unknown-verb :unknown-verb
-                                  :svo/unknown-interface :unknown-interface}]
-      (some (fn [issue]
-              (let [config-key (issue-type->config-key (:type issue))
-                    level (get svo-config config-key :warn)]
-                (= :error level)))
-            svo-issues))))
+   Returns true if any issue has :severity :error."
+  [svo-issues]
+  (some #(= :error (:severity %)) svo-issues))
 
 (defn bind-suite
   "Bind all pickles to stepdefs, producing plans and diagnostics.
@@ -274,12 +300,12 @@
          binding-issues (collect-issues plans)
          ;; SVO validation (only if opts provided)
          {:keys [glossary interfaces svo]} opts
-         svo-issues (collect-svo-issues plans glossary interfaces)
+         svo-issues (collect-svo-issues plans glossary interfaces svo)
          all-issues (assoc binding-issues :svo-issues (or svo-issues []))
          counts (issue-counts all-issues)
          ;; Runnable if no binding issues AND no blocking SVO issues
          binding-ok? (zero? (:total-issues counts))
-         svo-ok? (not (svo-issues-blocking? svo-issues svo))
+         svo-ok? (not (svo-issues-blocking? svo-issues))
          runnable? (and binding-ok? svo-ok?)]
      {:plans plans
       :runnable? runnable?

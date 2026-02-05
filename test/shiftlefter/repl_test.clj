@@ -1,20 +1,21 @@
 (ns shiftlefter.repl-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [clojure.string :as str]
             [shiftlefter.repl :as repl]
             [shiftlefter.stepengine.registry :as registry :refer [defstep]]
             [shiftlefter.browser.ctx :as browser.ctx]
-            [shiftlefter.subjects :as subjects]
             [shiftlefter.subjects.profile :as profile]
             [shiftlefter.webdriver.session-store :as store]
             [babashka.fs :as fs]))
 
-;; Clear registry, contexts, and surfaces before each test
+;; Clear registry, contexts, surfaces, and reset to vanilla mode before each test
 (use-fixtures :each
   (fn [f]
     (registry/clear-registry!)
     (repl/reset-ctx!)
     (repl/reset-ctxs!)
     (repl/reset-surfaces!)
+    (repl/vanilla!)  ; Ensure vanilla mode between tests
     (f)))
 
 ;; -----------------------------------------------------------------------------
@@ -514,3 +515,112 @@ Feature: Test
         (let [result (repl/destroy-persistent-subject! :nonexistent)]
           (is (:error result))
           (is (= :subject/not-found (get-in result [:error :type]))))))))
+
+;; -----------------------------------------------------------------------------
+;; Shifted Mode Tests (WI-031.011)
+;; -----------------------------------------------------------------------------
+
+(deftest test-shifted?-defaults-to-false
+  (testing "shifted? returns false by default"
+    (is (false? (repl/shifted?)))))
+
+(deftest test-vanilla!-returns-vanilla
+  (testing "vanilla! returns :vanilla"
+    (is (= :vanilla (repl/vanilla!)))))
+
+(deftest test-shifted!-with-config-map
+  (testing "shifted! with custom config enables Shifted mode"
+    (let [cfg {:svo {:unknown-subject :warn}
+               :runner {:step-paths ["steps/"]}}
+          result (repl/shifted! cfg)]
+      (is (= :ok (:status result)))
+      (is (true? (repl/shifted?)))
+      (is (= cfg (repl/get-repl-config))))))
+
+(deftest test-vanilla!-disables-shifted-mode
+  (testing "vanilla! disables Shifted mode"
+    (repl/shifted! {:svo {:unknown-subject :warn}})
+    (is (true? (repl/shifted?)))
+    (repl/vanilla!)
+    (is (false? (repl/shifted?)))
+    (is (nil? (repl/get-repl-config)))))
+
+(deftest test-run-dry-vanilla-mode
+  (testing "run-dry in vanilla mode uses bind-suite directly"
+    (defstep #"I am here" [] nil)
+    (let [result (repl/run-dry "Feature: Test\n  Scenario: X\n    Given I am here")]
+      (is (= :ok (:status result)))
+      (is (= 1 (count (:plans result)))))))
+
+(deftest test-run-dry-shifted-mode
+  (testing "run-dry in Shifted mode uses compile-suite"
+    (defstep #"I am here" [] nil)
+    ;; Shifted mode with minimal config (no glossaries = vanilla behavior)
+    (repl/shifted! {:runner {:step-paths ["steps/"]}})
+    (let [result (repl/run-dry "Feature: Test\n  Scenario: X\n    Given I am here")]
+      (is (= :ok (:status result)))
+      (is (= 1 (count (:plans result)))))))
+
+(deftest test-run-vanilla-mode
+  (testing "run in vanilla mode executes without SVO validation"
+    (defstep #"I do something" [] nil)
+    (let [result (repl/run "Feature: Test\n  Scenario: X\n    Given I do something")]
+      (is (= :ok (:status result)))
+      (is (= 1 (-> result :summary :passed))))))
+
+(deftest test-run-shifted-mode
+  (testing "run in Shifted mode includes diagnostics"
+    (defstep #"I do something" [] nil)
+    (repl/shifted! {:runner {:step-paths ["steps/"]}})
+    (let [result (repl/run "Feature: Test\n  Scenario: X\n    Given I do something")]
+      (is (= :ok (:status result)))
+      (is (contains? result :diagnostics))
+      (is (= 1 (-> result :summary :passed))))))
+
+(deftest test-as-warns-on-unknown-actor
+  (testing "as warns on unknown actor in Shifted mode"
+    (defstep #"I exist" [] {:exists true})
+    ;; Create a temp glossary file for testing
+    (let [temp-dir (str (fs/create-temp-dir {:prefix "sl-shifted-test-"}))
+          subjects-file (str temp-dir "/subjects.edn")]
+      (try
+        ;; Write a glossary with only :alice
+        (spit subjects-file "{:subjects {:alice {:desc \"Known user\"}}}")
+        ;; Enable Shifted mode with this glossary
+        (repl/shifted! {:svo {:unknown-subject :warn}
+                        :glossaries {:subjects subjects-file}})
+        ;; Call as with unknown actor - should warn but succeed
+        (let [stderr-out (java.io.StringWriter.)
+              result (binding [*err* stderr-out]
+                       (repl/as :bob "I exist"))]
+          (is (= :passed (:status result)))
+          (is (str/includes? (str stderr-out) "WARNING"))
+          (is (str/includes? (str stderr-out) ":bob"))
+          (is (str/includes? (str stderr-out) "not in subject glossary")))
+        ;; Call as with known actor - should not warn
+        (let [stderr-out (java.io.StringWriter.)
+              result (binding [*err* stderr-out]
+                       (repl/as :alice "I exist"))]
+          (is (= :passed (:status result)))
+          (is (not (str/includes? (str stderr-out) "WARNING"))))
+        (finally
+          (fs/delete-tree temp-dir))))))
+
+(deftest test-as-no-warning-in-vanilla-mode
+  (testing "as does not warn in vanilla mode"
+    (defstep #"I exist" [] {:exists true})
+    (repl/vanilla!)
+    (let [stderr-out (java.io.StringWriter.)
+          result (binding [*err* stderr-out]
+                   (repl/as :unknown-actor "I exist"))]
+      (is (= :passed (:status result)))
+      (is (= "" (str stderr-out))))))
+
+(deftest test-shifted!-no-args-without-config-file
+  (testing "shifted! with no args when no shiftlefter.edn exists"
+    ;; This test runs from the project root which may or may not have shiftlefter.edn
+    ;; Just verify it returns a result (either :ok or :error)
+    (let [result (repl/shifted!)]
+      (is (contains? result :status))
+      ;; Reset to vanilla for other tests
+      (repl/vanilla!))))

@@ -31,7 +31,7 @@
   (testing "Published events reach subscriber"
     (let [bus (events/make-memory-bus)
           got (atom [])
-          sub (events/subscribe! bus (fn [e] (swap! got conj e)))
+          _sub (events/subscribe! bus (fn [e] (swap! got conj e)))
           run-id "run-123"]
       (events/publish! bus {:type :test/foo :ts (events/now-iso) :run-id run-id :payload {:x 1}})
       (Thread/sleep 20)
@@ -66,8 +66,8 @@
     (let [bus (events/make-memory-bus)
           got1 (atom [])
           got2 (atom [])
-          sub1 (events/subscribe! bus (fn [e] (swap! got1 conj e)))
-          sub2 (events/subscribe! bus (fn [e] (swap! got2 conj e)))
+          _sub1 (events/subscribe! bus (fn [e] (swap! got1 conj e)))
+          _sub2 (events/subscribe! bus (fn [e] (swap! got2 conj e)))
           run-id "run-456"]
       ;; Publish two events
       (events/publish! bus {:type :test/a :ts (events/now-iso) :run-id run-id :payload {:n 1}})

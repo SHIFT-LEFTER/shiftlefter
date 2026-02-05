@@ -3,8 +3,8 @@
   (:require [shiftlefter.stepengine.registry :refer [defstep]]))
 
 (defstep #"I am logged in as \"([^\"]+)\""
-  [username]
-  {:user username :logged-in true})
+  [ctx username]
+  (assoc ctx :user username :logged-in true))
 
 (defstep #"I log out"
   [ctx]
