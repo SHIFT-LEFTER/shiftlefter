@@ -130,10 +130,19 @@
 ;; fmt-check tests
 ;; -----------------------------------------------------------------------------
 
-(deftest fmt-check-returns-ok-for-valid
-  (testing "returns :ok status for valid input"
-    (let [result (api/fmt-check minimal-feature)]
+(def canonical-feature
+  "Feature: Test\n\n  Scenario: Basic\n    Given a step\n")
+
+(deftest fmt-check-returns-ok-for-canonical
+  (testing "returns :ok status for canonical format"
+    (let [result (api/fmt-check canonical-feature)]
       (is (= :ok (:status result))))))
+
+(deftest fmt-check-returns-error-for-needs-formatting
+  (testing "returns :needs-formatting for non-canonical"
+    (let [result (api/fmt-check minimal-feature)]
+      (is (= :error (:status result)))
+      (is (= :needs-formatting (:reason result))))))
 
 (deftest fmt-check-returns-error-for-parse-errors
   (testing "returns parse-errors for invalid input"

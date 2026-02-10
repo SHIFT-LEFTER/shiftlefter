@@ -307,6 +307,7 @@
     (let [minimal "Feature: X\n"
           rng (java.util.Random. 42)]
       ;; Docstring delim mutator on content without docstrings
+      #_{:clj-kondo/ignore [:redundant-let]}
       (let [mutator-fn (-> (filter #(= :mut/docstring-delim (:id %)) fuzz/mutators)
                            first :fn)
             result (fuzz/apply-mutator mutator-fn minimal rng)]

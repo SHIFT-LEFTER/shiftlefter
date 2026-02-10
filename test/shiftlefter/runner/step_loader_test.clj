@@ -119,6 +119,7 @@
 
     (let [cart-step (registry/find-by-pattern "I have (\\d+) items in my cart")]
       (is (some? cart-step) "Should find cart step")
+      ;; Step now takes ctx-first: [ctx count-str]
       (let [step-fn (:fn cart-step)
-            result (step-fn "5")]
+            result (step-fn {} "5")]
         (is (= {:cart-count 5} result))))))

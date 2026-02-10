@@ -19,19 +19,25 @@
 ;; -----------------------------------------------------------------------------
 
 (defn make-step
-  "Create a pickle step map for testing."
-  ([text] (make-step text []))
-  ([text arguments]
-   {:step/id (java.util.UUID/randomUUID)
-    :step/text text
-    :step/arguments arguments}))
+  "Create a pickle step map for testing.
+   Optionally include location with {:line N :column N}."
+  ([text] (make-step text [] nil))
+  ([text arguments] (make-step text arguments nil))
+  ([text arguments location]
+   (cond-> {:step/id (java.util.UUID/randomUUID)
+            :step/text text
+            :step/arguments arguments}
+     location (assoc :step/location location))))
 
 (defn make-pickle
-  "Create a pickle map for testing."
-  [name steps]
-  {:pickle/id (java.util.UUID/randomUUID)
-   :pickle/name name
-   :pickle/steps (mapv #(if (string? %) (make-step %) %) steps)})
+  "Create a pickle map for testing.
+   Optionally include source-file for location tracking."
+  ([name steps] (make-pickle name steps nil))
+  ([name steps source-file]
+   (cond-> {:pickle/id (java.util.UUID/randomUUID)
+            :pickle/name name
+            :pickle/steps (mapv #(if (string? %) (make-step %) %) steps)}
+     source-file (assoc :pickle/source-file source-file))))
 
 ;; -----------------------------------------------------------------------------
 ;; match-step Tests
@@ -47,7 +53,7 @@
 (deftest test-match-step-with-captures
   (testing "Returns stepdef and captures on match"
     (let [stepdef (registry/register! #"I type \"([^\"]+)\" into \"([^\"]+)\""
-                                      (fn [val field] nil)
+                                      (fn [_val _field] nil)
                                       {:ns 't :file "t.clj" :line 1})
           result (bind/match-step "I type \"alice\" into \"username\"" stepdef)]
       (is (some? result))
@@ -66,7 +72,7 @@
 (deftest test-match-step-optional-groups
   (testing "Captures may include nil for optional groups"
     (let [stepdef (registry/register! #"I have (\d+) items?(?: in my (\w+))?"
-                                      (fn [n container] nil)
+                                      (fn [_n _container] nil)
                                       {:ns 't :file "t.clj" :line 1})]
       ;; With optional group present
       (let [result (bind/match-step "I have 5 items in my cart" stepdef)]
@@ -217,7 +223,7 @@
   (testing "Pickle with arity mismatch is not runnable"
     ;; 1 capture but arity 5
     (registry/register! #"I have (\d+) items"
-                        (fn [a b c d e] nil)
+                        (fn [_a _b _c _d _e] nil)
                         {:ns 's :file "s.clj" :line 1})
     (let [pickle (make-pickle "test" ["I have 5 items"])
           plan (bind/bind-pickle pickle (registry/all-stepdefs))]
@@ -251,7 +257,7 @@
                         {:ns 's :file "s.clj" :line 1})
     (let [pickles [(make-pickle "p1" ["I have 5 items"])
                    (make-pickle "p2" ["I click the button"])]
-          {:keys [plans runnable? diagnostics]} (bind/bind-suite pickles (registry/all-stepdefs))]
+          {:keys [runnable? diagnostics]} (bind/bind-suite pickles (registry/all-stepdefs))]
       (is (not runnable?))
       (is (= 1 (-> diagnostics :counts :undefined-count)))
       (is (= 1 (count (:undefined diagnostics)))))))
@@ -267,7 +273,7 @@
                         {:ns 's :file "s.clj" :line 2})
     ;; Bad arity step
     (registry/register! #"I click submit"
-                        (fn [a b c] nil)
+                        (fn [_a _b _c] nil)
                         {:ns 's :file "s.clj" :line 3})
     (let [pickles [(make-pickle "p1" ["I have 5 items"])      ;; ambiguous
                    (make-pickle "p2" ["undefined step"])      ;; undefined
@@ -285,7 +291,7 @@
 (deftest test-acceptance-criteria
   (testing "Spec acceptance criteria"
     (registry/register! #"I type \"([^\"]+)\" into \"([^\"]+)\""
-                        (fn [value field] nil)
+                        (fn [_value _field] nil)
                         {:ns 's :file "s.clj" :line 1})
     (let [pickle {:pickle/id #uuid "00000000-0000-0000-0000-000000000001"
                   :pickle/name "test"
@@ -296,3 +302,380 @@
       (is (:plan/runnable? plan))
       (is (= :matched (-> plan :plan/steps first :status)))
       (is (= ["alice" "username"] (-> plan :plan/steps first :binding :captures))))))
+
+;; -----------------------------------------------------------------------------
+;; SVOI Extraction Tests (Task 3.0.6)
+;; -----------------------------------------------------------------------------
+
+(deftest test-bind-step-svoi-extraction
+  (testing "Step with SVO metadata has :svoi extracted"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [step (make-step "Alice clicks the button")
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :matched (:status result)))
+      (is (= ["Alice" "the button"] (-> result :binding :captures)))
+      ;; SVOI should be extracted with normalized subject
+      (let [svoi (-> result :binding :svoi)]
+        (is (some? svoi))
+        (is (= :alice (:subject svoi)))
+        (is (= :click (:verb svoi)))
+        (is (= "the button" (:object svoi)))
+        (is (= :web (:interface svoi)))))))
+
+(deftest test-bind-step-legacy-no-svoi
+  (testing "Legacy step (no metadata) has :svoi nil"
+    (registry/register! #"I click submit"
+                        (fn [] nil)
+                        {:ns 's :file "s.clj" :line 1})
+    (let [step (make-step "I click submit")
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :matched (:status result)))
+      ;; Legacy steps should have nil svoi
+      (is (nil? (-> result :binding :svoi))))))
+
+(deftest test-bind-step-svoi-no-svo-key
+  (testing "Step with metadata but no :svo has :svoi nil"
+    (registry/register! #"I see the page"
+                        (fn [] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web})  ;; metadata but no :svo
+    (let [step (make-step "I see the page")
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :matched (:status result)))
+      ;; No :svo key means nil svoi
+      (is (nil? (-> result :binding :svoi))))))
+
+(deftest test-bind-step-svoi-literal-subject
+  (testing "SVOI with literal subject (not placeholder)"
+    (registry/register! #"the system initializes"
+                        (fn [] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :api
+                         :svo {:subject :system :verb :initialize :object nil}})
+    (let [step (make-step "the system initializes")
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :matched (:status result)))
+      (let [svoi (-> result :binding :svoi)]
+        (is (= :system (:subject svoi)))
+        (is (= :initialize (:verb svoi)))
+        (is (nil? (:object svoi)))
+        (is (= :api (:interface svoi)))))))
+
+(deftest test-bind-step-svoi-subject-normalization
+  (testing "Subject from capture is normalized (lowercase keyword)"
+    (registry/register! #"(.+) logs in"
+                        (fn [_ctx _s] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :login :object nil}})
+    (let [step (make-step "ADMIN logs in")
+          result (bind/bind-step step (registry/all-stepdefs))
+          svoi (-> result :binding :svoi)]
+      (is (= :admin (:subject svoi))))))
+
+;; -----------------------------------------------------------------------------
+;; Task 3.0.6 Acceptance Criteria
+;; -----------------------------------------------------------------------------
+
+(deftest acceptance-svoi-extraction-test
+  (testing "Task 3.0.6 AC: step with SVO metadata"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [step (make-step "Alice clicks the button")
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= ["Alice" "the button"] (-> result :binding :captures)))
+      (is (= {:subject :alice
+              :verb :click
+              :object "the button"
+              :interface :web}
+             (-> result :binding :svoi)))))
+
+  (testing "Task 3.0.6 AC: legacy step (no metadata)"
+    (registry/clear-registry!)
+    (registry/register! #"something legacy"
+                        (fn [] nil)
+                        {:ns 's :file "s.clj" :line 1})
+    (let [step (make-step "something legacy")
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (nil? (-> result :binding :svoi))))))
+
+;; -----------------------------------------------------------------------------
+;; SVO Validation Hook Tests (Task 3.0.7)
+;; -----------------------------------------------------------------------------
+
+(deftest test-bind-suite-svo-validation-valid
+  (testing "bind-suite with valid SVOI passes validation"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "test" ["Alice clicks the button"])
+          ;; Glossary structure: {:subjects {kw info} :verbs {type {kw info}}}
+          glossary {:subjects {:alice {} :admin {}}
+                    :verbs {:web {:click {} :fill {} :see {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :error
+                      :unknown-verb :error
+                      :unknown-interface :error}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
+      (is (:runnable? result))
+      (is (empty? (-> result :diagnostics :svo-issues))))))
+
+(deftest test-bind-suite-svo-unknown-subject-warn
+  (testing "bind-suite with unknown subject (warn) is runnable"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "test" ["UnknownUser clicks the button"])
+          glossary {:subjects {:alice {} :admin {}}
+                    :verbs {:web {:click {} :fill {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :warn}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
+      ;; Runnable because :warn doesn't block
+      (is (:runnable? result))
+      ;; But issue is still reported
+      (is (= 1 (count (-> result :diagnostics :svo-issues))))
+      (is (= :svo/unknown-subject (-> result :diagnostics :svo-issues first :type))))))
+
+(deftest test-bind-suite-svo-unknown-subject-error
+  (testing "bind-suite with unknown subject (error) is NOT runnable"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "test" ["UnknownUser clicks the button"])
+          glossary {:subjects {:alice {} :admin {}}
+                    :verbs {:web {:click {} :fill {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :error}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
+      ;; NOT runnable because :error blocks
+      (is (not (:runnable? result)))
+      ;; Issue is reported
+      (is (= 1 (count (-> result :diagnostics :svo-issues))))
+      (is (= :svo/unknown-subject (-> result :diagnostics :svo-issues first :type)))
+      ;; Has location info
+      (is (some? (-> result :diagnostics :svo-issues first :location))))))
+
+(deftest test-bind-suite-svo-unknown-verb-error
+  (testing "bind-suite with unknown verb (error) is NOT runnable"
+    (registry/register! #"(.+) smashes (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :smash :object :$2}})
+    (let [pickle (make-pickle "test" ["Alice smashes the button"])
+          glossary {:subjects {:alice {} :admin {}}
+                    :verbs {:web {:click {} :fill {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-verb :error}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
+      (is (not (:runnable? result)))
+      (is (= :svo/unknown-verb (-> result :diagnostics :svo-issues first :type))))))
+
+(deftest test-bind-suite-svo-unknown-interface-error
+  (testing "bind-suite with unknown interface (error) is NOT runnable"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :unknown-ui
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "test" ["Alice clicks the button"])
+          glossary {:subjects {:alice {}}
+                    :verbs {:web {:click {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-interface :error}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
+      (is (not (:runnable? result)))
+      (is (= :svo/unknown-interface (-> result :diagnostics :svo-issues first :type))))))
+
+(deftest test-bind-suite-no-opts-skips-svo-validation
+  (testing "bind-suite without opts skips SVO validation (backward compat)"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :unknown-ui
+                         :svo {:subject :$1 :verb :unknown-verb :object :$2}})
+    (let [pickle (make-pickle "test" ["UnknownUser clicks the button"])
+          ;; No opts passed — should skip SVO validation
+          result (bind/bind-suite [pickle] (registry/all-stepdefs))]
+      ;; Still runnable because no SVO validation
+      (is (:runnable? result))
+      ;; No SVO issues (empty)
+      (is (empty? (-> result :diagnostics :svo-issues))))))
+
+(deftest test-bind-suite-svo-issue-has-location
+  (testing "SVO issues include full step location info (uri, line, column)"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    ;; Create pickle with source-file and step with location
+    (let [step (make-step "BadUser clicks the button" [] {:line 7 :column 5})
+          pickle (make-pickle "test" [step] "features/login.feature")
+          glossary {:subjects {:alice {}}
+                    :verbs {:web {:click {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :error}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
+          issue (-> result :diagnostics :svo-issues first)
+          location (:location issue)]
+      ;; Existing assertions
+      (is (= "BadUser clicks the button" (:step-text location)))
+      (is (uuid? (:step-id location)))
+      ;; New full location assertions
+      (is (= "features/login.feature" (:uri location)))
+      (is (= 7 (:line location)))
+      (is (= 5 (:column location))))))
+
+(deftest test-bind-suite-undefined-step-has-source-file
+  (testing "Undefined steps include source-file for location reporting"
+    ;; Register a step that won't match our test step
+    (registry/register! #"I have (\d+) items"
+                        (fn [n] n)
+                        {:ns 's :file "s.clj" :line 1})
+    ;; Create pickle with source-file
+    (let [step (make-step "I click the button" [] {:line 10 :column 3})
+          pickle (make-pickle "test" [step] "features/undefined.feature")
+          {:keys [diagnostics]} (bind/bind-suite [pickle] (registry/all-stepdefs))
+          undefined-step (-> diagnostics :undefined first)]
+      ;; The bound-step should have :source-file attached
+      (is (= "features/undefined.feature" (:source-file undefined-step))))))
+
+(deftest test-bind-suite-issues-have-severity
+  (testing "All issues include :severity key (WI-031.005)"
+    ;; Register a step that matches but check SVO
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    ;; Create two pickles: one with undefined step, one with SVO issue
+    (let [undefined-pickle (make-pickle "undefined" ["I do undefined thing"])
+          svo-pickle (make-pickle "svo" ["UnknownUser clicks the button"])
+          glossary {:subjects {:alice {}}
+                    :verbs {:web {:click {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :warn}}  ;; warn, not error
+          result (bind/bind-suite [undefined-pickle svo-pickle]
+                                  (registry/all-stepdefs)
+                                  opts)
+          {:keys [undefined svo-issues]} (:diagnostics result)]
+      ;; Undefined steps should have :severity :error (always blocking)
+      (is (= 1 (count undefined)))
+      (is (= :error (:severity (first undefined))))
+      ;; SVO issues should have :severity from config (:warn in this case)
+      (is (= 1 (count svo-issues)))
+      (is (= :warn (:severity (first svo-issues))))))
+
+  (testing "SVO issues with :error config have :severity :error"
+    (registry/clear-registry!)
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "svo" ["UnknownUser clicks the button"])
+          glossary {:subjects {:alice {}}
+                    :verbs {:web {:click {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :error}}  ;; error, not warn
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
+          issue (-> result :diagnostics :svo-issues first)]
+      (is (= :error (:severity issue)))
+      ;; With :error severity, should not be runnable
+      (is (not (:runnable? result))))))
+
+(deftest test-bind-suite-multiple-svo-issues
+  (testing "bind-suite collects multiple SVO issues"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "test" ["BadUser clicks the button"
+                                       "AnotherBad clicks the link"])
+          glossary {:subjects {:alice {}}
+                    :verbs {:web {:click {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :warn}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
+      ;; Two steps with unknown subjects
+      (is (= 2 (count (-> result :diagnostics :svo-issues))))
+      (is (= 2 (-> result :diagnostics :counts :svo-issue-count))))))
+
+;; -----------------------------------------------------------------------------
+;; Task 3.0.7 Acceptance Criteria
+;; -----------------------------------------------------------------------------
+
+(deftest acceptance-svo-validation-test
+  (testing "Task 3.0.7 AC: unknown subject with :error blocks"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "test" ["Alcie clicks the button"])  ;; typo
+          glossary {:subjects {:alice {} :admin {}}
+                    :verbs {:web {:click {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :error}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
+      (is (not (:runnable? result)))
+      (let [issue (-> result :diagnostics :svo-issues first)]
+        (is (= :svo/unknown-subject (:type issue)))
+        (is (= :alcie (:subject issue)))
+        (is (some? (:location issue))))))
+
+  (testing "Task 3.0.7 AC: unknown subject with :warn allows run"
+    (registry/clear-registry!)
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "test" ["Alcie clicks the button"])
+          glossary {:subjects {:alice {} :admin {}}
+                    :verbs {:web {:click {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :warn}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
+      ;; Runnable because :warn
+      (is (:runnable? result))
+      ;; But still reported
+      (is (seq (-> result :diagnostics :svo-issues))))))

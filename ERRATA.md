@@ -169,6 +169,49 @@ The compliance projection layer (`shiftlefter.gherkin.compliance`) strips these 
 
 ---
 
+## E007: ~~Canonical Formatter Normalized i18n Keywords to English~~ (RESOLVED)
+
+**Date discovered**: 2026-02-05
+**Date resolved**: 2026-02-06
+
+**Source**: ShiftLefter canonical formatter (`shiftlefter.gherkin.printer/canonical`)
+
+**Resolution**:
+The canonical formatter now preserves original language keywords in formatted output. A French feature file with `Fonctionnalité:`, `Scénario:`, `Soit`, `Quand`, `Alors` will retain those keywords after canonical formatting. The `# language:` header is also preserved.
+
+**Original issue (historical)**:
+The canonical formatter previously normalized all i18n keywords to their English equivalents (e.g., `Soit` → `Given`, `Fonctionnalité` → `Feature`). This contradicted the behavior of every major Cucumber implementation (cucumber-jvm, cucumber-ruby, cucumber-js, SpecFlow/Reqnroll, Behave), all of which preserve original language keywords in formatter output.
+
+The Cucumber ecosystem uses a dual-field design: `keyword` holds the original text (for display fidelity), while `keywordType` holds the semantic classification (Context/Action/Outcome). ShiftLefter's AST now follows this same pattern: `:keyword` for semantic type (English), `:keyword-text` for the original language keyword as written.
+
+**Changes made:**
+- Added `:keyword-text` field to Feature, Scenario, ScenarioOutline, Background, and Rule records
+- Added `:language` field to Feature record (populated from `# language:` header)
+- Printer uses `:keyword-text` for all keyword output
+- Language header emitted when Feature has a non-nil `:language`
+- 8 new i18n formatter tests (French keywords, roundtrip, idempotency)
+
+---
+
+## E008: Built-in Step Patterns Can Conflict with User-Defined Steps
+
+**Date discovered**: 2026-02-07
+
+**Source**: ShiftLefter runner step registry (`shiftlefter.stepengine.registry`)
+
+**Description**:
+Built-in browser step definitions (e.g., `:subject clicks {:css "..."}`) are always loaded into the step registry. If a user defines a custom step with the exact same regex pattern as a built-in, the runner will raise an ambiguous match error at execution time.
+
+**Impact**:
+Users who happen to define a step pattern identical to a built-in browser step will get an ambiguous match error. In practice this is unlikely — the built-in patterns use a specific SVO structure with subject extraction (`:subject verb object`) that custom steps rarely duplicate exactly.
+
+**Our workaround**:
+Use a different pattern for your custom step. The built-in patterns are listed in `docs/CAPABILITIES.md` and in the browser step source (`src/shiftlefter/stepdefs/browser.clj`).
+
+**Upstream status**: By design. The registry intentionally rejects ambiguous matches to prevent silent wrong-step execution. A config-driven disable mechanism was considered (WI-033.004) but deferred indefinitely — the collision is unlikely and the error message is clear.
+
+---
+
 ## Template for New Entries
 
 ```markdown

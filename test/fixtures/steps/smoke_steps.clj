@@ -8,12 +8,12 @@
   nil)
 
 (defstep #"I enter username \"([^\"]+)\""
-  [username]
-  {:username username})
+  [ctx username]
+  (assoc ctx :username username))
 
 (defstep #"I enter password \"([^\"]+)\""
-  [password ctx]
-  (assoc (:scenario ctx) :password password))
+  [ctx password]
+  (assoc ctx :password password))
 
 (defstep #"I click the login button"
   []
@@ -37,8 +37,8 @@
 
 ;; Literal plus test steps (for macros-off test)
 (defstep #"login as alice \+"
-  []
-  {:user "alice+"})
+  [ctx]
+  (assoc ctx :user "alice+"))
 
 (defstep #"I check the username"
   []

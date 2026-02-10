@@ -595,6 +595,37 @@
         (is (= ["c" "d"] (:cells (second rows))))
         (is (= ["e" "f"] (:cells (nth rows 2))))))))
 
+(deftest comments-between-steps
+  (testing "Comment between two steps should not cause parse errors"
+    (let [input "Feature: T\n\n  Scenario: S\n    Given a step\n    # comment\n    When another step\n"
+          result (parser/parse (lexer/lex input))]
+      (is (empty? (:errors result)) "No parse errors")
+      (is (= 2 (count (:steps (first (:children (first (:ast result))))))))))
+
+  (testing "Multiple comments between steps"
+    (let [input "Feature: T\n\n  Scenario: S\n    Given a step\n    # comment 1\n    # comment 2\n    When another step\n"
+          result (parser/parse (lexer/lex input))]
+      (is (empty? (:errors result)) "No parse errors")
+      (is (= 2 (count (:steps (first (:children (first (:ast result))))))))))
+
+  (testing "Blank line and comment between steps"
+    (let [input "Feature: T\n\n  Scenario: S\n    Given a step\n\n    # comment\n    When another step\n"
+          result (parser/parse (lexer/lex input))]
+      (is (empty? (:errors result)) "No parse errors")
+      (is (= 2 (count (:steps (first (:children (first (:ast result))))))))))
+
+  (testing "Comments between multiple steps preserve all steps"
+    (let [input "Feature: T\n\n  Scenario: S\n    Given a step\n    # c1\n    When do something\n    # c2\n    Then verify something\n"
+          result (parser/parse (lexer/lex input))]
+      (is (empty? (:errors result)) "No parse errors")
+      (is (= 3 (count (:steps (first (:children (first (:ast result))))))))))
+
+  (testing "Comment after last step is fine"
+    (let [input "Feature: T\n\n  Scenario: S\n    Given a step\n    When another step\n    # trailing comment\n"
+          result (parser/parse (lexer/lex input))]
+      (is (empty? (:errors result)) "No parse errors")
+      (is (= 2 (count (:steps (first (:children (first (:ast result)))))))))))
+
 (deftest datatable-escaped-pipes
   (testing "DataTable cells with escaped pipes"
     (let [input "Feature: Test\n\n  Scenario: S\n    Given a table\n      | a\\|b | c |"

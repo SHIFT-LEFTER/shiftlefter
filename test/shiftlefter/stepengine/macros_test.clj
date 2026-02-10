@@ -1,7 +1,6 @@
 (ns shiftlefter.stepengine.macros-test
   (:require [clojure.test :refer [deftest is testing]]
-            [shiftlefter.stepengine.macros :as macros]
-            [shiftlefter.gherkin.location :as loc]))
+            [shiftlefter.stepengine.macros :as macros]))
 
 ;; -----------------------------------------------------------------------------
 ;; load-registries Tests

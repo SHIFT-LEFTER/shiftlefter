@@ -6,7 +6,7 @@
   (:require [clojure.spec.alpha :as s]
             [shiftlefter.gherkin.location :as location])
   (:import [java.nio.file Files Paths NoSuchFileException]
-           [java.nio.charset StandardCharsets CharsetDecoder CodingErrorAction]
+           [java.nio.charset StandardCharsets CodingErrorAction]
            [java.nio CharBuffer]))
 
 ;; -----------------------------------------------------------------------------

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Bounce the nREPL server - kill existing and start fresh
+#
+# Usage: ./bin/bounce-repl
+#
+# This script:
+# 1. Kills any existing nREPL process
+# 2. Removes stale .nrepl-port file
+# 3. Starts a fresh nREPL with cider middleware
+# 4. Runs in foreground (Ctrl-C to stop)
+
+set -e
+cd "$(dirname "$0")/.."
+
+echo "Killing existing nREPL..."
+pkill -f "nrepl.cmdline" 2>/dev/null || true
+
+# Clean up stale port file
+rm -f .nrepl-port
+
+echo "Starting fresh nREPL..."
+echo "(Ctrl-C to stop)"
+echo ""
+
+# Start nREPL with the :repl alias
+# Includes: nrepl, cider-nrepl middleware, test paths
+exec clj -M:dev:repl

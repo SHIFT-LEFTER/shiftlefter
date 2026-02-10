@@ -1,0 +1,5 @@
+;; Project-specific web verb extensions
+{:type :web
+ :verbs
+ {:swipe {:desc "Swipe gesture on mobile"}
+  :pinch {:desc "Pinch gesture for zoom"}}}

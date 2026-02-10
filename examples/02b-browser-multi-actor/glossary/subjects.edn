@@ -1,0 +1,6 @@
+;; Subject glossary — declares who can act in scenarios.
+;; Without this file, shifted mode rejects unknown subjects.
+
+{:subjects
+ {:alice {:desc "First test user"}
+  :bob   {:desc "Second test user"}}}

@@ -35,6 +35,20 @@
 (s/def ::line pos-int?)
 (s/def ::column pos-int?)
 
+;; Common specs for JSON output structures
+(s/def ::id string?)
+(s/def ::keyword string?)
+(s/def ::keywordType #{"Context" "Action" "Outcome" "Conjunction" "Unknown"})
+(s/def ::name string?)
+(s/def ::description string?)
+(s/def ::text string?)
+(s/def ::language string?)
+(s/def ::tags (s/coll-of map?))
+(s/def ::steps (s/coll-of map?))
+(s/def ::examples (s/coll-of map?))
+(s/def ::children (s/coll-of map?))
+(s/def ::location ::json-location)
+
 (s/def ::json-step
   (s/keys :req-un [::id ::keyword ::keywordType ::location ::text]))
 
@@ -465,7 +479,9 @@
 
 (defn- extract-keyword-from-source
   "Extract the keyword (Feature, Scenario, etc.) from source-text.
-   Source text format: 'Keyword: name' -> returns 'Keyword'"
+   Source text format: 'Keyword: name' -> returns 'Keyword'
+   DEPRECATED: prefer :keyword-text on AST nodes (added in WI-033.016).
+   Kept for backward compat with nodes constructed without :keyword-text."
   [source-text]
   (when source-text
     (str/trim (first (str/split source-text #":")))))
@@ -483,7 +499,7 @@
   [scenario id step-ids]
   (let [[tag-jsons _ _] (tags->json-with-ids (:tags scenario) 0)]
     {:id (str id)
-     :keyword (or (extract-keyword-from-source (:source-text scenario)) "Scenario")
+     :keyword (or (:keyword-text scenario) (extract-keyword-from-source (:source-text scenario)) "Scenario")
      :location (loc->json (:location scenario))
      :name (:name scenario)
      :description ""
@@ -605,7 +621,7 @@
         examples-id next-id-after-tags
         examples-json (cond-> {:description (or (:description examples) "")
                                :id (str examples-id)
-                               :keyword (or (extract-keyword-from-source (:source-text examples)) "Examples")
+                               :keyword (or (:keyword-text examples) (extract-keyword-from-source (:source-text examples)) "Examples")
                                :location (loc->json (:location examples))
                                :name (or (:name examples) "")
                                :tableBody (vec body-jsons)
@@ -631,7 +647,7 @@
         bg-id next-id
         bg-json {:description (or (:description background) "")
                  :id (str bg-id)
-                 :keyword (or (extract-keyword-from-source (:source-text background)) "Background")
+                 :keyword (or (:keyword-text background) (extract-keyword-from-source (:source-text background)) "Background")
                  :location (loc->json (:location background))
                  :name (or (:name background) "")
                  :steps step-jsons}]
@@ -650,7 +666,7 @@
         ;; 4. Finally assign ID to container
         scenario-id next-id-after-tags
         scenario-json {:id (str scenario-id)
-                       :keyword (or (extract-keyword-from-source (:source-text scenario)) "Scenario")
+                       :keyword (or (:keyword-text scenario) (extract-keyword-from-source (:source-text scenario)) "Scenario")
                        :location (loc->json (:location scenario))
                        :name (:name scenario)
                        :description (or (:description scenario) "")
@@ -692,7 +708,7 @@
         rule-json {:children scenario-results
                    :description (or (:description rule) "")
                    :id (str rule-id)
-                   :keyword (or (extract-keyword-from-source (:source-text rule)) "Rule")
+                   :keyword (or (:keyword-text rule) (extract-keyword-from-source (:source-text rule)) "Rule")
                    :location (loc->json (:location rule))
                    :name (:name rule)
                    :tags tag-jsons}]
@@ -731,7 +747,7 @@
                  (:children feature))
          ;; 2. Then assign IDs to feature tags
          [tag-jsons final-id tag-id-map] (tags->json-with-ids (:tags feature) next-id-after-children)
-         feature-json {:keyword (or (extract-keyword-from-source (:source-text feature)) "Feature")
+         feature-json {:keyword (or (:keyword-text feature) (extract-keyword-from-source (:source-text feature)) "Feature")
                        :location (loc->json (:location feature))
                        :name (:name feature)
                        :description (or (:description feature) "")

@@ -27,10 +27,78 @@
    - roundtrip-ok?   — check if string round-trips exactly
    - fmt-check       — check roundtrip + parse (returns status map)
    - fmt-canonical   — canonical formatting (normalizes whitespace)"
-  (:require [shiftlefter.gherkin.lexer :as lexer]
+  (:require [clojure.spec.alpha :as s]
+            [shiftlefter.gherkin.lexer :as lexer]
             [shiftlefter.gherkin.parser :as parser]
             [shiftlefter.gherkin.pickler :as pickler]
             [shiftlefter.gherkin.printer :as printer]))
+
+;; -----------------------------------------------------------------------------
+;; Specs — Return types for API functions
+;; -----------------------------------------------------------------------------
+
+;; Reuse existing specs from underlying namespaces
+(s/def ::tokens (s/coll-of :shiftlefter.gherkin.tokens/token :kind vector?))
+(s/def ::ast (s/coll-of :shiftlefter.gherkin.parser/ast-node :kind vector?))
+(s/def ::errors (s/coll-of :shiftlefter.gherkin.parser/error :kind vector?))
+(s/def ::pickles (s/coll-of map? :kind vector?))  ; pickle maps
+
+;; Return envelope specs
+(s/def ::lex-result (s/keys :req-un [::tokens ::errors]))
+(s/def ::parse-result (s/keys :req-un [::ast ::errors]))
+(s/def ::full-parse-result (s/keys :req-un [::tokens ::ast ::errors]))
+(s/def ::pickle-result (s/keys :req-un [::pickles ::errors]))
+
+;; fmt-check/fmt-canonical return specs
+(s/def ::status #{:ok :error})
+(s/def ::reason keyword?)
+(s/def ::output string?)
+(s/def ::details (s/coll-of map? :kind vector?))
+(s/def ::message string?)
+
+(s/def ::fmt-ok-result (s/keys :req-un [::status]))
+(s/def ::fmt-canonical-ok-result (s/keys :req-un [::status ::output]))
+(s/def ::fmt-error-result (s/keys :req-un [::status ::reason]
+                                  :opt-un [::details ::message]))
+(s/def ::fmt-check-result (s/or :ok ::fmt-ok-result :error ::fmt-error-result))
+(s/def ::fmt-canonical-result (s/or :ok ::fmt-canonical-ok-result :error ::fmt-error-result))
+
+;; -----------------------------------------------------------------------------
+;; Function specs (fdefs)
+;; -----------------------------------------------------------------------------
+
+(s/fdef lex-string
+  :args (s/cat :s string?)
+  :ret ::lex-result)
+
+(s/fdef parse-tokens
+  :args (s/cat :tokens (s/coll-of :shiftlefter.gherkin.tokens/token))
+  :ret ::parse-result)
+
+(s/fdef parse-string
+  :args (s/cat :s string?)
+  :ret ::full-parse-result)
+
+(s/fdef pickles
+  :args (s/cat :ast (s/coll-of :shiftlefter.gherkin.parser/ast-node)
+               :uri string?)
+  :ret ::pickle-result)
+
+(s/fdef print-tokens
+  :args (s/cat :tokens (s/coll-of :shiftlefter.gherkin.tokens/token))
+  :ret string?)
+
+(s/fdef roundtrip-ok?
+  :args (s/cat :s string?)
+  :ret boolean?)
+
+(s/fdef fmt-check
+  :args (s/cat :s string?)
+  :ret ::fmt-check-result)
+
+(s/fdef fmt-canonical
+  :args (s/cat :s string?)
+  :ret ::fmt-canonical-result)
 
 ;; -----------------------------------------------------------------------------
 ;; Envelope Helpers
@@ -114,29 +182,28 @@
     (= s reconstructed)))
 
 (defn fmt-check
-  "Check if string round-trips and parses without errors.
+  "Check if string is already in canonical format.
 
    Returns {:status :ok/:error ...}
-   - On success: {:status :ok}
+   - On success (already canonical): {:status :ok}
    - On parse error: {:status :error :reason :parse-errors :details [...]}
-   - On mismatch: {:status :error :reason :mismatch :original-length N :reconstructed-length M}"
+   - On needs formatting: {:status :error :reason :needs-formatting}"
   [s]
-  (let [tokens (lexer/lex s)
-        {:keys [errors]} (parser/parse tokens)]
-    (cond
-      (seq errors)
-      {:status :error
-       :reason :parse-errors
-       :details (vec errors)}
-
-      :else
-      (let [reconstructed (printer/print-tokens tokens)]
-        (if (= s reconstructed)
-          {:status :ok}
+  (try
+    (let [canonical (printer/canonical s)]
+      (if (= s canonical)
+        {:status :ok}
+        {:status :error
+         :reason :needs-formatting}))
+    (catch clojure.lang.ExceptionInfo e
+      (let [data (ex-data e)]
+        (if (:errors data)
           {:status :error
-           :reason :mismatch
-           :original-length (count s)
-           :reconstructed-length (count reconstructed)})))))
+           :reason :parse-errors
+           :details (vec (:errors data))}
+          {:status :error
+           :reason (:reason data :fmt-check/unknown-error)
+           :message (ex-message e)})))))
 
 (defn fmt-canonical
   "Format a Gherkin string to canonical style.

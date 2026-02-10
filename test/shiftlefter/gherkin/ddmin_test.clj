@@ -3,8 +3,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
             [babashka.fs :as fs]
-            [shiftlefter.gherkin.ddmin :as ddmin]
-            [shiftlefter.gherkin.api :as api]))
+            [shiftlefter.gherkin.ddmin :as ddmin]))
 
 ;; -----------------------------------------------------------------------------
 ;; Test fixtures
@@ -111,7 +110,7 @@
 
 (deftest identify-units-handles-parse-errors
   (testing "identify-units works even with parse errors"
-    (let [{:keys [units parse-failed?]} (ddmin/identify-units feature-with-typo)]
+    (let [{:keys [units]} (ddmin/identify-units feature-with-typo)]
       ;; Should still find some units
       (is (vector? units)))))
 
@@ -189,7 +188,7 @@
                                  :reason :graceful-errors
                                  :error/type :invalid-keyword}}))
 
-      (let [result (ddmin/ddmin-artifact temp-dir {:timeout-ms 200})]
+      (let [_result (ddmin/ddmin-artifact temp-dir {:timeout-ms 200})]
         ;; Should create min.feature and ddmin.edn
         (is (fs/exists? (fs/path temp-dir "min.feature")))
         (is (fs/exists? (fs/path temp-dir "ddmin.edn")))
@@ -202,6 +201,18 @@
 ;; -----------------------------------------------------------------------------
 ;; Mode inference tests
 ;; -----------------------------------------------------------------------------
+
+(deftest ddmin-handles-nil-mode
+  (testing "ddmin with nil mode (defaults to :auto)"
+    ;; This tests the fix for WI-032.018 - CLI passing nil mode
+    (let [result (ddmin/ddmin feature-with-typo {:mode nil :timeout-ms 200})]
+      (is (< (count (:minimized result)) (count (:original result))))
+      (is (:signatures-match? result))))
+
+  (testing "ddmin with empty opts (defaults to :auto)"
+    (let [result (ddmin/ddmin feature-with-typo {})]
+      (is (< (count (:minimized result)) (count (:original result))))
+      (is (:signatures-match? result)))))
 
 (deftest infer-mode-selects-correct-mode
   (testing "infer-mode returns parse for parse errors"

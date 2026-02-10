@@ -1,0 +1,2 @@
+{:interfaces {:web {:type :web
+                   :adapter :etaoin}}}

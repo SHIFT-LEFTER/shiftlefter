@@ -1,0 +1,7 @@
+#!/bin/bash
+# Wrapper for clj-nrepl-eval that sets JAVA_HOME
+# (Claude's bash doesn't inherit fish's environment)
+
+export JAVA_HOME=/opt/homebrew/opt/openjdk
+export PATH="$JAVA_HOME/bin:$HOME/.local/bin:$PATH"
+exec clj-nrepl-eval "$@"

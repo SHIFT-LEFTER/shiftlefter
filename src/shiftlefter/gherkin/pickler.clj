@@ -48,17 +48,35 @@
 (s/def ::registry map?)
 (s/def ::source-file string?)
 
+;; Primitive specs for Pickle Plan keys
+(s/def ::name string?)
+(s/def ::keyword string?)
+(s/def ::text string?)
+(s/def ::location :shiftlefter.gherkin.location/location)
+(s/def ::tags (s/coll-of map?))
+(s/def ::type keyword?)
+(s/def ::arguments (s/coll-of any?))
+(s/def ::examples any?)
+
 ;; Pickle Plan specs (intermediate representation)
+;; Ordered from leaf to root to avoid forward references
+
 (s/def ::step-plan
   (s/keys :req-un [::keyword ::text ::location]
           :opt-un [::arguments]))
+
+(s/def ::steps (s/coll-of ::step-plan))
 
 (s/def ::scenario-plan
   (s/keys :req-un [::name ::location ::tags ::steps ::type]
           :opt-un [::examples]))
 
+(s/def ::scenarios (s/coll-of ::scenario-plan))
+
 (s/def ::feature-plan
   (s/keys :req-un [::name ::tags ::scenarios]))
+
+(s/def ::features (s/coll-of ::feature-plan))
 
 (s/def ::pickle-plan
   (s/keys :req-un [::features ::source-file]))
@@ -397,11 +415,17 @@
   :args (s/cat :pre-ast ::ast :registry ::registry :source-file ::source-file)
   :ret ::pickles)
 
-(defn pickles->edn [pickles]
+(defn pickles->edn
+  "Serialize pickles to an EDN string."
+  [pickles]
   (pr-str pickles))
 
-(defn pickles->json [pickles]
+(defn pickles->json
+  "Serialize pickles to a JSON string."
+  [pickles]
   (json/generate-string pickles))
 
-(defn pickles->ndjson [pickles]
+(defn pickles->ndjson
+  "Serialize pickles to newline-delimited JSON (one pickle per line)."
+  [pickles]
   (str/join "\n" (map json/generate-string pickles)))

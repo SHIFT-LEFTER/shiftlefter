@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Generate API documentation using Codox.
+# Output: docs/api/index.html
+set -euo pipefail
+cd "$(dirname "$0")/.."
+echo "Generating API docs..."
+clj -X:codox
+echo "Done. Open docs/api/index.html"

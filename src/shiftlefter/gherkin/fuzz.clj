@@ -811,6 +811,14 @@
         corpus (when (#{:corpus :both} sources)
                  (load-corpus corpus-dir))
 
+        ;; Check corpus exists when required
+        _ (when (and (#{:corpus :both} sources) (empty? corpus))
+            (throw (ex-info (str "No .feature files found in corpus directory: " corpus-dir
+                                 "\nCorpus mode requires running from the project directory, "
+                                 "or use --sources generated instead.")
+                            {:reason :corpus-not-found
+                             :corpus-dir corpus-dir})))
+
         ;; Stats
         stats (atom {:mutations/total 0
                      :mutations/graceful 0

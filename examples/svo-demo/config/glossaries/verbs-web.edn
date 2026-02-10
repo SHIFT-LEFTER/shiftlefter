@@ -1,0 +1,15 @@
+;; Project-Specific Web Verbs
+;;
+;; This glossary EXTENDS the framework's default web verbs.
+;; Default verbs include: :click, :fill, :see, :navigate, :submit, :hover, etc.
+;;
+;; Add project-specific verbs here that aren't in the defaults.
+;; These might be domain-specific actions unique to your application.
+
+{:type :web
+ :verbs
+ {;; Domain-specific verbs for this application
+  :login {:desc "Authenticate with username/password"}
+  :logout {:desc "End authenticated session"}
+  :search {:desc "Execute a search query"}
+  :filter {:desc "Apply filter criteria to results"}}}

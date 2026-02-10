@@ -1,4 +1,12 @@
 (ns shiftlefter.gherkin.lexer
+  "Tokenizer for Gherkin source text.
+
+   Converts raw Gherkin source into a sequence of typed tokens with location
+   information. Handles language directives, tags, keywords, table rows,
+   doc strings, and comments. Dialect-aware — tokenizes keywords in any
+   supported language.
+
+   Entry point: `lex` (called by `gherkin.api/lex-string`)."
   (:require [clojure.string :as str]
             [shiftlefter.gherkin.location :as loc]
             [shiftlefter.gherkin.tokens :as tokens]
@@ -51,7 +59,11 @@
         :else current-state))
     current-state))
 
-(defn lazy-lex-helper [lines line-idx token-idx lang docstring-state]
+(defn lazy-lex-helper
+  "Internal helper that produces a lazy sequence of tokens from lines.
+   Tracks line index, token index, current language, and docstring state.
+   Called recursively to build the token stream; see `lex` for the public API."
+  [lines line-idx token-idx lang docstring-state]
   (lazy-seq
     (if (< line-idx (count lines))
       (let [raw-line (nth lines line-idx)
@@ -61,7 +73,8 @@
                        lang)
             new-docstring-state (update-docstring-state docstring-state token)]
         (cons token (lazy-lex-helper lines (inc line-idx) (inc token-idx) new-lang new-docstring-state)))
-      (list (tokens/->Token :eof nil (loc/->Location (count lines) 0) "" token-idx "" nil)))))
+      ;; EOF token: line is 1-indexed, so use max to ensure at least line 1 for empty input
+      (list (tokens/->Token :eof nil (loc/->Location (max 1 (count lines)) 1) "" token-idx "" nil)))))
 
 (defn lex
   "Lex the input Gherkin string into a lazy sequence of tokens.
