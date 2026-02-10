@@ -74,7 +74,112 @@
   (visible? [_this _locator]
     (when @fail-atom
       (throw (ex-info "invalid session id" {:type :session-error})))
-    true))
+    true)
+
+  ;; --- Navigation (0.3.6) ---
+  (go-back! [this]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:go-back!])
+    this)
+  (go-forward! [this]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:go-forward!])
+    this)
+  (refresh! [this]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:refresh!])
+    this)
+
+  ;; --- Scrolling (0.3.6) ---
+  (scroll-to! [this locator]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:scroll-to! locator])
+    this)
+  (scroll-to-position! [this position]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:scroll-to-position! position])
+    this)
+
+  ;; --- Form Operations (0.3.6) ---
+  (clear! [this locator]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:clear! locator])
+    this)
+  (select! [this locator text]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:select! locator text])
+    this)
+  (press-key! [this key-str]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:press-key! key-str])
+    this)
+
+  ;; --- Element Queries (0.3.6) ---
+  (get-attribute [_this _locator _attribute]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    "mock-attr")
+  (get-value [_this _locator]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    "mock-value")
+  (enabled? [_this _locator]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    true)
+
+  ;; --- Alerts (0.3.6) ---
+  (accept-alert! [this]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:accept-alert!])
+    this)
+  (dismiss-alert! [this]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:dismiss-alert!])
+    this)
+  (get-alert-text [_this]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    "mock alert")
+
+  ;; --- Window Management (0.3.6) ---
+  (maximize-window! [this]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:maximize-window!])
+    this)
+  (set-window-size! [this width height]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:set-window-size! width height])
+    this)
+  (switch-to-next-window! [this]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:switch-to-next-window!])
+    this)
+
+  ;; --- Frames (0.3.6) ---
+  (switch-to-frame! [this locator]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:switch-to-frame! locator])
+    this)
+  (switch-to-main-frame! [this]
+    (when @fail-atom
+      (throw (ex-info "invalid session id" {:type :session-error})))
+    (swap! call-log-atom conj [:switch-to-main-frame!])
+    this))
 
 (defn make-mock-browser
   "Create a mock browser for testing.
@@ -193,7 +298,33 @@
                          (get-text [_this _loc] "")
                          (get-url [_this] "")
                          (get-title [_this] "")
-                         (visible? [_this _loc] false))
+                         (visible? [_this _loc] false)
+                         ;; Navigation (0.3.6)
+                         (go-back! [this] this)
+                         (go-forward! [this] this)
+                         (refresh! [this] this)
+                         ;; Scrolling
+                         (scroll-to! [this _loc] this)
+                         (scroll-to-position! [this _pos] this)
+                         ;; Form Operations
+                         (clear! [this _loc] this)
+                         (select! [this _loc _text] this)
+                         (press-key! [this _key] this)
+                         ;; Element Queries
+                         (get-attribute [_this _loc _attr] "")
+                         (get-value [_this _loc] "")
+                         (enabled? [_this _loc] true)
+                         ;; Alerts
+                         (accept-alert! [this] this)
+                         (dismiss-alert! [this] this)
+                         (get-alert-text [_this] "")
+                         ;; Window Management
+                         (maximize-window! [this] this)
+                         (set-window-size! [this _w _h] this)
+                         (switch-to-next-window! [this] this)
+                         ;; Frames
+                         (switch-to-frame! [this _loc] this)
+                         (switch-to-main-frame! [this] this))
           reconnect-called (atom false)
           reconnect-fn (fn [_ _]
                          (reset! reconnect-called true)

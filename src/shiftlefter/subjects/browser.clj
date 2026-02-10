@@ -73,6 +73,44 @@
       (chrome/ensure-window! port))))
 
 ;; -----------------------------------------------------------------------------
+;; Reconnect Macros
+;; -----------------------------------------------------------------------------
+
+(defmacro ^:private with-reconnect-mutating
+  "Try body, reconnect on session error, retry once. Returns `this`.
+   For mutating IBrowser ops (! suffix)."
+  [browser-atom subject-name stealth reconnect-fn this & body]
+  `(try
+     ~@body
+     ~this
+     (catch Exception e#
+       (if (session-error? e#)
+         (let [new-browser# (~reconnect-fn ~subject-name ~stealth)]
+           (if new-browser#
+             (do
+               (reset! ~browser-atom new-browser#)
+               ~@body
+               ~this)
+             (throw e#)))
+         (throw e#)))))
+
+(defmacro ^:private with-reconnect-query
+  "Try body, reconnect on session error, retry once. Returns result of body.
+   For query IBrowser ops."
+  [browser-atom subject-name stealth reconnect-fn & body]
+  `(try
+     ~@body
+     (catch Exception e#
+       (if (session-error? e#)
+         (let [new-browser# (~reconnect-fn ~subject-name ~stealth)]
+           (if new-browser#
+             (do
+               (reset! ~browser-atom new-browser#)
+               ~@body)
+             (throw e#)))
+         (throw e#)))))
+
+;; -----------------------------------------------------------------------------
 ;; PersistentBrowser
 ;; -----------------------------------------------------------------------------
 
@@ -80,176 +118,144 @@
   bp/IBrowser
 
   (open-to! [this url]
-    ;; Ensure window exists before navigating (handles window-closed case)
+    ;; Special: ensure window exists before navigating (handles window-closed case)
     (ensure-window-for-subject! subject-name)
-    (try
-      (bp/open-to! @browser-atom url)
-      this
-      (catch Exception e
-        (if (session-error? e)
-          (let [new-browser (reconnect-fn subject-name stealth)]
-            (if new-browser
-              (do
-                (reset! browser-atom new-browser)
-                (bp/open-to! @browser-atom url)
-                this)
-              (throw e)))
-          (throw e)))))
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/open-to! @browser-atom url)))
 
   (click! [this locator]
-    (try
-      (bp/click! @browser-atom locator)
-      this
-      (catch Exception e
-        (if (session-error? e)
-          (let [new-browser (reconnect-fn subject-name stealth)]
-            (if new-browser
-              (do
-                (reset! browser-atom new-browser)
-                (bp/click! @browser-atom locator)
-                this)
-              (throw e)))
-          (throw e)))))
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/click! @browser-atom locator)))
 
   (doubleclick! [this locator]
-    (try
-      (bp/doubleclick! @browser-atom locator)
-      this
-      (catch Exception e
-        (if (session-error? e)
-          (let [new-browser (reconnect-fn subject-name stealth)]
-            (if new-browser
-              (do
-                (reset! browser-atom new-browser)
-                (bp/doubleclick! @browser-atom locator)
-                this)
-              (throw e)))
-          (throw e)))))
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/doubleclick! @browser-atom locator)))
 
   (rightclick! [this locator]
-    (try
-      (bp/rightclick! @browser-atom locator)
-      this
-      (catch Exception e
-        (if (session-error? e)
-          (let [new-browser (reconnect-fn subject-name stealth)]
-            (if new-browser
-              (do
-                (reset! browser-atom new-browser)
-                (bp/rightclick! @browser-atom locator)
-                this)
-              (throw e)))
-          (throw e)))))
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/rightclick! @browser-atom locator)))
 
   (move-to! [this locator]
-    (try
-      (bp/move-to! @browser-atom locator)
-      this
-      (catch Exception e
-        (if (session-error? e)
-          (let [new-browser (reconnect-fn subject-name stealth)]
-            (if new-browser
-              (do
-                (reset! browser-atom new-browser)
-                (bp/move-to! @browser-atom locator)
-                this)
-              (throw e)))
-          (throw e)))))
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/move-to! @browser-atom locator)))
 
   (drag-to! [this from-locator to-locator]
-    (try
-      (bp/drag-to! @browser-atom from-locator to-locator)
-      this
-      (catch Exception e
-        (if (session-error? e)
-          (let [new-browser (reconnect-fn subject-name stealth)]
-            (if new-browser
-              (do
-                (reset! browser-atom new-browser)
-                (bp/drag-to! @browser-atom from-locator to-locator)
-                this)
-              (throw e)))
-          (throw e)))))
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/drag-to! @browser-atom from-locator to-locator)))
 
   (fill! [this locator text]
-    (try
-      (bp/fill! @browser-atom locator text)
-      this
-      (catch Exception e
-        (if (session-error? e)
-          (let [new-browser (reconnect-fn subject-name stealth)]
-            (if new-browser
-              (do
-                (reset! browser-atom new-browser)
-                (bp/fill! @browser-atom locator text)
-                this)
-              (throw e)))
-          (throw e)))))
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/fill! @browser-atom locator text)))
 
   (element-count [_this locator]
-    (try
-      (bp/element-count @browser-atom locator)
-      (catch Exception e
-        (if (session-error? e)
-          (let [new-browser (reconnect-fn subject-name stealth)]
-            (if new-browser
-              (do
-                (reset! browser-atom new-browser)
-                (bp/element-count @browser-atom locator))
-              (throw e)))
-          (throw e)))))
+    (with-reconnect-query browser-atom subject-name stealth reconnect-fn
+      (bp/element-count @browser-atom locator)))
 
   (get-text [_this locator]
-    (try
-      (bp/get-text @browser-atom locator)
-      (catch Exception e
-        (if (session-error? e)
-          (let [new-browser (reconnect-fn subject-name stealth)]
-            (if new-browser
-              (do
-                (reset! browser-atom new-browser)
-                (bp/get-text @browser-atom locator))
-              (throw e)))
-          (throw e)))))
+    (with-reconnect-query browser-atom subject-name stealth reconnect-fn
+      (bp/get-text @browser-atom locator)))
 
   (get-url [_this]
-    (try
-      (bp/get-url @browser-atom)
-      (catch Exception e
-        (if (session-error? e)
-          (let [new-browser (reconnect-fn subject-name stealth)]
-            (if new-browser
-              (do
-                (reset! browser-atom new-browser)
-                (bp/get-url @browser-atom))
-              (throw e)))
-          (throw e)))))
+    (with-reconnect-query browser-atom subject-name stealth reconnect-fn
+      (bp/get-url @browser-atom)))
 
   (get-title [_this]
-    (try
-      (bp/get-title @browser-atom)
-      (catch Exception e
-        (if (session-error? e)
-          (let [new-browser (reconnect-fn subject-name stealth)]
-            (if new-browser
-              (do
-                (reset! browser-atom new-browser)
-                (bp/get-title @browser-atom))
-              (throw e)))
-          (throw e)))))
+    (with-reconnect-query browser-atom subject-name stealth reconnect-fn
+      (bp/get-title @browser-atom)))
 
   (visible? [_this locator]
-    (try
-      (bp/visible? @browser-atom locator)
-      (catch Exception e
-        (if (session-error? e)
-          (let [new-browser (reconnect-fn subject-name stealth)]
-            (if new-browser
-              (do
-                (reset! browser-atom new-browser)
-                (bp/visible? @browser-atom locator))
-              (throw e)))
-          (throw e))))))
+    (with-reconnect-query browser-atom subject-name stealth reconnect-fn
+      (bp/visible? @browser-atom locator)))
+
+  ;; --- Navigation (0.3.6) ---
+
+  (go-back! [this]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/go-back! @browser-atom)))
+
+  (go-forward! [this]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/go-forward! @browser-atom)))
+
+  (refresh! [this]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/refresh! @browser-atom)))
+
+  ;; --- Scrolling (0.3.6) ---
+
+  (scroll-to! [this locator]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/scroll-to! @browser-atom locator)))
+
+  (scroll-to-position! [this position]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/scroll-to-position! @browser-atom position)))
+
+  ;; --- Form Operations (0.3.6) ---
+
+  (clear! [this locator]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/clear! @browser-atom locator)))
+
+  (select! [this locator text]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/select! @browser-atom locator text)))
+
+  (press-key! [this key-str]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/press-key! @browser-atom key-str)))
+
+  ;; --- Element Queries (0.3.6) ---
+
+  (get-attribute [_this locator attribute]
+    (with-reconnect-query browser-atom subject-name stealth reconnect-fn
+      (bp/get-attribute @browser-atom locator attribute)))
+
+  (get-value [_this locator]
+    (with-reconnect-query browser-atom subject-name stealth reconnect-fn
+      (bp/get-value @browser-atom locator)))
+
+  (enabled? [_this locator]
+    (with-reconnect-query browser-atom subject-name stealth reconnect-fn
+      (bp/enabled? @browser-atom locator)))
+
+  ;; --- Alerts (0.3.6) ---
+
+  (accept-alert! [this]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/accept-alert! @browser-atom)))
+
+  (dismiss-alert! [this]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/dismiss-alert! @browser-atom)))
+
+  (get-alert-text [_this]
+    (with-reconnect-query browser-atom subject-name stealth reconnect-fn
+      (bp/get-alert-text @browser-atom)))
+
+  ;; --- Window Management (0.3.6) ---
+
+  (maximize-window! [this]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/maximize-window! @browser-atom)))
+
+  (set-window-size! [this width height]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/set-window-size! @browser-atom width height)))
+
+  (switch-to-next-window! [this]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/switch-to-next-window! @browser-atom)))
+
+  ;; --- Frames (0.3.6) ---
+
+  (switch-to-frame! [this locator]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/switch-to-frame! @browser-atom locator)))
+
+  (switch-to-main-frame! [this]
+    (with-reconnect-mutating browser-atom subject-name stealth reconnect-fn this
+      (bp/switch-to-main-frame! @browser-atom))))
 
 ;; -----------------------------------------------------------------------------
 ;; Factory

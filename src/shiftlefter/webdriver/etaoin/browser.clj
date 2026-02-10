@@ -13,6 +13,8 @@
 (defrecord EtaoinBrowser [driver]
   bp/IBrowser
 
+  ;; --- Kernel Operations ---
+
   (open-to! [this url]
     (eta/go driver url)
     this)
@@ -46,6 +48,8 @@
   (element-count [_this locator]
     (count (eta/query-all driver (:q locator))))
 
+  ;; --- Query Operations ---
+
   (get-text [_this locator]
     (eta/get-element-text driver (:q locator)))
 
@@ -59,7 +63,98 @@
     (try
       (eta/displayed? driver (:q locator))
       (catch Exception _
-        false))))
+        false)))
+
+  ;; --- Navigation ---
+
+  (go-back! [this]
+    (eta/back driver)
+    this)
+
+  (go-forward! [this]
+    (eta/forward driver)
+    this)
+
+  (refresh! [this]
+    (eta/refresh driver)
+    this)
+
+  ;; --- Scrolling ---
+
+  (scroll-to! [this locator]
+    (eta/scroll-query driver (:q locator))
+    this)
+
+  (scroll-to-position! [this position]
+    (case position
+      :top (eta/scroll-top driver)
+      :bottom (eta/scroll-bottom driver))
+    this)
+
+  ;; --- Form Operations ---
+
+  (clear! [this locator]
+    (eta/clear driver (:q locator))
+    this)
+
+  (select! [this locator text]
+    (eta/select driver (:q locator) text)
+    this)
+
+  (press-key! [this key-str]
+    (eta/fill-active driver key-str)
+    this)
+
+  ;; --- Element Queries ---
+
+  (get-attribute [_this locator attribute]
+    (eta/get-element-attr driver (:q locator) (keyword attribute)))
+
+  (get-value [_this locator]
+    (eta/get-element-value driver (:q locator)))
+
+  (enabled? [_this locator]
+    (try
+      (eta/enabled? driver (:q locator))
+      (catch Exception _
+        false)))
+
+  ;; --- Alerts ---
+
+  (accept-alert! [this]
+    (eta/accept-alert driver)
+    this)
+
+  (dismiss-alert! [this]
+    (eta/dismiss-alert driver)
+    this)
+
+  (get-alert-text [_this]
+    (eta/get-alert-text driver))
+
+  ;; --- Window Management ---
+
+  (maximize-window! [this]
+    (eta/maximize driver)
+    this)
+
+  (set-window-size! [this width height]
+    (eta/set-window-size driver width height)
+    this)
+
+  (switch-to-next-window! [this]
+    (eta/switch-window-next driver)
+    this)
+
+  ;; --- Frames ---
+
+  (switch-to-frame! [this locator]
+    (eta/switch-frame driver (:q locator))
+    this)
+
+  (switch-to-main-frame! [this]
+    (eta/switch-frame-top driver)
+    this))
 
 ;; -----------------------------------------------------------------------------
 ;; Factory

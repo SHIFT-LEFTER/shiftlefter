@@ -1,4 +1,9 @@
 (ns shiftlefter.gherkin.tokens
+  "Token record and type taxonomy for the Gherkin lexer.
+
+   Defines the `Token` record and specs for all token types: `:feature-line`,
+   `:scenario-line`, `:step-line`, `:tag-line`, `:table-row`, `:doc-string`,
+   `:comment`, `:empty`, `:eof`, and others."
   (:require [shiftlefter.gherkin.location :as loc]
             [shiftlefter.gherkin.dialect :as dialect]
             [clojure.string :as str]

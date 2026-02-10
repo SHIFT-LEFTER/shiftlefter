@@ -198,80 +198,80 @@ Feature: Test
     (is (= {} (repl/ctx)))))
 
 ;; -----------------------------------------------------------------------------
-;; Named Context Tests (free mode)
+;; Named Context Tests (as)
 ;; -----------------------------------------------------------------------------
 
-(deftest test-free-single-step
-  (testing "free executes step in named context"
-    (defstep #"I am (\w+)" [name]
+(deftest test-as-single-step
+  (testing "as executes step in named context"
+    (defstep #":(\w+) is named (\w+)" [_subject name]
       {:user name})
-    (let [result (repl/free :alice "I am alice")]
+    (let [result (repl/as :alice "is named alice")]
       (is (= :passed (:status result)))
       (is (= :alice (:session result)))
       (is (= {:user "alice"} (:ctx result))))))
 
-(deftest test-free-multiple-steps
-  (testing "free executes multiple steps in sequence"
-    (defstep #"I set x" [] {:x 1})
-    (defstep #"I set y" [] {:y 2})
-    (let [result (repl/free :test "I set x" "I set y")]
+(deftest test-as-multiple-steps
+  (testing "as executes multiple steps in sequence"
+    (defstep #":(\w+) sets x" [_subject] {:x 1})
+    (defstep #":(\w+) sets y" [_subject] {:y 2})
+    (let [result (repl/as :test "sets x" "sets y")]
       (is (= :passed (:status result)))
       (is (= {:x 1 :y 2} (:ctx result))))))
 
-(deftest test-free-separate-contexts
-  (testing "free maintains separate contexts for different sessions"
-    (defstep #"I am (\w+)" [name]
+(deftest test-as-separate-contexts
+  (testing "as maintains separate contexts for different sessions"
+    (defstep #":(\w+) is named (\w+)" [_subject name]
       {:user name})
-    (repl/free :alice "I am alice")
-    (repl/free :bob "I am bob")
+    (repl/as :alice "is named alice")
+    (repl/as :bob "is named bob")
     (is (= {:user "alice"} (repl/ctx :alice)))
     (is (= {:user "bob"} (repl/ctx :bob)))))
 
-(deftest test-free-context-accumulation
-  (testing "free accumulates context across calls"
-    (defstep #"I set (\w+) to (\d+)" [k v]
+(deftest test-as-context-accumulation
+  (testing "as accumulates context across calls"
+    (defstep #":(\w+) sets (\w+) to (\d+)" [_subject k v]
       {(keyword k) (Integer/parseInt v)})
-    (repl/free :test "I set x to 1")
-    (repl/free :test "I set y to 2")
+    (repl/as :test "sets x to 1")
+    (repl/as :test "sets y to 2")
     (is (= {:x 1 :y 2} (repl/ctx :test)))))
 
-(deftest test-free-stops-on-failure
-  (testing "free stops on first failing step"
-    (defstep #"I pass" [] {:passed true})
-    (defstep #"I fail" [] (throw (ex-info "boom" {})))
-    (defstep #"I never run" [] {:never true})
-    (let [result (repl/free :test "I pass" "I fail" "I never run")]
+(deftest test-as-stops-on-failure
+  (testing "as stops on first failing step"
+    (defstep #":(\w+) passes" [_subject] {:passed true})
+    (defstep #":(\w+) fails" [_subject] (throw (ex-info "boom" {})))
+    (defstep #":(\w+) never runs" [_subject] {:never true})
+    (let [result (repl/as :test "passes" "fails" "never runs")]
       (is (= :failed (:status result)))
       (is (= {:passed true} (:ctx result)))
       (is (nil? (:never (repl/ctx :test)))))))
 
-(deftest test-free-undefined-step
-  (testing "free reports undefined step"
-    (let [result (repl/free :test "I am undefined")]
+(deftest test-as-undefined-step
+  (testing "as reports undefined step"
+    (let [result (repl/as :test "does something undefined")]
       (is (= :undefined (:status result)))
       (is (= :test (:session result))))))
 
 (deftest test-ctxs-returns-all
   (testing "ctxs returns all named contexts"
-    (defstep #"I am (\w+)" [name] {:user name})
-    (repl/free :alice "I am alice")
-    (repl/free :bob "I am bob")
+    (defstep #":(\w+) is named (\w+)" [_subject name] {:user name})
+    (repl/as :alice "is named alice")
+    (repl/as :bob "is named bob")
     (is (= {:alice {:user "alice"} :bob {:user "bob"}}
            (repl/ctxs)))))
 
 (deftest test-reset-ctxs!
   (testing "reset-ctxs! clears all named contexts"
-    (defstep #"I exist" [] {:exists true})
-    (repl/free :a "I exist")
-    (repl/free :b "I exist")
+    (defstep #":(\w+) exists" [_subject] {:exists true})
+    (repl/as :a "exists")
+    (repl/as :b "exists")
     (is (= 2 (count (repl/ctxs))))
     (repl/reset-ctxs!)
     (is (= {} (repl/ctxs)))))
 
 (deftest test-clear!-resets-named-contexts
   (testing "clear! also resets named contexts"
-    (defstep #"I exist" [] {:exists true})
-    (repl/free :test "I exist")
+    (defstep #":(\w+) exists" [_subject] {:exists true})
+    (repl/as :test "exists")
     (is (seq (repl/ctxs)))
     (repl/clear!)
     (is (= {} (repl/ctxs)))))
@@ -373,8 +373,8 @@ Feature: Test
 
 (deftest test-reset-ctxs-no-browser
   (testing "reset-ctxs! returns :none action when no browser present"
-    (defstep #"I exist" [] {:exists true})
-    (repl/free :alice "I exist")
+    (defstep #":(\w+) exists" [_subject] {:exists true})
+    (repl/as :alice "exists")
     (let [actions (repl/reset-ctxs!)]
       (is (= 1 (count actions)))
       (is (= :none (-> actions first :action))))))
@@ -382,8 +382,8 @@ Feature: Test
 (deftest test-reset-ctxs-non-surface-closes
   (testing "reset-ctxs! returns :closed action for non-surface with browser"
     ;; Inject a fake browser into the context
-    (defstep #"I exist" [] {:exists true})
-    (repl/free :alice "I exist")
+    (defstep #":(\w+) exists" [_subject] {:exists true})
+    (repl/as :alice "exists")
     (inject-browser-into-ctx! :alice "session-123")
 
     ;; Verify browser is present
@@ -399,8 +399,8 @@ Feature: Test
   (testing "reset-ctxs! persists session for surface contexts"
     (let [spy-store (make-spy-store)]
       (binding [repl/*session-store* (delay spy-store)]
-        (defstep #"I exist" [] {:exists true})
-        (repl/free :alice "I exist")
+        (defstep #":(\w+) exists" [_subject] {:exists true})
+        (repl/as :alice "exists")
         (inject-browser-into-ctx! :alice "session-456")
         (repl/mark-surface! :alice)
 
@@ -421,9 +421,9 @@ Feature: Test
   (testing "clear! handles browser lifecycle before clearing"
     (let [spy-store (make-spy-store)]
       (binding [repl/*session-store* (delay spy-store)]
-        (defstep #"I exist" [] {:exists true})
-        (repl/free :alice "I exist")
-        (repl/free :bob "I exist")
+        (defstep #":(\w+) exists" [_subject] {:exists true})
+        (repl/as :alice "exists")
+        (repl/as :bob "exists")
         (inject-browser-into-ctx! :alice "alice-session")
         (inject-browser-into-ctx! :bob "bob-session")
         (repl/mark-surface! :alice)
@@ -441,8 +441,8 @@ Feature: Test
       (binding [repl/*session-store* (delay spy-store)]
         ;; Setup non-surface
         (repl/clear!)
-        (defstep #"I exist" [] {:exists true})
-        (repl/free :alice "I exist")
+        (defstep #":(\w+) exists" [_subject] {:exists true})
+        (repl/as :alice "exists")
         (inject-browser-into-ctx! :alice "alice-session")
 
         ;; Reset non-surface - should close (action = :closed)
@@ -450,7 +450,7 @@ Feature: Test
           (is (= :closed (-> actions first :action))))
 
         ;; Setup surface
-        (repl/free :bob "I exist")
+        (repl/as :bob "exists")
         (inject-browser-into-ctx! :bob "bob-session")
         (repl/mark-surface! :bob)
 
@@ -579,7 +579,7 @@ Feature: Test
 
 (deftest test-as-warns-on-unknown-actor
   (testing "as warns on unknown actor in Shifted mode"
-    (defstep #"I exist" [] {:exists true})
+    (defstep #":(\w+) exists" [_subject] {:exists true})
     ;; Create a temp glossary file for testing
     (let [temp-dir (str (fs/create-temp-dir {:prefix "sl-shifted-test-"}))
           subjects-file (str temp-dir "/subjects.edn")]
@@ -590,9 +590,10 @@ Feature: Test
         (repl/shifted! {:svo {:unknown-subject :warn}
                         :glossaries {:subjects subjects-file}})
         ;; Call as with unknown actor - should warn but succeed
+        ;; repl/as prepends ":bob " so "exists" becomes ":bob exists"
         (let [stderr-out (java.io.StringWriter.)
               result (binding [*err* stderr-out]
-                       (repl/as :bob "I exist"))]
+                       (repl/as :bob "exists"))]
           (is (= :passed (:status result)))
           (is (str/includes? (str stderr-out) "WARNING"))
           (is (str/includes? (str stderr-out) ":bob"))
@@ -600,7 +601,7 @@ Feature: Test
         ;; Call as with known actor - should not warn
         (let [stderr-out (java.io.StringWriter.)
               result (binding [*err* stderr-out]
-                       (repl/as :alice "I exist"))]
+                       (repl/as :alice "exists"))]
           (is (= :passed (:status result)))
           (is (not (str/includes? (str stderr-out) "WARNING"))))
         (finally
@@ -608,11 +609,12 @@ Feature: Test
 
 (deftest test-as-no-warning-in-vanilla-mode
   (testing "as does not warn in vanilla mode"
-    (defstep #"I exist" [] {:exists true})
+    (defstep #":([\w-]+) exists" [_subject] {:exists true})
     (repl/vanilla!)
+    ;; repl/as prepends ":unknown-actor " so "exists" becomes ":unknown-actor exists"
     (let [stderr-out (java.io.StringWriter.)
           result (binding [*err* stderr-out]
-                   (repl/as :unknown-actor "I exist"))]
+                   (repl/as :unknown-actor "exists"))]
       (is (= :passed (:status result)))
       (is (= "" (str stderr-out))))))
 

@@ -1,4 +1,12 @@
 (ns shiftlefter.gherkin.lexer
+  "Tokenizer for Gherkin source text.
+
+   Converts raw Gherkin source into a sequence of typed tokens with location
+   information. Handles language directives, tags, keywords, table rows,
+   doc strings, and comments. Dialect-aware — tokenizes keywords in any
+   supported language.
+
+   Entry point: `lex` (called by `gherkin.api/lex-string`)."
   (:require [clojure.string :as str]
             [shiftlefter.gherkin.location :as loc]
             [shiftlefter.gherkin.tokens :as tokens]

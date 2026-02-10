@@ -16,5 +16,22 @@
   :scroll {:desc "Scroll to element or position"}
   :wait {:desc "Wait for condition or element"}
   :clear {:desc "Clear input field contents"}
-  :press {:desc "Press keyboard key"}
-  :upload {:desc "Upload file to input"}}}
+  :press {:desc "Press keyboard key or chord"}
+  :upload {:desc "Upload file to input"}
+  ;; Navigation (0.3.6)
+  :navigate-back {:desc "Navigate backward in browser history"}
+  :navigate-forward {:desc "Navigate forward in browser history"}
+  :refresh {:desc "Reload the current page"}
+  ;; Interaction (0.3.6)
+  :doubleclick {:desc "Double-click on an element"}
+  :rightclick {:desc "Right-click (context menu) on an element"}
+  :move {:desc "Move mouse to an element"}
+  :count {:desc "Count matching elements"}
+  ;; Alert handling (0.3.6)
+  :accept-alert {:desc "Accept (OK) an alert dialog"}
+  :dismiss-alert {:desc "Dismiss (Cancel) an alert dialog"}
+  ;; Window/frame management (0.3.6)
+  :maximize {:desc "Maximize the browser window"}
+  :resize {:desc "Set browser window dimensions"}
+  :switch-window {:desc "Switch to another browser window or tab"}
+  :switch-frame {:desc "Switch to an iframe or back to main frame"}}}

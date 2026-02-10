@@ -71,16 +71,20 @@ find_java() {
     echo ""
 }
 
-# Handle `sl repl` command - requires clj (Clojure CLI)
-# This is handled in shell because we need to launch clj, not java -jar
-handle_repl_cmd() {
+# Handle `sl repl --clj` — clj-based REPL for user deps.edn merging
+# Only used when --clj flag is explicitly passed.
+# Without --clj, repl is handled by core.clj via the normal java -jar dispatch.
+handle_repl_clj() {
     local nrepl_mode=false
     local nrepl_port=""
 
-    # Parse repl-specific args
+    # Parse args, stripping --clj
     shift  # remove "repl"
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --clj)
+                shift  # consume --clj, don't pass through
+                ;;
             --nrepl)
                 nrepl_mode=true
                 shift
@@ -90,23 +94,21 @@ handle_repl_cmd() {
                 shift 2
                 ;;
             --help|-h)
-                echo "Usage: sl repl [--nrepl] [--port PORT]"
+                echo "Usage: sl repl [--nrepl] [--port PORT] [--clj]"
                 echo ""
                 echo "Start a Clojure REPL with ShiftLefter loaded."
+                echo "nREPL + CIDER middleware are bundled — no extra install needed."
                 echo ""
                 echo "Options:"
                 echo "  --nrepl       Start an nREPL server (for IDE integration)"
                 echo "  --port PORT   nREPL port (default: auto-select, printed on startup)"
+                echo "  --clj         Use Clojure CLI instead of bundled REPL"
+                echo "                (merges your deps.edn; requires clj installed)"
                 echo ""
                 echo "IDE Integration (VS Code/Calva, Emacs/CIDER):"
                 echo "  1. Run: sl repl --nrepl"
                 echo "  2. Note the port number printed"
                 echo "  3. In your IDE, 'Connect to running REPL' on that port"
-                echo ""
-                echo "If you have a deps.edn in the current directory, your dependencies"
-                echo "will be merged with ShiftLefter automatically."
-                echo ""
-                echo "Requires: Clojure CLI (clj) installed"
                 exit 0
                 ;;
             *)
@@ -117,61 +119,46 @@ handle_repl_cmd() {
         esac
     done
 
-    # Check for clj
+    # --clj mode requires clj
     if ! command -v clj &>/dev/null; then
-        echo "Error: Clojure CLI (clj) not found." >&2
+        echo "Error: --clj requires Clojure CLI (clj)." >&2
         echo "" >&2
-        echo "The 'sl repl' command requires Clojure CLI. Install options:" >&2
+        echo "Install options:" >&2
         echo "  macOS:   brew install clojure/tools/clojure" >&2
         echo "  Ubuntu:  See https://clojure.org/guides/install_clojure" >&2
-        echo "  Windows: See https://clojure.org/guides/install_clojure" >&2
         echo "" >&2
-        echo "Other sl commands (run, fmt, etc.) only require Java." >&2
+        echo "Or use 'sl repl' without --clj (uses bundled nREPL, no clj needed)." >&2
         exit 1
     fi
 
     # Find JAR for classpath
-    JAR_FILE=$(find_jar)
-    if [[ -z "$JAR_FILE" ]]; then
+    local jar_file
+    jar_file=$(find_jar)
+    if [[ -z "$jar_file" ]]; then
         echo "Error: ShiftLefter JAR not found in $SCRIPT_DIR" >&2
         exit 1
     fi
 
-    # Build the deps map - always include shiftlefter JAR
-    local sl_dep="{:deps {shiftlefter/shiftlefter {:local/root \"$JAR_FILE\"}"
-
-    # Add nREPL deps if needed
-    if [[ "$nrepl_mode" == "true" ]]; then
-        sl_dep="$sl_dep nrepl/nrepl {:mvn/version \"1.0.0\"} cider/cider-nrepl {:mvn/version \"0.28.5\"}"
-    fi
-
+    # Build deps map with nREPL + CIDER (for clj's classloader)
+    local sl_dep="{:deps {shiftlefter/shiftlefter {:local/root \"$jar_file\"}"
+    sl_dep="$sl_dep nrepl/nrepl {:mvn/version \"1.5.0\"} cider/cider-nrepl {:mvn/version \"0.50.0\"}"
     sl_dep="$sl_dep}}"
 
-    # Check if user has deps.edn - if so, merge with it
-    local clj_args=()
-    if [[ -f "deps.edn" ]]; then
-        # User has deps.edn - use Sdeps to add our deps on top
-        clj_args+=("-Sdeps" "$sl_dep")
-    else
-        # No user deps.edn - just use our deps directly
-        clj_args+=("-Sdeps" "$sl_dep")
-    fi
+    local clj_args=("-Sdeps" "$sl_dep")
 
     if [[ "$nrepl_mode" == "true" ]]; then
-        # Start nREPL server
         local port_args=()
         if [[ -n "$nrepl_port" ]]; then
             port_args=("--port" "$nrepl_port")
         fi
 
-        echo "Starting nREPL server with ShiftLefter..."
+        echo "Starting nREPL server with ShiftLefter (clj mode)..."
         exec clj "${clj_args[@]}" \
             -M -m nrepl.cmdline \
             --middleware "[cider.nrepl/cider-middleware]" \
             "${port_args[@]}"
     else
-        # Interactive REPL
-        echo "Starting ShiftLefter REPL..."
+        echo "Starting ShiftLefter REPL (clj mode)..."
         echo "Try: (require '[shiftlefter.repl :refer :all])"
         echo ""
         exec clj "${clj_args[@]}"
@@ -179,9 +166,16 @@ handle_repl_cmd() {
 }
 
 # Main dispatch
-# Check for repl command BEFORE looking for JAR (repl uses clj, not java -jar)
+# Check for repl --clj BEFORE normal dispatch (clj mode needs shell handling)
+# Without --clj, repl falls through to normal java -jar dispatch (handled by core.clj)
 if [[ "${1:-}" == "repl" ]]; then
-    handle_repl_cmd "$@"
+    for arg in "$@"; do
+        if [[ "$arg" == "--clj" ]]; then
+            handle_repl_clj "$@"
+            # handle_repl_clj does exec, so we never reach here
+        fi
+    done
+    # No --clj: fall through to normal java -jar dispatch below
 fi
 
 JAR_FILE=$(find_jar)
@@ -196,6 +190,18 @@ if [[ -z "$JAR_FILE" ]]; then
     exit 1
 fi
 
+# Check for lib/ directory with extra JARs (classpath extension)
+# If lib/*.jar files exist, use -cp mode instead of -jar to include them
+build_classpath() {
+    local jar="$1"
+    local lib_dir="$SCRIPT_DIR/lib"
+    if [[ -d "$lib_dir" ]] && ls "$lib_dir"/*.jar &>/dev/null 2>&1; then
+        echo "$jar:$lib_dir/*"
+    else
+        echo ""
+    fi
+}
+
 JAVA_CMD=$(find_java)
 if [[ -z "$JAVA_CMD" ]]; then
     echo "Error: Java not found." >&2
@@ -205,6 +211,13 @@ if [[ -z "$JAVA_CMD" ]]; then
     echo "  Ubuntu:  sudo apt install openjdk-17-jdk" >&2
     echo "  Windows: Download from https://adoptium.net/" >&2
     exit 1
+fi
+
+# Check for classpath extension
+EXTRA_CP=$(build_classpath "$JAR_FILE")
+if [[ -n "$EXTRA_CP" ]]; then
+    # Extended classpath mode: include lib/*.jar
+    exec "$JAVA_CMD" -cp "$EXTRA_CP" clojure.main -m shiftlefter.core "$@"
 fi
 
 exec "$JAVA_CMD" -jar "$JAR_FILE" "$@"

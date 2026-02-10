@@ -2,6 +2,7 @@
   "Main CLI for ShiftLefter."
   (:require
    [babashka.fs :as fs]
+   [clojure.main]
    [clojure.string :as str]
    [clojure.tools.cli :refer [parse-opts]]
    [shiftlefter.gherkin.api :as api]
@@ -89,6 +90,11 @@
    [nil "--ci" "CI mode: run full test suite (kaocha, compliance, fuzz smoke)"]
    [nil "--fuzzed" "Check fuzz artifact integrity (slow with many artifacts)"]
    [nil "--edn" "Output in EDN format (machine-readable)"]
+   [nil "--no-color" "Disable ANSI color output"]
+   [nil "--mode MODE" "ddmin mode: parse, pickles, lex, or auto"]
+   [nil "--nrepl" "Start nREPL server (for IDE integration)"]
+   [nil "--port PORT" "nREPL port (default: auto-select)"
+    :parse-fn #(Integer/parseInt %)]
    ["-v" "--verbose" "Verbose output"]
    ["-h" "--help"]])
 
@@ -112,7 +118,8 @@
         result (runner/execute! (cond-> {:paths resolved-paths
                                          :dry-run (:dry-run opts)
                                          :edn (:edn opts)
-                                         :verbose (:verbose opts)}
+                                         :verbose (:verbose opts)
+                                         :no-color (:no-color opts)}
                                   resolved-step-paths (assoc :step-paths resolved-step-paths)
                                   resolved-config-path (assoc :config-path resolved-config-path)))]
     (:exit-code result)))
@@ -577,18 +584,74 @@
         (println (str "Verify error: " (.getMessage e))))
       2)))
 
+;; -----------------------------------------------------------------------------
+;; REPL Command (WI-033.017)
+;; -----------------------------------------------------------------------------
+
+(defn repl-cmd
+  "Start an interactive REPL or nREPL server with ShiftLefter loaded.
+
+   Modes:
+   - Interactive (default): launches clojure.main/repl with ShiftLefter available
+   - nREPL (--nrepl): starts nREPL server with CIDER middleware for IDE integration
+
+   In nREPL mode, writes .nrepl-port file and blocks until interrupted.
+   In interactive mode, runs until the user exits (Ctrl-D or (exit))."
+  [{:keys [nrepl port]}]
+  (if nrepl
+    ;; nREPL server mode
+    (let [nrepl-port (or port 0)]
+      (require 'nrepl.server 'cider.nrepl)
+      (let [start-server (resolve 'nrepl.server/start-server)
+            default-handler (resolve 'nrepl.server/default-handler)
+            ;; cider-middleware is a vector of middleware vars — spread with apply
+            cider-mw-vec @(resolve 'cider.nrepl/cider-middleware)
+            handler (apply default-handler cider-mw-vec)
+            server (start-server :port nrepl-port :handler handler)
+            actual-port (:port server)
+            port-file (java.io.File. ".nrepl-port")]
+        (spit port-file (str actual-port))
+        (.deleteOnExit port-file)
+        (println (str "nREPL server started on port " actual-port))
+        (println "  .nrepl-port file written")
+        (println)
+        (println "Connect your IDE to this port, then try:")
+        (println "  (require '[shiftlefter.repl :refer :all])")
+        ;; Block until interrupted
+        (try
+          @(promise)
+          (catch Exception _
+            (.delete port-file)))))
+    ;; Interactive REPL mode
+    (do
+      (println "ShiftLefter REPL")
+      (println "Try: (require '[shiftlefter.repl :refer :all])")
+      (println)
+      (clojure.main/repl
+       :init (fn []
+               (in-ns 'user)
+               (refer-clojure))))))
+
 (defn -main [& args]
   (let [parsed (parse-opts args cli-options)
         options (:options parsed)
-        arguments (:arguments parsed)]
+        arguments (:arguments parsed)
+        errors (:errors parsed)]
     (cond
+      (seq errors)
+      (do
+        (binding [*out* *err*]
+          (doseq [e errors] (println e))
+          (println "\nUse --help for usage."))
+        (System/exit 1))
+
       (:help options)
       (println "Usage:
   sl run <path> [<path2> ...] [--step-paths p1,p2] [--config-path FILE] [--dry-run] [--edn] [-v]
   sl fmt --check <path> [<path2> ...]   (validate files/directories)
   sl fmt --write <path> [<path2> ...]   (format in place)
   sl fmt --canonical <path>             (format to stdout)
-  sl repl [--nrepl] [--port PORT]       (interactive REPL, requires clj)
+  sl repl [--nrepl] [--port PORT]       (interactive REPL or nREPL server)
   sl gherkin fuzz [--preset smoke|quick|nightly] [--seed N] [--trials N] [-v]
   sl gherkin fuzz --mutation [--sources generated|corpus|both] [--timeout-ms N]
   sl gherkin ddmin <path> [--mode parse|pickles|lex|auto] [--strategy structured|raw-lines]
@@ -617,6 +680,9 @@
 
       (= (first arguments) "verify")
       (System/exit (verify-cmd options))
+
+      (= (first arguments) "repl")
+      (repl-cmd options)
 
       :else
       (println "Unknown command. Use --help"))))

@@ -167,12 +167,13 @@
          indent-str fence)))
 
 (defn- format-step
-  "Format a Step."
+  "Format a Step.
+   Uses :keyword-text (original language keyword with trailing space) when available."
   [step indent-level]
   (let [indent-str (indent indent-level)
-        keyword-str (:keyword step)
+        keyword-str (or (:keyword-text step) (str (:keyword step) " "))
         text (:text step)
-        step-line (str indent-str keyword-str " " text)
+        step-line (str indent-str keyword-str text)
         arg (:argument step)]
     (cond
       (nil? arg)
@@ -205,9 +206,10 @@
   "Format an Examples table."
   [examples indent-level]
   (let [indent-str (indent indent-level)
+        kw (or (:keyword-text examples) "Examples")
         name-str (if (str/blank? (:name examples)) "" (str ": " (:name examples)))
         tags-line (format-tags (:tags examples) indent-level)
-        header (str indent-str "Examples:" name-str)
+        header (str indent-str kw ":" name-str)
         ;; Examples uses :table-header and :table-body, not :table
         table-header (:table-header examples)
         table-body (:table-body examples)
@@ -232,9 +234,10 @@
   "Format a Scenario or ScenarioOutline."
   [scenario indent-level]
   (let [indent-str (indent indent-level)
-        type-keyword (if (= :scenario-outline (:type scenario))
-                       "Scenario Outline"
-                       "Scenario")
+        type-keyword (or (:keyword-text scenario)
+                         (if (= :scenario-outline (:type scenario))
+                           "Scenario Outline"
+                           "Scenario"))
         name-str (:name scenario)
         tags-line (format-tags (:tags scenario) indent-level)
         header (str indent-str type-keyword ": " name-str)
@@ -250,8 +253,9 @@
   "Format a Background section."
   [background indent-level]
   (let [indent-str (indent indent-level)
+        kw (or (:keyword-text background) "Background")
         tags-line (format-tags (:tags background) indent-level)
-        header (str indent-str "Background:")
+        header (str indent-str kw ":")
         steps-str (format-steps (:steps background) (inc indent-level))]
     (str (when tags-line (str tags-line "\n"))
          header "\n"
@@ -269,8 +273,9 @@
   "Format a Rule node."
   [rule indent-level]
   (let [indent-str (indent indent-level)
+        kw (or (:keyword-text rule) "Rule")
         tags-line (format-tags (:tags rule) indent-level)
-        header (str indent-str "Rule: " (:name rule))
+        header (str indent-str kw ": " (:name rule))
         desc (format-description (:description rule) (inc indent-level))
         bg (parser/get-background rule)
         scenarios (parser/get-scenarios rule)
@@ -287,8 +292,11 @@
 (defn- format-feature
   "Format a Feature node."
   [feature]
-  (let [tags-line (format-tags (:tags feature) 0)
-        header (str "Feature: " (:name feature))
+  (let [kw (or (:keyword-text feature) "Feature")
+        language (:language feature)
+        language-header (when language (str "# language: " language "\n"))
+        tags-line (format-tags (:tags feature) 0)
+        header (str kw ": " (:name feature))
         desc (format-description (:description feature) 1)
         bg (parser/get-background feature)
         scenarios (parser/get-scenarios feature)
@@ -300,7 +308,8 @@
         rules-str (->> rules
                        (map #(format-rule % 1))
                        (str/join "\n\n"))]
-    (str (when tags-line (str tags-line "\n"))
+    (str language-header
+         (when tags-line (str tags-line "\n"))
          header
          (when desc (str "\n" desc))
          (when bg-str (str "\n\n" bg-str))

@@ -1,4 +1,12 @@
 (ns shiftlefter.gherkin.parser
+  "Recursive-descent parser for Gherkin token sequences.
+
+   Consumes tokens produced by the lexer and produces AST nodes (Feature,
+   Scenario, Background, Rule, Step, etc.). Collects errors without
+   throwing — returns `{:ast [...] :errors [...]}`.
+
+   Internal to the parser pipeline; use `gherkin.api/parse-string` for
+   the public API."
   (:require [shiftlefter.gherkin.tokens :as tokens]
             [shiftlefter.gherkin.location :as loc]
             [shiftlefter.gherkin.dialect :as dialect]
@@ -11,11 +19,11 @@
 ;; Defrecords for AST nodes
 ;; -----------------------------------------------------------------------------
 
-(defrecord Feature [type name description tags children location source-text leading-ws span])
-(defrecord Rule [type name description tags children location source-text leading-ws span])
-(defrecord Scenario [type name description tags steps examples location source-text leading-ws span])
-(defrecord ScenarioOutline [type name description tags steps examples location source-text leading-ws span])
-(defrecord Background [type name description steps tags location source-text leading-ws span])
+(defrecord Feature [type name description tags children keyword-text language location source-text leading-ws span])
+(defrecord Rule [type name description tags children keyword-text location source-text leading-ws span])
+(defrecord Scenario [type name description tags steps examples keyword-text location source-text leading-ws span])
+(defrecord ScenarioOutline [type name description tags steps examples keyword-text location source-text leading-ws span])
+(defrecord Background [type name description steps tags keyword-text location source-text leading-ws span])
 (defrecord Step [type keyword keyword-text text argument location source-text leading-ws span])
 (defrecord Examples [type name description tags table location source-text leading-ws span])
 (defrecord Docstring [type content fence mediaType location source-text leading-ws span])
@@ -122,7 +130,7 @@
   (s/with-gen
     (s/and (partial instance? Step) (s/keys :req-un [::type ::keyword ::text ::argument ::location ::source-text]))
     #(gen/fmap (fn [[kw txt loc src]]
-                 (->Step :step kw nil txt nil loc src "" nil))
+                 (->Step :step kw (str kw " ") txt nil loc src "" nil))
                (gen/tuple (s/gen ::keyword) (s/gen ::text) (s/gen ::location) (s/gen ::source-text)))))
 
 (s/def ::steps (s/coll-of ::step))
@@ -132,14 +140,14 @@
   (s/with-gen
     (s/and (partial instance? Scenario) (s/keys :req-un [::type ::name ::tags ::steps ::examples ::location ::source-text]))
     #(gen/fmap (fn [[nm tags loc src]]
-                 (->Scenario :scenario nm "" tags [] nil loc src "" nil))
+                 (->Scenario :scenario nm "" tags [] nil "Scenario" loc src "" nil))
                (gen/tuple (s/gen ::name) (s/gen ::tags) (s/gen ::location) (s/gen ::source-text)))))
 
 (s/def ::scenario-outline
   (s/with-gen
     (s/and (partial instance? ScenarioOutline) (s/keys :req-un [::type ::name ::tags ::steps ::examples ::location ::source-text]))
     #(gen/fmap (fn [[nm tags loc src]]
-                 (->ScenarioOutline :scenario-outline nm "" tags [] nil loc src "" nil))
+                 (->ScenarioOutline :scenario-outline nm "" tags [] nil "Scenario Outline" loc src "" nil))
                (gen/tuple (s/gen ::name) (s/gen ::tags) (s/gen ::location) (s/gen ::source-text)))))
 
 (s/def ::scenarios (s/coll-of (s/or :scenario ::scenario :scenario-outline ::scenario-outline)))
@@ -150,14 +158,14 @@
           :nil nil?)
     #(gen/one-of [(gen/return nil)
                   (gen/fmap (fn [[tags loc src]]
-                              (->Background :background nil "" [] tags loc src "" nil))
+                              (->Background :background nil "" [] tags "Background" loc src "" nil))
                             (gen/tuple (s/gen ::tags) (s/gen ::location) (s/gen ::source-text)))])))
 
 (s/def ::rule
   (s/with-gen
     (s/and (partial instance? Rule) (s/keys :req-un [::type ::name ::description ::tags ::children ::location ::source-text]))
     #(gen/fmap (fn [[nm desc tags loc src]]
-                 (->Rule :rule nm desc tags [] loc src "" nil))
+                 (->Rule :rule nm desc tags [] "Rule" loc src "" nil))
                (gen/tuple (s/gen ::name) (s/gen ::description) (s/gen ::tags) (s/gen ::location) (s/gen ::source-text)))))
 
 (s/def ::children (s/coll-of (s/or :background ::background :scenario ::scenario :scenario-outline ::scenario-outline :rule ::rule)))
@@ -166,7 +174,7 @@
   (s/with-gen
     (s/and (partial instance? Feature) (s/keys :req-un [::type ::name ::description ::tags ::children ::location ::source-text]))
     #(gen/fmap (fn [[nm desc tags loc src]]
-                 (->Feature :feature nm desc tags [] loc src "" nil))
+                 (->Feature :feature nm desc tags [] "Feature" nil loc src "" nil))
                (gen/tuple (s/gen ::name) (s/gen ::description) (s/gen ::tags) (s/gen ::location) (s/gen ::source-text)))))
 (s/def ::ast-node (s/or :feature ::feature :background ::background :scenario ::scenario :scenario-outline ::scenario-outline :step ::step :docstring ::argument :data-table ::data-table :table-row ::table-row :blank ::blank :comment ::comment))
 (s/def ::ast (s/coll-of ::ast-node))
@@ -313,10 +321,17 @@
          steps []
          errors []]
     (assert-advancing! "parse-steps" prev-ts ts)
-    (if (or (empty? ts) (not (= (:type (first ts)) :step-line)))
-      [steps ts errors]
-      (let [[step remaining step-errors] (parse-step ts)]
-        (recur ts remaining (conj steps step) (into errors step-errors))))))
+    (let [token-type (:type (first ts))]
+      (cond
+        (or (empty? ts) (not (#{:step-line :comment :blank} token-type)))
+        [steps ts errors]
+
+        (#{:comment :blank} token-type)
+        (recur ts (rest ts) steps errors)
+
+        :else
+        (let [[step remaining step-errors] (parse-step ts)]
+          (recur ts remaining (conj steps step) (into errors step-errors)))))))
 
 (defn- parse-step [ts]
   (let [token (first ts)
@@ -490,6 +505,7 @@
           header (when header-row (:cells header-row))
           body (when (seq body-rows) (mapv :cells body-rows))]
       [{:keyword "Examples"
+        :keyword-text (:keyword-text token)
         :name name
         :description description
         :table-header header
@@ -575,8 +591,8 @@
         ;; Use :raw for source-text to preserve "Scenario: name" format for keyword extraction
         source-text (or (:raw token) (:value token))]
     [(if is-outline
-       (->ScenarioOutline :scenario-outline name description tags steps examples (:location token) source-text (:leading-ws token) span)
-       (->Scenario :scenario name description tags steps examples (:location token) source-text (:leading-ws token) span))
+       (->ScenarioOutline :scenario-outline name description tags steps examples (:keyword-text token) (:location token) source-text (:leading-ws token) span)
+       (->Scenario :scenario name description tags steps examples (:keyword-text token) (:location token) source-text (:leading-ws token) span))
      remaining3 (concat desc-errors step-errors example-tag-errors)]))
 
 
@@ -658,7 +674,7 @@
         end-idx (or (token-idx (first remaining2)) (inc start-idx))
         span (make-span start-idx end-idx)
         source-text (or (:raw token) (:value token))]
-    [(->Background :background name description steps tags (:location token) source-text (:leading-ws token) span)
+    [(->Background :background name description steps tags (:keyword-text token) (:location token) source-text (:leading-ws token) span)
      remaining2 (concat desc-errors step-errors)]))
 
 (defn- parse-rule
@@ -683,7 +699,7 @@
         all-errors (concat desc-errors bg-errors scenarios-errors)
         end-idx (or (token-idx (first remaining4)) (inc start-idx))
         span (make-span start-idx end-idx)]
-    [(->Rule :rule name description tags children (:location token) (or (:raw token) (:value token)) (:leading-ws token) span)
+    [(->Rule :rule name description tags children (:keyword-text token) (:location token) (or (:raw token) (:value token)) (:leading-ws token) span)
      remaining4 all-errors]))
 
 (defn- parse-rules
@@ -769,7 +785,7 @@
         all-feature-errors (concat desc-errors bg-errors scenario-errors rule-errors)
         end-idx (or (token-idx (first remaining5)) (inc start-idx))
         span (make-span start-idx end-idx)]
-    [(->Feature :feature name description tags children (:location token) (or (:raw token) (:value token)) (:leading-ws token) span)
+    [(->Feature :feature name description tags children (:keyword-text token) nil (:location token) (or (:raw token) (:value token)) (:leading-ws token) span)
      remaining5 all-feature-errors]))
 
 ;; -----------------------------------------------------------------------------
@@ -823,7 +839,8 @@
       (loop [ts tokens
              ast []
              errors []
-             pending-tags []]
+             pending-tags []
+             pending-language nil]
         (if (empty? ts)
           ;; Check for orphan tags at EOF (tags not followed by a construct)
           (let [orphan-tag-errors (when (seq pending-tags)
@@ -834,38 +851,39 @@
             {:tokens tokens :ast ast :errors (into (into errors orphan-tag-errors) (validate-ast-order ast))})
         (let [token (first ts)]
           (if (not (tokens/token? token))  ;; Skip non-tokens (errors)—the fix
-            (recur (rest ts) ast errors pending-tags)
+            (recur (rest ts) ast errors pending-tags pending-language)
             (cond
               (= (:type token) :blank)
               (let [idx (:idx token)]
-                (recur (rest ts) (conj ast (->Blank :blank (:location token) (:value token) (:leading-ws token) (make-span idx (inc idx)))) errors pending-tags))
+                (recur (rest ts) (conj ast (->Blank :blank (:location token) (:value token) (:leading-ws token) (make-span idx (inc idx)))) errors pending-tags pending-language))
               (= (:type token) :comment)
               (let [idx (:idx token)]
-                (recur (rest ts) (conj ast (->Comment :comment (:value token) (:location token) (:value token) (:leading-ws token) (make-span idx (inc idx)))) errors pending-tags))
+                (recur (rest ts) (conj ast (->Comment :comment (:value token) (:location token) (:value token) (:leading-ws token) (make-span idx (inc idx)))) errors pending-tags pending-language))
               (= (:type token) :tag-line)
               (let [tag-value (:value token)
                     tag-error (when-let [err (:error tag-value)]
                                 (->error :invalid-tag-line (:location token) err :token token))
                     rich-tags (tag-token->rich-tags token)]
-                (recur (rest ts) ast (if tag-error (conj errors tag-error) errors) (into pending-tags rich-tags)))
+                (recur (rest ts) ast (if tag-error (conj errors tag-error) errors) (into pending-tags rich-tags) pending-language))
               (= (:type token) :feature-line)
-              (let [[node remaining feature-errors] (parse-feature ts pending-tags)]
-                (recur remaining (conj ast node) (into errors feature-errors) []))
+              (let [[node remaining feature-errors] (parse-feature ts pending-tags)
+                    node (assoc node :language pending-language)]
+                (recur remaining (conj ast node) (into errors feature-errors) [] nil))
               (= (:type token) :background-line)
               (let [[node remaining bg-errors] (parse-background ts pending-tags)]
-                (recur remaining (conj ast node) (into errors bg-errors) []))
+                (recur remaining (conj ast node) (into errors bg-errors) [] pending-language))
               (#{:scenario-line :scenario-outline-line} (:type token))
               (let [[node remaining scenario-errors] (parse-scenario ts pending-tags)]
-                (recur remaining (conj ast node) (into errors scenario-errors) []))
+                (recur remaining (conj ast node) (into errors scenario-errors) [] pending-language))
               (= (:type token) :eof)
-              (recur (rest ts) ast errors pending-tags)
+              (recur (rest ts) ast errors pending-tags pending-language)
               (= (:type token) :language-header)
-              ;; Language headers are processed by the lexer; skip in parser
-              (recur (rest ts) ast errors pending-tags)
+              ;; Capture language for the next Feature node
+              (recur (rest ts) ast errors pending-tags (:value token))
               (= (:type token) :unknown-line)
-              (recur (next ts) ast (conj errors (->error :invalid-keyword (:location token) (str "Invalid keyword: " (:value token)) :token token)) pending-tags)
+              (recur (next ts) ast (conj errors (->error :invalid-keyword (:location token) (str "Invalid keyword: " (:value token)) :token token)) pending-tags pending-language)
               :else
-              (recur (rest ts) ast (conj errors (->error :unexpected-token (:location token) (str "Unexpected token: " (:type token)) :token token)) pending-tags)))))))))
+              (recur (rest ts) ast (conj errors (->error :unexpected-token (:location token) (str "Unexpected token: " (:type token)) :token token)) pending-tags pending-language)))))))))
 
 (defn node->raw
   "Reconstruct raw text from a node's span using the token vector.

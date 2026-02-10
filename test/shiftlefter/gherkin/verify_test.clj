@@ -21,7 +21,7 @@
 
 (deftest check-smoke-parse-valid
   (testing "smoke-parse passes for valid fixture"
-    (let [result (verify/check-smoke-parse "examples/quickstart/features/toy-login.feature")]
+    (let [result (verify/check-smoke-parse "examples/01-validate-and-format/login.feature")]
       (is (= :ok (:status result)))
       (is (= :smoke-parse (:id result))))))
 
@@ -32,13 +32,13 @@
 
 (deftest check-smoke-fmt-valid
   (testing "smoke-fmt passes for valid fixture"
-    (let [result (verify/check-smoke-fmt "examples/quickstart/features/toy-login.feature")]
+    (let [result (verify/check-smoke-fmt "examples/01-validate-and-format/login.feature")]
       (is (= :ok (:status result)))
       (is (= :smoke-fmt (:id result))))))
 
 (deftest check-smoke-roundtrip-valid
   (testing "smoke-roundtrip passes for valid fixture"
-    (let [result (verify/check-smoke-roundtrip "examples/quickstart/features/toy-login.feature")]
+    (let [result (verify/check-smoke-roundtrip "examples/01-validate-and-format/login.feature")]
       (is (= :ok (:status result)))
       (is (= :smoke-roundtrip (:id result))))))
 

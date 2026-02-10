@@ -1,7 +1,8 @@
 (ns shiftlefter.adapters.registry-test
   (:require [clojure.test :refer [deftest is testing]]
             [shiftlefter.adapters.registry :as registry]
-            [shiftlefter.adapters.etaoin :as etaoin]))
+            [shiftlefter.adapters.etaoin :as etaoin]
+            [shiftlefter.adapters.playwright :as playwright]))
 
 ;; -----------------------------------------------------------------------------
 ;; get-adapter Tests
@@ -16,13 +17,23 @@
       (is (= etaoin/create-browser (:factory adapter)))
       (is (= etaoin/close-browser (:cleanup adapter))))))
 
+(deftest test-get-adapter-playwright
+  (testing "get-adapter returns adapter for :playwright"
+    (let [adapter (registry/get-adapter :playwright)]
+      (is (map? adapter))
+      (is (fn? (:factory adapter)))
+      (is (fn? (:cleanup adapter)))
+      (is (= playwright/create-browser (:factory adapter)))
+      (is (= playwright/close-browser (:cleanup adapter))))))
+
 (deftest test-get-adapter-unknown
   (testing "get-adapter returns error for unknown adapter"
     (let [result (registry/get-adapter :unknown)]
       (is (map? (:error result)))
       (is (= :adapter/unknown (-> result :error :type)))
       (is (= :unknown (-> result :error :adapter)))
-      (is (contains? (set (-> result :error :known)) :etaoin)))))
+      (is (contains? (set (-> result :error :known)) :etaoin))
+      (is (contains? (set (-> result :error :known)) :playwright)))))
 
 (deftest test-get-adapter-custom-registry
   (testing "get-adapter can use custom registry"
@@ -58,9 +69,13 @@
   (testing "default-registry has expected structure"
     (is (map? registry/default-registry))
     (is (contains? registry/default-registry :etaoin))
+    (is (contains? registry/default-registry :playwright))
     (let [etaoin-adapter (:etaoin registry/default-registry)]
       (is (contains? etaoin-adapter :factory))
-      (is (contains? etaoin-adapter :cleanup)))))
+      (is (contains? etaoin-adapter :cleanup)))
+    (let [pw-adapter (:playwright registry/default-registry)]
+      (is (contains? pw-adapter :factory))
+      (is (contains? pw-adapter :cleanup)))))
 
 ;; -----------------------------------------------------------------------------
 ;; create-capability Tests (with mock)

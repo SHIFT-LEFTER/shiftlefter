@@ -136,7 +136,7 @@
 
 (deftest roundtrip-toy-login-file
   (testing "toy-login.feature roundtrips"
-    (let [path "examples/quickstart/features/toy-login.feature"
+    (let [path "examples/01-validate-and-format/login.feature"
           result (printer/fmt-check path)]
       (is (= :ok (:status result))
           (str "Expected :ok but got " result)))))
@@ -298,7 +298,7 @@
 
 (deftest idempotence-file-toy-login
   (testing "toy-login.feature is idempotent"
-    (let [original (slurp "examples/quickstart/features/toy-login.feature")
+    (let [original (slurp "examples/01-validate-and-format/login.feature")
           once (printer/canonical original)
           twice (printer/canonical once)]
       (is (= once twice)))))
@@ -361,7 +361,7 @@
 
 (deftest semantic-equivalence-file
   (testing "toy-login.feature formatting preserves semantics"
-    (let [original (slurp "examples/quickstart/features/toy-login.feature")
+    (let [original (slurp "examples/01-validate-and-format/login.feature")
           formatted (printer/canonical original)
           pickles-before (get-normalized-pickles original)
           pickles-after (get-normalized-pickles formatted)]
@@ -492,3 +492,64 @@
       (is (string? result))
       (is (str/includes? result "@smoke @slow")
           "Canonical should normalize tag spacing to single space"))))
+
+;; -----------------------------------------------------------------------------
+;; i18n keyword preservation tests
+;; -----------------------------------------------------------------------------
+
+(deftest canonical-preserves-french-keywords
+  (testing "Canonical formatter preserves French keywords"
+    (let [input "#language:fr\nFonctionnalité: Connexion\n  Scénario: Utilisateur se connecte\n    Soit la page de connexion\n    Quand je saisis mes identifiants\n    Alors je vois le tableau de bord\n"
+          result (printer/canonical input)]
+      (is (str/includes? result "# language: fr") "Language header preserved")
+      (is (str/includes? result "Fonctionnalité:") "Feature keyword in French")
+      (is (str/includes? result "Scénario:") "Scenario keyword in French")
+      (is (str/includes? result "Soit ") "Given keyword in French")
+      (is (str/includes? result "Quand ") "When keyword in French")
+      (is (str/includes? result "Alors ") "Then keyword in French")
+      (is (not (str/includes? result "Feature:")) "No English Feature keyword")
+      (is (not (str/includes? result "Scenario:")) "No English Scenario keyword"))))
+
+(deftest canonical-preserves-french-conjunctions
+  (testing "Canonical formatter preserves French And/But"
+    (let [input "#language:fr\nFonctionnalité: Test\n  Scénario: S\n    Soit foo\n    Et bar\n    Mais baz\n"
+          result (printer/canonical input)]
+      (is (str/includes? result "Et ") "And keyword in French")
+      (is (str/includes? result "Mais ") "But keyword in French"))))
+
+(deftest canonical-preserves-french-background
+  (testing "Canonical formatter preserves French Background keyword"
+    (let [input "#language:fr\nFonctionnalité: Test\n  Contexte:\n    Soit setup\n  Scénario: S\n    Quand action\n"
+          result (printer/canonical input)]
+      (is (str/includes? result "Contexte:") "Background keyword in French"))))
+
+(deftest canonical-preserves-french-rule
+  (testing "Canonical formatter preserves French Rule keyword"
+    (let [input "#language:fr\nFonctionnalité: Test\n  Règle: Ma règle\n    Scénario: S\n      Soit foo\n"
+          result (printer/canonical input)]
+      (is (str/includes? result "Règle:") "Rule keyword in French"))))
+
+(deftest canonical-preserves-french-examples
+  (testing "Canonical formatter preserves French Examples keyword"
+    (let [input "#language:fr\nFonctionnalité: Test\n  Scénario: S\n    Soit <x>\n  Exemples:\n    | x |\n    | 1 |\n"
+          result (printer/canonical input)]
+      (is (str/includes? result "Exemples:") "Examples keyword in French"))))
+
+(deftest canonical-english-no-language-header
+  (testing "English files without #language header don't get one added"
+    (let [input "Feature: Test\n  Scenario: S\n    Given foo\n"
+          result (printer/canonical input)]
+      (is (not (str/includes? result "# language:")) "No language header for plain English"))))
+
+(deftest canonical-explicit-english-language-header
+  (testing "Explicit #language:en is preserved"
+    (let [input "#language:en\nFeature: Test\n  Scenario: S\n    Given foo\n"
+          result (printer/canonical input)]
+      (is (str/includes? result "# language: en") "Explicit English header preserved"))))
+
+(deftest canonical-french-roundtrip-parseable
+  (testing "French canonical output can be re-parsed"
+    (let [input "#language:fr\nFonctionnalité: Test\n  Scénario: S\n    Soit foo\n    Quand bar\n    Alors baz\n"
+          canonical (printer/canonical input)
+          reparsed (printer/canonical canonical)]
+      (is (= canonical reparsed) "French canonical output is idempotent"))))

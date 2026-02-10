@@ -206,11 +206,11 @@ Persistent Mode (new):
 (repl/connect-surface! :alice)
 ;; => Checks if Chrome alive, creates session, attaches to context
 
-;; Using it (unchanged)
-(repl/as :alice "I open the browser to 'https://example.com'")
+;; Using it (repl/as prepends :alice automatically)
+(repl/as :alice "opens the browser to 'https://example.com'")
 
 ;; After sleep/wake - automatic reconnection
-(repl/as :alice "I click {:css \"button\"}")
+(repl/as :alice "clicks {:css \"button\"}")
 ;; => Detects dead session, reconnects to same Chrome, retries
 
 ;; Destroying a surface

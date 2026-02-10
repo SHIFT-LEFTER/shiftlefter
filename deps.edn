@@ -5,24 +5,34 @@
         babashka/fs                 {:mvn/version "0.5.20"}
         org.clojure/tools.cli       {:mvn/version "1.0.219"}
         org.clojure/core.async      {:mvn/version "1.6.681"}
-        etaoin/etaoin               {:mvn/version "1.1.42"}}
+        etaoin/etaoin               {:mvn/version "1.1.42"}
+        nrepl/nrepl                 {:mvn/version "1.5.0"}
+        cider/cider-nrepl           {:mvn/version "0.50.0"}}
 
  :paths ["src" "resources"]
 
  :aliases
  {:dev  {:extra-paths ["dev" "test"]}
-  :test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
+  :test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}
+                      com.microsoft.playwright/playwright {:mvn/version "1.50.0"}}
          :extra-paths ["test"]
          :main-opts  ["-m" "kaocha.runner"]}
   :run {:main-opts ["-m" "shiftlefter.core"]}
   :compliance {:extra-deps {io.cucumber/gherkin-utils {:mvn/version "28.2.0"}
                             io.cucumber/messages      {:mvn/version "28.2.0"}}
                :ns-default shiftlefter.gherkin.compliance}
-  :repl {:extra-deps {nrepl/nrepl {:mvn/version "1.5.0"}
-                    cider/cider-nrepl {:mvn/version "0.50.0"}}
-        :jvm-opts ["-Dclojure.spec.skip-macros=true"]
+  :repl {:jvm-opts ["-Dclojure.spec.skip-macros=true"]
         :main-opts ["-m" "nrepl.cmdline" "--middleware" "[cider.nrepl/cider-middleware]"]}
   :kondo {:deps {clj-kondo/clj-kondo {:mvn/version "2025.10.23"}}
           :main-opts ["-m" "clj-kondo.main"]}
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.6"}}
-          :ns-default build}}}
+          :ns-default build}
+  :codox {:extra-deps {codox/codox {:mvn/version "0.10.8"}}
+          :exec-fn codox.main/generate-docs
+          :exec-args {:name "ShiftLefter"
+                      :version "0.3.6-SNAPSHOT"
+                      :description "Gherkin test framework with vocabulary validation"
+                      :source-paths ["src"]
+                      :output-path "docs/api"
+                      :source-uri "https://github.com/SHIFT-LEFTER/shiftlefter/blob/v{version}/{filepath}#L{line}"
+                      :metadata {:doc/format :markdown}}}}}

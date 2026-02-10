@@ -1,4 +1,11 @@
 (ns shiftlefter.gherkin.dialect
+  "Gherkin dialect (language) definitions.
+
+   Loads keyword mappings for 70+ languages from Cucumber's official i18n
+   JSON data. Each dialect maps Gherkin keywords (Feature, Scenario, Given,
+   When, Then, etc.) to their localized equivalents.
+
+   Primary entry points: `get-dialect`, `default-dialect`, `all-dialect-codes`."
   (:require [clojure.spec.alpha :as s]
             [cheshire.core :as json]
             [clojure.java.io :as io]

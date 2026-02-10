@@ -81,7 +81,97 @@
     (require '[etaoin.api :as eta])
     (try
       ((resolve 'etaoin.api/displayed?) driver (:q locator))
-      (catch Exception _ false))))
+      (catch Exception _ false)))
+
+  ;; --- Navigation (0.3.6) ---
+  (go-back! [this]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/back) driver)
+    this)
+  (go-forward! [this]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/forward) driver)
+    this)
+  (refresh! [this]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/refresh) driver)
+    this)
+
+  ;; --- Scrolling ---
+  (scroll-to! [this locator]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/scroll-query) driver (:q locator))
+    this)
+  (scroll-to-position! [this position]
+    (require '[etaoin.api :as eta])
+    (case position
+      :top ((resolve 'etaoin.api/scroll-top) driver)
+      :bottom ((resolve 'etaoin.api/scroll-bottom) driver))
+    this)
+
+  ;; --- Form Operations ---
+  (clear! [this locator]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/clear) driver (:q locator))
+    this)
+  (select! [this locator text]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/select) driver (:q locator) text)
+    this)
+  (press-key! [this key-str]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/fill-active) driver key-str)
+    this)
+
+  ;; --- Element Queries ---
+  (get-attribute [_this locator attribute]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/get-element-attr) driver (:q locator) (keyword attribute)))
+  (get-value [_this locator]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/get-element-value) driver (:q locator)))
+  (enabled? [_this locator]
+    (require '[etaoin.api :as eta])
+    (try
+      ((resolve 'etaoin.api/enabled?) driver (:q locator))
+      (catch Exception _ false)))
+
+  ;; --- Alerts ---
+  (accept-alert! [this]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/accept-alert) driver)
+    this)
+  (dismiss-alert! [this]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/dismiss-alert) driver)
+    this)
+  (get-alert-text [_this]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/get-alert-text) driver))
+
+  ;; --- Window Management ---
+  (maximize-window! [this]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/maximize) driver)
+    this)
+  (set-window-size! [this width height]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/set-window-size) driver width height)
+    this)
+  (switch-to-next-window! [this]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/switch-window-next) driver)
+    this)
+
+  ;; --- Frames ---
+  (switch-to-frame! [this locator]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/switch-frame) driver (:q locator))
+    this)
+  (switch-to-main-frame! [this]
+    (require '[etaoin.api :as eta])
+    ((resolve 'etaoin.api/switch-frame-top) driver)
+    this))
 
 ;; -----------------------------------------------------------------------------
 ;; Integration Tests

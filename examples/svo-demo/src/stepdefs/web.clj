@@ -16,7 +16,12 @@
    Key concepts:
    - :interface — which configured interface this step uses (e.g., :web)
    - :svo — subject/verb/object extraction with :$1, :$2 placeholders
-   - Capture groups map to :$1, :$2, etc. in order"
+   - Capture groups map to :$1, :$2, etc. in order
+
+   Convention: ctx-first
+   - ctx is the first argument to every step function
+   - ctx is a flat map (scenario state) — NOT nested under (:scenario ctx)
+   - Return the updated ctx map (or ctx unchanged for verification steps)"
   (:require [shiftlefter.stepengine.registry :refer [defstep]]))
 
 ;; =============================================================================
@@ -30,7 +35,7 @@
   [ctx]
   ;; In a real test, this would navigate to the login page
   (println "[Setup] Navigating to login page")
-  (assoc (:scenario ctx) :page :login))
+  (assoc ctx :page :login))
 
 ;; =============================================================================
 ;; SHIFTED STEPS (With SVO Metadata)
@@ -55,7 +60,7 @@
   [ctx subject field value]
   ;; In a real test, this would use a browser driver
   (println (str "[" subject "] Filling " field " with: " value))
-  (assoc (:scenario ctx) :last-action {:fill field :value value}))
+  (assoc ctx :last-action {:fill field :value value}))
 
 ;; --- Click Steps ---
 ;; Pattern: "{Subject} clicks the {element}"
@@ -67,7 +72,7 @@
          :object :$2}}
   [ctx subject element]
   (println (str "[" subject "] Clicking: " element))
-  (assoc (:scenario ctx) :last-action {:click element}))
+  (assoc ctx :last-action {:click element}))
 
 ;; --- See Steps ---
 ;; Pattern: "{Subject} sees {something}"
@@ -79,7 +84,7 @@
          :object :$2}}
   [ctx subject element]
   (println (str "[" subject "] Verifying visible: " element))
-  (:scenario ctx))
+  ctx)
 
 (defstep #"^(\w+) sees (?:a |an )?(?:error )?message \"([^\"]+)\"$"
   {:interface :web
@@ -88,7 +93,7 @@
          :object "message"}}
   [ctx subject message]
   (println (str "[" subject "] Verifying message: " message))
-  (:scenario ctx))
+  ctx)
 
 (defstep #"^(\w+) sees her (.+)$"
   {:interface :web
@@ -97,7 +102,7 @@
          :object :$2}}
   [ctx subject element]
   (println (str "[" subject "] Verifying visible: " element))
-  (:scenario ctx))
+  ctx)
 
 ;; --- Navigate Steps ---
 ;; Pattern: "{Subject} navigates to {page}"
@@ -109,7 +114,7 @@
          :object :$2}}
   [ctx subject page]
   (println (str "[" subject "] Navigating to: " page))
-  (assoc (:scenario ctx) :page page))
+  (assoc ctx :page page))
 
 ;; =============================================================================
 ;; Notes for Users
@@ -136,3 +141,8 @@
 ;; 5. CAPTURE GROUPS
 ;;    :$1, :$2, :$3 refer to regex capture groups in order.
 ;;    The subject is typically :$1 in "Subject does something" patterns.
+;;
+;; 6. CTX-FIRST CONVENTION
+;;    ctx is always the first argument. It's a flat map — just assoc/get
+;;    directly on it. Return the updated ctx (or ctx unchanged for
+;;    verification-only steps).

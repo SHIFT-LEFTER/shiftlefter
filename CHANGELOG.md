@@ -1,3 +1,102 @@
+# Changelog: 0.3.6
+
+**Release Date:** 2026-02-09
+
+---
+
+**ShiftLefter now supports Playwright, bundles nREPL, and ships with full API docs.**
+
+v0.3.5 made browser testing work. v0.3.6 hardens the developer experience — alternative browser backends, a bundled REPL server, 36 browser steps, CLI safety, and comprehensive documentation.
+
+---
+
+## What's New
+
+### Playwright Adapter (Experimental)
+
+Alternative browser backend alongside Etaoin. Same step definitions, different engine:
+
+```clojure
+;; shiftlefter.edn
+{:interfaces {:web {:type :web :adapter :playwright :config {:headless true}}}}
+```
+
+Supports Chromium, Firefox, and WebKit. All 31 IBrowser protocol methods implemented. Auto-waiting and string-based selectors map naturally. Requires the Playwright Java dependency (not bundled) — see `docs/CAPABILITIES.md` for setup.
+
+### Browser Backend Configuration
+
+Choose your browser engine per-interface via config. Generic `:adapter-opts` passthrough for backend-specific settings:
+
+```clojure
+{:interfaces {:web {:type :web
+                    :adapter :etaoin
+                    :adapter-opts {:load-timeout 30000}}}}
+```
+
+### 36 Browser Step Definitions
+
+19 new protocol methods and 22 new step definitions (36 total browser steps). Covers scrolling, keyboard chords, window/tab management, frames, dialogs, and advanced form interactions. Etaoin (default, bundled) requires ChromeDriver on your system; see `docs/CAPABILITIES.md` for browser setup tiers.
+
+```gherkin
+When :alice scrolls down by 500 pixels
+And :alice presses 'shift+control+t'
+And :alice switches to window 2
+And :alice accepts the dialog
+Then :alice should see 3 {:css "li.result"} elements
+```
+
+### Bundled nREPL Server
+
+`sl repl` now works with Java-only — no Clojure CLI required. CIDER middleware included for IDE integration:
+
+```bash
+sl repl              # interactive REPL
+sl repl --nrepl      # start nREPL server (default port 7888)
+sl repl --nrepl --port 9000
+```
+
+### API Documentation
+
+Generated API docs for all 51 namespaces via Codox. [Browse on GitHub](https://github.com/SHIFT-LEFTER/shiftlefter/tree/v0.3.6/docs/api).
+
+### Installation & Capabilities Docs
+
+New `docs/CAPABILITIES.md` with tiered capability guide (Java-only → Java+ChromeDriver → Java+Clojure CLI). New `CONTRIBUTING.md` for developers.
+
+---
+
+## Bug Fixes
+
+- **Inline comments** — `#` comments inside scenario bodies no longer cause parse errors.
+- **CLI flag handling** — Unknown flags now rejected with usage message instead of silently ignored. Fixed `--config-path` not reaching the runner.
+- **i18n keywords** — Formatter now preserves original language keywords instead of normalizing to English.
+
+---
+
+## Minor Improvements
+
+- **Browser step retry** — Configurable `*retry-timeout-ms*` dynamic var (default 3s). Element count verification now retries.
+- **CLI flags** — Added `--no-color` and `--mode` flags.
+- **Bundled capabilities** — 8 libraries available in uberjar stepdefs (Cheshire, babashka.fs, core.async, spec.alpha, test.check, etaoin, Java stdlib, clojure.test). Classpath extension via `lib/*.jar`.
+
+---
+
+## Breaking Changes
+
+- **"I" step patterns removed** — `I click`, `I fill`, etc. no longer exist. All steps use subject-extracting patterns (`:alice clicks`, `:bob fills`).
+- **`repl/free` removed** — Use `repl/as` instead (identical behavior).
+
+---
+
+## Test Results
+
+```
+1029 tests, 3200+ assertions, 0 failures
+Compliance: 46/46 good, 11/11 bad (100%)
+```
+
+---
+
 # Changelog: 0.3.5
 
 **Release Date:** 2026-02-05

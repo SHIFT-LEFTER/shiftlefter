@@ -33,7 +33,7 @@ Manual verification tests that cannot be reliably automated.
 
 3. Navigate to a page:
    ```clojure
-   (repl/free :sleep-test "I open the browser to 'https://example.com'")
+   (repl/as :sleep-test "opens the browser to 'https://example.com'")
    ```
 
 4. Close laptop lid (or manually sleep)
@@ -44,7 +44,7 @@ Manual verification tests that cannot be reliably automated.
 
 7. Run another command:
    ```clojure
-   (repl/free :sleep-test "I should see {:text \"Example Domain\"}")
+   (repl/as :sleep-test "should see {:text \"Example Domain\"}")
    ```
 
 **Expected:** Command succeeds after brief reconnection delay (you may see a small pause).
@@ -73,7 +73,7 @@ Manual verification tests that cannot be reliably automated.
 
 2. Navigate to a page:
    ```clojure
-   (repl/free :kill-test "I open the browser to 'https://example.com'")
+   (repl/as :kill-test "opens the browser to 'https://example.com'")
    ```
 
 3. Note the Chrome PID:
@@ -91,7 +91,7 @@ Manual verification tests that cannot be reliably automated.
 
 6. Run a browser command:
    ```clojure
-   (repl/free :kill-test "I open the browser to 'https://httpbin.org/get'")
+   (repl/as :kill-test "opens the browser to 'https://httpbin.org/get'")
    ```
 
 **Expected:** New Chrome window opens, command succeeds.
@@ -121,7 +121,7 @@ Manual verification tests that cannot be reliably automated.
 2. Check navigator.webdriver flag:
    ```clojure
    ;; Navigate to a page that shows automation detection
-   (repl/free :stealth-test "I open the browser to 'https://bot.sannysoft.com'")
+   (repl/as :stealth-test "opens the browser to 'https://bot.sannysoft.com'")
    ```
 
 3. Visually inspect the page:
@@ -130,7 +130,7 @@ Manual verification tests that cannot be reliably automated.
 
 4. Optional: Test Cloudflare-protected site:
    ```clojure
-   (repl/free :stealth-test "I open the browser to 'https://nowsecure.nl'")
+   (repl/as :stealth-test "opens the browser to 'https://nowsecure.nl'")
    ```
    - Should not immediately show Cloudflare challenge
    - Note: This may still trigger on some sites depending on other factors
@@ -161,7 +161,7 @@ Manual verification tests that cannot be reliably automated.
 
 2. Navigate and set some state:
    ```clojure
-   (repl/free :persist-test "I open the browser to 'https://example.com'")
+   (repl/as :persist-test "opens the browser to 'https://example.com'")
    ```
 
 3. In the browser, open DevTools (F12), go to Console, run:
@@ -220,14 +220,14 @@ Manual verification tests that cannot be reliably automated.
 
 3. Navigate each to different pages:
    ```clojure
-   (repl/free :multi-a "I open the browser to 'https://example.com'")
-   (repl/free :multi-b "I open the browser to 'https://httpbin.org'")
+   (repl/as :multi-a "opens the browser to 'https://example.com'")
+   (repl/as :multi-b "opens the browser to 'https://httpbin.org'")
    ```
 
 4. Verify isolation:
    ```clojure
-   (repl/free :multi-a "I should see {:text \"Example Domain\"}")
-   (repl/free :multi-b "I should see {:text \"httpbin\"}")
+   (repl/as :multi-a "should see {:text \"Example Domain\"}")
+   (repl/as :multi-b "should see {:text \"httpbin\"}")
    ```
 
 **Expected:** Both pass — subjects are independent.

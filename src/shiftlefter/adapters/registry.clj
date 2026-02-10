@@ -26,7 +26,8 @@
    (cleanup-capability :etaoin capability)
    ;; => {:ok :closed}
    ```"
-  (:require [shiftlefter.adapters.etaoin :as etaoin]))
+  (:require [shiftlefter.adapters.etaoin :as etaoin]
+            [shiftlefter.adapters.playwright :as playwright]))
 
 ;; -----------------------------------------------------------------------------
 ;; Default Registry
@@ -36,9 +37,12 @@
   "Built-in adapters shipped with ShiftLefter.
 
    Currently includes:
-   - :etaoin — Etaoin WebDriver for browser automation"
-  {:etaoin {:factory etaoin/create-browser
-            :cleanup etaoin/close-browser}})
+   - :etaoin — Etaoin WebDriver for browser automation
+   - :playwright — Playwright for browser automation (requires Playwright dep)"
+  {:etaoin     {:factory etaoin/create-browser
+                :cleanup etaoin/close-browser}
+   :playwright {:factory playwright/create-browser
+                :cleanup playwright/close-browser}})
 
 ;; -----------------------------------------------------------------------------
 ;; Registry Operations
@@ -61,7 +65,7 @@
    ;; => {:factory #function :cleanup #function}
 
    (get-adapter :unknown)
-   ;; => {:error {:type :adapter/unknown :adapter :unknown :known [:etaoin]}}
+   ;; => {:error {:type :adapter/unknown :adapter :unknown :known [:etaoin :playwright]}}
    ```"
   ([adapter-name]
    (get-adapter adapter-name default-registry))

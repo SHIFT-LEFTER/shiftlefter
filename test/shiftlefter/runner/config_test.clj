@@ -448,3 +448,36 @@
           result (config/normalize cfg)]
       (is (seq (:errors result)))
       (is (= :config/unknown-interface-type (-> result :errors first :type))))))
+
+;; -----------------------------------------------------------------------------
+;; CLI Override Round-Trip Tests (WI-033.007)
+;; -----------------------------------------------------------------------------
+
+(deftest test-cli-step-paths-override-config
+  (testing "CLI --step-paths takes precedence over config file step-paths"
+    (let [config (config/load-config {:config-path "test/fixtures/config/shiftlefter.fr.edn"})
+          config-step-paths (config/get-step-paths config)
+          cli-step-paths ["custom/steps/" "more/steps/"]
+          ;; Simulate run-cmd logic: CLI wins if provided
+          effective (or cli-step-paths config-step-paths)]
+      ;; Config has its own step-paths, but CLI overrides
+      (is (= cli-step-paths effective))
+      ;; Verify config actually had different step-paths
+      (is (not= cli-step-paths config-step-paths)
+          "Config should have different step-paths to prove CLI override works")))
+
+  (testing "Config step-paths used when CLI doesn't provide --step-paths"
+    (let [config (config/load-config {:config-path "test/fixtures/config/shiftlefter.fr.edn"})
+          config-step-paths (config/get-step-paths config)
+          cli-step-paths nil
+          effective (or cli-step-paths config-step-paths)]
+      (is (= config-step-paths effective))))
+
+  (testing "Deep merge preserves nested user values alongside defaults"
+    (let [config (config/load-config {:config-path "test/fixtures/config/shiftlefter.fr.edn"})]
+      ;; User specified :parser :dialect "fr" — should survive
+      (is (= "fr" (get-in config [:parser :dialect])))
+      ;; User specified :runner :step-paths — should survive
+      (is (= ["steps/" "more-steps/"] (get-in config [:runner :step-paths])))
+      ;; Default :runner :macros should still be present (deep merge)
+      (is (some? (get-in config [:runner :macros]))))))

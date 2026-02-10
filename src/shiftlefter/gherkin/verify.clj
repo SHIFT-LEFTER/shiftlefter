@@ -244,7 +244,7 @@
 
 (def smoke-fixtures
   "List of smoke fixture paths to validate."
-  ["examples/quickstart/features/toy-login.feature"])
+  ["examples/01-validate-and-format/login.feature"])
 
 (defn run-validator-checks
   "Run validator-only checks (fast, default mode).

@@ -131,20 +131,20 @@ Status values:
 
 ## Using the Browser
 
-After connecting, use the browser via REPL free mode. Make sure the browser stepdefs are loaded:
+After connecting, use the browser via REPL. Make sure the browser stepdefs are loaded:
 
 ```clojure
 (require '[shiftlefter.stepdefs.browser])  ;; If not already loaded
 
-;; Navigate
-(repl/free :finance "I open the browser to 'https://app.example.com'")
+;; Navigate (repl/as prepends :finance automatically)
+(repl/as :finance "opens the browser to 'https://app.example.com'")
 
 ;; Interact
-(repl/free :finance "I click {:css \"button.submit\"}")
-(repl/free :finance "I fill {:id \"email\"} with 'user@example.com'")
+(repl/as :finance "clicks {:css \"button.submit\"}")
+(repl/as :finance "fills {:id \"email\"} with 'user@example.com'")
 
-;; Query
-(repl/free :finance "I should see {:text \"Welcome\"}")
+;; Verify
+(repl/as :finance "should see {:text \"Welcome\"}")
 ```
 
 Or access the browser directly:

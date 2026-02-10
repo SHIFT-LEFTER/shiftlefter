@@ -70,14 +70,14 @@ clj -M:dev
 ### 5. Run steps interactively
 
 ```clojure
-;; Navigate
-(repl/as :alice "I open the browser to 'https://example.com'")
+;; Navigate (repl/as prepends :alice automatically)
+(repl/as :alice "opens the browser to 'https://example.com'")
 
 ;; Click
-(repl/as :alice "I click {:css \"a\"}")
+(repl/as :alice "clicks {:css \"a\"}")
 
-;; Count elements
-(repl/as :alice "I count {:css \"h1\"} elements")
+;; Verify element visible
+(repl/as :alice "should see {:css \"h1\"}")
 ```
 
 ### 6. Use Surfaces for persistent sessions
@@ -118,24 +118,27 @@ Locators use EDN syntax in step text:
 
 ## Available Steps
 
+All built-in browser steps require a subject (`:user`, `:alice`, etc.):
+
 ```gherkin
 # Navigation
-I open the browser to '<url>'
+:user opens the browser to '<url>'
 
-# Clicks
-I click {<locator>}
-I double-click {<locator>}
-I right-click {<locator>}
+# Actions
+:user clicks {<locator>}
+:user double-clicks {<locator>}
+:user right-clicks {<locator>}
+:user moves to {<locator>}
+:user drags {<from-locator>} to {<to-locator>}
+:user fills {<locator>} with '<text>'
 
-# Mouse
-I move to {<locator>}
-I drag {<from-locator>} to {<to-locator>}
-
-# Input
-I fill {<locator>} with '<text>'
-
-# Query
-I count {<locator>} elements
+# Verification
+:user should see '<text>'
+:user should see the title '<text>'
+:user should be on '<url>'
+:user should see {<locator>}
+:user should not see {<locator>}
+:user should see <N> {<locator>} elements
 ```
 
 ## CLI Usage

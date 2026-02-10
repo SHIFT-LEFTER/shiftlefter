@@ -47,7 +47,78 @@
 
   (visible? [_ loc]
     (swap! calls-atom conj [:visible? loc])
-    true))
+    true)
+
+  ;; --- Navigation (0.3.6) ---
+  (go-back! [this]
+    (swap! calls-atom conj [:go-back!])
+    this)
+  (go-forward! [this]
+    (swap! calls-atom conj [:go-forward!])
+    this)
+  (refresh! [this]
+    (swap! calls-atom conj [:refresh!])
+    this)
+
+  ;; --- Scrolling ---
+  (scroll-to! [this loc]
+    (swap! calls-atom conj [:scroll-to! loc])
+    this)
+  (scroll-to-position! [this position]
+    (swap! calls-atom conj [:scroll-to-position! position])
+    this)
+
+  ;; --- Form Operations ---
+  (clear! [this loc]
+    (swap! calls-atom conj [:clear! loc])
+    this)
+  (select! [this loc text]
+    (swap! calls-atom conj [:select! loc text])
+    this)
+  (press-key! [this key-str]
+    (swap! calls-atom conj [:press-key! key-str])
+    this)
+
+  ;; --- Element Queries ---
+  (get-attribute [_ loc attr]
+    (swap! calls-atom conj [:get-attribute loc attr])
+    "fake-attr")
+  (get-value [_ loc]
+    (swap! calls-atom conj [:get-value loc])
+    "fake-value")
+  (enabled? [_ loc]
+    (swap! calls-atom conj [:enabled? loc])
+    true)
+
+  ;; --- Alerts ---
+  (accept-alert! [this]
+    (swap! calls-atom conj [:accept-alert!])
+    this)
+  (dismiss-alert! [this]
+    (swap! calls-atom conj [:dismiss-alert!])
+    this)
+  (get-alert-text [_]
+    (swap! calls-atom conj [:get-alert-text])
+    "fake alert")
+
+  ;; --- Window Management ---
+  (maximize-window! [this]
+    (swap! calls-atom conj [:maximize-window!])
+    this)
+  (set-window-size! [this w h]
+    (swap! calls-atom conj [:set-window-size! w h])
+    this)
+  (switch-to-next-window! [this]
+    (swap! calls-atom conj [:switch-to-next-window!])
+    this)
+
+  ;; --- Frames ---
+  (switch-to-frame! [this loc]
+    (swap! calls-atom conj [:switch-to-frame! loc])
+    this)
+  (switch-to-main-frame! [this]
+    (swap! calls-atom conj [:switch-to-main-frame!])
+    this))
 
 (defn make-fake-browser []
   (->FakeBrowser (atom [])))

@@ -2,11 +2,11 @@
 
 **Gherkin test framework with vocabulary validation** — parse, format, run, and catch mistakes before execution. 100% Cucumber-compatible parser, built in Clojure.
 
-## Status: v0.3.5 - Browser Testing & Polish
+## Status: v0.3.6
 
 ShiftLefter provides a complete BDD testing framework with Gherkin parsing, validation, formatting, and test execution. The parser is 100% Cucumber-compatible; the runner executes scenarios with step definitions written in Clojure.
 
-**Current:** Parser, formatter, runner, macro expansion, multi-actor browser testing, SVO validation, tutorial examples
+**Current:** Parser, formatter, runner, macro expansion, multi-actor browser testing (Etaoin + Playwright), SVO validation, REPL with nREPL/CIDER, tutorial examples
 
 **Next:** Executable traceability, intent regions, supplanting what the screenplay pattern was aiming for with the data-oriented, queryable, far simpler SVOI
 
@@ -16,39 +16,40 @@ ShiftLefter provides a complete BDD testing framework with Gherkin parsing, vali
 
 ## Install
 
-### Binary Release (Recommended)
+### Quick Start (Java only — most users)
 
 **Requirements:** Java 11 or later
 
-1. Download `shiftlefter-v0.3.5.zip` from [releases](https://github.com/SHIFT-LEFTER/shiftlefter/releases)
+1. Download the latest release zip from [releases](https://github.com/SHIFT-LEFTER/shiftlefter/releases)
 2. Unzip and add to PATH:
    ```bash
-   unzip shiftlefter-v0.3.5.zip
-   export PATH="$PATH:$PWD/shiftlefter-v0.3.5"
+   unzip shiftlefter-*.zip
+   export PATH="$PATH:$PWD/shiftlefter-*"
    ```
 3. Run:
    ```bash
+   sl --help
    sl fmt --check your-file.feature
    sl run features/ --step-paths steps/
    ```
 
-The zip contains the `sl` wrapper script and a versioned JAR. No Clojure toolchain needed — just Java.
+This is all you need to run features, format files, start the REPL (`sl repl`), connect your IDE (`sl repl --nrepl`), and use built-in browser steps. No Clojure toolchain needed — just Java.
 
-### From Source (Development)
+### Writing Custom Step Definitions
 
-**Requirements:** Clojure CLI tools
+Same Java-only install. Write `.clj` step definition files and ShiftLefter loads them automatically. 8 libraries are bundled (JSON, filesystem, browser automation, async, specs, and more) — see [What Can I Do?](docs/CAPABILITIES.md) for the full list.
 
-1. Install Clojure: [Official guide](https://clojure.org/guides/install_clojure) or `brew install clojure`
-2. Clone this repository
-3. Run from source:
-   ```bash
-   bin/sl fmt --check your-file.feature
-   ```
-4. Or build the uberjar yourself:
-   ```bash
-   clojure -T:build uberjar
-   java -jar target/shiftlefter.jar fmt --check your-file.feature
-   ```
+### From Source (Contributors)
+
+**Requirements:** Java 11+ and [Clojure CLI](https://clojure.org/guides/install_clojure)
+
+```bash
+git clone https://github.com/SHIFT-LEFTER/shiftlefter.git
+cd shiftlefter
+bin/kaocha    # run tests
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for full development setup.
 
 ---
 
@@ -136,38 +137,45 @@ sl verify --edn
 
 ## Writing Step Definitions
 
-Step definitions bind Gherkin steps to Clojure functions. Create `.clj` files in your step-paths directory:
+Step definitions bind Gherkin steps to Clojure functions. Every step has a **subject** — a keyword like `:user`, `:alice`, `:cart` — extracted from the first word in the step text. Create `.clj` files in your step-paths directory:
 
 ```clojure
-;; steps/login_steps.clj
-(ns my-project.steps.login
+;; steps/shopping_steps.clj
+(ns my-project.steps.shopping
   (:require [shiftlefter.stepengine.registry :refer [defstep]]
             [shiftlefter.step :as step]))
 
-;; Simple step (no captures)
-(defstep #"I am on the login page"
-  [ctx]
-  (assoc ctx :page :login))
-
-;; Step with captures (regex groups become arguments)
-(defstep #"I enter \"([^\"]+)\" and \"([^\"]+)\""
-  [ctx username password]
-  (assoc ctx :username username :password password))
-
-;; Step with context only (no captures)
-(defstep #"I should see the dashboard"
-  [ctx]
-  (when-not (:logged-in ctx)
-    (throw (ex-info "Not logged in!" {:ctx ctx})))
-  ctx)
-
-;; Step with captures AND context (ctx is always first)
-(defstep #"I have (\d+) items in my cart"
-  [ctx count-str]
+;; Subject-extracting step (first capture is the subject keyword)
+(defstep #"(\S+) has (\d+) items in the cart"
+  [ctx subject count-str]
   (assoc ctx :cart-count (Integer/parseInt count-str)))
+
+;; Step with captures (regex groups become arguments after ctx)
+(defstep #"(\S+) adds \"([^\"]+)\" to the cart"
+  [ctx subject product]
+  (update ctx :cart (fnil conj []) product))
+
+;; Verification step
+(defstep #"(\S+) should have (\d+) items"
+  [ctx subject expected-str]
+  (let [expected (Integer/parseInt expected-str)
+        actual (:cart-count ctx)]
+    (when (not= expected actual)
+      (throw (ex-info "Count mismatch" {:expected expected :actual actual})))
+    ctx))
 ```
 
-**Convention:** `ctx` is always the **first** argument, followed by regex captures in order. Steps that don't need context can omit it entirely (`[]`).
+Corresponding feature file:
+
+```gherkin
+Feature: Shopping cart
+  Scenario: Add items
+    Given :shopper has 0 items in the cart
+    When :shopper adds "Cucumber" to the cart
+    Then :shopper should have 1 items
+```
+
+**Convention:** `ctx` is always the **first** argument, followed by regex captures in order.
 
 **Return values:**
 
@@ -176,28 +184,15 @@ Step definitions bind Gherkin steps to Clojure functions. Create `.clj` files in
 - **`:pending`** → marks step as pending (scenario fails unless `allow-pending?` is true)
 - **Throw** → step fails with error
 
-**Context structure:**
-The `ctx` argument is a flat map — your accumulated state is directly on it, not nested:
-
-```clojure
-(defstep #"I should have (\d+) items"
-  [ctx expected-str]
-  (let [expected (Integer/parseInt expected-str)
-        actual (:cart-count ctx)]
-    (when (not= expected actual)
-      (throw (ex-info "Count mismatch" {:expected expected :actual actual})))
-    ctx))
-```
-
 **DataTable / DocString access:**
 Steps with a DataTable or DocString attached access them via `(step/arguments ctx)`:
 
 ```clojure
-(defstep #"the following users exist:" [ctx]
+(defstep #"(\S+) has the following items:" [ctx _subject]
   (let [{:keys [rows]} (step/arguments ctx)
         headers (first rows)
         data (rest rows)]
-    (assoc ctx :users data)))
+    (assoc ctx :items data)))
 ```
 
 ---
@@ -207,11 +202,11 @@ Steps with a DataTable or DocString attached access them via `(step/arguments ct
 Add type-checking to your step definitions with Subject-Verb-Object validation. See `docs/SVO.md` for full documentation.
 
 ```clojure
-;; Step with SVO metadata
-(defstep #"^(\w+) clicks the (.+)$"
+;; Step with SVO metadata — subject extracted from first capture
+(defstep #"(\S+) clicks (.+)"
   {:interface :web
    :svo {:subject :$1 :verb :click :object :$2}}
-  [ctx subject element]
+  [ctx subject locator]
   ...)
 ```
 
@@ -253,6 +248,18 @@ ShiftLefter looks for `shiftlefter.edn` in the current directory. Copy `shiftlef
  :runner {:step-paths ["steps/"]      ;; Where to find step definitions
           :allow-pending? false}}     ;; true = pending steps don't fail the run
 ```
+
+**Browser backend** — choose between Etaoin (default, bundled) and Playwright (add to `lib/` or `deps.edn`):
+
+```clojure
+{:interfaces
+ {:web {:type :web
+        :adapter :playwright    ;; or :etaoin (default)
+        :config {:headless false
+                 :adapter-opts {:browser-type :firefox}}}}}
+```
+
+See [Browser Backend Configuration](docs/CAPABILITIES.md#browser-backend-configuration) for full details and option passthrough examples.
 
 **Precedence:**
 1. CLI flags (e.g., `--step-paths`) override config file
@@ -300,20 +307,20 @@ For framework integration, use `shiftlefter.gherkin.api`:
 
 ## REPL Usage
 
-For interactive development and experimentation, use `shiftlefter.repl`:
+For interactive development and experimentation, use `shiftlefter.repl`. Start it with `sl repl` (interactive) or `sl repl --nrepl` (IDE integration via CIDER/Calva):
 
 ```clojure
 (require '[shiftlefter.repl :as repl])
 (require '[shiftlefter.stepengine.registry :refer [defstep]])
 
-;; Define steps — ctx is always first, followed by captures
-(defstep #"I have (\d+) cucumbers" [ctx n]
+;; Define steps — ctx is always first, then captures
+(defstep #"(\S+) has (\d+) cucumbers" [ctx _subject n]
   (assoc ctx :count (Integer/parseInt n)))
 
-(defstep #"I eat (\d+)" [ctx n]
+(defstep #"(\S+) eats (\d+)" [ctx _subject n]
   (update ctx :count - (Integer/parseInt n)))
 
-(defstep #"I should have (\d+) left" [ctx n]
+(defstep #"(\S+) should have (\d+) left" [ctx _subject n]
   (let [expected (Integer/parseInt n)
         actual (:count ctx)]
     (when (not= expected actual)
@@ -328,13 +335,13 @@ For interactive development and experimentation, use `shiftlefter.repl`:
 (repl/run "
   Feature: Cucumbers
     Scenario: Eating
-      Given I have 12 cucumbers
-      When I eat 5
-      Then I should have 7 left")
+      Given :garden has 12 cucumbers
+      When :garden eats 5
+      Then :garden should have 7 left")
 ;; => {:status :ok :summary {:scenarios 1 :passed 1 :failed 0 :pending 0}}
 
 ;; Dry-run (bind without executing)
-(repl/run-dry "Feature: X\n  Scenario: Y\n    Given I have 5 cucumbers")
+(repl/run-dry "Feature: X\n  Scenario: Y\n    Given :garden has 5 cucumbers")
 ;; => {:status :ok :plans [...]}
 ```
 
@@ -343,38 +350,37 @@ For interactive development and experimentation, use `shiftlefter.repl`:
 For quick experimentation, execute steps directly without Gherkin structure:
 
 ```clojure
-;; Execute steps one at a time
-(repl/step "I have 12 cucumbers")
+;; Execute steps one at a time (repl/as prepends the subject name)
+(repl/as :garden "has 12 cucumbers")
 ;; => {:status :passed :ctx {:count 12}}
 
-(repl/step "I eat 5")
+(repl/as :garden "eats 5")
 ;; => {:status :passed :ctx {:count 7}}
 
 ;; Context accumulates across calls
-(repl/ctx)
+(repl/ctx :garden)
 ;; => {:count 7}
 
 ;; Reset for new session
-(repl/reset-ctx!)
+(repl/reset-ctxs!)
 ```
 
 ### Named Contexts (multi-actor sessions)
 
-Use `free` for multi-user scenarios where each actor has separate state:
+Each subject gets its own isolated context:
 
 ```clojure
 ;; Each session maintains its own context
-(repl/free :alice "I log in as alice")
-(repl/free :bob "I log in as bob")
-(repl/free :alice "I create a post")
-(repl/free :bob "I see alice's post")
+(repl/as :alice "opens the browser to 'https://example.com'")
+(repl/as :bob "opens the browser to 'https://example.com'")
+(repl/as :alice "clicks {:id \"login\"}")
+(repl/as :bob "fills {:id \"search\"} with 'test'")
 
 ;; Multiple steps in one call
-(repl/free :alice "I write a comment" "I submit")
+(repl/as :alice "fills {:id \"email\"} with 'alice@test.com'" "clicks {:id \"submit\"}")
 
 ;; Inspect specific context
 (repl/ctx :alice)
-;; => {:user "alice" :posts [...]}
 
 ;; Inspect all named contexts
 (repl/ctxs)
@@ -389,7 +395,6 @@ Use `free` for multi-user scenarios where each actor has separate state:
 ```clojure
 ;; List registered step patterns
 (repl/steps)
-;; => ["I have (\\d+) cucumbers" "I eat (\\d+)" ...]
 
 ;; Clear registry and context (fresh start)
 (repl/clear!)
@@ -439,9 +444,14 @@ See [ERRATA.md](ERRATA.md) for known edge cases and workarounds.
 
 ## Documentation
 
+- [docs/CAPABILITIES.md](docs/CAPABILITIES.md) — What you can do at each installation tier, bundled libraries, browser backend config
+- [docs/browser-getting-started.md](docs/browser-getting-started.md) — Browser automation quick start (built-in steps)
+- [docs/PERSISTENT-SUBJECTS.md](docs/PERSISTENT-SUBJECTS.md) — Multi-actor persistent browser sessions
+- [API Reference](docs/api/index.html) — Generated API docs for all 51 namespaces (Codox)
 - [docs/SVO.md](docs/SVO.md) — SVO validation guide (glossaries, defstep metadata, migration)
 - [docs/GLOSSARY.md](docs/GLOSSARY.md) — Terminology reference
 - [docs/FUZZ.md](docs/FUZZ.md) — Fuzz testing and delta debugging
+- [CONTRIBUTING.md](CONTRIBUTING.md) — Development setup and contribution guide
 - [CHANGELOG.md](CHANGELOG.md) — Release history
 - [ERRATA.md](ERRATA.md) — Known edge cases and workarounds
 
@@ -478,7 +488,7 @@ bin/                           # Dev scripts (kaocha, kondo, compliance, repl-ev
 
 ## Testing
 
-**945 tests, 2869 assertions, 0 failures**
+**1029 tests, 3200+ assertions, 0 failures**
 
 ```bash
 # Run full test suite

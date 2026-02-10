@@ -8,10 +8,10 @@
 
 (deftest read-file-utf8-valid
   (testing "Valid UTF-8 file reads successfully"
-    (let [result (io/read-file-utf8 "examples/quickstart/features/toy-login.feature")]
+    (let [result (io/read-file-utf8 "examples/01-validate-and-format/login.feature")]
       (is (= :ok (:status result)))
       (is (string? (:content result)))
-      (is (= "examples/quickstart/features/toy-login.feature" (:path result))))))
+      (is (= "examples/01-validate-and-format/login.feature" (:path result))))))
 
 (deftest read-file-utf8-invalid
   (testing "Invalid UTF-8 file returns distinct error (AC2)"
@@ -34,7 +34,7 @@
 
 (deftest slurp-utf8-valid
   (testing "slurp-utf8 returns string for valid file"
-    (let [content (io/slurp-utf8 "examples/quickstart/features/toy-login.feature")]
+    (let [content (io/slurp-utf8 "examples/01-validate-and-format/login.feature")]
       (is (string? content))
       (is (pos? (count content))))))
 

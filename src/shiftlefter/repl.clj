@@ -25,7 +25,7 @@
          When I eat 5
          Then I should have 7 left\")
 
-   ;; Or use free mode (no Feature/Scenario wrapper needed)
+   ;; Or use step mode (no Feature/Scenario wrapper needed)
    (repl/step \"I have 12 cucumbers\")
    (repl/step \"I eat 5\")
    (repl/step \"I should have 7 left\")
@@ -38,10 +38,9 @@
    - `run-dry`    — parse and bind only (no execution)
    - `parse-only` — just parse, return pickles
 
-   ### Free Mode (steps only, no structure)
+   ### Step Mode (steps only, no structure)
    - `step`       — execute a single step, maintains session context
    - `as`         — execute steps in named context (multi-actor sessions)
-   - `free`       — alias for `as` (compatibility)
    - `ctx`        — inspect session context (or named context)
    - `ctxs`       — inspect all named contexts
    - `set-ctx!`   — set a named context to a value (e.g., attach browser)
@@ -77,7 +76,7 @@
             [shiftlefter.webdriver.session-store :as store]))
 
 ;; -----------------------------------------------------------------------------
-;; Session Context (for free mode)
+;; Session Context (for step mode)
 ;; -----------------------------------------------------------------------------
 
 (defonce ^:private session-ctx (atom {}))
@@ -105,7 +104,7 @@
 (defn ctx
   "Get the current session context (or a named context).
 
-   In free mode, context accumulates across step calls.
+   In step mode, context accumulates across step calls.
    Step functions returning maps merge into this context."
   ([] @session-ctx)
   ([name] (get @named-contexts name {})))
@@ -148,7 +147,7 @@
    (set-ctx! :alice (browser.ctx/assoc-active-browser {} my-browser))
 
    ;; Now steps can use the browser
-   (as :alice \"I open the browser to 'https://example.com'\")
+   (as :alice \"opens the browser to 'https://example.com'\")
    ```"
   [ctx-name ctx-value]
   (swap! named-contexts assoc ctx-name ctx-value)
@@ -171,7 +170,7 @@
    Example:
    ```clojure
    (mark-surface! :alice)
-   (as :alice \"I open the browser to 'https://example.com'\")
+   (as :alice \"opens the browser to 'https://example.com'\")
    (reset-ctxs!)  ; session persisted, not closed
    ```"
   [ctx-name]
@@ -501,7 +500,7 @@
 ;; -----------------------------------------------------------------------------
 
 (defn step
-  "Execute a single step in free mode.
+  "Execute a single step in step mode.
 
    No Feature/Scenario structure required — just provide step text.
    Context accumulates across calls within a session.
@@ -626,6 +625,19 @@
    Each named context maintains its own accumulated state,
    allowing simulation of multiple users/actors.
 
+   Automatically prepends `:ctx-name` to each step text, so the step
+   matches subject-extracting patterns. For example:
+
+   ```clojure
+   (as :alice \"opens the browser to 'https://example.com'\")
+   ```
+
+   becomes step text `:alice opens the browser to 'https://example.com'`
+   which matches the built-in browser step pattern.
+
+   If the step text already starts with `:ctx-name`, no prepending occurs
+   (idempotent — you can also write the full step text explicitly).
+
    In Shifted mode with `:unknown-subject :warn`, warns but proceeds.
    In Shifted mode with `:unknown-subject :error`, returns error without executing.
 
@@ -638,42 +650,44 @@
 
    Example:
    ```clojure
-   (as :alice \"I log in as alice\")
-   (as :bob \"I log in as bob\")
-   (as :alice \"I create a post\")
-   (as :bob \"I see alice's post\")
+   (as :alice \"opens the browser to 'https://example.com'\")
+   (as :alice \"clicks {:id \\\"login\\\"}\")
+   (as :alice \"should see 'Welcome'\")
+
+   ;; Also works with explicit subject (idempotent):
+   (as :alice \":alice opens the browser to 'https://example.com'\")
 
    ;; Check all contexts
    (ctxs)
-   ;; => {:alice {:logged-in true :posts [...]} :bob {:logged-in true}}
 
    ;; Check specific context
    (ctx :alice)
-   ;; => {:logged-in true :posts [...]}
    ```"
   [ctx-name & steps]
   (if-let [validation-error (validate-actor ctx-name)]
     ;; Actor validation failed in error mode — don't execute
     (assoc validation-error :session ctx-name :ctx (get @named-contexts ctx-name {}))
     ;; Actor valid or warn mode — proceed with execution
-    (loop [remaining steps
-           current-ctx (get @named-contexts ctx-name {})
-           last-result nil]
-      (if (empty? remaining)
-        ;; Return last result (or ok if no steps)
-        (or last-result {:status :ok :session ctx-name :ctx current-ctx})
-        (let [step-text (first remaining)
-              result (execute-step-in-context step-text current-ctx ctx-name)
-              new-ctx (merge current-ctx (:ctx result))]
-          (swap! named-contexts assoc ctx-name new-ctx)
-          (if (= :passed (:status result))
-            (recur (rest remaining) new-ctx (assoc result :session ctx-name :ctx new-ctx))
-            ;; Stop on first non-passing step
-            (assoc result :session ctx-name :ctx new-ctx)))))))
-
-(def free
-  "Alias for `as`. See `as` docstring."
-  as)
+    (let [subject-prefix (str ctx-name " ")]
+      (loop [remaining steps
+             current-ctx (get @named-contexts ctx-name {})
+             last-result nil]
+        (if (empty? remaining)
+          ;; Return last result (or ok if no steps)
+          (or last-result {:status :ok :session ctx-name :ctx current-ctx})
+          (let [raw-text (first remaining)
+                ;; Prepend :subject if not already present (idempotent).
+                ;; repl/as is shifted-mode: every step gets a subject.
+                step-text (if (.startsWith raw-text subject-prefix)
+                            raw-text
+                            (str subject-prefix raw-text))
+                result (execute-step-in-context step-text current-ctx ctx-name)
+                new-ctx (merge current-ctx (:ctx result))]
+            (swap! named-contexts assoc ctx-name new-ctx)
+            (if (= :passed (:status result))
+              (recur (rest remaining) new-ctx (assoc result :session ctx-name :ctx new-ctx))
+              ;; Stop on first non-passing step
+              (assoc result :session ctx-name :ctx new-ctx))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Persistent Subjects (re-exports from shiftlefter.subjects)

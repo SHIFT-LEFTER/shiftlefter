@@ -113,10 +113,12 @@
                      [(parser/->Step :step "Given" "Given " "the minimalism" nil
                                      (loc/->Location 4 5) "Given the minimalism" "    " nil)]
                      nil
+                     "Scenario"
                      (loc/->Location 3 3)
                      "Scenario: minimalistic"
                      "  "
                      nil)]
+                   "Feature" nil
                    (loc/->Location 1 1)
                    "Feature: Minimal"
                    ""
@@ -162,10 +164,12 @@
                       (parser/->Step :step "Then" "Then " "I see dashboard" nil
                                      (loc/->Location 5 5) "Then I see dashboard" "    " nil)]
                      nil
+                     "Scenario"
                      (loc/->Location 2 3)
                      "Scenario: User logs in"
                      "  "
                      nil)]
+                   "Feature" nil
                    (loc/->Location 1 1)
                    "Feature: Login"
                    ""
@@ -190,6 +194,7 @@
                    ""
                    []
                    []
+                   "Feature" nil
                    (loc/->Location 1 1)
                    "Feature: Test"
                    ""
@@ -227,10 +232,12 @@
                      [(parser/->Step :step "Given" "Given " "the minimalism" nil
                                      (loc/->Location 4 5) "Given the minimalism" "    " nil)]
                      nil
+                     "Scenario"
                      (loc/->Location 3 3)
                      "Scenario: minimalistic"
                      "  "
                      nil)]
+                   "Feature" nil
                    (loc/->Location 1 1)
                    "Feature: Minimal"
                    ""
@@ -283,10 +290,12 @@
                      [(parser/->Step :step "Given" "Given " "a step" nil
                                      (loc/->Location 3 5) "Given a step" "    " nil)]
                      nil
+                     "Scenario"
                      (loc/->Location 2 3)
                      "Scenario: test"
                      "  "
                      nil)]
+                   "Feature" nil
                    (loc/->Location 1 1)
                    "Feature: Test"
                    ""
@@ -328,10 +337,12 @@
                       (parser/->Step :step "Then" "Then " "outcome" nil (loc/->Location 5 5) "" "" nil)
                       (parser/->Step :step "And" "And " "conjunction" nil (loc/->Location 6 5) "" "" nil)]
                      nil
+                     "Scenario"
                      (loc/->Location 2 3)
                      "Scenario: test"
                      "  "
                      nil)]
+                   "Feature" nil
                    (loc/->Location 1 1)
                    "Feature: Test"
                    ""
@@ -373,6 +384,7 @@
                      ""
                      [(parser/->Step :step "Given" "Given " "bg step" nil (loc/->Location 4 5) "Given bg step" "    " nil)]
                      []
+                     "Background"
                      (loc/->Location 3 3)
                      "Background: setup"
                      "  "
@@ -384,10 +396,12 @@
                      []
                      [(parser/->Step :step "When" "When " "scenario step" nil (loc/->Location 7 5) "When scenario step" "    " nil)]
                      nil
+                     "Scenario"
                      (loc/->Location 6 3)
                      "Scenario: test scenario"
                      "  "
                      nil)]
+                   "Feature" nil
                    (loc/->Location 1 1)
                    "Feature: Background Test"
                    ""
@@ -437,6 +451,7 @@
                        ""
                        [(parser/->Step :step "Given" "Given " "rule bg step" nil (loc/->Location 6 7) "Given rule bg step" "      " nil)]
                        []
+                       "Background"
                        (loc/->Location 5 5)
                        "Background: rule setup"
                        "    "
@@ -448,14 +463,17 @@
                        []
                        [(parser/->Step :step "When" "When " "rule scenario step" nil (loc/->Location 9 7) "When rule scenario step" "      " nil)]
                        nil
+                       "Scenario"
                        (loc/->Location 8 5)
                        "Scenario: rule scenario"
                        "    "
                        nil)]
+                     "Rule"
                      (loc/->Location 3 3)
                      "Rule: My Rule"
                      "  "
                      nil)]
+                   "Feature" nil
                    (loc/->Location 1 1)
                    "Feature: Rule Background Test"
                    ""
@@ -498,10 +516,12 @@
                      []
                      [(parser/->Step :step "Given" "Given " "only step" nil (loc/->Location 4 5) "Given only step" "    " nil)]
                      nil
+                     "Scenario"
                      (loc/->Location 3 3)
                      "Scenario: plain scenario"
                      "  "
                      nil)]
+                   "Feature" nil
                    (loc/->Location 1 1)
                    "Feature: No Background"
                    ""

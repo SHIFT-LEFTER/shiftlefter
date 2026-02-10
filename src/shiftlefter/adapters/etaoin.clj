@@ -24,6 +24,7 @@
 
    Config options:
    - :headless — if true, run headless (default: false)
+   - :adapter-opts — map merged into Etaoin options (e.g., :size, :prefs, :user-agent)
    - :webdriver-url — URL of WebDriver server (optional, uses default if not provided)
 
    Returns:
@@ -34,12 +35,18 @@
    ```clojure
    (create-browser {:headless true})
    ;; => {:ok {:browser #EtaoinBrowser{...} :etaoin-driver {...}}}
+
+   (create-browser {:headless true
+                    :adapter-opts {:size {:width 1280 :height 720}}})
+   ;; => {:ok {:browser #EtaoinBrowser{...} :etaoin-driver {...}}}
    ```"
   [config]
   (try
     (let [headless? (get config :headless false)
-          opts {:type :chrome
-                :headless headless?}
+          adapter-opts (get config :adapter-opts {})
+          opts (merge {:type :chrome
+                       :headless headless?}
+                      adapter-opts)
           ;; Create session via Etaoin
           eta-driver (eta/chrome opts)
           ;; Create EtaoinBrowser for protocol operations
