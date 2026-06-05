@@ -31,7 +31,8 @@
    ;; => {:chrome-path \"/custom/chrome\" :stealth false}
    ```"
   (:require [babashka.fs :as fs]
-            [clojure.edn :as edn]))
+            [clojure.edn :as edn]
+            [shiftlefter.gherkin.io :as gio]))
 
 ;; -----------------------------------------------------------------------------
 ;; Path Helpers
@@ -78,7 +79,7 @@
   []
   (let [path (user-config-path)]
     (when (fs/exists? path)
-      (edn/read-string (slurp path)))))
+      (edn/read-string (gio/slurp-utf8 path)))))
 
 (defn load-user-config-safe
   "Like load-user-config but catches parse errors.

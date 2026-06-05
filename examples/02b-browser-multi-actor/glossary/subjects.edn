@@ -1,6 +1,9 @@
 ;; Subject glossary — declares who can act in scenarios.
 ;; Without this file, shifted mode rejects unknown subjects.
+;;
+;; Types are the top-level keys. Instances are session handles listed
+;; under :instances. In Gherkin, use :type/instance (e.g. :user/alice).
 
 {:subjects
- {:alice {:desc "First test user"}
-  :bob   {:desc "Second test user"}}}
+ {:user {:desc "Standard application user"
+         :instances [:alice :bob]}}}

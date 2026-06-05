@@ -21,7 +21,8 @@
                        :config {:headless true}}}
     :svo {:unknown-subject :warn
           :unknown-verb :warn
-          :unknown-interface :error}}
+          :unknown-interface :error
+          :unknown-object :off}}
    ```
 
    ## Usage
@@ -32,13 +33,77 @@
    ```"
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
+            [clojure.spec.alpha :as s]
             [shiftlefter.gherkin.io :as io]))
+
+;; -----------------------------------------------------------------------------
+;; Specs — Config Shape
+;; -----------------------------------------------------------------------------
+
+;; Parser sub-config
+(s/def ::dialect string?)
+(s/def ::parser (s/keys :req-un [::dialect]))
+
+;; Runner sub-config
+(s/def ::step-paths (s/coll-of string?))
+(s/def ::allow-pending? boolean?)
+(s/def ::enabled? boolean?)
+(s/def ::registry-paths (s/coll-of string?))
+(s/def ::macros (s/keys :req-un [::enabled?]
+                        :opt-un [::registry-paths]))
+;; sl-aa5: capability provisioning strategy. :eager (default, scoped-eager
+;; — provision every interface the scenario touches at scenario start)
+;; or :lazy (legacy, provision on first step that needs it). Opt-out
+;; exists for the rare test pattern that benefits from lazy short-circuit.
+(s/def ::provisioning #{:eager :lazy})
+(s/def ::runner (s/keys :req-un [::step-paths ::allow-pending?]
+                        :opt-un [::macros ::provisioning]))
+
+;; Interface sub-config
+(s/def ::type keyword?)
+(s/def ::adapter keyword?)
+;; :shared-impl? true means a single adapter impl is shared across all
+;; subject-keyed entries (:cap/<iface>.alice, :cap/<iface>.bob both
+;; reference the same impl). Default false: each subject gets its own
+;; impl (browser pattern). Used for interfaces where one resource per
+;; scenario suffices, e.g. SMS Twilio account, future shared queues.
+(s/def ::shared-impl? boolean?)
+(s/def ::interface-def (s/keys :req-un [::type ::adapter]
+                               :opt-un [::config ::shared-impl?]))
+(s/def ::interfaces (s/map-of keyword? ::interface-def))
+
+;; SVO enforcement sub-config
+(s/def ::unknown-subject #{:warn :error :off})
+(s/def ::unknown-verb #{:warn :error :off})
+(s/def ::unknown-interface #{:warn :error :off})
+(s/def ::unknown-object #{:strict :warn :off})
+(s/def ::svo (s/keys :opt-un [::unknown-subject ::unknown-verb ::unknown-interface ::unknown-object]))
+
+;; Glossaries sub-config
+(s/def ::subjects (s/nilable string?))
+(s/def ::verbs (s/nilable (s/map-of keyword? string?)))
+(s/def ::glossaries (s/nilable (s/keys :opt-un [::subjects ::verbs])))
+
+;; Top-level config
+(s/def ::config
+  (s/keys :opt-un [::parser ::runner ::glossaries ::interfaces ::svo]))
+
+;; load-config-safe result
+(s/def ::status #{:ok :error})
+(s/def ::message string?)
+(s/def ::path string?)
+(s/def ::config-ok (s/keys :req-un [::status ::config]))
+(s/def ::config-error (s/keys :req-un [::status ::type ::message]
+                              :opt-un [::path]))
+(s/def ::config-result (s/or :ok ::config-ok :error ::config-error))
 
 ;; -----------------------------------------------------------------------------
 ;; Default Configuration
 ;; -----------------------------------------------------------------------------
 
 ;; Known interface types (verb vocabulary domains)
+;; NOTE: closed set — gates :unknown-interface SVO validation. Add new
+;; interface types here when introducing them (e.g., :cli, :queue).
 (def known-interface-types
   "Set of known interface types that have verb glossaries."
   #{:web :api :sms :email})
@@ -58,7 +123,8 @@
    ;; SVO enforcement settings
    :svo {:unknown-subject :warn
          :unknown-verb :warn
-         :unknown-interface :error}})
+         :unknown-interface :error
+         :unknown-object :off}})
 
 ;; -----------------------------------------------------------------------------
 ;; Config Loading
@@ -95,12 +161,25 @@
        :message (str "Failed to parse config: " (ex-message e))
        :path path})))
 
-(defn- find-default-config
-  "Find the default config file (./shiftlefter.edn) if it exists."
+(defn find-default-config
+  "Find the default config file (./shiftlefter.edn) if it exists.
+
+   Returns the path string or nil. Public so the runner can use it to
+   locate sibling files (notably setup.clj, see runner/setup.clj)."
   []
   (let [path "shiftlefter.edn"]
     (when (fs/exists? path)
       path)))
+
+(defn resolve-config-path
+  "Resolve which shiftlefter.edn would actually be loaded for the given opts.
+
+   Mirrors load-config's precedence:
+     1. Explicit --config path
+     2. ./shiftlefter.edn
+     3. nil (built-in defaults, no config file)"
+  [opts]
+  (or (:config-path opts) (find-default-config)))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API
@@ -189,6 +268,13 @@
   "Check if macros are enabled in config."
   [config]
   (get-in config [:runner :macros :enabled?] false))
+
+(defn provisioning-mode
+  "Return the capability-provisioning strategy: `:eager` (scoped-eager,
+   default) or `:lazy` (per-step on first touch). Drives the eager
+   phase in `stepengine.exec/execute-scenario`. See sl-aa5."
+  [config]
+  (get-in config [:runner :provisioning] :eager))
 
 (defn get-macro-registry-paths
   "Get macro registry paths from config."
@@ -394,10 +480,11 @@
   "Get the enforcement level for a specific SVO check.
 
    check should be one of:
-   - :unknown-subject
-   - :unknown-verb
-   - :unknown-interface
+   - :unknown-subject — :warn, :error, or :off
+   - :unknown-verb — :warn, :error, or :off
+   - :unknown-interface — :warn, :error, or :off
+   - :unknown-object — :strict, :warn, or :off
 
-   Returns :warn, :error, or the configured value."
+   Returns the configured enforcement level."
   [config check]
   (get-in config [:svo check]))

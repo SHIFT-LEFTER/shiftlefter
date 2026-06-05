@@ -81,8 +81,39 @@
 (s/def ::pickle-plan
   (s/keys :req-un [::features ::source-file]))
 
-;; Final pickle specs
-(s/def ::pickles (s/coll-of map?))
+;; Final pickle step shape (output of step-plan->pickle-step)
+(s/def :step/id uuid?)
+(s/def :step/text string?)
+(s/def :step/template-text (s/nilable string?))
+(s/def :step/keyword string?)
+(s/def :step/location map?)
+(s/def :step/origin #{:scenario :feature-background :rule-background})
+(s/def :step/arguments any?)
+
+(s/def ::pickle-step
+  (s/keys :req [:step/id :step/text :step/keyword :step/location :step/origin :step/arguments]
+          :opt [:step/template-text]))
+
+;; Final pickle shape (output of scenario-plan->pickles)
+(s/def :pickle/id uuid?)
+(s/def :pickle/name string?)
+(s/def :pickle/template-name (s/nilable string?))
+(s/def :pickle/row-index (s/nilable nat-int?))
+(s/def :pickle/row-values (s/nilable map?))
+(s/def :pickle/source-file string?)
+(s/def :pickle/location map?)
+(s/def :pickle/tags (s/coll-of map?))
+(s/def :pickle/scenario-location (s/nilable map?))
+(s/def :pickle/row-location (s/nilable map?))
+(s/def :pickle/steps (s/coll-of ::pickle-step))
+
+(s/def ::pickle
+  (s/keys :req [:pickle/id :pickle/name :pickle/source-file
+                :pickle/location :pickle/tags :pickle/steps]
+          :opt [:pickle/template-name :pickle/row-index :pickle/row-values
+                :pickle/scenario-location :pickle/row-location]))
+
+(s/def ::pickles (s/coll-of ::pickle))
 
 (defn- parse-step-keyword-and-text
   "Extract keyword and text from a step map.
@@ -429,3 +460,15 @@
   "Serialize pickles to newline-delimited JSON (one pickle per line)."
   [pickles]
   (str/join "\n" (map json/generate-string pickles)))
+
+(s/fdef pickles->edn
+  :args (s/cat :pickles sequential?)
+  :ret string?)
+
+(s/fdef pickles->json
+  :args (s/cat :pickles sequential?)
+  :ret string?)
+
+(s/fdef pickles->ndjson
+  :args (s/cat :pickles sequential?)
+  :ret string?)

@@ -14,7 +14,7 @@
    [\"Alice\" \"the login button\"]
    ```
 
-   Produces SVOI map:
+   Produces SVO map:
    ```clojure
    {:subject :alice              ;; normalized from \"Alice\"
     :verb :click                 ;; literal from metadata
@@ -28,7 +28,33 @@
    - Subject values are normalized (lowercase keyword)
    - Object values are left as-is (strings)
    - Verb and interface are always literal keywords"
-  (:require [clojure.string :as str]))
+  (:require [clojure.spec.alpha :as s]
+            [clojure.string :as str]))
+
+;; -----------------------------------------------------------------------------
+;; Specs — SVO & Error Shapes
+;; -----------------------------------------------------------------------------
+
+(s/def ::subject keyword?)
+(s/def ::verb keyword?)
+(s/def ::object any?)
+(s/def ::interface keyword?)
+
+(s/def ::svo
+  (s/keys :req-un [::subject ::verb ::object ::interface]))
+
+(s/def ::placeholder keyword?)
+(s/def ::index pos-int?)
+(s/def ::capture-count nat-int?)
+(s/def ::type #{:svo/placeholder-out-of-bounds})
+(s/def ::message string?)
+
+(s/def ::svo-error
+  (s/keys :req-un [::type ::message ::placeholder ::index ::capture-count]))
+
+;; extract-svo returns nil, svo, or error
+(s/def ::extract-result
+  (s/nilable (s/or :svo ::svo :error ::svo-error)))
 
 ;; -----------------------------------------------------------------------------
 ;; Subject Normalization
@@ -119,11 +145,11 @@
    svo-map))
 
 ;; -----------------------------------------------------------------------------
-;; SVOI Extraction
+;; SVO Extraction
 ;; -----------------------------------------------------------------------------
 
-(defn extract-svoi
-  "Extract SVOI map from stepdef metadata and captures.
+(defn extract-svo
+  "Extract SVO map from stepdef metadata and captures.
 
    Parameters:
    - metadata: Stepdef metadata map with :interface and :svo keys
@@ -131,7 +157,7 @@
 
    Returns:
    - nil if metadata is nil or has no :svo key
-   - SVOI map {:subject :kw :verb :kw :object any :interface :kw} on success
+   - SVO map {:subject :kw :verb :kw :object any :interface :kw} on success
    - Error map with :type on failure (placeholder out of bounds)
 
    The :subject value is normalized to a lowercase keyword.
@@ -139,14 +165,14 @@
    The :verb and :interface are literal keywords from metadata.
 
    Examples:
-     (extract-svoi {:interface :web :svo {:subject :$1 :verb :click :object :$2}}
+     (extract-svo {:interface :web :svo {:subject :$1 :verb :click :object :$2}}
                    [\"Alice\" \"the button\"])
      => {:subject :alice :verb :click :object \"the button\" :interface :web}
 
-     (extract-svoi nil [\"x\"])
+     (extract-svo nil [\"x\"])
      => nil
 
-     (extract-svoi {:interface :web} [\"x\"])
+     (extract-svo {:interface :web} [\"x\"])
      => nil"
   [metadata captures]
   (when-let [svo (:svo metadata)]
@@ -155,7 +181,7 @@
       (if (:type substituted)
         ;; Error during substitution
         substituted
-        ;; Success — normalize subject and build SVOI
+        ;; Success — normalize subject and build SVO
         (let [subject-raw (:subject substituted)
               subject (if (string? subject-raw)
                         (normalize-subject subject-raw)

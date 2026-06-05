@@ -350,6 +350,56 @@
       ;; Does NOT show definition-step (wrapper role)
       (is (not (str/includes? output "definition-step:"))))))
 
+;; -----------------------------------------------------------------------------
+;; Subject Display in Verbose Output
+;; -----------------------------------------------------------------------------
+
+(deftest test-verbose-subject-display-qualified
+  (testing "Qualified subject :user/alice displays as [:user] alice"
+    (let [scenario {:status :passed
+                    :plan {:plan/pickle {:pickle/name "Multi-user test"}}
+                    :steps [{:status :passed
+                             :step {:step/text ":user/alice opens the browser to 'http://example.com'"}}]}
+          output (with-err-str (console/print-scenario! scenario {:no-color true :verbose true}))]
+      (is (str/includes? output "[:user] alice opens the browser"))
+      (is (not (str/includes? output ":user/alice"))))))
+
+(deftest test-verbose-subject-display-singleton
+  (testing "Singleton subject :guest displays as [:guest] guest"
+    (let [scenario {:status :passed
+                    :plan {:plan/pickle {:pickle/name "Guest test"}}
+                    :steps [{:status :passed
+                             :step {:step/text ":guest opens the browser to 'http://example.com'"}}]}
+          output (with-err-str (console/print-scenario! scenario {:no-color true :verbose true}))]
+      (is (str/includes? output "[:guest] guest opens the browser")))))
+
+(deftest test-verbose-subject-display-hyphenated
+  (testing "Hyphenated subject :admin-banned displays as [:admin-banned] admin-banned"
+    (let [scenario {:status :passed
+                    :plan {:plan/pickle {:pickle/name "Admin test"}}
+                    :steps [{:status :passed
+                             :step {:step/text ":admin-banned tries to login"}}]}
+          output (with-err-str (console/print-scenario! scenario {:no-color true :verbose true}))]
+      (is (str/includes? output "[:admin-banned] admin-banned tries")))))
+
+(deftest test-verbose-subject-display-namespaced-type
+  (testing "Namespaced type :test-harness/fixture-insertion displays correctly"
+    (let [scenario {:status :passed
+                    :plan {:plan/pickle {:pickle/name "Fixture test"}}
+                    :steps [{:status :passed
+                             :step {:step/text ":test-harness/fixture-insertion seeds the database"}}]}
+          output (with-err-str (console/print-scenario! scenario {:no-color true :verbose true}))]
+      (is (str/includes? output "[:test-harness] fixture-insertion seeds the database")))))
+
+(deftest test-verbose-non-subject-step-unchanged
+  (testing "Steps without leading colon subject pass through unchanged"
+    (let [scenario {:status :passed
+                    :plan {:plan/pickle {:pickle/name "Regular test"}}
+                    :steps [{:status :passed
+                             :step {:step/text "pause for 5 seconds"}}]}
+          output (with-err-str (console/print-scenario! scenario {:no-color true :verbose true}))]
+      (is (str/includes? output "pause for 5 seconds")))))
+
 (deftest test-print-failures-non-macro-no-provenance
   (testing "Non-macro step failure shows no macro provenance"
     (let [scenarios [{:status :failed

@@ -36,7 +36,7 @@ clj -M:dev
 ```clojure
 (require '[shiftlefter.repl :as repl])
 (require '[shiftlefter.stepdefs.browser])
-(require '[shiftlefter.browser.ctx :as browser.ctx])
+(require '[shiftlefter.capabilities.ctx :as cap])
 (require '[shiftlefter.webdriver.etaoin.session :as session])
 ```
 
@@ -63,8 +63,8 @@ clj -M:dev
 ;; Clear any previous state
 (repl/clear!)
 
-;; Attach the browser to :alice context
-(repl/set-ctx! :alice (browser.ctx/assoc-active-browser {} my-browser))
+;; Attach the browser to :alice context (subject-keyed under :cap/web.alice)
+(repl/set-ctx! :alice (cap/assoc-capability {} :web my-browser :ephemeral :alice))
 ```
 
 ### 5. Run steps interactively

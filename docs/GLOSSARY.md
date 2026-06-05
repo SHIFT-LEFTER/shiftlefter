@@ -305,18 +305,20 @@ Reference to a regex capture group in SVO metadata:
 {:svo {:subject :$1 :verb :click :object :$2}}
 ```
 
-### SVOI (Subject-Verb-Object-Interface)
+### SVO (Subject, Verb, Object)
 
-Internal structure produced by SVO extraction:
+The behavior triple. Internal structure produced by SVO extraction at
+bind-time:
 
 ```clojure
 {:subject :alice
  :verb :click
  :object "the button"
- :interface :web}
+ :interface :web}  ; interface lives on V's namespace, not as a peer role
 ```
 
-Attached to bound steps as `:svoi` key.
+Attached to bound steps as `:svo` key. See `ARCHITECTURE.md` § "The SVO
+Model" for the full framing.
 
 ### Auto-Provisioning
 

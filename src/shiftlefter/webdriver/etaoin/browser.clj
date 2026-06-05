@@ -32,9 +32,16 @@
     this)
 
   (move-to! [this locator]
-    ;; Etaoin doesn't have a simple move-to, use click-based hover workaround
-    ;; For now, just scroll element into view via query
-    (eta/query driver (:q locator))
+    ;; Use the W3C Actions API to teleport the pointer to the element's
+    ;; in-view center point. This fires the full hover/mouseenter event
+    ;; chain that pages rely on for menus, tooltips, etc.
+    ;;
+    ;; (Wired in sl-jsn 2026-05-13. The previous impl was a query-only
+    ;; stub that resolved the locator but never moved the cursor.)
+    (let [el    (eta/query driver (:q locator))
+          mouse (-> (eta/make-mouse-input)
+                    (eta/add-pointer-move-to-el el))]
+      (eta/perform-actions driver mouse))
     this)
 
   (drag-to! [this from-locator to-locator]

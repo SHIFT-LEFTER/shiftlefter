@@ -1,7 +1,7 @@
 (ns shiftlefter.stepdefs.browser-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [shiftlefter.stepengine.registry :as registry]
-            [shiftlefter.browser.ctx :as browser.ctx]
+            [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.browser.protocol :as bp]
             [shiftlefter.stepdefs.browser]))
 
@@ -139,17 +139,16 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- make-ctx-with-subject
-  "Create ctx with a named subject browser session."
+  "Create ctx with a named subject browser session under :cap/web.<subj>."
   [subject-kw browser]
-  (-> {}
-      (browser.ctx/assoc-active-browser subject-kw browser)))
+  (cap/assoc-capability {} :web browser :ephemeral subject-kw))
 
 (defn- make-ctx-with-two-subjects
   "Create ctx with two named subject browser sessions."
   [subj1-kw browser1 subj2-kw browser2]
   (-> {}
-      (browser.ctx/assoc-active-browser subj1-kw browser1)
-      (browser.ctx/assoc-active-browser subj2-kw browser2)))
+      (cap/assoc-capability :web browser1 :ephemeral subj1-kw)
+      (cap/assoc-capability :web browser2 :ephemeral subj2-kw)))
 
 (defn- find-stepdef
   "Find a stepdef by pattern match."
@@ -220,6 +219,17 @@
       (is (map? result))
       (let [calls (get-calls browser)]
         (is (= :move-to (:op (first calls))))))))
+
+(deftest test-hover
+  (testing ":user hovers over {locator} delegates to move-to! kernel op (sl-jsn)"
+    (let [browser (make-fake-browser)
+          ctx (make-ctx-with-subject :user browser)
+          result (invoke-step ":user hovers over {:css \".menu-trigger\"}" ctx)]
+      (is (map? result))
+      (let [calls (get-calls browser)]
+        (is (= 1 (count calls)))
+        (is (= :move-to (:op (first calls))))
+        (is (= {:css ".menu-trigger"} (-> calls first :locator :q)))))))
 
 (deftest test-drag-to
   (testing ":user drags {from} to {to} drags element"
@@ -437,19 +447,22 @@
       (is (= [{:op :switch-to-main-frame}] (get-calls browser))))))
 
 ;; =============================================================================
-;; Vector Locator Syntax Tests
+;; Vector Locator Syntax Tests (DEPRECATED)
 ;; =============================================================================
 
-(deftest test-vector-locator-syntax
-  (testing "Vector locator syntax [:css \"...\"] works with subject steps"
-    (let [browser (make-fake-browser)
-          ctx (make-ctx-with-subject :user browser)
-          result (invoke-step ":user clicks [:css \"#login\"]" ctx)]
-      (is (map? result))
-      (let [calls (get-calls browser)]
-        (is (= :click (:op (first calls))))
-        ;; Vector normalized to map
-        (is (= {:css "#login"} (-> calls first :locator :q)))))))
+;; NOTE: Vector locator syntax [:css "..."] is DEPRECATED as of GP.001f.
+;; The step patterns now support:
+;; - EDN maps: {:css "#foo"}, {:id "bar"}
+;; - Intent references: Login.submit, Login.submit[1], Login.submit[-1]
+;;
+;; Vector syntax is no longer matched by step patterns.
+
+(deftest test-vector-locator-syntax-deprecated
+  (testing "Vector locator syntax [:css \"...\"] no longer matches step patterns"
+    ;; Vector syntax was intentionally dropped to avoid confusion with
+    ;; intent reference indexing (Login.submit[1]).
+    (is (nil? (find-stepdef ":user clicks [:css \"#login\"]"))
+        "Vector syntax should not match any step pattern")))
 
 ;; =============================================================================
 ;; Error Handling Tests
@@ -896,3 +909,38 @@
               (str "Expected exactly 1 match for '" text "' but got "
                    (count matches) ": "
                    (mapv #(str (:pattern %)) matches))))))))
+
+;; =============================================================================
+;; Intent Reference Pattern Matching Tests
+;; =============================================================================
+
+(deftest test-intent-reference-patterns-match
+  (testing "Intent reference patterns match step definitions"
+    ;; These patterns should match the new locator regex
+    (let [patterns [":alice clicks Login.submit"
+                    ":alice clicks Login.submit[1]"
+                    ":alice clicks Login.submit[-1]"
+                    ":alice clicks Login.submit[*]"
+                    ":alice clicks FrequentlyBoughtTogether.add-to-cart"
+                    ":alice clicks Checkout.pay-button[2]"
+                    ":alice fills Login.email with 'test@example.com'"
+                    ":alice should see Login.error-message"
+                    ":alice should not see Login.spinner"
+                    ":alice should see 3 Grades.assignment[*] elements"]]
+      (doseq [text patterns]
+        (is (some? (find-stepdef text))
+            (str "Should find stepdef for intent reference pattern: " text))))))
+
+(deftest test-intent-reference-pattern-rejects-invalid
+  (testing "Invalid intent references don't match step patterns"
+    ;; These should NOT match (invalid format)
+    (let [invalid-patterns [":alice clicks login.submit"       ;; lowercase intent
+                            ":alice clicks Login.Submit"       ;; uppercase element
+                            ":alice clicks Login"              ;; no element
+                            ":alice clicks .submit"            ;; no intent
+                            ":alice clicks Login.submit[]"     ;; empty index
+                            ":alice clicks Login.submit[abc]"  ;; non-numeric index
+                            ]]
+      (doseq [text invalid-patterns]
+        (is (nil? (find-stepdef text))
+            (str "Should NOT find stepdef for invalid pattern: " text))))))

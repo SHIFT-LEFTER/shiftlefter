@@ -12,11 +12,39 @@
      (run-checks {:fuzzed true})        ; include artifact checks"
   (:require [babashka.fs :as fs]
             [clojure.java.shell :as shell]
+            [clojure.spec.alpha :as s]
             [shiftlefter.gherkin.api :as api]
             [shiftlefter.gherkin.io :as io]
             ;; Required for reading tagged literals in result.edn
             [shiftlefter.gherkin.location]
             [shiftlefter.gherkin.tokens]))
+
+;; -----------------------------------------------------------------------------
+;; Specs — Check & Verify Result Shapes
+;; -----------------------------------------------------------------------------
+
+(s/def ::id keyword?)
+(s/def ::status #{:ok :fail :skip})
+(s/def ::message string?)
+(s/def ::details any?)
+
+(s/def ::check-result
+  (s/keys :req-un [::id ::status]
+          :opt-un [::message ::details]))
+
+(s/def ::total nat-int?)
+(s/def ::passed nat-int?)
+(s/def ::failed nat-int?)
+
+(s/def ::summary
+  (s/keys :req-un [::total ::passed ::failed]))
+
+(s/def ::checks (s/coll-of ::check-result))
+(s/def ::failures (s/coll-of ::check-result))
+
+(s/def ::verify-result
+  (s/keys :req-un [::status ::checks ::failures ::summary]
+          :opt-un [::message]))
 
 ;; -----------------------------------------------------------------------------
 ;; Check result structure

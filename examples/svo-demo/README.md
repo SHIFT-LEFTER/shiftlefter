@@ -6,7 +6,7 @@ This example demonstrates ShiftLefter's Subject-Verb-Object (SVO) validation sys
 
 SVO validation helps catch errors in your Gherkin step definitions by:
 
-1. **Subject validation** - Ensures actors (Alice, Bob, Admin) are known
+1. **Subject validation** - Ensures actors (`:user/alice`, `:admin`) are known
 2. **Verb validation** - Ensures actions (click, fill, see) are valid for the interface
 3. **Interface validation** - Ensures interfaces are configured
 
@@ -17,7 +17,7 @@ svo-demo/
 ├── shiftlefter.edn           # Configuration with interfaces and glossaries
 ├── config/
 │   └── glossaries/
-│       ├── subjects.edn      # Who can perform actions (Alice, Bob, Admin)
+│       ├── subjects.edn      # Who can perform actions (types and instances)
 │       └── verbs-web.edn     # Project-specific verbs (extends defaults)
 ├── features/
 │   └── login.feature         # Feature file using SVO patterns

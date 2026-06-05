@@ -304,11 +304,11 @@
       (is (= ["alice" "username"] (-> plan :plan/steps first :binding :captures))))))
 
 ;; -----------------------------------------------------------------------------
-;; SVOI Extraction Tests (Task 3.0.6)
+;; SVO Extraction Tests (Task 3.0.6)
 ;; -----------------------------------------------------------------------------
 
-(deftest test-bind-step-svoi-extraction
-  (testing "Step with SVO metadata has :svoi extracted"
+(deftest test-bind-step-svo-extraction
+  (testing "Step with SVO metadata has :svo extracted"
     (registry/register! #"(.+) clicks (.+)"
                         (fn [_ctx _s _t] nil)
                         {:ns 's :file "s.clj" :line 1}
@@ -318,27 +318,27 @@
           result (bind/bind-step step (registry/all-stepdefs))]
       (is (= :matched (:status result)))
       (is (= ["Alice" "the button"] (-> result :binding :captures)))
-      ;; SVOI should be extracted with normalized subject
-      (let [svoi (-> result :binding :svoi)]
-        (is (some? svoi))
-        (is (= :alice (:subject svoi)))
-        (is (= :click (:verb svoi)))
-        (is (= "the button" (:object svoi)))
-        (is (= :web (:interface svoi)))))))
+      ;; SVO should be extracted with normalized subject
+      (let [svo (-> result :binding :svo)]
+        (is (some? svo))
+        (is (= :alice (:subject svo)))
+        (is (= :click (:verb svo)))
+        (is (= "the button" (:object svo)))
+        (is (= :web (:interface svo)))))))
 
-(deftest test-bind-step-legacy-no-svoi
-  (testing "Legacy step (no metadata) has :svoi nil"
+(deftest test-bind-step-legacy-no-svo
+  (testing "Legacy step (no metadata) has :svo nil"
     (registry/register! #"I click submit"
                         (fn [] nil)
                         {:ns 's :file "s.clj" :line 1})
     (let [step (make-step "I click submit")
           result (bind/bind-step step (registry/all-stepdefs))]
       (is (= :matched (:status result)))
-      ;; Legacy steps should have nil svoi
-      (is (nil? (-> result :binding :svoi))))))
+      ;; Legacy steps should have nil svo
+      (is (nil? (-> result :binding :svo))))))
 
-(deftest test-bind-step-svoi-no-svo-key
-  (testing "Step with metadata but no :svo has :svoi nil"
+(deftest test-bind-step-svo-no-svo-key
+  (testing "Step with metadata but no :svo has :svo nil"
     (registry/register! #"I see the page"
                         (fn [] nil)
                         {:ns 's :file "s.clj" :line 1}
@@ -346,11 +346,11 @@
     (let [step (make-step "I see the page")
           result (bind/bind-step step (registry/all-stepdefs))]
       (is (= :matched (:status result)))
-      ;; No :svo key means nil svoi
-      (is (nil? (-> result :binding :svoi))))))
+      ;; No :svo key means nil svo
+      (is (nil? (-> result :binding :svo))))))
 
-(deftest test-bind-step-svoi-literal-subject
-  (testing "SVOI with literal subject (not placeholder)"
+(deftest test-bind-step-svo-literal-subject
+  (testing "SVO with literal subject (not placeholder)"
     (registry/register! #"the system initializes"
                         (fn [] nil)
                         {:ns 's :file "s.clj" :line 1}
@@ -359,13 +359,13 @@
     (let [step (make-step "the system initializes")
           result (bind/bind-step step (registry/all-stepdefs))]
       (is (= :matched (:status result)))
-      (let [svoi (-> result :binding :svoi)]
-        (is (= :system (:subject svoi)))
-        (is (= :initialize (:verb svoi)))
-        (is (nil? (:object svoi)))
-        (is (= :api (:interface svoi)))))))
+      (let [svo (-> result :binding :svo)]
+        (is (= :system (:subject svo)))
+        (is (= :initialize (:verb svo)))
+        (is (nil? (:object svo)))
+        (is (= :api (:interface svo)))))))
 
-(deftest test-bind-step-svoi-subject-normalization
+(deftest test-bind-step-svo-subject-normalization
   (testing "Subject from capture is normalized (lowercase keyword)"
     (registry/register! #"(.+) logs in"
                         (fn [_ctx _s] nil)
@@ -374,14 +374,14 @@
                          :svo {:subject :$1 :verb :login :object nil}})
     (let [step (make-step "ADMIN logs in")
           result (bind/bind-step step (registry/all-stepdefs))
-          svoi (-> result :binding :svoi)]
-      (is (= :admin (:subject svoi))))))
+          svo (-> result :binding :svo)]
+      (is (= :admin (:subject svo))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Task 3.0.6 Acceptance Criteria
 ;; -----------------------------------------------------------------------------
 
-(deftest acceptance-svoi-extraction-test
+(deftest acceptance-svo-extraction-test
   (testing "Task 3.0.6 AC: step with SVO metadata"
     (registry/register! #"(.+) clicks (.+)"
                         (fn [_ctx _s _t] nil)
@@ -395,7 +395,7 @@
               :verb :click
               :object "the button"
               :interface :web}
-             (-> result :binding :svoi)))))
+             (-> result :binding :svo)))))
 
   (testing "Task 3.0.6 AC: legacy step (no metadata)"
     (registry/clear-registry!)
@@ -404,14 +404,14 @@
                         {:ns 's :file "s.clj" :line 1})
     (let [step (make-step "something legacy")
           result (bind/bind-step step (registry/all-stepdefs))]
-      (is (nil? (-> result :binding :svoi))))))
+      (is (nil? (-> result :binding :svo))))))
 
 ;; -----------------------------------------------------------------------------
 ;; SVO Validation Hook Tests (Task 3.0.7)
 ;; -----------------------------------------------------------------------------
 
 (deftest test-bind-suite-svo-validation-valid
-  (testing "bind-suite with valid SVOI passes validation"
+  (testing "bind-suite with valid SVO passes validation"
     (registry/register! #"(.+) clicks (.+)"
                         (fn [_ctx _s _t] nil)
                         {:ns 's :file "s.clj" :line 1}
@@ -679,3 +679,178 @@
       (is (:runnable? result))
       ;; But still reported
       (is (seq (-> result :diagnostics :svo-issues))))))
+
+;; -----------------------------------------------------------------------------
+;; Declared-Interface Filter Tests (sl-1ya)
+;; -----------------------------------------------------------------------------
+
+(defn- make-annotated-step
+  "Helper: pickle step with :step/declared-interface set.
+   Text is the ORIGINAL text (including `[:iface] ` prefix), declared is
+   the keyword attached by the annotation pass."
+  [text declared]
+  (assoc (make-step text) :step/declared-interface declared))
+
+(deftest test-declared-interface-filters-to-matching-stepdef
+  (testing "Declared interface narrows candidates; binds to the :sms stepdef"
+    ;; Identical regex under two interfaces — the annotation is what picks one.
+    ;; (Enabled by sl-86d registry keying change.)
+    (registry/register! #"(\S+) receives a message"
+                        (fn [_subj] nil)
+                        {:ns 't :file "t.clj" :line 1}
+                        {:interface :sms
+                         :svo {:subject :$1 :verb :receive :object "message"}})
+    (registry/register! #"(\S+) receives a message"
+                        (fn [_subj] nil)
+                        {:ns 't :file "t.clj" :line 2}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :receive :object "message"}})
+    (let [step (make-annotated-step "[:sms] alice receives a message" :sms)
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :matched (:status result)))
+      ;; Bound stepdef should be the :sms one — SVO's interface confirms
+      (is (= :sms (-> result :binding :svo :interface)))
+      ;; Filter info carried through
+      (is (= :sms (-> result :filter-info :declared-interface))))))
+
+(deftest test-identical-pattern-no-annotation-is-ambiguous
+  (testing "Same regex under :sms and :web — no annotation → ambiguous (AC4 of sl-86d)"
+    (registry/register! #"(\S+) receives a message"
+                        (fn [_s] nil)
+                        {:ns 't :file "t.clj" :line 1}
+                        {:interface :sms
+                         :svo {:subject :$1 :verb :receive :object "message"}})
+    (registry/register! #"(\S+) receives a message"
+                        (fn [_s] nil)
+                        {:ns 't :file "t.clj" :line 2}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :receive :object "message"}})
+    (let [step (make-step "alice receives a message")  ;; no annotation
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :ambiguous (:status result)))
+      (is (= 2 (count (:alternatives result)))))))
+
+(deftest test-declared-interface-undefined-when-only-other-interface-matches
+  (testing "Only :web stepdef exists; :sms annotation → undefined with filter diagnostic"
+    (registry/register! #"(\S+) receives a message"
+                        (fn [_subj] nil)
+                        {:ns 't :file "t.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :receive :object "message"}})
+    (let [step (make-annotated-step "[:sms] alice receives a message" :sms)
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :undefined (:status result)))
+      (let [info (:filter-info result)]
+        (is (= :sms (:declared-interface info)))
+        ;; Level-2: surfaces that :web had a candidate that was filtered out
+        (is (= 1 (:other-interface-match-count info)))
+        (is (= [:web] (:other-interfaces info)))
+        ;; sl-563: explicit suggestion string
+        (is (= "No [:sms] stepdef matches, but [:web] does."
+               (:suggestion info)))))))
+
+(deftest test-declared-interface-suggestion-multiple-other-ifaces
+  (testing "Multiple other interfaces match → suggestion lists all (plural verb)"
+    (registry/register! #"hello world"
+                        (fn [] nil)
+                        {:ns 't :file "t.clj" :line 1}
+                        {:interface :web})
+    (registry/register! #"hello world"
+                        (fn [] nil)
+                        {:ns 't :file "t.clj" :line 2}
+                        {:interface :slack})
+    (let [step (make-annotated-step "[:sms] hello world" :sms)
+          result (bind/bind-step step (registry/all-stepdefs))
+          info (:filter-info result)]
+      (is (= :undefined (:status result)))
+      (is (= 2 (:other-interface-match-count info)))
+      (is (= #{:web :slack} (set (:other-interfaces info))))
+      ;; Plural verb when more than one
+      (is (re-find #"^No \[:sms\] stepdef matches, but \[:[\w]+\] \[:[\w]+\] do\.$"
+                   (:suggestion info))))))
+
+(deftest test-declared-interface-no-suggestion-when-zero-other-matches
+  (testing "Undefined with no other-interface matches → no :suggestion"
+    (registry/register! #"unrelated text here"
+                        (fn [] nil)
+                        {:ns 't :file "t.clj" :line 1}
+                        {:interface :web})
+    (let [step (make-annotated-step "[:sms] alice does something else" :sms)
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :undefined (:status result)))
+      (is (not (contains? (:filter-info result) :suggestion))))))
+
+(deftest test-declared-interface-excludes-interface-less-stepdef
+  (testing "Stepdef without :interface metadata is excluded when annotation present"
+    ;; Legacy stepdef — no metadata at all
+    (registry/register! #"pauses for (\d+) seconds"
+                        (fn [_n] nil)
+                        {:ns 't :file "t.clj" :line 1})
+    (let [step (make-annotated-step "[:sms] pauses for 5 seconds" :sms)
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :undefined (:status result)))
+      (is (= :sms (-> result :filter-info :declared-interface))))))
+
+(deftest test-declared-interface-ambiguous-within-interface
+  (testing "Two :sms stepdefs both match → ambiguous (filter doesn't save us)"
+    (registry/register! #"(\S+) sends something"
+                        (fn [_s] nil)
+                        {:ns 't :file "t.clj" :line 1}
+                        {:interface :sms
+                         :svo {:subject :$1 :verb :send :object "something"}})
+    (registry/register! #"(.+) sends something"
+                        (fn [_s] nil)
+                        {:ns 't :file "t.clj" :line 2}
+                        {:interface :sms
+                         :svo {:subject :$1 :verb :send :object "something"}})
+    (let [step (make-annotated-step "[:sms] alice sends something" :sms)
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :ambiguous (:status result)))
+      (is (= 2 (count (:alternatives result))))
+      (is (= :sms (-> result :filter-info :declared-interface))))))
+
+(deftest test-no-annotation-matches-globally-unchanged-behavior
+  (testing "Steps without declared-interface match across all interfaces (legacy behavior)"
+    (registry/register! #"(\S+) waves"
+                        (fn [_s] nil)
+                        {:ns 't :file "t.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :wave :object "hand"}})
+    (let [step (make-step "alice waves")  ;; no declared-interface
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :matched (:status result)))
+      ;; No filter-info when no annotation
+      (is (nil? (:filter-info result))))))
+
+(deftest test-annotation-prefix-stripped-for-matching
+  (testing "Regex matches against text with prefix stripped"
+    (registry/register! #"(\S+) clicks the button"
+                        (fn [_s] nil)
+                        {:ns 't :file "t.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object "button"}})
+    ;; Pickle step text has prefix; declared-interface attached by annotation pass
+    (let [step (make-annotated-step "[:web] alice clicks the button" :web)
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :matched (:status result)))
+      ;; Capture should be from the stripped text
+      (is (= ["alice"] (-> result :binding :captures)))
+      ;; :step/text on the returned step retains the annotation
+      (is (= "[:web] alice clicks the button"
+             (-> result :step :step/text))))))
+
+(deftest test-annotation-no-other-interface-match
+  (testing "Undefined under annotation AND no match under any interface — no :other-interfaces"
+    (registry/register! #"(\S+) does irrelevant thing"
+                        (fn [_s] nil)
+                        {:ns 't :file "t.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :do :object "thing"}})
+    (let [step (make-annotated-step "[:sms] alice does nothing in particular" :sms)
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :undefined (:status result)))
+      ;; Filter info exists but has no other-interfaces key when zero matches elsewhere
+      (let [info (:filter-info result)]
+        (is (= :sms (:declared-interface info)))
+        (is (not (contains? info :other-interface-match-count)))
+        (is (not (contains? info :other-interfaces)))))))

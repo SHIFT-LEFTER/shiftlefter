@@ -10,9 +10,23 @@
 
 (def instrumented-namespaces
   "Namespaces with fdefs to instrument during tests."
-  '[shiftlefter.gherkin.parser
+  '[shiftlefter.gherkin.api
+    shiftlefter.gherkin.compliance
+    shiftlefter.gherkin.dialect
+    shiftlefter.gherkin.io
     shiftlefter.gherkin.lexer
-    shiftlefter.gherkin.pickler])
+    shiftlefter.gherkin.parser
+    shiftlefter.gherkin.pickler
+    shiftlefter.gherkin.printer
+    shiftlefter.graph
+    ;; sl-hse note: shiftlefter.stepengine.registry has an s/fdef on
+    ;; register! that validates :svo structure (capture-refs are :$N,
+    ;; :frame is required, etc.). Activation is held back: ~37 existing
+    ;; test fixtures use old-shape :svo with literal objects and no
+    ;; :frame, and Tier 0/2 already cover the load- and compile-time
+    ;; failure paths. Activate via a follow-on after migrating those
+    ;; fixtures.
+    ])
 
 ;; -----------------------------------------------------------------------------
 ;; Instrumentation API

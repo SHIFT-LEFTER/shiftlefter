@@ -10,6 +10,7 @@
    Explicit (preferred):
    - `{:css \"...\"}`, `{:xpath \"...\"}`, `{:id \"...\"}`
    - `{:tag \"div\"}`, `{:class \"btn\"}`, `{:name \"email\"}`
+   - `{:testid \"btn-submit\"}` — expands to `{:css \"[data-testid='btn-submit']\"}`
 
    Vector shorthand (normalized to map):
    - `[:css \"...\"]`, `[:xpath \"...\"]`, etc.
@@ -29,16 +30,26 @@
 
 (def ^:private valid-selector-types
   "Set of valid selector type keywords for explicit locators."
-  #{:css :xpath :id :tag :class :name})
+  #{:css :xpath :id :tag :class :name :testid})
 
 ;; -----------------------------------------------------------------------------
 ;; Resolution
 ;; -----------------------------------------------------------------------------
 
-(defn- resolve-map
-  "Resolve a map-form locator. Must have exactly one valid selector key."
+(defn- expand-testid
+  "Expand {:testid \"foo\"} → {:css \"[data-testid='foo']\"}.
+   Returns the map unchanged if no :testid key."
   [m]
-  (let [selector-keys (filter valid-selector-types (keys m))]
+  (if-let [testid (:testid m)]
+    {:css (str "[data-testid='" testid "']")}
+    m))
+
+(defn- resolve-map
+  "Resolve a map-form locator. Must have exactly one valid selector key.
+   Expands :testid to :css before resolution."
+  [m]
+  (let [m (expand-testid m)
+        selector-keys (filter valid-selector-types (keys m))]
     (case (count selector-keys)
       0 {:errors [{:type :browser/selector-invalid
                    :message "Map locator has no valid selector key"

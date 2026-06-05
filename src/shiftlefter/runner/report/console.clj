@@ -130,11 +130,31 @@
   (true? (-> step-result :step :step/synthetic?)))
 
 ;; -----------------------------------------------------------------------------
+;; Subject Display
+;; -----------------------------------------------------------------------------
+
+(defn- format-subject-display
+  "Transform a step text's leading subject for display.
+   `:user/alice opens the browser` → `[:user] alice opens the browser`
+   `:guest opens the browser` → `[:guest] guest opens the browser`
+   Non-subject steps pass through unchanged."
+  [step-text]
+  (if-let [[_ subject rest-of-text] (re-matches #"^:(\S+)\s+(.*)" step-text)]
+    (let [kw (keyword subject)]
+      (if-let [ns-part (namespace kw)]
+        ;; Qualified: :user/alice → [:user] alice
+        (str "[:" ns-part "] " (name kw) " " rest-of-text)
+        ;; Bare: :guest → [:guest] guest
+        (str "[:" subject "] " subject " " rest-of-text)))
+    step-text))
+
+;; -----------------------------------------------------------------------------
 ;; Verbose Output
 ;; -----------------------------------------------------------------------------
 
 (defn- format-step-verbose
-  "Format a step for verbose output."
+  "Format a step for verbose output.
+   Transforms subject display: `:user/alice` → `[:user] alice`."
   ([step-result use-color?]
    (format-step-verbose step-result use-color? "  "))
   ([step-result use-color? indent]
@@ -145,10 +165,11 @@
                   :failed "✗ "
                   :pending "? "
                   :skipped "- "
-                  "")]
+                  "")
+         display-text (format-subject-display (:step/text step))]
      (str indent
           (colorize prefix (status-color status) use-color?)
-          (:step/text step)
+          display-text
           (when (= :failed status)
             (str " — " (-> step-result :error :message)))))))
 
@@ -251,12 +272,24 @@
         rest-lines (map #(str "  " %) (rest lines))]
     (str/join "\n" (cons first-line rest-lines))))
 
+(defn- format-suite-lint-issue
+  "Format a suite-load lint issue (sl-unz) for display with color.
+   The issue's `:message` already includes source file:line for stepdef
+   issues; we just prefix with ERROR and indent."
+  [issue use-color?]
+  (let [lines      (str/split-lines (or (:message issue) ""))
+        first-line (str "  " (colorize "ERROR: " :red use-color?) (first lines))
+        rest-lines (map #(str "         " %) (rest lines))]
+    (str/join "\n" (cons first-line rest-lines))))
+
 (defn print-diagnostics!
-  "Print planning diagnostics (undefined/ambiguous steps, SVO issues).
+  "Print planning diagnostics (undefined/ambiguous steps, SVO issues,
+   suite-load lint issues).
    Outputs to stderr."
   [diagnostics opts]
   (let [use-color? (colors-enabled? opts)
-        {:keys [undefined ambiguous invalid-arity svo-issues counts]} diagnostics]
+        {:keys [undefined ambiguous invalid-arity svo-issues
+                suite-lint-issues counts]} diagnostics]
     (binding [*out* *err*]
       (when (seq undefined)
         (println (colorize "\nUndefined steps:" :yellow use-color?))
@@ -279,6 +312,12 @@
         (println (colorize "\nSVO validation issues:" :yellow use-color?))
         (doseq [issue svo-issues]
           (println (format-svo-issue issue use-color?))
+          (println)))
+
+      (when (seq suite-lint-issues)
+        (println (colorize "\nSuite-load lint issues:" :yellow use-color?))
+        (doseq [issue suite-lint-issues]
+          (println (format-suite-lint-issue issue use-color?))
           (println)))
 
       (println)

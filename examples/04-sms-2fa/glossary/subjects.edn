@@ -1,0 +1,7 @@
+;; Subject glossary — declares who can act in scenarios.
+;; Without this file (or with a typo), :svo {:unknown-subject :error}
+;; rejects the scenario before any browser opens.
+
+{:subjects
+ {:user {:desc "Standard application user"
+         :instances [:alice]}}}

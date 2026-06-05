@@ -8,7 +8,7 @@ ShiftLefter provides a complete BDD testing framework with Gherkin parsing, vali
 
 **Current:** Parser, formatter, runner, macro expansion, multi-actor browser testing (Etaoin + Playwright), SVO validation, REPL with nREPL/CIDER, tutorial examples
 
-**Next:** Executable traceability, intent regions, supplanting what the screenplay pattern was aiming for with the data-oriented, queryable, far simpler SVOI
+**Next:** Executable traceability, intent regions, supplanting what the screenplay pattern was aiming for with the data-oriented, queryable, far simpler SVO model
 
 **Future:** Use case ↔ feature mapping & generation, observation lineage from real-world requirements through to running tests
 
@@ -389,6 +389,32 @@ Each subject gets its own isolated context:
 ;; Reset all named contexts
 (repl/reset-ctxs!)
 ```
+
+### Sieve Server (Development)
+
+When the REPL starts, it automatically launches the sieve HTTP server on port 3333
+with a headed Chrome browser. The toddler loop UI connects here.
+
+```clojure
+;; The server env is available as a var
+sieve-env
+;; => {:server #<...> :driver #<...> :port 3333}
+
+;; Navigate the browser
+(shiftlefter.sieve.server/navigate! sieve-env "https://example.com")
+
+;; Stop the server (browser closes)
+(sieve-stop!)
+```
+
+**Disable auto-start** for sessions that don't need a browser:
+
+```bash
+SIEVE=0 bin/repl-eval   # or however you start the REPL
+```
+
+If Chrome or chromedriver isn't available, the REPL starts normally with a warning —
+no browser features, but everything else works.
 
 ### Utilities
 

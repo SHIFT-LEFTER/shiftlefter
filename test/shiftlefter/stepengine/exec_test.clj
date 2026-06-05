@@ -1,10 +1,10 @@
 (ns shiftlefter.stepengine.exec-test
   (:require [clojure.test :refer [deftest is testing]]
             [shiftlefter.stepengine.exec :as exec]
-            [shiftlefter.adapters.registry :as registry]
-            [shiftlefter.browser.ctx :as browser.ctx]
             [shiftlefter.capabilities.ctx :as cap]
-            [shiftlefter.runner.events :as events]))
+            [shiftlefter.runner.events :as events]
+            [shiftlefter.sms.adapter-hooks :as sms-hooks]
+            [shiftlefter.test-helpers.adapter-registry :as mock]))
 
 ;; -----------------------------------------------------------------------------
 ;; Helper to create test bindings
@@ -325,7 +325,7 @@
   (testing "Wrapper step marked passed without execution"
     (let [executed (atom false)
           plan (make-plan [(assoc (make-bound-wrapper "login" 1)
-                                   :binding {:fn (fn [] (reset! executed true)) :arity 0})
+                                  :binding {:fn (fn [] (reset! executed true)) :arity 0})
                            (make-bound-expanded "login" 0 "child step" (fn [] {:done true}) 0)])
           result (exec/execute-scenario plan {})]
       (is (not @executed) "Wrapper step fn should not be called")
@@ -417,88 +417,104 @@
    :session session-id
    :type :chrome})
 
+;; Stub web adapter for cleanup-orchestration tests below. The fake browser
+;; map (`make-fake-browser`) never makes a real WebDriver call — we just
+;; need cleanup to be invoked so :capability-cleanup is populated.
+(def ^:private stub-web-interfaces
+  {:web {:type :web :adapter :stub-web :config {}}})
+
+(def ^:private stub-web-registry
+  "Mock registry providing a no-op :stub-web adapter. Pass via
+   `:adapter-registry` alongside `stub-web-interfaces`."
+  (mock/registry {:stub-web {}}))
+
 (deftest test-suite-browser-cleanup-no-browser
-  (testing "execute-suite reports :none cleanup when no browser present"
+  (testing "execute-suite reports empty :cleaned when no capability present"
     (let [plan (make-plan [(make-bound-step (fn [] {:data 1}) 0 [])])
           result (exec/execute-suite [plan])]
       (is (= :passed (:status result)))
       (is (= 1 (count (:scenarios result))))
-      (is (= :none (-> result :scenarios first :browser-cleanup :action))))))
+      (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
+        (is (empty? (:cleaned cap-cleanup)))))))
 
 (deftest test-suite-browser-cleanup-with-browser
-  (testing "execute-suite reports :closed cleanup when browser present"
-    ;; Create a step that adds a fake browser to scenario context
+  (testing "execute-suite cleans up :web ephemeral when browser present"
+    ;; Step seeds a :web ephemeral capability into scenario ctx.
     (let [add-browser-step (fn []
-                             (browser.ctx/assoc-active-browser {} (make-fake-browser "test-session")))
+                             (cap/assoc-capability {} :web (make-fake-browser "test-session") :ephemeral))
           plan (make-plan [(make-bound-step add-browser-step 0 [])])
-          result (exec/execute-suite [plan])]
+          result (exec/execute-suite [plan] {:interfaces stub-web-interfaces
+                                             :adapter-registry stub-web-registry})]
       (is (= :passed (:status result)))
-      ;; Cleanup should report :closed (actual close may fail gracefully on fake)
-      (let [cleanup (-> result :scenarios first :browser-cleanup)]
-        (is (contains? #{:closed :close-failed} (:action cleanup)))))))
+      (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
+        (is (= 1 (count (:cleaned cap-cleanup))))
+        (is (contains? #{:closed :close-failed}
+                       (-> cap-cleanup :cleaned first :action)))))))
 
 (deftest test-suite-browser-cleanup-on-failure
-  (testing "execute-suite cleans up browser even on scenario failure"
-    ;; Create steps: add browser, then fail
+  (testing "execute-suite cleans up capability even on scenario failure"
     (let [add-browser-step (fn []
-                             (browser.ctx/assoc-active-browser {} (make-fake-browser "fail-session")))
+                             (cap/assoc-capability {} :web (make-fake-browser "fail-session") :ephemeral))
           fail-step (fn [_ctx] (throw (Exception. "intentional failure")))
           plan (make-plan [(make-bound-step add-browser-step 0 [])
                            (make-bound-step fail-step 1 [])])
-          result (exec/execute-suite [plan])]
+          result (exec/execute-suite [plan] {:interfaces stub-web-interfaces
+                                             :adapter-registry stub-web-registry})]
       (is (= :failed (:status result)))
-      ;; Browser cleanup should still happen
-      (let [cleanup (-> result :scenarios first :browser-cleanup)]
-        (is (contains? #{:closed :close-failed} (:action cleanup)))))))
+      (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
+        (is (= 1 (count (:cleaned cap-cleanup))))
+        (is (contains? #{:closed :close-failed}
+                       (-> cap-cleanup :cleaned first :action)))))))
 
 (deftest test-suite-multiple-scenarios-cleanup
-  (testing "execute-suite cleans up browser for each scenario"
+  (testing "execute-suite cleans up capability for each scenario"
     (let [add-browser-step (fn []
-                             (browser.ctx/assoc-active-browser {} (make-fake-browser "session-1")))
+                             (cap/assoc-capability {} :web (make-fake-browser "session-1") :ephemeral))
           plan1 (make-plan [(make-bound-step add-browser-step 0 [])])
           plan2 (make-plan [(make-bound-step (fn [] {:no-browser true}) 0 [])])
-          result (exec/execute-suite [plan1 plan2])]
+          result (exec/execute-suite [plan1 plan2] {:interfaces stub-web-interfaces
+                                                    :adapter-registry stub-web-registry})]
       (is (= :passed (:status result)))
       (is (= 2 (count (:scenarios result))))
-      ;; First scenario had browser → should attempt close
+      ;; First scenario had a :web cap → should clean it up
       (is (contains? #{:closed :close-failed}
-                     (-> result :scenarios first :browser-cleanup :action)))
-      ;; Second scenario had no browser → :none
-      (is (= :none (-> result :scenarios second :browser-cleanup :action))))))
+                     (-> result :scenarios first :capability-cleanup :cleaned first :action)))
+      ;; Second scenario had no caps → empty :cleaned
+      (is (empty? (-> result :scenarios second :capability-cleanup :cleaned))))))
 
 (deftest test-acceptance-criteria-cli-lifecycle
-  (testing "Task 2.5.10 AC: CLI cleans up browser after scenario"
+  (testing "Task 2.5.10 AC: CLI cleans up capability after scenario"
     (let [add-browser-step (fn []
-                             (browser.ctx/assoc-active-browser {} (make-fake-browser "ac-session")))
+                             (cap/assoc-capability {} :web (make-fake-browser "ac-session") :ephemeral))
           plan (make-plan [(make-bound-step add-browser-step 0 [])])
-          result (exec/execute-suite [plan])]
-      ;; Suite passed
+          result (exec/execute-suite [plan] {:interfaces stub-web-interfaces
+                                             :adapter-registry stub-web-registry})]
       (is (= :passed (:status result)))
-      ;; Browser cleanup was attempted
-      (is (some? (-> result :scenarios first :browser-cleanup))))))
+      ;; Capability cleanup was attempted (either :closed or :close-failed)
+      (is (= 1 (count (-> result :scenarios first :capability-cleanup :cleaned)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Auto-Provisioning Tests (Task 3.0.10)
 ;; -----------------------------------------------------------------------------
 
-(defn make-bound-step-with-svoi
-  "Create a bound step with SVOI metadata for testing auto-provisioning.
-   Includes step location data for SVOI event emission tests."
-  ([f arity captures svoi]
-   (make-bound-step-with-svoi f arity captures svoi "test step with SVOI"))
-  ([f arity captures svoi step-text]
+(defn make-bound-step-with-svo
+  "Create a bound step with SVO metadata for testing auto-provisioning.
+   Includes step location data for SVO event emission tests."
+  ([f arity captures svo]
+   (make-bound-step-with-svo f arity captures svo "test step with SVO"))
+  ([f arity captures svo step-text]
    {:status :matched
     :step {:step/id (java.util.UUID/randomUUID)
            :step/text step-text
            :step/arguments []
            :step/location {:uri "test.feature" :line 10}}
     :binding (merge (make-binding f arity captures)
-                    {:svoi svoi})}))
+                    {:svo svo})}))
 
-(deftest test-no-provisioning-without-svoi
-  (testing "Steps without SVOI don't trigger provisioning"
+(deftest test-no-provisioning-without-svo
+  (testing "Steps without SVO don't trigger provisioning"
     (let [executed (atom false)
-          ;; Step without SVOI in binding
+          ;; Step without SVO in binding
           bound-step (make-bound-step (fn [] (reset! executed true) {:done true}) 0 [])
           plan (make-plan [bound-step])
           ;; No interfaces config provided
@@ -509,8 +525,8 @@
 (deftest test-no-provisioning-when-capability-present
   (testing "No provisioning when capability already exists for subject"
     (let [_provision-called (atom false)
-          ;; Step with SVOI requesting :web interface for :alice
-          bound-step (make-bound-step-with-svoi
+          ;; Step with SVO requesting :web interface for :alice
+          bound-step (make-bound-step-with-svo
                        (fn [ctx]
                          ;; Verify subject-keyed capability is in ctx
                          (is (cap/capability-present? ctx :web :alice))
@@ -527,18 +543,13 @@
 
 (deftest test-provisioning-creates-capability
   (testing "Auto-provisioning creates subject-keyed capability when needed"
-    (let [factory-called (atom false)
-          ;; Mock adapter that tracks calls
-          mock-registry {:mock-adapter {:factory (fn [config]
-                                                   (reset! factory-called true)
-                                                   {:ok {:browser-type :mock
-                                                         :config config}})
-                                        :cleanup (fn [_] {:ok :closed})}}
-          interfaces {:web {:type :web
-                            :adapter :mock-adapter
-                            :config {:headless true}}}
+    (let [events (atom [])
+          registry (mock/registry {:mock-adapter {:impl   {:browser-type :mock}
+                                                  :events events}})
+          interfaces (mock/interfaces {:web {:adapter :mock-adapter
+                                             :config  {:headless true}}})
           ;; Step that checks for provisioned capability (subject-keyed)
-          bound-step (make-bound-step-with-svoi
+          bound-step (make-bound-step-with-svo
                        (fn [ctx]
                          (let [cap (cap/get-capability ctx :web :alice)]
                            (is (some? cap) "Capability should be provisioned for :alice")
@@ -547,48 +558,72 @@
                            (assoc ctx :saw-provisioned true)))
                        1 []
                        {:subject :alice :verb :click :interface :web})
-          plan (make-plan [bound-step])]
-      ;; Execute with custom registry
-      (with-redefs [registry/create-capability
-                    (fn [adapter-name config & [reg]]
-                      (if-let [adapter (get (or reg mock-registry) adapter-name)]
-                        ((:factory adapter) config)
-                        {:error {:type :adapter/unknown :adapter adapter-name}}))]
-        (let [result (exec/execute-scenario plan {} {:interfaces interfaces})]
-          (is @factory-called "Factory should be called")
-          (is (= :passed (:status result)))
-          ;; Subject-keyed capability should be in final ctx
-          (is (cap/capability-present? (:scenario-ctx result) :web :alice)))))))
+          plan (make-plan [bound-step])
+          result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                 :adapter-registry registry})]
+      (is (seq @events) "Factory should be called")
+      (is (= :passed (:status result)))
+      ;; Subject-keyed capability should be in final ctx
+      (is (cap/capability-present? (:scenario-ctx result) :web :alice)))))
+
+(deftest test-qualified-subject-session-keyed-by-instance
+  ;; Regression for sl-t55. A qualified subject like :user/alice must be
+  ;; provisioned such that its capability is keyed by the instance
+  ;; (:alice) — matching how runtime step routing looks it up. Before the
+  ;; fix, provisioning stored the cap under :user/alice and every
+  ;; subsequent step lookup missed. cap/capability-key normalizes via
+  ;; (name subject), so :user/alice → :cap/web.alice.
+  (testing "Qualified subject :user/alice provisions :cap/web.alice"
+    (let [mock-cap {:impl :fake :driver :chromedriver-stub}
+          registry (mock/registry {:mock-adapter {:impl mock-cap}})
+          interfaces (mock/interfaces {:web {:adapter :mock-adapter}})
+          captured-ctx (atom nil)
+          bound-step (make-bound-step-with-svo
+                       (fn [ctx]
+                         (reset! captured-ctx ctx)
+                         (assoc ctx :saw true))
+                       1 []
+                       {:subject :user/alice :verb :navigate :interface :web})
+          plan (make-plan [bound-step])
+          result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                 :adapter-registry registry})
+          ctx (or @captured-ctx (:scenario-ctx result))]
+      (is (= :passed (:status result)))
+      (is (= mock-cap (cap/get-capability ctx :web :alice))
+          "Capability should be stored under :alice (instance)")
+      ;; Both :alice and :user/alice route to :cap/web.alice via
+      ;; (name subject) normalization in cap/capability-key — that
+      ;; equivalence IS the regression fix. Legacy shape stored under
+      ;; the literal key and could miss; unified shape can't.
+      (is (= mock-cap (cap/get-capability ctx :web :user/alice))
+          "Qualified :user/alice resolves to the same instance-keyed slot"))))
 
 (deftest test-provisioning-failure-blocks-step
   (testing "Provisioning failure causes step to fail"
     (let [step-executed (atom false)
-          ;; Step with SVOI but provisioning will fail
-          bound-step (make-bound-step-with-svoi
+          ;; Step with SVO but provisioning will fail
+          bound-step (make-bound-step-with-svo
                        (fn []
                          (reset! step-executed true)
                          {:done true})
                        0 []
                        {:subject :alice :verb :click :interface :web})
           plan (make-plan [bound-step])
-          ;; Interfaces config with adapter that fails
-          interfaces {:web {:type :web
-                            :adapter :failing-adapter
-                            :config {}}}]
-      ;; Mock adapter that fails
-      (with-redefs [registry/create-capability
-                    (fn [_ _]
-                      {:error {:type :adapter/create-failed
-                               :message "ChromeDriver not found"}})]
-        (let [result (exec/execute-scenario plan {} {:interfaces interfaces})]
-          (is (not @step-executed) "Step should not execute on provisioning failure")
-          (is (= :failed (:status result)))
-          (is (= :svo/provisioning-failed (-> result :steps first :error :type)))
-          (is (= :web (-> result :steps first :error :interface))))))))
+          interfaces (mock/interfaces {:web {:adapter :failing-adapter}})
+          registry (mock/registry {:failing-adapter
+                                   {:fail? true
+                                    :error {:type    :adapter/create-failed
+                                            :message "ChromeDriver not found"}}})
+          result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                 :adapter-registry registry})]
+      (is (not @step-executed) "Step should not execute on provisioning failure")
+      (is (= :failed (:status result)))
+      (is (= :svo/provisioning-failed (-> result :steps first :error :type)))
+      (is (= :web (-> result :steps first :error :interface))))))
 
 (deftest test-provisioning-unknown-interface
   (testing "Unknown interface in config causes provisioning failure"
-    (let [bound-step (make-bound-step-with-svoi
+    (let [bound-step (make-bound-step-with-svo
                        (fn [] {:done true})
                        0 []
                        {:subject :alice :verb :click :interface :unknown-iface})
@@ -603,7 +638,7 @@
 
 (deftest test-provisioning-no-interfaces-config-skips-gracefully
   (testing "Missing interfaces config skips provisioning gracefully"
-    (let [bound-step (make-bound-step-with-svoi
+    (let [bound-step (make-bound-step-with-svo
                        (fn [] {:done true})
                        0 []
                        {:subject :alice :verb :click :interface :web})
@@ -615,55 +650,59 @@
 
 (deftest test-capability-reused-across-steps
   (testing "Capability provisioned once, reused by subsequent steps with same subject"
-    (let [factory-calls (atom 0)
+    (let [events (atom [])
           mock-impl {:type :mock-browser}
-          interfaces {:web {:type :web :adapter :mock :config {}}}
+          interfaces (mock/interfaces {:web {:adapter :mock}})
+          registry (mock/registry {:mock {:impl mock-impl :events events}})
           ;; Two steps both need :web for :alice
-          step1 (make-bound-step-with-svoi
+          step1 (make-bound-step-with-svo
                   (fn [ctx]
                     (is (cap/capability-present? ctx :web :alice))
                     ctx)  ;; Return ctx unchanged
                   1 []
                   {:subject :alice :verb :click :interface :web})
-          step2 (make-bound-step-with-svoi
+          step2 (make-bound-step-with-svo
                   (fn [ctx]
                     (is (cap/capability-present? ctx :web :alice))
                     {:both-done true})
                   1 []
                   {:subject :alice :verb :fill :interface :web})
-          plan (make-plan [step1 step2])]
-      (with-redefs [registry/create-capability
-                    (fn [_ _]
-                      (swap! factory-calls inc)
-                      {:ok mock-impl})]
-        (let [result (exec/execute-scenario plan {} {:interfaces interfaces})]
-          (is (= :passed (:status result)))
-          (is (= 1 @factory-calls) "Factory should only be called once"))))))
+          plan (make-plan [step1 step2])
+          result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                 :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is (= 1 (count (filter #(= :provision (first %)) @events)))
+          "Factory should only be called once"))))
 
 (deftest test-provisioning-with-suite
   (testing "execute-suite passes interfaces config for provisioning"
-    (let [factory-calls (atom 0)
-          interfaces {:api {:type :api :adapter :http :config {:base-url "http://test"}}}
-          bound-step (make-bound-step-with-svoi
+    (let [events (atom [])
+          interfaces (mock/interfaces {:api {:adapter :http
+                                             :config  {:base-url "http://test"}}})
+          registry (mock/registry {:http {:impl   {:type :http-client}
+                                          :events events}})
+          bound-step (make-bound-step-with-svo
                        (fn [ctx]
                          (is (cap/capability-present? ctx :api :system))
                          {:api-done true})
                        1 []
                        {:subject :system :verb :call :interface :api})
-          plan (make-plan [bound-step])]
-      (with-redefs [registry/create-capability
-                    (fn [_ config]
-                      (swap! factory-calls inc)
-                      {:ok {:type :http-client :config config}})]
-        (let [result (exec/execute-suite [plan] {:interfaces interfaces})]
-          (is (= :passed (:status result)))
-          (is (= 1 @factory-calls)))))))
+          plan (make-plan [bound-step])
+          result (exec/execute-suite [plan] {:interfaces       interfaces
+                                             :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is (= 1 (count (filter #(= :provision (first %)) @events)))))))
 
 (deftest test-acceptance-auto-provisioning
   (testing "Task 3.0.10 AC: Step with :interface :web auto-provisions for subject"
     (let [provisioned-impl {:type :test-browser :session "test-123"}
-          interfaces {:web {:type :web :adapter :etaoin :config {:headless true}}}
-          bound-step (make-bound-step-with-svoi
+          interfaces (mock/interfaces {:web {:adapter :etaoin
+                                             :config  {:headless true}}})
+          ;; Factory returns {:browser <impl>} — adapter/interface wiring is
+          ;; verified by the resulting capability shape, not by inside-factory
+          ;; assertions (those were redundant with the post-hoc cap check).
+          registry (mock/registry {:etaoin {:impl {:browser provisioned-impl}}})
+          bound-step (make-bound-step-with-svo
                        (fn [ctx]
                          ;; Step can access provisioned subject-keyed capability
                          (let [cap-impl (cap/get-capability ctx :web :alice)]
@@ -672,20 +711,16 @@
                            (assoc ctx :clicked true)))
                        1 []
                        {:subject :alice :verb :click :object "the button" :interface :web})
-          plan (make-plan [bound-step])]
-      ;; Factory returns {:ok {:browser {...}}} — :browser key triggers bridge
-      (with-redefs [registry/create-capability
-                    (fn [adapter-name config]
-                      (is (= :etaoin adapter-name))
-                      (is (= {:headless true} config))
-                      {:ok {:browser provisioned-impl}})]
-        (let [result (exec/execute-scenario plan {} {:interfaces interfaces})]
-          (is (= :passed (:status result)))
-          ;; Final ctx has subject-keyed capability with :ephemeral mode
-          (let [final-ctx (:scenario-ctx result)]
-            (is (cap/capability-present? final-ctx :web :alice))
-            ;; Also bridged to browser.ctx
-            (is (some? (browser.ctx/get-session final-ctx :alice)))))))))
+          plan (make-plan [bound-step])
+          result (exec/execute-scenario plan {} {:interfaces       interfaces
+                                                 :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      ;; Final ctx has subject-keyed capability with :ephemeral mode
+      (let [final-ctx (:scenario-ctx result)]
+        (is (cap/capability-present? final-ctx :web :alice))
+        ;; Subject-keyed capability is the unified storage.
+        (is (= :test-browser (-> (cap/get-capability final-ctx :web :alice)
+                                 :browser :type)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Capability Cleanup Tests (Task 3.0.11)
@@ -694,30 +729,26 @@
 (deftest test-cleanup-ephemeral-capabilities
   (testing "Ephemeral subject-keyed capabilities are cleaned up after scenario"
     (let [cleanup-called (atom #{})
-          interfaces {:web {:type :web :adapter :mock :config {}}}
-          bound-step (make-bound-step-with-svoi
+          interfaces (mock/interfaces {:web {:adapter :mock}})
+          registry (mock/registry {:mock {:impl    {:type :mock-browser :id "browser-1"}
+                                          :cleanup (fn [impl]
+                                                     (swap! cleanup-called conj (:id impl))
+                                                     {:ok :closed})}})
+          bound-step (make-bound-step-with-svo
                        (fn [ctx]
                          (assoc ctx :step-done true))
                        1 []
                        {:subject :alice :verb :click :interface :web})
-          plan (make-plan [bound-step])]
-      (with-redefs [registry/create-capability
-                    (fn [_ _]
-                      {:ok {:type :mock-browser :id "browser-1"}})
-                    registry/get-adapter
-                    (fn [_adapter-name]
-                      {:factory (fn [_] {:ok {:type :mock}})
-                       :cleanup (fn [impl]
-                                  (swap! cleanup-called conj (:id impl))
-                                  {:ok :closed})})]
-        (let [result (exec/execute-suite [plan] {:interfaces interfaces})]
-          (is (= :passed (:status result)))
-          ;; Cleanup should have been called for the ephemeral capability
-          (is (contains? @cleanup-called "browser-1"))
-          ;; Check capability-cleanup result
-          (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
-            (is (= 1 (count (:cleaned cap-cleanup))))
-            (is (= :closed (-> cap-cleanup :cleaned first :action)))))))))
+          plan (make-plan [bound-step])
+          result (exec/execute-suite [plan] {:interfaces       interfaces
+                                             :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      ;; Cleanup should have been called for the ephemeral capability
+      (is (contains? @cleanup-called "browser-1"))
+      ;; Check capability-cleanup result
+      (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
+        (is (= 1 (count (:cleaned cap-cleanup))))
+        (is (= :closed (-> cap-cleanup :cleaned first :action)))))))
 
 (deftest test-cleanup-persistent-capabilities-skipped
   (testing "Persistent capabilities are not cleaned up"
@@ -726,108 +757,99 @@
           bound-step (make-bound-step (fn [_ctx] nil) 1 [])
           plan (make-plan [bound-step])
           ;; Pre-provision a persistent capability in initial ctx (via execute-scenario directly)
-          initial-ctx (cap/assoc-capability {} :web {:type :persistent-browser} :persistent)]
-      (with-redefs [registry/get-adapter
-                    (fn [_]
-                      {:factory (fn [_] {:ok {}})
-                       :cleanup (fn [impl]
-                                  (swap! cleanup-called conj (:type impl))
-                                  {:ok :closed})})]
-        ;; Use execute-scenario directly with initial ctx that has persistent cap
-        (let [result (exec/execute-scenario plan initial-ctx {})]
-          (is (= :passed (:status result)))
-          ;; The persistent capability should still be in ctx
-          (is (cap/capability-present? (:scenario-ctx result) :web))
-          (is (= :persistent (cap/get-capability-mode (:scenario-ctx result) :web))))))))
+          initial-ctx (cap/assoc-capability {} :web {:type :persistent-browser} :persistent)
+          ;; Registry exists but should not be consulted for cleanup; persistent
+          ;; capabilities stay in ctx across scenarios. If it ever IS called,
+          ;; the assertion below catches the regression.
+          registry (mock/registry {:any {:cleanup (fn [impl]
+                                                    (swap! cleanup-called conj (:type impl))
+                                                    {:ok :closed})}})
+          result (exec/execute-scenario plan initial-ctx {:adapter-registry registry})]
+      (is (= :passed (:status result)))
+      ;; The persistent capability should still be in ctx
+      (is (cap/capability-present? (:scenario-ctx result) :web))
+      (is (= :persistent (cap/get-capability-mode (:scenario-ctx result) :web))))))
 
 (deftest test-cleanup-multiple-ephemeral-capabilities
   (testing "Multiple ephemeral subject-keyed capabilities are all cleaned up"
     (let [cleanup-order (atom [])
-          interfaces {:web {:type :web :adapter :mock :config {}}
-                      :api {:type :api :adapter :mock-api :config {}}}
+          interfaces (mock/interfaces {:web {:adapter :mock}
+                                       :api {:adapter :mock-api}})
+          registry (mock/registry {:mock     {:impl    {:adapter :mock :id "mock"}
+                                              :cleanup (fn [impl]
+                                                         (swap! cleanup-order conj (:adapter impl))
+                                                         {:ok :closed})}
+                                   :mock-api {:impl    {:adapter :mock-api :id "mock-api"}
+                                              :cleanup (fn [impl]
+                                                         (swap! cleanup-order conj (:adapter impl))
+                                                         {:ok :closed})}})
           ;; Two steps with different interfaces, same subject
-          step1 (make-bound-step-with-svoi
+          step1 (make-bound-step-with-svo
                   (fn [ctx] (assoc ctx :web-done true))
                   1 []
                   {:subject :alice :verb :click :interface :web})
-          step2 (make-bound-step-with-svoi
+          step2 (make-bound-step-with-svo
                   (fn [ctx] (assoc ctx :api-done true))
                   1 []
                   {:subject :alice :verb :call :interface :api})
-          plan (make-plan [step1 step2])]
-      (with-redefs [registry/create-capability
-                    (fn [adapter-name _]
-                      {:ok {:adapter adapter-name :id (name adapter-name)}})
-                    registry/get-adapter
-                    (fn [_adapter-name]
-                      {:factory (fn [_] {:ok {}})
-                       :cleanup (fn [impl]
-                                  (swap! cleanup-order conj (:adapter impl))
-                                  {:ok :closed})})]
-        (let [result (exec/execute-suite [plan] {:interfaces interfaces})]
-          (is (= :passed (:status result)))
-          ;; Both capabilities should be cleaned up
-          (is (= 2 (count @cleanup-order)))
-          (is (contains? (set @cleanup-order) :mock))
-          (is (contains? (set @cleanup-order) :mock-api))
-          ;; Check cleanup result
-          (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
-            (is (= 2 (count (:cleaned cap-cleanup))))))))))
+          plan (make-plan [step1 step2])
+          result (exec/execute-suite [plan] {:interfaces       interfaces
+                                             :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      ;; Both capabilities should be cleaned up
+      (is (= 2 (count @cleanup-order)))
+      (is (contains? (set @cleanup-order) :mock))
+      (is (contains? (set @cleanup-order) :mock-api))
+      ;; Check cleanup result
+      (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
+        (is (= 2 (count (:cleaned cap-cleanup))))))))
 
 (deftest test-cleanup-mixed-ephemeral-and-persistent
   (testing "Only ephemeral capabilities cleaned, persistent skipped"
     (let [cleanup-called (atom #{})
-          interfaces {:web {:type :web :adapter :mock :config {}}}
+          interfaces (mock/interfaces {:web {:adapter :mock}})
+          registry (mock/registry {:mock {:impl    {:type :mock-browser}
+                                          :cleanup (fn [impl]
+                                                     (swap! cleanup-called conj (:type impl))
+                                                     {:ok :closed})}})
           ;; Step that provisions ephemeral :web (subject-keyed as :web.alice)
-          bound-step (make-bound-step-with-svoi
+          bound-step (make-bound-step-with-svo
                        (fn [ctx]
                          ;; Also add a persistent capability manually (no subject)
                          (cap/assoc-capability ctx :api {:type :api-client} :persistent))
                        1 []
                        {:subject :alice :verb :click :interface :web})
-          plan (make-plan [bound-step])]
-      (with-redefs [registry/create-capability
-                    (fn [_ _]
-                      {:ok {:type :mock-browser}})
-                    registry/get-adapter
-                    (fn [_]
-                      {:factory (fn [_] {:ok {}})
-                       :cleanup (fn [impl]
-                                  (swap! cleanup-called conj (:type impl))
-                                  {:ok :closed})})]
-        (let [result (exec/execute-suite [plan] {:interfaces interfaces})]
-          (is (= :passed (:status result)))
-          ;; Only ephemeral capability cleaned up
-          (is (contains? @cleanup-called :mock-browser))
-          (is (not (contains? @cleanup-called :api-client)))
-          ;; Check cleanup result shows persistent was skipped
-          (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
-            (is (= 1 (count (:cleaned cap-cleanup))))
-            (is (= [:api] (:skipped cap-cleanup)))))))))
+          plan (make-plan [bound-step])
+          result (exec/execute-suite [plan] {:interfaces       interfaces
+                                             :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      ;; Only ephemeral capability cleaned up
+      (is (contains? @cleanup-called :mock-browser))
+      (is (not (contains? @cleanup-called :api-client)))
+      ;; Check cleanup result shows persistent was skipped
+      (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
+        (is (= 1 (count (:cleaned cap-cleanup))))
+        (is (= [:api] (:skipped cap-cleanup)))))))
 
 (deftest test-cleanup-handles-adapter-errors
   (testing "Cleanup continues even if adapter cleanup fails"
-    (let [interfaces {:web {:type :web :adapter :failing :config {}}}
-          bound-step (make-bound-step-with-svoi
+    (let [interfaces (mock/interfaces {:web {:adapter :failing}})
+          registry (mock/registry {:failing {:impl    {:type :browser}
+                                             :cleanup (fn [_]
+                                                        (throw (Exception. "Cleanup failed!")))}})
+          bound-step (make-bound-step-with-svo
                        (fn [ctx] (assoc ctx :done true))
                        1 []
                        {:subject :alice :verb :click :interface :web})
-          plan (make-plan [bound-step])]
-      (with-redefs [registry/create-capability
-                    (fn [_ _]
-                      {:ok {:type :browser}})
-                    registry/get-adapter
-                    (fn [_]
-                      {:factory (fn [_] {:ok {}})
-                       :cleanup (fn [_]
-                                  (throw (Exception. "Cleanup failed\u0021")))})]
-        (let [result (exec/execute-suite [plan] {:interfaces interfaces})]
-          ;; Scenario should still pass (cleanup failure doesn't affect result)
-          (is (= :passed (:status result)))
-          ;; Cleanup result should show failure
-          (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
-            (is (= :close-failed (-> cap-cleanup :cleaned first :action)))
-            (is (string? (-> cap-cleanup :cleaned first :error)))))))))
+          plan (make-plan [bound-step])
+          result (exec/execute-suite [plan] {:interfaces       interfaces
+                                             :adapter-registry registry})]
+      ;; Scenario should still pass (cleanup failure doesn't affect result)
+      (is (= :passed (:status result)))
+      ;; Cleanup result should show failure
+      (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
+        (is (= :close-failed (-> cap-cleanup :cleaned first :action)))
+        (is (string? (-> cap-cleanup :cleaned first :error)))))))
 
 (deftest test-cleanup-no-capabilities
   (testing "No cleanup needed when no capabilities present"
@@ -842,26 +864,21 @@
 (deftest test-acceptance-ephemeral-cleanup
   (testing "Task 3.0.11 AC: Ephemeral :cap/web.alice is cleaned up after scenario"
     (let [cleanup-called (atom false)
-          interfaces {:web {:type :web :adapter :etaoin :config {:headless true}}}
-          bound-step (make-bound-step-with-svoi
+          interfaces (mock/interfaces {:web {:adapter :etaoin
+                                             :config  {:headless true}}})
+          registry (mock/registry {:etaoin {:impl    {:type :test-browser}
+                                            :cleanup (fn [_]
+                                                       (reset! cleanup-called true)
+                                                       {:ok :closed})}})
+          bound-step (make-bound-step-with-svo
                        (fn [ctx] (assoc ctx :clicked true))
                        1 []
                        {:subject :alice :verb :click :interface :web})
-          plan (make-plan [bound-step])]
-      (with-redefs [registry/create-capability
-                    (fn [_ _]
-                      {:ok {:type :test-browser}})
-                    registry/get-adapter
-                    (fn [adapter-name]
-                      (if (= :etaoin adapter-name)
-                        {:factory (fn [_] {:ok {}})
-                         :cleanup (fn [_]
-                                    (reset! cleanup-called true)
-                                    {:ok :closed})}
-                        {:error {:type :adapter/unknown}}))]
-        (let [result (exec/execute-suite [plan] {:interfaces interfaces})]
-          (is (= :passed (:status result)))
-          (is @cleanup-called "Ephemeral capability should be cleaned up")))))
+          plan (make-plan [bound-step])
+          result (exec/execute-suite [plan] {:interfaces       interfaces
+                                             :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is @cleanup-called "Ephemeral capability should be cleaned up")))
 
   (testing "Task 3.0.11 AC: Persistent :cap/web survives scenario"
     (let [cleanup-called (atom false)
@@ -875,57 +892,51 @@
                        1 [])
           plan (make-plan [bound-step])
           ;; Pre-provision persistent capability (no subject)
-          initial-ctx (cap/assoc-capability {} :web {:type :persistent-browser} :persistent)]
-      (with-redefs [registry/get-adapter
-                    (fn [_]
-                      {:factory (fn [_] {:ok {}})
-                       :cleanup (fn [_]
-                                  (reset! cleanup-called true)
-                                  {:ok :closed})})]
-        (let [result (exec/execute-scenario plan initial-ctx {})]
-          (is (= :passed (:status result)))
-          (is (not @cleanup-called) "Persistent capability should NOT be cleaned up")
-          ;; Capability still present in final ctx
-          (is (cap/capability-present? (:scenario-ctx result) :web)))))))
+          initial-ctx (cap/assoc-capability {} :web {:type :persistent-browser} :persistent)
+          registry (mock/registry {:web {:cleanup (fn [_]
+                                                    (reset! cleanup-called true)
+                                                    {:ok :closed})}})
+          result (exec/execute-scenario plan initial-ctx {:adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is (not @cleanup-called) "Persistent capability should NOT be cleaned up")
+      ;; Capability still present in final ctx
+      (is (cap/capability-present? (:scenario-ctx result) :web)))))
 
 ;; -----------------------------------------------------------------------------
-;; SVOI Event Emission Tests (Task 3.0.12)
+;; SVO Event Emission Tests (Task 3.0.12)
 ;; -----------------------------------------------------------------------------
 
-;; Note: make-bound-step-with-svoi defined above in Auto-Provisioning Tests section
+;; Note: make-bound-step-with-svo defined above in Auto-Provisioning Tests section
 
-(deftest test-svoi-event-emission
-  (testing "Task 3.0.12 AC1: emits :step/svoi event before step execution"
-    (with-redefs [registry/get-adapter
-                  (fn [& _args]
-                    {:factory (fn [_] {:ok {}})
-                     :cleanup (fn [_] {:ok :closed})})]
-      (let [events-received (atom [])
-            bus (events/make-memory-bus)
-            run-id "test-run-123"
-            svoi {:subject "User"
-                  :verb "logs in"
-                  :object "system"
-                  :interface :web}
-            bound-step (make-bound-step-with-svoi
-                         (fn [ctx] ctx)
-                         1 []
-                         svoi)
-            plan (make-plan [bound-step])
-            sub-id (events/subscribe! bus (fn [e] (swap! events-received conj e)))]
-        ;; Give async subscription time to set up
-        (Thread/sleep 10)
-        (let [result (exec/execute-scenario plan {} {:bus bus
-                                                     :run-id run-id
-                                                     :interfaces {:web {:type :browser}}})]
+(deftest test-svo-event-emission
+  (testing "Task 3.0.12 AC1: emits :step/svo event before step execution"
+    (let [events-received (atom [])
+          bus (events/make-memory-bus)
+          run-id "test-run-123"
+          svo {:subject "User"
+                :verb "logs in"
+                :object "system"
+                :interface :web}
+          bound-step (make-bound-step-with-svo
+                       (fn [ctx] ctx)
+                       1 []
+                       svo)
+          plan (make-plan [bound-step])
+          sub-id (events/subscribe! bus (fn [e] (swap! events-received conj e)))]
+      ;; Give async subscription time to set up
+      (Thread/sleep 10)
+      (let [result (exec/execute-scenario plan {} {:bus bus
+                                                   :run-id run-id
+                                                   :interfaces       {:web {:type :browser :adapter :web}}
+                                                   :adapter-registry (mock/registry {:web {}})})]
           ;; Give async events time to propagate
           (Thread/sleep 50)
           (events/unsubscribe! bus sub-id)
           (events/bus-close! bus)
           (is (= :passed (:status result)))
-          (is (= 1 (count @events-received)) "Should emit exactly one SVOI event")
+          (is (= 1 (count @events-received)) "Should emit exactly one SVO event")
           (let [evt (first @events-received)]
-            (is (= :step/svoi (:type evt)))
+            (is (= :step/svo (:type evt)))
             (is (= run-id (:run-id evt)))
             (is (string? (:ts evt)))
             (let [payload (:payload evt)]
@@ -934,19 +945,19 @@
               (is (= "system" (:object payload)))
               (is (= :web (:interface payload)))
               (is (= :browser (:interface-type payload)))
-              (is (= "test step with SVOI" (:step-text payload)))
-              (is (= {:uri "test.feature" :line 10} (:location payload)))))))))
+              (is (= "test step with SVO" (:step-text payload)))
+              (is (= {:uri "test.feature" :line 10} (:location payload))))))))
 
   (testing "Task 3.0.12 AC2: no event when bus/run-id missing"
-    ;; Step without :interface in SVOI - no provisioning needed
+    ;; Step without :interface in SVO - no provisioning needed
     (let [events-received (atom [])
-          svoi {:subject "User"
+          svo {:subject "User"
                 :verb "logs in"
                 :object "system"}  ;; No :interface - no provisioning
-          bound-step (make-bound-step-with-svoi
+          bound-step (make-bound-step-with-svo
                        (fn [ctx] ctx)
                        1 []
-                       svoi)
+                       svo)
           plan (make-plan [bound-step])]
       ;; Execute without bus/run-id
       #_{:clj-kondo/ignore [:redundant-let]}
@@ -954,11 +965,11 @@
         (is (= :passed (:status result)))
         (is (empty? @events-received) "No events should be emitted without bus"))))
 
-  (testing "Task 3.0.12 AC3: no event when step has no SVOI"
+  (testing "Task 3.0.12 AC3: no event when step has no SVO"
     (let [events-received (atom [])
           bus (events/make-memory-bus)
           run-id "test-run-456"
-          ;; Regular step without SVOI
+          ;; Regular step without SVO
           bound-step (make-bound-step
                        (fn [ctx] ctx)
                        1 [])
@@ -970,38 +981,35 @@
         (events/unsubscribe! bus sub-id)
         (events/bus-close! bus)
         (is (= :passed (:status result)))
-        (is (empty? @events-received) "No events should be emitted for step without SVOI"))))
+        (is (empty? @events-received) "No events should be emitted for step without SVO"))))
 
   (testing "Task 3.0.12 AC4: multiple steps emit multiple events"
-    (with-redefs [registry/get-adapter
-                  (fn [& _args]
-                    {:factory (fn [_] {:ok {}})
-                     :cleanup (fn [_] {:ok :closed})})]
-      (let [events-received (atom [])
-            bus (events/make-memory-bus)
-            run-id "test-run-789"
-            svoi1 {:subject "Admin" :verb "creates" :object "account" :interface :api}
-            svoi2 {:subject "User" :verb "views" :object "dashboard" :interface :web}
-            bound-step1 (make-bound-step-with-svoi
-                          (fn [ctx] ctx)
-                          1 [] svoi1)
-            bound-step2 (make-bound-step-with-svoi
-                          (fn [ctx] ctx)
-                          1 [] svoi2)
-            plan (make-plan [bound-step1 bound-step2])
-            sub-id (events/subscribe! bus (fn [e] (swap! events-received conj e)))]
-        (Thread/sleep 10)
-        (let [result (exec/execute-scenario plan {} {:bus bus
-                                                     :run-id run-id
-                                                     :interfaces {:api {:type :rest}
-                                                                  :web {:type :browser}}})]
-          (Thread/sleep 50)
-          (events/unsubscribe! bus sub-id)
-          (events/bus-close! bus)
-          (is (= :passed (:status result)))
-          (is (= 2 (count @events-received)) "Should emit two SVOI events")
-          (let [subjects (set (map #(get-in % [:payload :subject]) @events-received))]
-            (is (= #{"Admin" "User"} subjects))))))))
+    (let [events-received (atom [])
+          bus (events/make-memory-bus)
+          run-id "test-run-789"
+          svo1 {:subject "Admin" :verb "creates" :object "account" :interface :api}
+          svo2 {:subject "User" :verb "views" :object "dashboard" :interface :web}
+          bound-step1 (make-bound-step-with-svo
+                        (fn [ctx] ctx)
+                        1 [] svo1)
+          bound-step2 (make-bound-step-with-svo
+                        (fn [ctx] ctx)
+                        1 [] svo2)
+          plan (make-plan [bound-step1 bound-step2])
+          sub-id (events/subscribe! bus (fn [e] (swap! events-received conj e)))]
+      (Thread/sleep 10)
+      (let [result (exec/execute-scenario plan {} {:bus bus
+                                                   :run-id run-id
+                                                   :interfaces       {:api {:type :rest    :adapter :api}
+                                                                      :web {:type :browser :adapter :web}}
+                                                   :adapter-registry (mock/registry {:api {} :web {}})})]
+        (Thread/sleep 50)
+        (events/unsubscribe! bus sub-id)
+        (events/bus-close! bus)
+        (is (= :passed (:status result)))
+        (is (= 2 (count @events-received)) "Should emit two SVO events")
+        (let [subjects (set (map #(get-in % [:payload :subject]) @events-received))]
+          (is (= #{"Admin" "User"} subjects)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Subject-Keyed Provisioning + Browser Bridge Tests (WI-032.025)
@@ -1009,15 +1017,17 @@
 
 (deftest test-different-subjects-get-separate-capabilities
   (testing "Alice and Bob get separate browser capabilities"
-    (let [factory-calls (atom [])
-          interfaces {:web {:type :web :adapter :mock :config {}}}
-          step-alice (make-bound-step-with-svoi
+    (let [events (atom [])
+          interfaces (mock/interfaces {:web {:adapter :mock}})
+          registry (mock/registry {:mock {:impl   {:id "browser"}
+                                          :events events}})
+          step-alice (make-bound-step-with-svo
                        (fn [ctx]
                          (is (cap/capability-present? ctx :web :alice))
                          ctx)
                        1 []
                        {:subject :alice :verb :click :interface :web})
-          step-bob (make-bound-step-with-svoi
+          step-bob (make-bound-step-with-svo
                      (fn [ctx]
                        (is (cap/capability-present? ctx :web :bob))
                        ;; Alice's should still be there too
@@ -1025,99 +1035,543 @@
                        ctx)
                      1 []
                      {:subject :bob :verb :click :interface :web})
-          plan (make-plan [step-alice step-bob])]
-      (with-redefs [registry/create-capability
-                    (fn [_ _]
-                      (let [id (str "browser-" (count @factory-calls))]
-                        (swap! factory-calls conj id)
-                        {:ok {:id id}}))]
-        (let [result (exec/execute-scenario plan {} {:interfaces interfaces})]
-          (is (= :passed (:status result)))
-          ;; Two separate factory calls (one per subject)
-          (is (= 2 (count @factory-calls))))))))
+          plan (make-plan [step-alice step-bob])
+          result (exec/execute-scenario plan {} {:interfaces       interfaces
+                                                 :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      ;; Two separate factory calls (one per subject)
+      (is (= 2 (count (filter #(= :provision (first %)) @events)))))))
 
-(deftest test-browser-ctx-bridge-on-provisioning
-  (testing "Provisioned browser is bridged to browser.ctx for step compatibility"
-    (let [mock-browser {:type :mock :id "bridged-browser"}
-          interfaces {:web {:type :web :adapter :mock :config {}}}
-          bound-step (make-bound-step-with-svoi
-                       (fn [ctx]
-                         ;; Should be findable via browser.ctx/get-session
-                         (let [session (browser.ctx/get-session ctx :alice)]
-                           (is (some? session) "Browser should be bridged to browser.ctx")
-                           (is (= "bridged-browser" (:id session))))
-                         ctx)
-                       1 []
-                       {:subject :alice :verb :click :interface :web})
-          plan (make-plan [bound-step])]
-      (with-redefs [registry/create-capability
-                    (fn [_ _]
-                      {:ok {:browser mock-browser}})]
-        (let [result (exec/execute-scenario plan {} {:interfaces interfaces})]
-          (is (= :passed (:status result))))))))
-
-(deftest test-browser-ctx-bridge-default-session
-  (testing "SVOI with nil subject bridges to :default session"
-    (let [mock-browser {:type :mock :id "default-browser"}
-          interfaces {:web {:type :web :adapter :mock :config {}}}
-          ;; Step without subject in SVOI
-          bound-step (make-bound-step-with-svoi
-                       (fn [ctx]
-                         (let [session (browser.ctx/get-session ctx :default)]
-                           (is (some? session) "Browser should be bridged as :default")
-                           (is (= "default-browser" (:id session))))
-                         ctx)
-                       1 []
-                       {:verb :click :interface :web})  ;; No :subject
-          plan (make-plan [bound-step])]
-      (with-redefs [registry/create-capability
-                    (fn [_ _]
-                      {:ok {:browser mock-browser}})]
-        (let [result (exec/execute-scenario plan {} {:interfaces interfaces})]
-          (is (= :passed (:status result))))))))
-
-(deftest test-no-browser-bridge-for-non-browser-capabilities
-  (testing "Non-browser capabilities (no :browser key) skip browser.ctx bridge"
-    (let [interfaces {:api {:type :api :adapter :http :config {}}}
-          bound-step (make-bound-step-with-svoi
-                       (fn [ctx]
-                         ;; No browser.ctx entry should exist
-                         (is (nil? (browser.ctx/get-session ctx :alice)))
-                         ctx)
-                       1 []
-                       {:subject :alice :verb :call :interface :api})
-          plan (make-plan [bound-step])]
-      (with-redefs [registry/create-capability
-                    (fn [_ _]
-                      {:ok {:type :http-client :base-url "http://test"}})]
-        (let [result (exec/execute-scenario plan {} {:interfaces interfaces})]
-          (is (= :passed (:status result))))))))
+;; Three bridge-specific tests removed in sl-fds:
+;;   test-browser-ctx-bridge-on-provisioning
+;;   test-browser-ctx-bridge-default-session
+;;   test-no-browser-bridge-for-non-browser-capabilities
+;; They asserted on the legacy :cap/browser mirror written by
+;; bridge-to-browser-ctx, which was deleted along with the bridge.
+;; Subject-keyed unified-shape coverage lives in
+;; test-different-subjects-get-separate-capabilities and
+;; test-qualified-subject-session-keyed-by-instance.
 
 (deftest test-cleanup-subject-keyed-capabilities
   (testing "Subject-keyed ephemeral capabilities are cleaned up correctly"
-    (let [cleanup-called (atom #{})
+    (let [cleanup-called  (atom #{})
           factory-counter (atom 0)
-          interfaces {:web {:type :web :adapter :mock :config {}}}
-          step-alice (make-bound-step-with-svoi
+          interfaces (mock/interfaces {:web {:adapter :mock}})
+          ;; :factory escape hatch: mint a unique :id per call so Alice and
+          ;; Bob's caps are distinct impl objects (otherwise the framework
+          ;; would treat them as identical and run cleanup once).
+          registry (mock/registry
+                    {:mock {:factory (fn [_]
+                                       {:ok {:id (str "browser-"
+                                                      (swap! factory-counter inc))}})
+                            :cleanup (fn [impl]
+                                       (swap! cleanup-called conj (:id impl))
+                                       {:ok :closed})}})
+          step-alice (make-bound-step-with-svo
                        (fn [ctx] ctx)
                        1 []
                        {:subject :alice :verb :click :interface :web})
-          step-bob (make-bound-step-with-svoi
+          step-bob (make-bound-step-with-svo
                      (fn [ctx] ctx)
                      1 []
                      {:subject :bob :verb :click :interface :web})
-          plan (make-plan [step-alice step-bob])]
-      (with-redefs [registry/create-capability
-                    (fn [_ _]
-                      (let [id (str "browser-" (swap! factory-counter inc))]
-                        {:ok {:id id}}))
-                    registry/get-adapter
-                    (fn [_]
-                      {:factory (fn [_] {:ok {}})
-                       :cleanup (fn [impl]
-                                  (swap! cleanup-called conj (:id impl))
-                                  {:ok :closed})})]
-        (let [result (exec/execute-suite [plan] {:interfaces interfaces})]
-          (is (= :passed (:status result)))
-          ;; Both subject capabilities should be cleaned up
-          (is (= 2 (count @cleanup-called))))))))
+          plan (make-plan [step-alice step-bob])
+          result (exec/execute-suite [plan] {:interfaces       interfaces
+                                             :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      ;; Both subject capabilities should be cleaned up
+      (is (= 2 (count @cleanup-called))))))
+
+;; -----------------------------------------------------------------------------
+;; :shared-impl? Provisioning Tests (sl-ups)
+;; -----------------------------------------------------------------------------
+
+(deftest test-shared-impl-single-factory-call-across-subjects
+  (testing ":shared-impl? true causes Alice and Bob to share one impl"
+    (let [events (atom [])
+          shared-impl {:type :mock-sms :id "shared-1"}
+          interfaces (mock/interfaces {:sms {:adapter      :sms-mock
+                                             :shared-impl? true}})
+          registry (mock/registry {:sms-mock {:impl   shared-impl
+                                              :events events}})
+          step-alice (make-bound-step-with-svo
+                       (fn [ctx]
+                         (is (cap/capability-present? ctx :sms :alice))
+                         ctx)
+                       1 []
+                       {:subject :alice :verb :send :interface :sms})
+          step-bob (make-bound-step-with-svo
+                     (fn [ctx]
+                       (is (cap/capability-present? ctx :sms :bob))
+                       (let [alice-impl (cap/get-capability ctx :sms :alice)
+                             bob-impl   (cap/get-capability ctx :sms :bob)]
+                         (is (identical? alice-impl bob-impl)
+                             "Alice and Bob should reference the SAME impl instance"))
+                       ctx)
+                     1 []
+                     {:subject :bob :verb :send :interface :sms})
+          plan (make-plan [step-alice step-bob])
+          result (exec/execute-scenario plan {} {:interfaces       interfaces
+                                                 :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is (= 1 (count (filter #(= :provision (first %)) @events)))
+          "Factory should be called exactly once under :shared-impl?"))))
+
+(deftest test-shared-impl-cleanup-runs-once-per-impl
+  (testing ":shared-impl? cleanup dedup — N subject entries → 1 cleanup call"
+    (let [cleanup-calls (atom [])
+          shared-impl   {:type :mock-sms :id "shared-1"}
+          interfaces (mock/interfaces {:sms {:adapter      :sms-mock
+                                             :shared-impl? true}})
+          registry (mock/registry {:sms-mock {:impl    shared-impl
+                                              :cleanup (fn [impl]
+                                                         (swap! cleanup-calls conj impl)
+                                                         {:ok :closed})}})
+          step-alice (make-bound-step-with-svo
+                       (fn [ctx] ctx)
+                       1 []
+                       {:subject :alice :verb :send :interface :sms})
+          step-bob (make-bound-step-with-svo
+                     (fn [ctx] ctx)
+                     1 []
+                     {:subject :bob :verb :send :interface :sms})
+          plan (make-plan [step-alice step-bob])
+          result (exec/execute-suite [plan] {:interfaces       interfaces
+                                             :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is (= 1 (count @cleanup-calls))
+          "Cleanup should run exactly once despite two subject entries")
+      (is (identical? shared-impl (first @cleanup-calls)))
+      ;; Cleanup result should report duplicates as :skipped, not :cleaned.
+      (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
+        (is (= 1 (count (:cleaned cap-cleanup))))
+        (is (some #(= "shared impl already cleaned" (:reason %))
+                  (:skipped cap-cleanup)))))))
+
+(deftest test-non-shared-impl-default-behavior-unchanged
+  (testing "Without :shared-impl?, each subject still gets its own impl"
+    (let [factory-calls (atom 0)
+          interfaces (mock/interfaces {:web {:adapter :mock}})
+          registry (mock/registry
+                    {:mock {:factory (fn [_]
+                                       (swap! factory-calls inc)
+                                       {:ok {:id (str "impl-" @factory-calls)}})}})
+          step-alice (make-bound-step-with-svo
+                       (fn [ctx] ctx)
+                       1 []
+                       {:subject :alice :verb :click :interface :web})
+          step-bob (make-bound-step-with-svo
+                     (fn [ctx]
+                       (let [alice-impl (cap/get-capability ctx :web :alice)
+                             bob-impl   (cap/get-capability ctx :web :bob)]
+                         (is (not (identical? alice-impl bob-impl))
+                             "Without :shared-impl?, impls must be distinct"))
+                       ctx)
+                     1 []
+                     {:subject :bob :verb :click :interface :web})
+          plan (make-plan [step-alice step-bob])
+          result (exec/execute-scenario plan {} {:interfaces       interfaces
+                                                 :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is (= 2 @factory-calls)
+          "Without :shared-impl?, factory runs once per subject"))))
+
+;; -----------------------------------------------------------------------------
+;; :sms/scenario-start-ts setter (sl-ups; replaced by sl-3mq hook later)
+;; -----------------------------------------------------------------------------
+
+(deftest test-sms-scenario-start-ts-set-on-first-provision
+  (testing "First SMS provisioning sets :sms/scenario-start-ts"
+    (let [interfaces (mock/interfaces {:sms {:adapter      :sms-mock
+                                             :shared-impl? true}})
+          ;; Wire the production :on-provision hook so the timestamp setter
+          ;; fires — that's what this test is verifying.
+          registry (mock/registry {:sms-mock {:impl         {:type :mock-sms}
+                                              :on-provision sms-hooks/set-scenario-start-ts}})
+          observed-ts (atom nil)
+          bound-step (make-bound-step-with-svo
+                       (fn [ctx]
+                         (reset! observed-ts (:sms/scenario-start-ts ctx))
+                         ctx)
+                       1 []
+                       {:subject :alice :verb :send :interface :sms})
+          plan (make-plan [bound-step])
+          result (exec/execute-scenario plan {} {:interfaces       interfaces
+                                                 :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is (instance? java.time.Instant @observed-ts)
+          ":sms/scenario-start-ts is an Instant"))))
+
+(deftest test-sms-scenario-start-ts-not-clobbered-on-second-subject
+  (testing "Second SMS subject's provision does not overwrite :sms/scenario-start-ts"
+    (let [interfaces (mock/interfaces {:sms {:adapter      :sms-mock
+                                             :shared-impl? true}})
+          registry (mock/registry {:sms-mock {:impl         {:type :mock-sms}
+                                              :on-provision sms-hooks/set-scenario-start-ts}})
+          alice-ts (atom nil)
+          bob-ts   (atom nil)
+          step-alice (make-bound-step-with-svo
+                       (fn [ctx]
+                         (reset! alice-ts (:sms/scenario-start-ts ctx))
+                         ctx)
+                       1 []
+                       {:subject :alice :verb :send :interface :sms})
+          step-bob (make-bound-step-with-svo
+                     (fn [ctx]
+                       (reset! bob-ts (:sms/scenario-start-ts ctx))
+                       ctx)
+                     1 []
+                     {:subject :bob :verb :send :interface :sms})
+          plan (make-plan [step-alice step-bob])
+          result (exec/execute-scenario plan {} {:interfaces       interfaces
+                                                 :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is (some? @alice-ts))
+      (is (= @alice-ts @bob-ts)
+          "Bob sees Alice's timestamp, not a fresh one"))))
+
+(deftest test-non-sms-interface-leaves-scenario-start-ts-unset
+  (testing "Provisioning a non-SMS interface does not touch :sms/scenario-start-ts"
+    (let [interfaces (mock/interfaces {:web {:adapter :mock}})
+          registry (mock/registry {:mock {:impl {:type :mock-browser}}})
+          observed-keys (atom nil)
+          bound-step (make-bound-step-with-svo
+                       (fn [ctx]
+                         (reset! observed-keys (set (keys ctx)))
+                         ctx)
+                       1 []
+                       {:subject :alice :verb :click :interface :web})
+          plan (make-plan [bound-step])
+          result (exec/execute-scenario plan {} {:interfaces       interfaces
+                                                 :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is (not (contains? @observed-keys :sms/scenario-start-ts))
+          ":sms/scenario-start-ts must not appear for non-SMS interfaces"))))
+
+;; -----------------------------------------------------------------------------
+;; Generic adapter :on-provision hook (sl-3mq)
+;; -----------------------------------------------------------------------------
+;;
+;; The hook signature is (fn [ctx impl] -> ctx). It runs after
+;; cap/assoc-capability so adapters can seed per-interface scenario state
+;; without the engine special-casing each interface type. The SMS
+;; :sms/scenario-start-ts tests above exercise the same machinery via the
+;; default registry; these tests use a custom registry passed as
+;; :adapter-registry to verify the mechanism in isolation.
+
+(deftest test-on-provision-hook-invoked-once-with-correct-args
+  (testing "Hook fires exactly once per provisioning with (ctx, impl)"
+    (let [calls (atom [])
+          hook (fn [ctx impl]
+                 (swap! calls conj {:ctx-at-call ctx :impl-at-call impl})
+                 ctx)
+          bound-step (make-bound-step-with-svo
+                       (fn [ctx] ctx) 1 []
+                       {:subject :alice :verb :doit :interface :test})
+          plan (make-plan [bound-step])
+          opts {:interfaces (mock/interfaces {:test {:adapter :test-adapter}})
+                :adapter-registry (mock/registry {:test-adapter {:on-provision hook}})}
+          result (exec/execute-scenario plan {} opts)]
+      (is (= :passed (:status result)))
+      (is (= 1 (count @calls)) "Hook called exactly once")
+      (let [{:keys [ctx-at-call impl-at-call]} (first @calls)]
+        (is (= {:type :test-impl} impl-at-call)
+            "Hook receives the provisioned impl as second arg")
+        (is (cap/capability-present? ctx-at-call :test :alice)
+            "Hook sees ctx after assoc-capability")))))
+
+(deftest test-on-provision-hook-return-value-becomes-ctx
+  (testing "Hook return value threads forward as the new scenario ctx"
+    (let [observed (atom nil)
+          hook (fn [ctx _impl] (assoc ctx :hook/touched :yes))
+          step-fn (fn [ctx]
+                    (reset! observed (:hook/touched ctx))
+                    ctx)
+          bound-step (make-bound-step-with-svo
+                       step-fn 1 []
+                       {:subject :alice :verb :doit :interface :test})
+          plan (make-plan [bound-step])
+          opts {:interfaces (mock/interfaces {:test {:adapter :test-adapter}})
+                :adapter-registry (mock/registry {:test-adapter {:on-provision hook}})}
+          result (exec/execute-scenario plan {} opts)]
+      (is (= :passed (:status result)))
+      (is (= :yes @observed)
+          "Step body sees the key the hook added to ctx"))))
+
+(deftest test-on-provision-hook-absent-is-no-op
+  (testing "Adapter with no :on-provision provisions cleanly; ctx unchanged by hook step"
+    (let [observed-keys (atom nil)
+          step-fn (fn [ctx]
+                    (reset! observed-keys (set (keys ctx)))
+                    ctx)
+          bound-step (make-bound-step-with-svo
+                       step-fn 1 []
+                       {:subject :alice :verb :doit :interface :test})
+          plan (make-plan [bound-step])
+          opts {:interfaces (mock/interfaces {:test {:adapter :test-adapter}})
+                :adapter-registry (mock/registry {:test-adapter {}})}
+          result (exec/execute-scenario plan {} opts)]
+      (is (= :passed (:status result))
+          "No hook → no error")
+      (is (contains? @observed-keys :cap/test.alice)
+          "Capability still provisioned without a hook")
+      (is (not-any? #{:hook/touched :sms/scenario-start-ts} @observed-keys)
+          "No hook-side-effects in ctx"))))
+
+(deftest test-on-provision-hook-throw-fails-scenario
+  (testing "Hook exceptions surface as :adapter/on-provision-failed"
+    (let [hook (fn [_ctx _impl]
+                 (throw (ex-info "boom" {:reason :test})))
+          bound-step (make-bound-step-with-svo
+                       (fn [ctx] ctx) 1 []
+                       {:subject :alice :verb :doit :interface :test})
+          plan (make-plan [bound-step])
+          opts {:interfaces (mock/interfaces {:test {:adapter :test-adapter}})
+                :adapter-registry (mock/registry {:test-adapter {:on-provision hook}})}
+          result (exec/execute-scenario plan {} opts)
+          step-error (:error (first (:steps result)))]
+      (is (= :failed (:status result)))
+      (is (= :adapter/on-provision-failed (:type step-error))
+          "Error type is the structured hook-failure tag")
+      (is (= :test-adapter (:adapter step-error))
+          "Adapter name is included in the error map")
+      (is (re-find #"boom" (:message step-error))
+          "Hook's exception message is surfaced in :message"))))
+
+(deftest test-on-provision-hook-fires-for-shared-impl-reuse
+  (testing "Shared-impl reuse on second subject still invokes the hook"
+    (let [calls (atom 0)
+          hook (fn [ctx _impl] (swap! calls inc) ctx)
+          interfaces {:test {:type :test
+                             :adapter :test-adapter
+                             :config {}
+                             :shared-impl? true}}
+          step-alice (make-bound-step-with-svo
+                       (fn [ctx] ctx) 1 []
+                       {:subject :alice :verb :doit :interface :test})
+          step-bob (make-bound-step-with-svo
+                     (fn [ctx] ctx) 1 []
+                     {:subject :bob :verb :doit :interface :test})
+          plan (make-plan [step-alice step-bob])
+          opts {:interfaces interfaces
+                :adapter-registry (mock/registry {:test-adapter {:on-provision hook}})}
+          result (exec/execute-scenario plan {} opts)]
+      (is (= :passed (:status result)))
+      (is (= 2 @calls)
+          "Hook fires for both Alice and Bob; idempotency is the hook's job, not the engine's"))))
+
+;; -----------------------------------------------------------------------------
+;; Scoped-Eager Provisioning Tests (sl-aa5)
+;;
+;; The eager phase fires before any step in the scenario runs. Per-step
+;; ensure-capability calls remain in place — they no-op when ctx already
+;; has the cap. These tests use the `:provisioning :eager` opt to enable
+;; the phase; bare callers (REPL) keep today's lazy behavior.
+;; -----------------------------------------------------------------------------
+
+(deftest test-eager-provisions-before-first-step
+  (testing ":provisioning :eager fires factory before any step body runs"
+    (let [events (atom [])
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          registry (mock/registry {:web {:events events}})
+          step-fn (fn [ctx]
+                    (swap! events conj [:step :s1])
+                    ;; Capability is already present; lazy ensure-capability
+                    ;; in classify-and-execute-step finds it and no-ops.
+                    (is (cap/capability-present? ctx :web :alice))
+                    ctx)
+          bound (make-bound-step-with-svo
+                  step-fn 1 []
+                  {:subject :alice :verb :click :interface :web})
+          plan (make-plan [bound])
+          opts {:interfaces interfaces
+                :adapter-registry registry
+                :provisioning :eager}
+          result (exec/execute-scenario plan {} opts)]
+      (is (= :passed (:status result)))
+      (is (= [[:provision :web] [:step :s1]] @events)
+          "Provisioning happens before the first step body"))))
+
+(deftest test-eager-fails-fast-on-bad-creds
+  (testing "Eager provisioning failure → first step :failed, rest :skipped, no step body runs"
+    (let [step1-ran? (atom false)
+          step2-ran? (atom false)
+          events (atom [])
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          registry (mock/registry {:web {:events events :fail? true}})
+          s1 (make-bound-step-with-svo
+               (fn [ctx] (reset! step1-ran? true) ctx) 1 []
+               {:subject :alice :verb :click :interface :web})
+          s2 (make-bound-step-with-svo
+               (fn [ctx] (reset! step2-ran? true) ctx) 1 []
+               {:subject :alice :verb :fill :interface :web})
+          plan (make-plan [s1 s2])
+          opts {:interfaces interfaces
+                :adapter-registry registry
+                :provisioning :eager}
+          result (exec/execute-scenario plan {} opts)
+          [r1 r2] (:steps result)]
+      (is (= :failed (:status result)))
+      (is (= :failed (:status r1)) "First step bears the failure")
+      (is (= :skipped (:status r2)) "Remaining steps skipped")
+      (is (not @step1-ran?) "No step body executed")
+      (is (not @step2-ran?))
+      (is (= :svo/provisioning-failed (-> r1 :error :type))
+          "Single-interface failure surfaces verbatim, not wrapped"))))
+
+(deftest test-eager-respects-shared-impl
+  (testing ":shared-impl? interface provisioned once across multiple subjects"
+    (let [events (atom [])
+          interfaces (mock/interfaces {:sms {:adapter :sms :shared-impl? true}})
+          registry (mock/registry {:sms {:events events}})
+          alice (make-bound-step-with-svo
+                  (fn [ctx] ctx) 1 []
+                  {:subject :alice :verb :receive :interface :sms})
+          bob (make-bound-step-with-svo
+                (fn [ctx] ctx) 1 []
+                {:subject :bob :verb :receive :interface :sms})
+          plan (make-plan [alice bob])
+          opts {:interfaces interfaces
+                :adapter-registry registry
+                :provisioning :eager}
+          result (exec/execute-scenario plan {} opts)
+          provision-calls (filter #(= :provision (first %)) @events)]
+      (is (= :passed (:status result)))
+      (is (= 1 (count provision-calls))
+          "Factory invoked exactly once; Bob's target reused Alice's impl via find-existing-shared-impl")
+      (is (cap/capability-present? (:scenario-ctx result) :sms :alice))
+      (is (cap/capability-present? (:scenario-ctx result) :sms :bob))
+      (is (= (cap/get-capability (:scenario-ctx result) :sms :alice)
+             (cap/get-capability (:scenario-ctx result) :sms :bob))
+          "Both subjects point at the same impl"))))
+
+(deftest test-eager-aggregates-errors-across-interfaces
+  (testing "Multiple interface failures aggregate cleanly without losing context"
+    (let [events (atom [])
+          interfaces (mock/interfaces {:web {:adapter :web}
+                                       :sms {:adapter :sms}})
+          registry (mock/registry {:web {:events events :fail? true}
+                                   :sms {:events events :fail? true}})
+          web-step (make-bound-step-with-svo
+                     (fn [ctx] ctx) 1 []
+                     {:subject :alice :verb :click :interface :web})
+          sms-step (make-bound-step-with-svo
+                     (fn [ctx] ctx) 1 []
+                     {:subject :alice :verb :receive :interface :sms})
+          plan (make-plan [web-step sms-step])
+          opts {:interfaces interfaces
+                :adapter-registry registry
+                :provisioning :eager}
+          result (exec/execute-scenario plan {} opts)
+          err (-> result :steps first :error)]
+      (is (= :failed (:status result)))
+      (is (= :scenario/eager-provisioning-failed (:type err))
+          "Multi-interface failure wraps under a scenario-level type")
+      (is (= 2 (count (:errors err)))
+          "Both per-interface errors preserved")
+      (is (= #{:web :sms} (set (map :interface (:errors err))))
+          "Each original error keeps its :interface tag"))))
+
+(deftest test-eager-no-targets-does-nothing
+  (testing "Plan with no SVO'd steps doesn't invoke the registry"
+    (let [events (atom [])
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          registry (mock/registry {:web {:events events}})
+          ;; Plain step, no svo
+          bound (make-bound-step (fn [ctx] (assoc ctx :ran true)) 1 [])
+          plan (make-plan [bound])
+          opts {:interfaces interfaces
+                :adapter-registry registry
+                :provisioning :eager}
+          result (exec/execute-scenario plan {} opts)]
+      (is (= :passed (:status result)))
+      (is (empty? @events) "No factory call when nothing needs provisioning"))))
+
+(deftest test-eager-multi-interface-parallel-both-provisioned
+  (testing "Multi-interface scenario provisions all distinct interfaces (parallel branch)"
+    (let [events (atom [])
+          interfaces (mock/interfaces {:web {:adapter :web}
+                                       :api {:adapter :api}})
+          registry (mock/registry {:web {:events events}
+                                   :api {:events events}})
+          web-step (make-bound-step-with-svo
+                     (fn [ctx] ctx) 1 []
+                     {:subject :alice :verb :click :interface :web})
+          api-step (make-bound-step-with-svo
+                     (fn [ctx] ctx) 1 []
+                     {:subject :system :verb :call :interface :api})
+          plan (make-plan [web-step api-step])
+          opts {:interfaces interfaces
+                :adapter-registry registry
+                :provisioning :eager}
+          result (exec/execute-scenario plan {} opts)
+          ifaces-provisioned (->> @events (filter #(= :provision (first %))) (map second) set)]
+      (is (= :passed (:status result)))
+      (is (= #{:web :api} ifaces-provisioned)
+          "Both interfaces brought up before any step ran")
+      (is (cap/capability-present? (:scenario-ctx result) :web :alice))
+      (is (cap/capability-present? (:scenario-ctx result) :api :system)))))
+
+(deftest test-lazy-mode-opt-out-preserves-old-timing
+  (testing ":provisioning :lazy reverts to per-step on-first-touch"
+    (let [events (atom [])
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          registry (mock/registry {:web {:events events}})
+          ;; First step is interface-less (no provisioning); second touches :web.
+          ;; With :lazy, the :web factory should fire AFTER step 1's body runs.
+          s1 (make-bound-step
+               (fn [ctx] (swap! events conj [:step :pre]) ctx) 1 [])
+          s2 (make-bound-step-with-svo
+               (fn [ctx] (swap! events conj [:step :web]) ctx) 1 []
+               {:subject :alice :verb :click :interface :web})
+          plan (make-plan [s1 s2])
+          opts {:interfaces interfaces
+                :adapter-registry registry
+                :provisioning :lazy}
+          result (exec/execute-scenario plan {} opts)]
+      (is (= :passed (:status result)))
+      ;; Step :pre ran first, then provisioning happened (lazy), then step :web
+      (is (= [[:step :pre] [:provision :web] [:step :web]] @events)
+          "Lazy: provisioning interleaves with steps, not all upfront"))))
+
+(deftest test-repl-path-bare-execute-stays-lazy
+  (testing "execute-scenario without :provisioning opt → no eager phase (REPL default)"
+    (let [events (atom [])
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          registry (mock/registry {:web {:events events}})
+          s1 (make-bound-step
+               (fn [ctx] (swap! events conj [:step :pre]) ctx) 1 [])
+          s2 (make-bound-step-with-svo
+               (fn [ctx] (swap! events conj [:step :web]) ctx) 1 []
+               {:subject :alice :verb :click :interface :web})
+          plan (make-plan [s1 s2])
+          ;; NO :provisioning key — REPL-style invocation
+          opts {:interfaces interfaces
+                :adapter-registry registry}
+          result (exec/execute-scenario plan {} opts)]
+      (is (= :passed (:status result)))
+      (is (= [[:step :pre] [:provision :web] [:step :web]] @events)
+          "Bare exec call defaults to lazy; :web provisioned only when its step runs"))))
+
+(deftest test-eager-skips-synthetic-steps
+  (testing "Synthetic macro wrappers are excluded from eager target collection"
+    (let [events (atom [])
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          registry (mock/registry {:web {:events events}})
+          ;; A synthetic step shaped like a macro wrapper — has :svo-ish
+          ;; metadata but should be ignored by the eager scanner.
+          synthetic {:status :matched
+                     :step {:step/id (java.util.UUID/randomUUID)
+                            :step/text "macro wrapper"
+                            :step/synthetic? true
+                            :step/macro {:role :call :step-count 0}}
+                     :binding {:fn (fn [ctx] ctx) :arity 1 :captures []
+                               :svo {:subject :alice :verb :do :interface :web}}}
+          plan (make-plan [synthetic])
+          opts {:interfaces interfaces
+                :adapter-registry registry
+                :provisioning :eager}
+          result (exec/execute-scenario plan {} opts)]
+      (is (= :passed (:status result)))
+      (is (empty? @events)
+          "Synthetic step's svo shouldn't trigger eager provisioning"))))

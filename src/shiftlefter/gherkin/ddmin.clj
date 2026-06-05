@@ -12,8 +12,40 @@
 
    CLI:
      sl gherkin ddmin <path> --mode parse|pickles|lex|auto [--strategy structured|raw-lines]"
-  (:require [shiftlefter.gherkin.api :as api]
+  (:require [clojure.spec.alpha :as s]
+            [shiftlefter.gherkin.api :as api]
             [shiftlefter.gherkin.fuzz :as fuzz]))
+
+;; -----------------------------------------------------------------------------
+;; Specs — ddmin Option & Result Shapes
+;; -----------------------------------------------------------------------------
+
+(s/def ::mode #{:parse :pickles :lex :auto})
+(s/def ::strategy #{:structured :raw-lines})
+(s/def ::timeout-ms pos-int?)
+(s/def ::budget-ms pos-int?)
+(s/def ::max-iterations pos-int?)
+(s/def ::baseline-sig (s/nilable map?))
+
+(s/def ::ddmin-opts
+  (s/keys :opt-un [::mode ::strategy ::timeout-ms ::budget-ms
+                   ::max-iterations ::baseline-sig]))
+
+(s/def ::original string?)
+(s/def ::minimized string?)
+(s/def ::minimized-sig map?)
+(s/def ::signatures-match? boolean?)
+(s/def ::steps nat-int?)
+(s/def ::removed nat-int?)
+(s/def ::stopped-reason keyword?)
+(s/def ::reduction-ratio double?)
+(s/def ::total-ms nat-int?)
+(s/def ::timing (s/keys :req-un [::total-ms]))
+
+(s/def ::ddmin-result
+  (s/keys :req-un [::original ::minimized ::baseline-sig ::minimized-sig
+                   ::signatures-match? ::steps ::removed ::strategy ::mode
+                   ::timing ::stopped-reason ::reduction-ratio]))
 
 ;; -----------------------------------------------------------------------------
 ;; Signature matching (from FZ3)

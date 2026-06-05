@@ -393,3 +393,27 @@
     (if (seq errors)
       (throw (ex-info "Parse errors" {:errors errors}))
       (:output (format-canonical ast)))))
+
+;; -----------------------------------------------------------------------------
+;; Additional fdefs
+;; -----------------------------------------------------------------------------
+
+(s/fdef roundtrip
+  :args (s/cat :input string?)
+  :ret string?)
+
+(s/fdef roundtrip-ok?
+  :args (s/cat :input string?)
+  :ret boolean?)
+
+(s/fdef format-canonical
+  :args (s/cat :ast (s/coll-of :shiftlefter.gherkin.parser/ast-node))
+  :ret (s/keys :req-un [::status]))
+
+(s/fdef fmt-canonical
+  :args (s/cat :path ::path)
+  :ret ::fmt-result)
+
+(s/fdef canonical
+  :args (s/cat :input string?)
+  :ret string?)

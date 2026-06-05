@@ -1,15 +1,24 @@
 ;; Project-Specific Web Verbs
 ;;
 ;; This glossary EXTENDS the framework's default web verbs.
-;; Default verbs include: :click, :fill, :see, :navigate, :submit, :hover, etc.
+;; Default verbs include: :click, :fill, :see, :navigate, :scroll, :press, etc.
 ;;
-;; Add project-specific verbs here that aren't in the defaults.
-;; These might be domain-specific actions unique to your application.
+;; Each verb declares its valence as a closed set of frames; each frame
+;; declares its args (slot names beyond S-V-O) and a human-readable
+;; surface pattern. See the framework's verbs-web.edn for documentation.
 
 {:type :web
  :verbs
  {;; Domain-specific verbs for this application
-  :login {:desc "Authenticate with username/password"}
-  :logout {:desc "End authenticated session"}
-  :search {:desc "Execute a search query"}
-  :filter {:desc "Apply filter criteria to results"}}}
+  :login  {:desc "Authenticate with username/password"
+           :frames {:default {:args [:username :password]
+                              :pattern "S logs in as USERNAME with PASSWORD"}}}
+  :logout {:desc "End authenticated session"
+           :frames {:default {:args []
+                              :pattern "S logs out"}}}
+  :search {:desc "Execute a search query"
+           :frames {:default {:args [:query]
+                              :pattern "S searches for QUERY"}}}
+  :filter {:desc "Apply filter criteria to results"
+           :frames {:default {:args [:criteria]
+                              :pattern "S filters by CRITERIA"}}}}}

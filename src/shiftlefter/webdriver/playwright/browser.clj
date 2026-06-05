@@ -313,6 +313,7 @@
    Closes the browser and releases the Playwright instance."
   [pw-browser]
   (let [{:keys [browser playwright]} (:pw-context pw-browser)]
+    ;; Intentional bare catches: cleanup should not throw even if browser already closed
     (try (.close browser) (catch Exception _))
     (try (.close playwright) (catch Exception _))))
 

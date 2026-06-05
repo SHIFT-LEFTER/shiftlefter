@@ -23,7 +23,7 @@ SVO validation adds optional type-checking to your step definitions:
 The framework will:
 1. **Extract** subject/verb/object from captures at bind time
 2. **Validate** against glossaries (known subjects, known verbs)
-3. **Report** typos with suggestions ("Did you mean :alice?")
+3. **Report** typos with suggestions ("Did you mean :user/alice?")
 4. **Auto-provision** capabilities when steps reference interfaces
 
 ---
@@ -45,11 +45,13 @@ my-project/
 **subjects.edn:**
 ```clojure
 {:subjects
- {:alice {:desc "Standard customer"}
-  :bob {:desc "New customer in onboarding"}
+ {:user  {:desc "Standard customer"
+          :instances [:alice :bob]}
   :admin {:desc "Administrative user"}
   :guest {:desc "Unauthenticated visitor"}}}
 ```
+
+Top-level keys are **types** (roles). Types with `:instances` group multiple session handles; types without are **singletons** used directly in steps. In Gherkin, use `:user/alice` to identify both the role and the actor.
 
 **verbs-web.edn:**
 ```clojure
@@ -98,10 +100,10 @@ Unknown subjects or verbs are reported:
 
 ```
 SVO validation issues:
-Unknown subject :alcie in step "When Alcie clicks the button"
+Unknown subject :user/alcie in step "When :user/alcie clicks the button"
        at features/login.feature:12
-       Known subjects: :alice, :admin, :guest, :bob
-       Did you mean: :alice?
+       Known subjects: :user, :admin, :guest, :user/alice, :user/bob
+       Did you mean: :user/alice?
 ```
 
 ---
@@ -152,6 +154,10 @@ Subjects are normalized to keywords:
 - `"Admin"` → `:admin`
 - `"System Admin"` → `:system-admin`
 
+The recommended Gherkin form is `:type/instance` (e.g. `:user/alice`), which makes the actor's role explicit. Both `:user/alice` and bare `:alice` route to the same browser session — the instance keyword (`:alice`) is the session key.
+
+In verbose console output, `:user/alice opens the browser` displays as `[:user] alice opens the browser`.
+
 ### Legacy vs Shifted Steps
 
 **Legacy steps** work unchanged:
@@ -172,7 +178,40 @@ Subjects are normalized to keywords:
   ...)
 ```
 
-You can migrate incrementally - mix legacy and shifted steps in the same project.
+SVO metadata is additive — adding it to one step definition doesn't require adding it to all of them.
+
+### Step Binding Rules
+
+How a step in your feature file finds its definition. Two cases, governed by whether the step has an interface annotation.
+
+**Rule 1 — No annotation.** The step text is matched against *every* registered step definition across all interfaces. Exactly one stepdef must match:
+
+- 0 matches → `:undefined` (planning error)
+- 1 match → bound
+- 2+ matches → `:ambiguous` (planning error)
+
+```gherkin
+When :user/alice clicks the submit button
+```
+
+Whichever stepdef matches wins, regardless of its `:interface` metadata.
+
+**Rule 2 — With `[:interface]` annotation.** The step text is prefixed with an explicit interface keyword, e.g. `[:sms]`. This narrows the candidate pool to stepdefs whose `:interface` metadata equals that keyword. Within that filtered set, the same 0/1/2+ rule applies.
+
+```gherkin
+Then [:sms] :user/alice receives a message containing '(\d{6})'
+```
+
+Only stepdefs registered with `:interface :sms` are considered. It's a shorthand for "bind this step to something tagged `:sms`, not anything else." Stepdefs without `:interface` metadata (the legacy escape hatch) are excluded from annotated binding.
+
+The annotation is also an assertion: if `:sms` isn't configured under `:interfaces` in your `shiftlefter.edn`, you get `:annotation/unknown-interface` at planning time — catches typos and missing config early.
+
+**When you'd want each:**
+
+- Rule 1 is the default and right for most steps. Patterns are usually distinct enough that ambiguity doesn't arise.
+- Rule 2 is for the case where the *same* step vocabulary legitimately applies across multiple channels. A pattern like `(\S+) receives a message` can be registered under `:sms`, `:whatsapp`, and `:email`; the annotation picks which one.
+
+Annotations are a Shifted-mode feature. In vanilla mode `[:foo]` is treated as literal step text.
 
 ---
 
@@ -233,18 +272,26 @@ Enforcement levels:
 
 ```clojure
 {:subjects
- {;; Human actors
-  :alice {:desc "Standard customer with verified account"}
-  :bob {:desc "New customer in onboarding"}
-  :admin {:desc "Administrative user with elevated privileges"}
+ {;; Types with instances — use :type/instance in Gherkin
+  :user  {:desc "Standard application user"
+          :instances [:alice :bob]}
+  :admin {:desc "Administrative user"
+          :instances [:pat]}
+
+  ;; Singletons — types without :instances, used directly
   :guest {:desc "Unauthenticated visitor"}
 
-  ;; System actors (for setup/teardown)
-  :system/test-setup {:desc "Test harness for fixture creation"}
-  :system/database {:desc "Database operations actor"}}}
+  ;; Namespaced types — for categorization
+  :system/test-setup {:desc "Test harness for fixture creation"}}}
 ```
 
-Namespaced keywords (`:system/test-setup`) are supported for categorization.
+**Types** are the top-level keys (`:user`, `:admin`, `:guest`, `:system/test-setup`). Each type has a `:desc` and optionally an `:instances` vector.
+
+- **Types with `:instances`** — group multiple session handles under one role. In Gherkin, refer to them as `:user/alice`, `:user/bob`, `:admin/pat`.
+- **Singletons** — types without `:instances` (like `:guest`). Use the type keyword directly in Gherkin steps.
+- **Namespaced types** — Clojure namespaced keywords (`:system/test-setup`) are supported for organizing non-human actors.
+
+The old flat format (each entry a standalone subject with no `:instances`) still works — each entry is treated as a singleton.
 
 ### Verb Glossary
 
@@ -336,8 +383,9 @@ Start with your actors:
 ```clojure
 ;; subjects.edn
 {:subjects
- {:alice {:desc "Test user 1"}
-  :bob {:desc "Test user 2"}}}
+ {:user {:desc "Standard test user"
+         :instances [:alice :bob]}
+  :admin {:desc "Administrative user"}}}
 ```
 
 Add domain-specific verbs:
@@ -429,10 +477,10 @@ Capabilities are cleaned up at scenario end (ephemeral mode).
 ### Unknown Subject
 
 ```
-Unknown subject :alcie in step "When Alcie clicks the button"
+Unknown subject :user/alcie in step "When :user/alcie clicks the button"
        at features/login.feature:12
-       Known subjects: :alice, :admin, :guest, :bob
-       Did you mean: :alice?
+       Known subjects: :user, :admin, :guest, :user/alice, :user/bob, :admin/pat
+       Did you mean: :user/alice?
 ```
 
 ### Unknown Verb
@@ -473,12 +521,12 @@ Steps with SVO metadata emit `:step/svoi` events:
 {:type :step/svoi
  :ts "2026-01-10T..."
  :run-id "uuid"
- :payload {:subject :alice
+ :payload {:subject :user/alice
            :verb :click
            :object "the login button"
            :interface :web
            :interface-type :web
-           :step-text "When Alice clicks the login button"
+           :step-text "When :user/alice clicks the login button"
            :location {:uri "login.feature" :line 12}}}
 ```
 

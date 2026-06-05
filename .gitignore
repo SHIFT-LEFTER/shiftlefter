@@ -13,8 +13,20 @@ fuzz/
 target/
 **/node_modules/
 
+# Project-local data (Asami graph, future SQLite exports)
+.shiftlefter/
+
 # User config (use shiftlefter.edn.example as template)
 /shiftlefter.edn
 
 # Testing infrastructure
 _docs/testing/node_modules/
+_docs
+CLAUDE.md
+
+# Agent tooling (user-specific)
+.claude/
+.glance-hue
+
+# bv (beads viewer) local config and caches
+.bv/

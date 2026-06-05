@@ -59,7 +59,8 @@
   (s/keys :req-un [::keyword ::location ::name ::description ::tags ::language ::children]))
 
 (s/fdef loc->json
-  :args (s/cat :loc ::loc/location)
+  :args (s/cat :loc (s/or :record ::loc/location
+                          :map (s/keys :req-un [::loc/line ::loc/column])))
   :ret ::json-location)
 
 (s/fdef step->json
@@ -80,6 +81,48 @@
 
 (s/fdef tokens->ndjson
   :args (s/cat :tokens sequential?)
+  :ret string?)
+
+;; Specs for remaining public API functions
+(s/fdef loc-key
+  :args (s/cat :loc (s/keys :req-un [::line ::column]))
+  :ret (s/tuple pos-int? pos-int?))
+
+(s/fdef diff-ndjson
+  :args (s/cat :our-file string? :expected-file string?)
+  :ret boolean?)
+
+(s/fdef download-testdata
+  :args (s/cat)
+  :ret string?)
+
+(s/fdef run-compliance
+  :args (s/cat :testdata-dir string?)
+  :ret map?)
+
+(s/fdef save-failure-artifacts!
+  :args (s/cat :run-dir string? :report map?)
+  :ret map?)
+
+(s/fdef ast->ndjson-with-ids
+  :args (s/cat :ast sequential? :uri string? :tokens (s/? (s/nilable sequential?)))
+  :ret (s/keys :req-un [::ndjson ::next-id ::id-map]))
+
+(s/def ::ndjson string?)
+(s/def ::next-id nat-int?)
+(s/def ::id-map map?)
+
+(s/fdef pickles->ndjson
+  :args (s/cat :pickles sequential?)
+  :ret string?)
+
+(s/fdef pickles->ndjson-with-ids
+  :args (s/cat :pickles sequential?
+               :ast-id-map map?
+               :next-id nat-int?
+               :uri string?
+               :ast sequential?
+               :language (s/? string?))
   :ret string?)
 
 ;; Forward declaration for functions used before definition
@@ -180,187 +223,180 @@
                       (str/replace "\\`" "`"))]
     unescaped))
 
+;; -----------------------------------------------------------------------------
+;; tokens->ndjson Helpers
+;;
+;; Each helper takes reduce state + token fields and returns updated state.
+;; State shape: {:lines [...] :docstring-indent int? :in-description bool :seen-structural? bool}
+;; -----------------------------------------------------------------------------
+
+(defn- format-docstring-ndjson
+  "Handle docstring-related tokens: separator, inner unknown-line, inner blank.
+   Returns updated reduce state, or nil if token is not docstring-related."
+  [{:keys [lines docstring-indent in-description seen-structural?]}
+   {:keys [line col token-type value raw]}]
+  (cond
+    (= token-type :docstring-separator)
+    (let [fence (if (= :backtick (:fence value)) "```" "\"\"\"")
+          media (or (:language value) "")
+          new-indent (if docstring-indent nil (dec col))]
+      {:lines (conj lines (str "(" line ":" col ")DocStringSeparator:()" fence "/" media "/"))
+       :docstring-indent new-indent
+       :in-description in-description
+       :seen-structural? seen-structural?})
+
+    (and docstring-indent (= token-type :unknown-line))
+    (let [content (strip-docstring-indent raw docstring-indent)]
+      {:lines (conj lines (str "(" line ":1)Other:/" content "/"))
+       :docstring-indent docstring-indent
+       :in-description in-description
+       :seen-structural? seen-structural?})
+
+    (and docstring-indent (= token-type :blank))
+    {:lines (conj lines (str "(" line ":1)Other://"))
+     :docstring-indent docstring-indent
+     :in-description in-description
+     :seen-structural? seen-structural?}))
+
+(def ^:private structural-keyword-config
+  "Token type → [ndjson-label default-keyword]"
+  {:feature-line          ["FeatureLine"  "Feature"]
+   :scenario-line         ["ScenarioLine" "Scenario"]
+   :scenario-outline-line ["ScenarioLine" "Scenario Outline"]
+   :background-line       ["BackgroundLine" "Background"]
+   :rule-line             ["RuleLine"     "Rule"]
+   :examples-line         ["ExamplesLine" "Examples"]})
+
+(defn- format-structural-keyword-ndjson
+  "Handle structural keyword tokens (feature, scenario, background, rule, examples).
+   Returns updated reduce state, or nil if token is not structural."
+  [{:keys [lines docstring-indent]}
+   {:keys [line col token-type value keyword-text]}]
+  (when-let [[label default-kw] (structural-keyword-config token-type)]
+    (let [kw (or keyword-text default-kw)
+          name (or value "")]
+      {:lines (conj lines (str "(" line ":" col ")" label ":()" kw "/" name "/"))
+       :docstring-indent docstring-indent
+       :in-description false
+       :seen-structural? true})))
+
+(defn- format-tag-ndjson
+  "Handle :tag-line tokens. Returns updated reduce state."
+  [{:keys [lines docstring-indent in-description seen-structural?]}
+   {:keys [line col value]}]
+  (let [tags (:tags value)
+        positions (:positions value)
+        tag-pairs (map (fn [tag pos] (str pos ":@" tag)) tags positions)
+        formatted (str/join "," tag-pairs)]
+    {:lines (conj lines (str "(" line ":" col ")TagLine://" formatted))
+     :docstring-indent docstring-indent
+     :in-description in-description
+     :seen-structural? seen-structural?}))
+
+(defn- format-table-row-ndjson
+  "Handle :table-row tokens. Returns updated reduce state."
+  [{:keys [lines docstring-indent seen-structural?]}
+   {:keys [line col value]}]
+  (let [raw (:raw value)
+        cells (:cells value)
+        cell-positions (calculate-table-cell-positions raw cells)
+        formatted-cells (str/join "," (map (fn [[c v]] (str c ":" v)) cell-positions))]
+    {:lines (conj lines (str "(" line ":" col ")TableRow://" formatted-cells))
+     :docstring-indent docstring-indent
+     :in-description false
+     :seen-structural? seen-structural?}))
+
+(defn- format-step-ndjson
+  "Handle :step-line tokens. Returns updated reduce state."
+  [{:keys [lines docstring-indent seen-structural?]}
+   {:keys [line col value keyword-text]}]
+  (let [[kw text] (if (map? value)
+                    [(name (:keyword value)) (:text value)]
+                    (let [[k & rest] (str/split (or value "") #" " 2)]
+                      [k (first rest)]))
+        kw-display (or keyword-text (str kw " "))
+        keyword-type (if (and keyword-text (str/starts-with? (str/trim keyword-text) "*"))
+                       "(Unknown)"
+                       (case (keyword (str/lower-case (or kw "")))
+                         :given "(Context)"
+                         :when "(Action)"
+                         :then "(Outcome)"
+                         :and "(Conjunction)"
+                         :but "(Conjunction)"
+                         "(Unknown)"))]
+    {:lines (conj lines (str "(" line ":" col ")StepLine:" keyword-type kw-display "/" (or text "") "/"))
+     :docstring-indent docstring-indent
+     :in-description false
+     :seen-structural? seen-structural?}))
+
+;; -----------------------------------------------------------------------------
+;; tokens->ndjson — Main
+;; -----------------------------------------------------------------------------
+
 (defn tokens->ndjson
   "Convert our token seq to plain-text format matching Cucumber .tokens. Pure projection."
   [tokens]
-  ;; Use reduce to track:
-  ;; - docstring-indent: base indentation when inside docstring (nil when not in docstring)
-  ;; - in-description: true when we've seen description text (unknown-line) after a structural keyword
-  ;;   Blank lines become Other:// when in-description, Empty:// otherwise
+  ;; Reduce state tracks:
+  ;; - docstring-indent: base indentation when inside docstring (nil when not)
+  ;; - in-description: true after description text (unknown-line) following structural keyword
   ;; - seen-structural?: true after first structural keyword (Feature/Scenario/etc)
-  ;;   Comments only enable description mode after we've seen a structural keyword
   (let [{:keys [lines]}
         (reduce
-         (fn [{:keys [lines docstring-indent in-description seen-structural?]} token]
+         (fn [{:keys [docstring-indent in-description seen-structural?] :as state} token]
            (let [loc (:location token)
-                 line (:line loc)
-                 col (or (:column loc) 1)
-                 token-type (:type token)
-                 value (:value token)
-                 raw (:raw token)
-                 keyword-text (:keyword-text token)]
-             (cond
-               (= token-type :eof)
-               {:lines (conj lines "EOF") :docstring-indent docstring-indent :in-description false :seen-structural? seen-structural?}
+                 t {:line (:line loc)
+                    :col (or (:column loc) 1)
+                    :token-type (:type token)
+                    :value (:value token)
+                    :raw (:raw token)
+                    :keyword-text (:keyword-text token)}]
+             (or
+              ;; Docstring tokens (separator, inner content)
+              (format-docstring-ndjson state t)
+              ;; Structural keywords (feature, scenario, background, rule, examples)
+              (when-not docstring-indent
+                (format-structural-keyword-ndjson state t))
+              ;; Dispatch remaining tokens by type
+              (case (:token-type t)
+                :eof
+                (assoc state :lines (conj (:lines state) "EOF") :in-description false)
 
-               (= token-type :docstring-separator)
-               ;; Toggle docstring state and record base indent
-               (let [fence (if (= :backtick (:fence value)) "```" "\"\"\"")
-                     media (or (:language value) "")
-                     new-indent (if docstring-indent nil (dec col))]  ; col is 1-indexed, indent is 0-indexed
-                 {:lines (conj lines (str "(" line ":" col ")DocStringSeparator:()" fence "/" media "/"))
-                  :docstring-indent new-indent
-                  :in-description in-description
-                  :seen-structural? seen-structural?})
+                :blank
+                (assoc state :lines (conj (:lines state)
+                                          (str "(" (:line t) ":" (:col t) ")"
+                                               (if in-description "Other" "Empty") "://")))
 
-               ;; Inside docstring: convert unknown-line and blank to Other
-               (and docstring-indent (= token-type :unknown-line))
-               (let [content (strip-docstring-indent raw docstring-indent)]
-                 {:lines (conj lines (str "(" line ":1)Other:/" content "/"))
-                  :docstring-indent docstring-indent
-                  :in-description in-description
-                  :seen-structural? seen-structural?})
+                :language-header
+                (assoc state :lines (conj (:lines state)
+                                          (str "(" (:line t) ":" (:col t) ")Language:/" (:value t) "/")))
 
-               (and docstring-indent (= token-type :blank))
-               ;; Blank line inside docstring becomes Other://
-               {:lines (conj lines (str "(" line ":1)Other://"))
-                :docstring-indent docstring-indent
-                :in-description in-description
-                :seen-structural? seen-structural?}
+                :comment
+                (let [raw-content (io/strip-trailing-eol (:raw t))]
+                  (assoc state
+                         :lines (conj (:lines state)
+                                      (str "(" (:line t) ":1)Comment:/" raw-content "/"))
+                         :in-description (if seen-structural? true in-description)))
 
-               ;; Normal tokens outside docstring
-               (= token-type :blank)
-               ;; Blank in description context becomes Other, otherwise Empty
-               {:lines (conj lines (str "(" line ":" col ")" (if in-description "Other" "Empty") "://"))
-                :docstring-indent docstring-indent
-                :in-description in-description
-                :seen-structural? seen-structural?}
+                :tag-line
+                (format-tag-ndjson state t)
 
-               (= token-type :language-header)
-               {:lines (conj lines (str "(" line ":" col ")Language:/" value "/"))
-                :docstring-indent docstring-indent
-                :in-description in-description
-                :seen-structural? seen-structural?}
+                :table-row
+                (format-table-row-ndjson state t)
 
-               (= token-type :comment)
-               ;; Cucumber uses "Comment:/" with raw content including leading whitespace
-               ;; Column is always 1 for comments
-               ;; Comments only enable description mode after we've seen a structural keyword
-               (let [raw-content (io/strip-trailing-eol raw)]
-                 {:lines (conj lines (str "(" line ":1)Comment:/" raw-content "/"))
-                  :docstring-indent docstring-indent
-                  :in-description (if seen-structural? true in-description)
-                  :seen-structural? seen-structural?})
+                :step-line
+                (format-step-ndjson state t)
 
-               (= token-type :tag-line)
-               ;; TagLine format: //col:@tag,col:@tag (all tags on one line)
-               ;; Lexer provides correct positions in :positions
-               (let [tags (:tags value)
-                     positions (:positions value)
-                     tag-pairs (map (fn [tag pos] (str pos ":@" tag)) tags positions)
-                     formatted (str/join "," tag-pairs)]
-                 {:lines (conj lines (str "(" line ":" col ")TagLine://" formatted))
-                  :docstring-indent docstring-indent
-                  :in-description in-description
-                  :seen-structural? seen-structural?})
+                :unknown-line
+                (let [content (io/strip-trailing-eol (:raw t))]
+                  (assoc state
+                         :lines (conj (:lines state)
+                                      (str "(" (:line t) ":1)Other:/" content "/"))
+                         :in-description true))
 
-               ;; Structural keywords reset description mode and set seen-structural?
-               (= token-type :feature-line)
-               (let [kw (or keyword-text "Feature")
-                     name (or value "")]
-                 {:lines (conj lines (str "(" line ":" col ")FeatureLine:()" kw "/" name "/"))
-                  :docstring-indent docstring-indent
-                  :in-description false
-                  :seen-structural? true})
-
-               (= token-type :scenario-line)
-               (let [kw (or keyword-text "Scenario")
-                     name (or value "")]
-                 {:lines (conj lines (str "(" line ":" col ")ScenarioLine:()" kw "/" name "/"))
-                  :docstring-indent docstring-indent
-                  :in-description false
-                  :seen-structural? true})
-
-               (= token-type :scenario-outline-line)
-               (let [kw (or keyword-text "Scenario Outline")
-                     name (or value "")]
-                 {:lines (conj lines (str "(" line ":" col ")ScenarioLine:()" kw "/" name "/"))
-                  :docstring-indent docstring-indent
-                  :in-description false
-                  :seen-structural? true})
-
-               (= token-type :background-line)
-               (let [kw (or keyword-text "Background")
-                     name (or value "")]
-                 {:lines (conj lines (str "(" line ":" col ")BackgroundLine:()" kw "/" name "/"))
-                  :docstring-indent docstring-indent
-                  :in-description false
-                  :seen-structural? true})
-
-               (= token-type :rule-line)
-               (let [kw (or keyword-text "Rule")
-                     name (or value "")]
-                 {:lines (conj lines (str "(" line ":" col ")RuleLine:()" kw "/" name "/"))
-                  :docstring-indent docstring-indent
-                  :in-description false
-                  :seen-structural? true})
-
-               (= token-type :examples-line)
-               (let [kw (or keyword-text "Examples")
-                     name (or value "")]
-                 {:lines (conj lines (str "(" line ":" col ")ExamplesLine:()" kw "/" name "/"))
-                  :docstring-indent docstring-indent
-                  :in-description false
-                  :seen-structural? true})
-
-               (= token-type :table-row)
-               ;; Table rows reset description mode
-               (let [raw (:raw value)
-                     cells (:cells value)
-                     cell-positions (calculate-table-cell-positions raw cells)
-                     formatted-cells (str/join "," (map (fn [[c v]] (str c ":" v)) cell-positions))]
-                 {:lines (conj lines (str "(" line ":" col ")TableRow://" formatted-cells))
-                  :docstring-indent docstring-indent
-                  :in-description false
-                  :seen-structural? seen-structural?})
-
-               (= token-type :step-line)
-               (let [;; Handle new format {:keyword :given :text "..."} or old format "Given ..."
-                     [kw text] (if (map? value)
-                                 [(name (:keyword value)) (:text value)]
-                                 (let [[k & rest] (str/split (or value "") #" " 2)]
-                                   [k (first rest)]))
-                     ;; Use keyword-text if available (preserves original keyword like "Soit ")
-                     kw-display (or keyword-text (str kw " "))
-                     ;; Step text is already trimmed in lexer (dialect/match-step-keyword)
-                     ;; Check if original keyword was * - should be Unknown, not Conjunction
-                     keyword-type (if (and keyword-text (str/starts-with? (str/trim keyword-text) "*"))
-                                    "(Unknown)"
-                                    (case (keyword (str/lower-case (or kw "")))
-                                      :given "(Context)"
-                                      :when "(Action)"
-                                      :then "(Outcome)"
-                                      :and "(Conjunction)"
-                                      :but "(Conjunction)"
-                                      "(Unknown)"))]
-                 {:lines (conj lines (str "(" line ":" col ")StepLine:" keyword-type kw-display "/" (or text "") "/"))
-                  :docstring-indent docstring-indent
-                  :in-description false
-                  :seen-structural? seen-structural?})  ; Steps reset description mode
-
-               ;; Unknown lines (description text) - output as Other, enable description mode
-               (= token-type :unknown-line)
-               (let [content (io/strip-trailing-eol raw)]
-                 {:lines (conj lines (str "(" line ":1)Other:/" content "/"))
-                  :docstring-indent docstring-indent
-                  :in-description true
-                  :seen-structural? seen-structural?})  ; Now in description mode
-
-               :else
-               {:lines (conj lines (str "(" line ":" col ")" (name token-type) ":()" value "/"))
-                :docstring-indent docstring-indent
-                :in-description in-description
-                :seen-structural? seen-structural?})))
+                ;; Fallback
+                (assoc state :lines (conj (:lines state)
+                                          (str "(" (:line t) ":" (:col t) ")"
+                                               (name (:token-type t)) ":()" (:value t) "/")))))))
          {:lines [] :docstring-indent nil :in-description false :seen-structural? false}
          tokens)]
     (str (str/join "\n" lines) "\n")))

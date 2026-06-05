@@ -184,11 +184,52 @@
 (s/def ::gherkin-string string?)
 (s/def ::canonical-keyword
   #{:feature :background :scenario :example :scenario-outline :rule :examples
-    :given :when :then :and :but :step
+    :given :when :then :and :but :step :star
     :language-header :tag :docstring-separator :table-row})
 
 (s/def ::dialect (s/map-of ::lang (s/map-of ::gherkin-string ::canonical-keyword)))
 
+;; Lookup list: vector of [prefix-string canonical-keyword] pairs
+(s/def ::prefix-pair (s/tuple string? ::canonical-keyword))
+(s/def ::keyword-lookup (s/coll-of ::prefix-pair :kind vector?))
+
+;; Match result shapes — functions return :keyword (not :canonical-keyword)
+(s/def ::keyword ::canonical-keyword)
+(s/def ::matched string?)
+(s/def ::text string?)
+(s/def ::name string?)
+
+;; Legacy dialect shape (string -> string -> keyword map)
+(s/def ::legacy-dialect (s/map-of string? (s/map-of string? ::canonical-keyword)))
+
 (s/fdef keyword-for
   :args (s/cat :s string? :lang (s/? keyword?))
   :ret (s/nilable ::canonical-keyword))
+
+(s/fdef get-dialect
+  :args (s/cat :lang string?)
+  :ret (s/nilable ::keyword-lookup))
+
+(s/fdef match-keyword
+  :args (s/cat :text string? :dialect ::keyword-lookup)
+  :ret (s/nilable (s/keys :req-un [::keyword ::matched])))
+
+(s/fdef match-step-keyword
+  :args (s/cat :text string? :dialect ::keyword-lookup)
+  :ret (s/nilable (s/keys :req-un [::keyword ::matched ::text])))
+
+(s/fdef match-block-keyword
+  :args (s/cat :text string? :dialect ::keyword-lookup)
+  :ret (s/nilable (s/keys :req-un [::keyword ::matched ::name])))
+
+(s/fdef language-exists?
+  :args (s/cat :lang string?)
+  :ret boolean?)
+
+(s/fdef english-only-dialect
+  :args (s/cat)
+  :ret map?)
+
+(s/fdef current-dialect
+  :args (s/cat)
+  :ret map?)

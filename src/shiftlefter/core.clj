@@ -526,7 +526,7 @@
           (if (:signatures-match? result) 0 1))
 
         ;; Run on single file
-        (let [content (slurp resolved-path)
+        (let [content (io/slurp-utf8 resolved-path)
               result (ddmin/ddmin content opts)]
           (if (= :no-failure (:reason (:baseline-sig result)))
             (do

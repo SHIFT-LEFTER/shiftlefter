@@ -19,8 +19,22 @@
 (s/def ::input string?)
 (s/def ::token-seq (s/coll-of ::tokens/token :kind seq?))
 
+(s/def ::lines (s/coll-of string?))
+(s/def ::line-idx nat-int?)
+(s/def ::token-idx nat-int?)
+(s/def ::lang string?)
+(s/def ::docstring-state (s/nilable #{:triple-quote :backtick}))
+
 (s/fdef lex
   :args (s/cat :input ::input)
+  :ret ::token-seq)
+
+(s/fdef lazy-lex-helper
+  :args (s/cat :lines ::lines
+               :line-idx ::line-idx
+               :token-idx ::token-idx
+               :lang ::lang
+               :docstring-state ::docstring-state)
   :ret ::token-seq)
 
 ;; -----------------------------------------------------------------------------

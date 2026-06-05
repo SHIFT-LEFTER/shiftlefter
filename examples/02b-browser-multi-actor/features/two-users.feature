@@ -1,16 +1,16 @@
 Feature: Multi-actor browser test
 
   Scenario: Two users login simultaneously
-    When :alice opens the browser to 'https://the-internet.herokuapp.com/login'
-    And :alice fills {:id "username"} with 'tomsmith'
-    And :alice fills {:id "password"} with 'SuperSecretPassword!'
-    And :alice clicks {:css "button[type='submit']"}
-    Then :alice should see 'You logged into a secure area!'
-    And :bob opens the browser to 'https://the-internet.herokuapp.com/login'
-    And :bob fills {:id "username"} with 'tomsmith'
-    And :bob fills {:id "password"} with 'SuperSecretPassword!'
-    And :bob clicks {:css "button[type='submit']"}
-    And :bob should see 'You logged into a secure area!'
-    And :alice should be on '/secure'
-    And :bob should be on '/secure'
+    When :user/alice opens the browser to 'https://the-internet.herokuapp.com/login'
+    And :user/alice fills {:id "username"} with 'tomsmith'
+    And :user/alice fills {:id "password"} with 'SuperSecretPassword!'
+    And :user/alice clicks {:css "button[type='submit']"}
+    Then :user/alice should see 'You logged into a secure area!'
+    And :user/bob opens the browser to 'https://the-internet.herokuapp.com/login'
+    And :user/bob fills {:id "username"} with 'tomsmith'
+    And :user/bob fills {:id "password"} with 'SuperSecretPassword!'
+    And :user/bob clicks {:css "button[type='submit']"}
+    And :user/bob should see 'You logged into a secure area!'
+    And :user/alice should be on '/secure'
+    And :user/bob should be on '/secure'
     And pause for 3 seconds

@@ -70,7 +70,7 @@
             [shiftlefter.stepengine.exec :as exec]
             [shiftlefter.runner.config :as config]
             [shiftlefter.svo.glossary :as glossary]
-            [shiftlefter.browser.ctx :as browser.ctx]
+            [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.subjects :as subjects]
             [shiftlefter.webdriver.etaoin.session :as session]
             [shiftlefter.webdriver.session-store :as store]))
@@ -141,10 +141,10 @@
 
    Example:
    ```clojure
-   (require '[shiftlefter.browser.ctx :as browser.ctx])
+   (require '[shiftlefter.capabilities.ctx :as cap])
 
    (def my-browser ...)
-   (set-ctx! :alice (browser.ctx/assoc-active-browser {} my-browser))
+   (set-ctx! :alice (cap/assoc-capability {} :web my-browser :ephemeral :alice))
 
    ;; Now steps can use the browser
    (as :alice \"opens the browser to 'https://example.com'\")
@@ -247,8 +247,13 @@
          {:status :ok :config (:config result)})
        result)))
   ([cfg]
-   (reset! repl-config cfg)
-   {:status :ok :config cfg}))
+   (if-not (map? cfg)
+     {:status :error
+      :type :repl/invalid-input
+      :message (str "Expected a config map, got " (if (nil? cfg) "nil" (type cfg)))}
+     (do
+       (reset! repl-config cfg)
+       {:status :ok :config cfg}))))
 
 (defn vanilla!
   "Disable Shifted mode, returning to vanilla mode.
@@ -344,6 +349,19 @@
 ;; Browser Lifecycle (internal)
 ;; -----------------------------------------------------------------------------
 
+(defn- ctx->web-browser
+  "Return the first :web capability impl from ctx, or nil if none.
+
+   Walks all :cap/* keys, keeps any whose interface (per
+   `cap/parse-capability-name`) is :web, and returns the first impl.
+   Handles both bare `:cap/web` and subject-keyed `:cap/web.<subject>`
+   storage."
+  [ctx-value]
+  (->> (cap/all-capabilities ctx-value)
+       (some (fn [[k v]]
+               (when (= :web (:interface (cap/parse-capability-name k)))
+                 (:impl v))))))
+
 (defn- close-or-persist-browser!
   "Handle browser session cleanup for a named context.
 
@@ -352,10 +370,8 @@
 
    Returns {:action :closed|:persisted|:none, ...} for observability."
   [ctx-name ctx-value]
-  (if-not (browser.ctx/browser-present? ctx-value)
-    {:action :none :ctx-name ctx-name}
-    (let [browser (browser.ctx/get-active-browser ctx-value)
-          is-surface? (surface? ctx-name)]
+  (if-let [browser (ctx->web-browser ctx-value)]
+    (let [is-surface? (surface? ctx-name)]
       (if is-surface?
         ;; Surface: detach + persist
         (let [handle {:webdriver-url (:webdriver-url browser)
@@ -366,7 +382,8 @@
         ;; Non-surface: close session
         (do
           (session/close-session! browser)
-          {:action :closed :ctx-name ctx-name})))))
+          {:action :closed :ctx-name ctx-name})))
+    {:action :none :ctx-name ctx-name}))
 
 (defn- cleanup-all-contexts!
   "Clean up browser sessions for all named contexts.
@@ -387,13 +404,18 @@
 
    Returns:
    - {:status :ok :pickles [...]}
-   - {:status :parse-error :errors [...]}"
+   - {:status :parse-error :errors [...]}
+   - {:status :error :type :repl/invalid-input ...} if text is not a string"
   [text]
-  (let [{:keys [ast errors]} (api/parse-string text)]
-    (if (seq errors)
-      {:status :parse-error :errors errors}
-      (let [{:keys [pickles]} (api/pickles ast "repl://")]
-        {:status :ok :pickles pickles}))))
+  (if-not (string? text)
+    {:status :error
+     :type :repl/invalid-input
+     :message (str "Expected a string, got " (if (nil? text) "nil" (type text)))}
+    (let [{:keys [ast errors]} (api/parse-string text)]
+      (if (seq errors)
+        {:status :parse-error :errors errors}
+        (let [{:keys [pickles]} (api/pickles ast "repl://")]
+          {:status :ok :pickles pickles})))))
 
 (defn run-dry
   "Parse and bind Gherkin text without executing.
@@ -405,23 +427,28 @@
    Returns:
    - {:status :ok :plans [...] :diagnostics {...}}
    - {:status :parse-error :errors [...]}
-   - {:status :bind-error :diagnostics {...}}"
+   - {:status :bind-error :diagnostics {...}}
+   - {:status :error :type :repl/invalid-input ...} if text is not a string"
   [text]
-  (let [{:keys [ast errors]} (api/parse-string text)]
-    (if (seq errors)
-      {:status :parse-error :errors errors}
-      (let [{:keys [pickles]} (api/pickles ast "repl://")
-            stepdefs (registry/all-stepdefs)
-            config @repl-config
-            {:keys [plans runnable? diagnostics]}
-            (if config
-              ;; Shifted mode: use compile-suite for full validation
-              (compile/compile-suite config pickles stepdefs)
-              ;; Vanilla mode: direct bind
-              (bind/bind-suite pickles stepdefs))]
-        (if runnable?
-          {:status :ok :plans plans :diagnostics diagnostics}
-          {:status :bind-error :diagnostics diagnostics})))))
+  (if-not (string? text)
+    {:status :error
+     :type :repl/invalid-input
+     :message (str "Expected a string, got " (if (nil? text) "nil" (type text)))}
+    (let [{:keys [ast errors]} (api/parse-string text)]
+      (if (seq errors)
+        {:status :parse-error :errors errors}
+        (let [{:keys [pickles]} (api/pickles ast "repl://")
+              stepdefs (registry/all-stepdefs)
+              config @repl-config
+              {:keys [plans runnable? diagnostics]}
+              (if config
+                ;; Shifted mode: use compile-suite for full validation
+                (compile/compile-suite config pickles stepdefs)
+                ;; Vanilla mode: direct bind
+                (bind/bind-suite pickles stepdefs))]
+          (if runnable?
+            {:status :ok :plans plans :diagnostics diagnostics}
+            {:status :bind-error :diagnostics diagnostics}))))))
 
 (defn run
   "Parse and execute Gherkin text.
@@ -434,6 +461,7 @@
    - {:status :ok :results {...} :summary {...}}
    - {:status :parse-error :errors [...]}
    - {:status :bind-error :diagnostics {...}}
+   - {:status :error :type :repl/invalid-input ...} if text is not a string
 
    Example:
    ```clojure
@@ -445,28 +473,32 @@
          Then I get 8\")
    ```"
   [text]
-  (let [{:keys [ast errors]} (api/parse-string text)]
-    (if (seq errors)
-      {:status :parse-error :errors errors}
-      (let [{:keys [pickles]} (api/pickles ast "repl://")
-            stepdefs (registry/all-stepdefs)
-            config @repl-config
-            {:keys [plans runnable? diagnostics]}
-            (if config
-              ;; Shifted mode: use compile-suite for full validation
-              (compile/compile-suite config pickles stepdefs)
-              ;; Vanilla mode: direct bind
-              (bind/bind-suite pickles stepdefs))]
-        (if-not runnable?
-          {:status :bind-error :diagnostics diagnostics}
-          (let [results (exec/execute-suite plans)]
-            {:status :ok
-             :results results
-             :diagnostics diagnostics  ; Include any SVO warnings
-             :summary {:scenarios (count (:scenarios results))
-                       :passed (count (filter #(= :passed (:status %)) (:scenarios results)))
-                       :failed (count (filter #(= :failed (:status %)) (:scenarios results)))
-                       :pending (count (filter #(= :pending (:status %)) (:scenarios results)))}}))))))
+  (if-not (string? text)
+    {:status :error
+     :type :repl/invalid-input
+     :message (str "Expected a string, got " (if (nil? text) "nil" (type text)))}
+    (let [{:keys [ast errors]} (api/parse-string text)]
+      (if (seq errors)
+        {:status :parse-error :errors errors}
+        (let [{:keys [pickles]} (api/pickles ast "repl://")
+              stepdefs (registry/all-stepdefs)
+              config @repl-config
+              {:keys [plans runnable? diagnostics]}
+              (if config
+                ;; Shifted mode: use compile-suite for full validation
+                (compile/compile-suite config pickles stepdefs)
+                ;; Vanilla mode: direct bind
+                (bind/bind-suite pickles stepdefs))]
+          (if-not runnable?
+            {:status :bind-error :diagnostics diagnostics}
+            (let [results (exec/execute-suite plans)]
+              {:status :ok
+               :results results
+               :diagnostics diagnostics  ; Include any SVO warnings
+               :summary {:scenarios (count (:scenarios results))
+                         :passed (count (filter #(= :passed (:status %)) (:scenarios results)))
+                         :failed (count (filter #(= :failed (:status %)) (:scenarios results)))
+                         :pending (count (filter #(= :pending (:status %)) (:scenarios results)))}})))))))
 
 (defn clear!
   "Clear the step registry, session context, named contexts, and surface markings.
@@ -511,6 +543,7 @@
    - {:status :pending :ctx {...}}
    - {:status :undefined :text \"...\"}
    - {:status :ambiguous :text \"...\" :matches [...]}
+   - {:status :error :type :repl/invalid-input ...} if text is not a string
 
    Example:
    ```clojure
@@ -525,30 +558,34 @@
    (reset-ctx!)
    ```"
   [text]
-  (let [stepdefs (registry/all-stepdefs)
-        matches (keep #(bind/match-step text %) stepdefs)]
-    (case (count matches)
-      0 {:status :undefined :text text}
+  (if-not (string? text)
+    {:status :error
+     :type :repl/invalid-input
+     :message (str "Expected a string, got " (if (nil? text) "nil" (type text)))}
+    (let [stepdefs (registry/all-stepdefs)
+          matches (keep #(bind/match-step text %) stepdefs)]
+      (case (count matches)
+        0 {:status :undefined :text text}
 
-      1 (let [{:keys [stepdef captures]} (first matches)
-              current-ctx @session-ctx
-              step-map {:step/text text}
-              exec-ctx {:step step-map :scenario current-ctx}
-              result (exec/invoke-step {:fn (:fn stepdef)
-                                        :arity (:arity stepdef)
-                                        :captures captures}
-                                       captures
-                                       exec-ctx)]
-          (when (= :passed (:status result))
-            (swap! session-ctx merge (:scenario result)))
-          {:status (:status result)
-           :ctx @session-ctx
-           :error (:error result)})
+        1 (let [{:keys [stepdef captures]} (first matches)
+                current-ctx @session-ctx
+                step-map {:step/text text}
+                exec-ctx {:step step-map :scenario current-ctx}
+                result (exec/invoke-step {:fn (:fn stepdef)
+                                          :arity (:arity stepdef)
+                                          :captures captures}
+                                         captures
+                                         exec-ctx)]
+            (when (= :passed (:status result))
+              (swap! session-ctx merge (:scenario result)))
+            {:status (:status result)
+             :ctx @session-ctx
+             :error (:error result)})
 
-      ;; 2+ matches = ambiguous
-      {:status :ambiguous
-       :text text
-       :matches (mapv #(-> % :stepdef :pattern-src) matches)})))
+        ;; 2+ matches = ambiguous
+        {:status :ambiguous
+         :text text
+         :matches (mapv #(-> % :stepdef :pattern-src) matches)}))))
 
 (defn- validate-actor
   "In Shifted mode, validate actor name against subject glossary.
@@ -581,12 +618,15 @@
 
 (defn- inject-subject-browser
   "If ctx-name matches a connected persistent subject, inject its browser into ctx.
-   Only injects if ctx doesn't already have a browser configured."
+
+   Stored under the subject-keyed slot `:cap/web.<ctx-name>` so subject-routed
+   step lookups (e.g. `(repl/as :alice \"clicks Login.submit\")`) can find it.
+   Only injects if no `:web` capability is already present for this subject."
   [ctx-name current-ctx]
-  (if (browser.ctx/browser-present? current-ctx)
+  (if (cap/get-capability current-ctx :web ctx-name)
     current-ctx
     (if-let [subject-info (get @connected-subjects ctx-name)]
-      (browser.ctx/assoc-active-browser current-ctx (:browser subject-info))
+      (cap/assoc-capability current-ctx :web (:browser subject-info) :persistent ctx-name)
       current-ctx)))
 
 (defn- execute-step-in-context

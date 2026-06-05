@@ -1,0 +1,17 @@
+;; This example is a self-contained mini-project that pulls in the
+;; shiftlefter framework from the parent directory via :local/root.
+;;
+;; Why a deps.edn here instead of using the framework's own:
+;;   1. Running `clj` from this directory means cwd = example root,
+;;      so glossary paths in shiftlefter.edn resolve correctly.
+;;   2. Future work: CI runs every example via the same `clj -M:demo`
+;;      invocation across all example dirs.
+;;
+;; setup.clj requires shiftlefter.demo.fixture.* — first-class src/
+;; namespaces since sl-7ui (2026-05-12), so no classpath hack needed.
+
+{:deps {com.shift-lefter/shiftlefter {:local/root "../.."}
+        ring/ring-core               {:mvn/version "1.12.2"}}
+
+ :aliases
+ {:demo {:main-opts ["-m" "shiftlefter.core" "run" "features/"]}}}

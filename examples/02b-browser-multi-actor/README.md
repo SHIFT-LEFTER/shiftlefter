@@ -6,7 +6,7 @@ Run browser tests with multiple users, each in their own browser session. Still 
 
 Two browser windows opening simultaneously, each logged in as the same user but with completely independent sessions. This demonstrates:
 
-- Multiple actors (`:alice`, `:bob`) in one scenario
+- Multiple actors (`:user/alice`, `:user/bob`) in one scenario
 - Automatic browser provisioning per actor
 - Session isolation — each actor has their own cookies, state, etc.
 
@@ -17,18 +17,18 @@ Two browser windows opening simultaneously, each logged in as the same user but 
 Feature: Multi-actor browser test
 
   Scenario: Two users login simultaneously
-    When :alice opens the browser to 'https://the-internet.herokuapp.com/login'
-    And :alice fills {:id "username"} with 'tomsmith'
-    And :alice fills {:id "password"} with 'SuperSecretPassword!'
-    And :alice clicks {:css "button[type='submit']"}
-    Then :alice should see 'You logged into a secure area!'
-    And :bob opens the browser to 'https://the-internet.herokuapp.com/login'
-    And :bob fills {:id "username"} with 'tomsmith'
-    And :bob fills {:id "password"} with 'SuperSecretPassword!'
-    And :bob clicks {:css "button[type='submit']"}
-    And :bob should see 'You logged into a secure area!'
-    And :alice should be on '/secure'
-    And :bob should be on '/secure'
+    When :user/alice opens the browser to 'https://the-internet.herokuapp.com/login'
+    And :user/alice fills {:id "username"} with 'tomsmith'
+    And :user/alice fills {:id "password"} with 'SuperSecretPassword!'
+    And :user/alice clicks {:css "button[type='submit']"}
+    Then :user/alice should see 'You logged into a secure area!'
+    And :user/bob opens the browser to 'https://the-internet.herokuapp.com/login'
+    And :user/bob fills {:id "username"} with 'tomsmith'
+    And :user/bob fills {:id "password"} with 'SuperSecretPassword!'
+    And :user/bob clicks {:css "button[type='submit']"}
+    And :user/bob should see 'You logged into a secure area!'
+    And :user/alice should be on '/secure'
+    And :user/bob should be on '/secure'
     And pause for 3 seconds
 ```
 
@@ -61,13 +61,13 @@ Watch two Chrome windows open and fill forms independently!
 
 ## How It Works
 
-The `:alice` and `:bob` prefixes in step text are **actor names**. When ShiftLefter sees a new actor:
+The `:user/alice` and `:user/bob` prefixes in step text identify both the actor **type** (`:user`) and the session **instance** (`:alice`, `:bob`). When ShiftLefter sees a new actor:
 
-1. Provisions a fresh browser session for that actor
-2. Routes all subsequent steps for that actor to their browser
-3. Keeps sessions isolated — `:alice`'s cookies don't affect `:bob`
+1. Provisions a fresh browser session for that instance
+2. Routes all subsequent steps for that instance to their browser
+3. Keeps sessions isolated — `:user/alice`'s cookies don't affect `:user/bob`
 
-You can use any name: `:user`, `:admin`, `:customer1`, `:customer2`, etc.
+The `:type/instance` form is the recommended syntax. The type (`:user`) is for glossary organization and display; the instance (`:alice`) is the session key.
 
 ## Bonus: Vocabulary Validation (Shifted Mode)
 
@@ -89,11 +89,11 @@ This example includes two extra config files to demonstrate the simplest case: s
 sl run --config-path shiftlefter-shifted-no-glossary.edn --dry-run features/
 ```
 
-This config sets `:unknown-subject :error` but provides no glossary. ShiftLefter rejects every step — `:alice` and `:bob` are unknown subjects:
+This config sets `:unknown-subject :error` but provides no glossary. ShiftLefter rejects every step — `:user/alice` and `:user/bob` are unknown subjects:
 
 ```
-ERROR: Unknown subject :alice in step ":alice opens the browser to '...'"
-ERROR: Unknown subject :bob in step ":bob opens the browser to '...'"
+ERROR: Unknown subject :user/alice in step ":user/alice opens the browser to '...'"
+ERROR: Unknown subject :user/bob in step ":user/bob opens the browser to '...'"
 ```
 
 **Step 2: Add a glossary and run again**
@@ -102,15 +102,15 @@ ERROR: Unknown subject :bob in step ":bob opens the browser to '...'"
 sl run --config-path shiftlefter-shifted.edn --dry-run features/
 ```
 
-This config points to a glossary (`glossary/subjects.edn`) that declares `:alice` and `:bob` as valid actors:
+This config points to a glossary (`glossary/subjects.edn`) that declares `:alice` and `:bob` as instances of the `:user` type:
 
 ```clojure
 {:subjects
- {:alice {:desc "First test user"}
-  :bob   {:desc "Second test user"}}}
+ {:user {:desc "Standard application user"
+         :instances [:alice :bob]}}}
 ```
 
-Now binding succeeds. Rename `:bob` to `:bbo` in the feature file and it fails again — the glossary is the source of truth.
+Now binding succeeds. Rename `:user/bob` to `:user/bbo` in the feature file and it fails again — the glossary is the source of truth.
 
 ## What's Next?
 

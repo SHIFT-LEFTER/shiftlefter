@@ -34,7 +34,8 @@
 
    ;; Check mode
    (cap/get-capability-mode ctx2 :web)  ;; => :ephemeral
-   ```")
+   ```"
+  (:require [clojure.string :as str]))
 
 ;; -----------------------------------------------------------------------------
 ;; Key Construction
@@ -192,6 +193,24 @@
        (filter (fn [[_k v]] (= :ephemeral (:mode v))))
        (map first)
        vec))
+
+(defn find-existing-shared-impl
+  "Find an existing impl for `interface-name` across any subject-keyed
+   entry in ctx, returning it (or nil if none exists).
+
+   Used by `:shared-impl?` interfaces during provisioning: when Alice's
+   SMS step provisions :cap/sms.alice, Bob's subsequent SMS step finds
+   that impl here and reuses it under :cap/sms.bob — one Twilio HTTP
+   client across all subject entries in the scenario."
+  [ctx interface-name]
+  (let [iface-key (keyword "cap" (name interface-name))
+        prefix    (str (name interface-name) ".")
+        match?    (fn [k]
+                    (and (keyword? k)
+                         (= "cap" (namespace k))
+                         (or (= k iface-key)
+                             (str/starts-with? (name k) prefix))))]
+    (some (fn [[k v]] (when (match? k) (:impl v))) ctx)))
 
 (defn persistent-capabilities
   "Returns interface names of all persistent capabilities in ctx."

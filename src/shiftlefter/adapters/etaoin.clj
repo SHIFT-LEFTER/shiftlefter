@@ -12,7 +12,8 @@
    ## Cleanup
 
    `close-browser` closes the browser session and releases resources."
-  (:require [etaoin.api :as eta]
+  (:require [clojure.java.io :as io]
+            [etaoin.api :as eta]
             [shiftlefter.webdriver.etaoin.browser :as browser]))
 
 ;; -----------------------------------------------------------------------------
@@ -44,6 +45,18 @@
   (try
     (let [headless? (get config :headless false)
           adapter-opts (get config :adapter-opts {})
+          ;; Chromedriver discovery: adapter-opts :path-driver > ~/.shiftlefter/config.edn > PATH
+          path-driver (or (:path-driver adapter-opts)
+                         (try
+                           (some-> (io/file (str (System/getProperty "user.home")
+                                                 "/.shiftlefter/config.edn"))
+                                   slurp
+                                   read-string
+                                   :chromedriver-path)
+                           (catch Exception _ nil)))
+          adapter-opts (if path-driver
+                         (assoc adapter-opts :path-driver path-driver)
+                         adapter-opts)
           opts (merge {:type :chrome
                        :headless headless?}
                       adapter-opts)

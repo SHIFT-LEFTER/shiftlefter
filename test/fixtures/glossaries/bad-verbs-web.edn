@@ -1,0 +1,11 @@
+;; Intentionally non-conforming verb glossary, used by sl-hse tests
+;; to exercise Tier 0 enforcement error paths.
+;;
+;; - :swipe lacks :frames (verb-level missing key)
+;; - :pinch's :default frame lacks :pattern (frame-level missing key)
+
+{:type :web
+ :verbs
+ {:swipe {:desc "Swipe gesture on mobile"}
+  :pinch {:desc "Pinch gesture for zoom"
+          :frames {:default {:args []}}}}}

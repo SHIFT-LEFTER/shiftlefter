@@ -19,13 +19,17 @@
    - 1: Executed, some not passed (failed/pending when not allowed)
    - 2: Planning/setup failure (parse/config/load/bind errors)
    - 3: Harness crash (uncaught exception)"
-  (:require [shiftlefter.gherkin.api :as api]
+  (:require [babashka.fs :as fs]
+            [clojure.spec.alpha :as s]
+            [clojure.tools.logging :as log]
+            [shiftlefter.gherkin.api :as api]
             [shiftlefter.gherkin.io :as io]
             [shiftlefter.runner.config :as config]
             [shiftlefter.runner.discover :as discover]
             [shiftlefter.runner.events :as events]
             [shiftlefter.runner.report.console :as console]
             [shiftlefter.runner.report.edn :as report-edn]
+            [shiftlefter.runner.setup :as setup]
             [shiftlefter.runner.step-loader :as step-loader]
             [shiftlefter.stepengine.compile :as compile]
             [shiftlefter.stepengine.exec :as exec]
@@ -38,6 +42,32 @@
             ))
 
 ;; -----------------------------------------------------------------------------
+;; Specs — Parse & Pipeline Result Shapes
+;; -----------------------------------------------------------------------------
+
+(s/def ::status #{:ok :error})
+(s/def ::path string?)
+(s/def ::ast vector?)
+(s/def ::tokens vector?)
+(s/def ::pickles vector?)
+(s/def ::errors (s/coll-of map?))
+
+(s/def ::parse-file-ok
+  (s/keys :req-un [::status ::path ::ast ::tokens ::pickles]))
+
+(s/def ::parse-file-error
+  (s/keys :req-un [::status ::path ::errors]))
+
+(s/def ::parse-file-result
+  (s/or :ok ::parse-file-ok :error ::parse-file-error))
+
+(s/def ::features (s/coll-of map?))
+(s/def ::all-pickles vector?)
+
+(s/def ::parse-all-result
+  (s/keys :req-un [::status ::features ::all-pickles ::errors]))
+
+;; -----------------------------------------------------------------------------
 ;; Built-in Step Loading
 ;; -----------------------------------------------------------------------------
 
@@ -47,7 +77,8 @@
    registry). Uses :reload to force defstep forms to re-execute even if
    the namespace was previously loaded."
   []
-  (require 'shiftlefter.stepdefs.browser :reload))
+  (require 'shiftlefter.stepdefs.browser :reload)
+  (require 'shiftlefter.stepdefs.sms :reload))
 
 ;; -----------------------------------------------------------------------------
 ;; Pipeline Helpers
@@ -127,6 +158,277 @@
                                            :counts counts})))
 
 ;; -----------------------------------------------------------------------------
+;; Pipeline Stages
+;;
+;; Each stage returns [:continue data] or [:exit result-map].
+;; Stages are chained in execute! via early-exit `or` pattern.
+;; -----------------------------------------------------------------------------
+
+(defn- report-planning-error!
+  "Report a planning error (exit 2) to the appropriate output."
+  [run-id opts error-info]
+  (let [exit-code 2]
+    (when (:edn opts)
+      (report-edn/prn-summary
+       (report-edn/build-summary run-id exit-code nil error-info)))
+    (when (and (not (:edn opts)) (:stderr-msg error-info))
+      (binding [*out* *err*]
+        ((:stderr-msg error-info))))
+    {:exit-code exit-code
+     :run-id run-id
+     :status :planning-failed}))
+
+(defn- load-config-stage
+  "Stage 1: Load configuration.
+   Returns [:continue {:config ... :step-paths ... :allow-pending? ...}]
+   or [:exit error-result]."
+  [run-id opts]
+  (let [config-result (config/load-config-safe {:config-path (:config-path opts)})]
+    (if (= :error (:status config-result))
+      [:exit (report-planning-error! run-id opts
+               {:error {:type :config/error :message (:message config-result)}
+                :stderr-msg #(println "Config error:" (:message config-result))})]
+      (let [config (:config config-result)]
+        [:continue {:config config
+                    :step-paths (or (:step-paths opts) (config/get-step-paths config))
+                    :allow-pending? (config/allow-pending? config)}]))))
+
+(defn- discover-features-stage
+  "Stage 2: Discover feature files.
+   Returns [:continue {:feature-paths [...]}] or [:exit error-result]."
+  [run-id opts]
+  (let [discover-result (discover/discover-feature-files-or-error (:paths opts))]
+    (if (= :error (:status discover-result))
+      [:exit (report-planning-error! run-id opts
+               {:error {:type (:type discover-result) :message (:message discover-result)}
+                :stderr-msg #(println "Discovery error:" (:message discover-result))})]
+      [:continue {:feature-paths (:files discover-result)}])))
+
+(defn- parse-features-stage
+  "Stage 3-4: Parse all feature files.
+   Returns [:continue {:all-pickles [...] :features [...]}] or [:exit error-result]."
+  [run-id opts feature-paths]
+  (let [parse-result (parse-all-features feature-paths)]
+    (if (= :error (:status parse-result))
+      [:exit (merge
+              (report-planning-error! run-id opts
+                {:error {:type :parse/failed :errors (:errors parse-result)}
+                 :stderr-msg #(do (println "Parse errors:")
+                                  (doseq [err (:errors parse-result)]
+                                    (println " " (:message err))))})
+              {:errors (:errors parse-result)})]
+      [:continue {:all-pickles (:all-pickles parse-result)
+                  :features (:features parse-result)}])))
+
+(defn- load-steps-stage
+  "Stage 5: Load step definitions + built-ins.
+   Returns [:continue nil] or [:exit error-result]."
+  [run-id opts step-paths]
+  (let [load-result (step-loader/load-step-paths! step-paths)]
+    (if (= :error (:status load-result))
+      [:exit (merge
+              (report-planning-error! run-id opts
+                {:error {:type :step-load/failed :errors (:errors load-result)}
+                 :stderr-msg #(do (println "Step load errors:")
+                                  (doseq [err (:errors load-result)]
+                                    (println " " (:path err) "-" (-> err :error :message))))})
+              {:errors (:errors load-result)})]
+      (do
+        ;; Load built-in step definitions AFTER step-loader clears registry
+        (load-built-in-steps!)
+        [:continue nil]))))
+
+(defn- compile-suite-stage
+  "Stage 6: Compile suite (bind all pickles to stepdefs).
+   Returns [:continue {:plans [...] :diagnostics {...}}] or [:exit error-result].
+
+   `opts` may carry `:adapter-registry`; it's forwarded to the binder so
+   capability gating (sl-ewn) honors a setup.clj-supplied custom registry."
+  [run-id opts config all-pickles report-opts]
+  (let [stepdefs (registry/all-stepdefs)
+        compile-opts (when-let [r (:adapter-registry opts)]
+                       {:adapter-registry r})
+        {:keys [plans runnable? diagnostics]}
+        (compile/compile-suite config all-pickles stepdefs compile-opts)]
+    (if-not runnable?
+      (let [exit-code 2]
+        (when-not (:edn opts)
+          (console/print-diagnostics! diagnostics report-opts))
+        (when (:edn opts)
+          (report-edn/prn-summary
+           (report-edn/build-summary run-id exit-code nil {:diagnostics diagnostics})))
+        [:exit {:exit-code exit-code
+                :run-id run-id
+                :status :planning-failed
+                :diagnostics diagnostics}])
+      [:continue {:plans plans :diagnostics diagnostics}])))
+
+(defn- execute-and-report-stage
+  "Stage 8-10: Execute scenarios, report results, return exit code."
+  [run-id opts bus config features all-pickles plans diagnostics allow-pending? report-opts]
+  (publish-run-started! bus run-id (count features) (count all-pickles))
+  (let [exec-opts (cond-> {:bus bus :run-id run-id :interfaces (:interfaces config)
+                           ;; sl-aa5: scoped-eager provisioning is the default;
+                           ;; opt-out via {:runner {:provisioning :lazy}}.
+                           :provisioning (config/provisioning-mode config)}
+                    (:adapter-registry opts) (assoc :adapter-registry (:adapter-registry opts)))
+        exec-result (exec/execute-suite plans exec-opts)
+        exit-code (compute-exit-code exec-result allow-pending?)]
+    ;; Report
+    (when-not (:edn opts)
+      (when (:verbose opts)
+        (doseq [scenario (:scenarios exec-result)]
+          (console/print-scenario! scenario report-opts)))
+      (console/print-failures! (:scenarios exec-result) report-opts)
+      (console/print-summary! exec-result report-opts))
+    (when (:edn opts)
+      (report-edn/prn-summary
+       (report-edn/build-summary run-id exit-code exec-result {:diagnostics diagnostics})))
+    (publish-run-finished! bus run-id exit-code (:counts exec-result))
+    (events/bus-close! bus)
+    {:exit-code exit-code
+     :run-id run-id
+     :status (if (zero? exit-code) :passed :failed)
+     :counts (:counts exec-result)
+     :result exec-result}))
+
+;; -----------------------------------------------------------------------------
+;; Setup-Aware Execution (sl-dbu)
+;;
+;; When a setup.clj sits next to the active shiftlefter.edn, it owns the
+;; feature plan: each group declares :features (paths/globs) and a :start
+;; lifecycle that may return a custom :adapter-registry. The runner threads
+;; that registry through this group's compile + execute, then calls :stop.
+;;
+;; See runner/setup.clj for the contract and pure-mode invariant.
+;; -----------------------------------------------------------------------------
+
+(defn- load-setup-stage
+  "Locate and load setup.clj sibling-of-config. Returns one of:
+   - [:none nil]                    — no setup.clj present, classic pipeline
+   - [:loaded {:setups [...] :path}] — loaded successfully
+   - [:exit error-result]           — load failed, treat as planning error"
+  [run-id opts config]
+  (if-let [setup-path (setup/find-setup-file (config/resolve-config-path opts))]
+    (let [{:keys [ok error]} (setup/load-setup setup-path config)]
+      (if error
+        [:exit (report-planning-error! run-id opts
+                 {:error error
+                  :stderr-msg #(println "Setup error:" (:message error))})]
+        [:loaded {:setups ok :path setup-path}]))
+    [:none nil]))
+
+(defn- compute-suite-exit-code
+  "Aggregate per-group exit codes into a suite exit code.
+   Worst code wins: planning-error (2) > failed (1) > passed (0)."
+  [exit-codes]
+  (cond
+    (some #(= 2 %) exit-codes) 2
+    (some #(not (zero? %)) exit-codes) 1
+    :else 0))
+
+(defn- run-group!
+  "Run one orchestrated group end-to-end.
+
+   Lifecycle: call (:start config) → parse this group's features →
+   compile-suite (with the group's adapter-registry) → execute → :stop
+   (in finally; runs even on failure).
+
+   Returns a per-group result map shaped like execute-and-report-stage's,
+   plus :group-label and :status."
+  [run-id opts config group bus report-opts allow-pending?]
+  (let [label    (or (:label group) "<unlabeled>")
+        features (setup/resolve-group-features group)
+        ;; :start may throw or return malformed shape — both treated as
+        ;; planning errors local to this group; other groups still run.
+        start-result (try
+                       ((:start group) config)
+                       (catch Throwable t
+                         {::start-throw t}))]
+    (cond
+      (::start-throw start-result)
+      (let [t (::start-throw start-result)]
+        (when-not (:edn opts)
+          (binding [*out* *err*]
+            (println (str "Setup group " (pr-str label) " :start threw: "
+                          (ex-message t)))))
+        {:exit-code 2 :run-id run-id :status :planning-failed
+         :group-label label
+         :error {:type :setup/start-threw :message (ex-message t)}})
+
+      (and start-result (not (s/valid? :shiftlefter.runner.setup/start-result start-result)))
+      (do (when-not (:edn opts)
+            (binding [*out* *err*]
+              (println (str "Setup group " (pr-str label)
+                            " :start returned an invalid shape; expected {:adapter-registry? :stop?}"))))
+          {:exit-code 2 :run-id run-id :status :planning-failed
+           :group-label label
+           :error {:type :setup/invalid-start-result}})
+
+      :else
+      (let [{:keys [adapter-registry stop]} start-result
+            inner-opts (cond-> opts
+                         adapter-registry (assoc :adapter-registry adapter-registry))]
+        (try
+          (let [[s-parse d-parse] (parse-features-stage run-id inner-opts features)]
+            (if (= :exit s-parse)
+              (assoc d-parse :group-label label)
+              (let [{:keys [all-pickles features]} d-parse
+                    [s-compile d-compile]
+                    (compile-suite-stage run-id inner-opts config all-pickles report-opts)]
+                (if (= :exit s-compile)
+                  (assoc d-compile :group-label label)
+                  (let [{:keys [plans diagnostics]} d-compile]
+                    (if (:dry-run opts)
+                      (let [exit-code 0]
+                        (when-not (:edn opts)
+                          (binding [*out* *err*]
+                            (println (str "[" label "] " (count plans)
+                                          " scenario(s) bound successfully (dry run)"))))
+                        {:exit-code exit-code :run-id run-id :status :dry-run
+                         :group-label label :plans plans})
+                      (-> (execute-and-report-stage
+                           run-id inner-opts bus config features
+                           all-pickles plans diagnostics
+                           allow-pending? report-opts)
+                          (assoc :group-label label))))))))
+          (finally
+            (when stop
+              (try (stop)
+                   (catch Throwable t
+                     ;; :stop failures are operational; surface via the
+                     ;; logging facade rather than the user-facing
+                     ;; stderr stream so they don't interleave with EDN
+                     ;; output and can be filtered by log config.
+                     (log/warnf t "Setup group %s :stop threw (ignored): %s"
+                                (pr-str label) (ex-message t)))))))))))
+
+(defn- run-with-setups!
+  "Drive the suite through all setup groups in declared order.
+   Aggregates per-group exit codes into a single suite result.
+
+   `setup-base-dir`: directory containing setup.clj — relative paths in
+   each group's :features resolve against it."
+  [run-id opts config setups setup-base-dir bus report-opts allow-pending?]
+  (let [;; Validate CLI paths against the declared union before any group runs.
+        cli-result (setup/validate-cli-paths (:paths opts) setups setup-base-dir)]
+    (if-let [err (:error cli-result)]
+      (report-planning-error! run-id opts
+        {:error err
+         :stderr-msg #(println "Setup error:" (:message err))})
+      (let [filtered (setup/filter-setups-by-cli-paths setups (:ok cli-result) setup-base-dir)
+            results  (mapv #(run-group! run-id opts config % bus report-opts allow-pending?)
+                           filtered)
+            exit-code (compute-suite-exit-code (map :exit-code results))]
+        {:exit-code exit-code
+         :run-id    run-id
+         :status    (case exit-code
+                      0 :passed
+                      2 :planning-failed
+                      :failed)
+         :groups    results}))))
+
+;; -----------------------------------------------------------------------------
 ;; Main Pipeline
 ;; -----------------------------------------------------------------------------
 
@@ -154,166 +456,58 @@
         bus (events/make-memory-bus)
         report-opts (select-keys opts [:verbose :no-color])]
     (try
-      ;; 1. Load config
-      (let [config-result (config/load-config-safe {:config-path (:config-path opts)})]
-        (if (= :error (:status config-result))
-          ;; Config error → exit 2
-          (let [exit-code 2]
-            (when (:edn opts)
-              (report-edn/prn-summary
-               (report-edn/build-summary run-id exit-code nil
-                                         {:error {:type :config/error
-                                                  :message (:message config-result)}})))
-            (when-not (:edn opts)
-              (binding [*out* *err*]
-                (println "Config error:" (:message config-result))))
-            {:exit-code exit-code
-             :run-id run-id
-             :status :planning-failed})
+      (let [[s1 d1] (load-config-stage run-id opts)]
+        (if (= :exit s1) d1
+          (let [{:keys [config step-paths allow-pending?]} d1
+                ;; Setup-aware branch (sl-dbu): load setup.clj if present.
+                ;; If found, it owns the feature plan — bypass discovery and
+                ;; the single-suite pipeline; loop over groups instead.
+                [s-setup d-setup] (load-setup-stage run-id opts config)]
+            (cond
+              (= :exit s-setup) d-setup
 
-          (let [config (:config config-result)
-                step-paths (or (:step-paths opts) (config/get-step-paths config))
-                allow-pending? (config/allow-pending? config)]
+              (= :loaded s-setup)
+              (let [[s4 d4] (load-steps-stage run-id opts step-paths)
+                    setup-base-dir (str (fs/parent (:path d-setup)))]
+                (if (= :exit s4) d4
+                  (run-with-setups! run-id opts config (:setups d-setup)
+                                    setup-base-dir bus report-opts allow-pending?)))
 
-            ;; 2. Discover feature files
-            #_{:clj-kondo/ignore [:redundant-let]}
-            (let [discover-result (discover/discover-feature-files-or-error (:paths opts))]
-              (if (= :error (:status discover-result))
-                ;; Discovery error → exit 2
-                (let [exit-code 2]
-                  (when (:edn opts)
-                    (report-edn/prn-summary
-                     (report-edn/build-summary run-id exit-code nil
-                                               {:error {:type (:type discover-result)
-                                                        :message (:message discover-result)}})))
-                  (when-not (:edn opts)
-                    (binding [*out* *err*]
-                      (println "Discovery error:" (:message discover-result))))
-                  {:exit-code exit-code
-                   :run-id run-id
-                   :status :planning-failed})
-
-                (let [feature-paths (:files discover-result)]
-
-                  ;; 3-4. Parse all features
-                  #_{:clj-kondo/ignore [:redundant-let]}
-                  (let [parse-result (parse-all-features feature-paths)]
-                    (if (= :error (:status parse-result))
-                      ;; Parse errors → exit 2
-                      (let [exit-code 2]
-                        (when (:edn opts)
-                          (report-edn/prn-summary
-                           (report-edn/build-summary run-id exit-code nil
-                                                     {:error {:type :parse/failed
-                                                              :errors (:errors parse-result)}})))
-                        (when-not (:edn opts)
-                          (binding [*out* *err*]
-                            (println "Parse errors:")
-                            (doseq [err (:errors parse-result)]
-                              (println " " (:message err)))))
-                        {:exit-code exit-code
-                         :run-id run-id
-                         :status :planning-failed
-                         :errors (:errors parse-result)})
-
-                      (let [all-pickles (:all-pickles parse-result)
-                            features (:features parse-result)]
-
-                        ;; 5. Load step definitions
-                        #_{:clj-kondo/ignore [:redundant-let]}
-                        (let [load-result (step-loader/load-step-paths! step-paths)]
-                          (if (= :error (:status load-result))
-                            ;; Step load error → exit 2
-                            (let [exit-code 2]
-                              (when (:edn opts)
-                                (report-edn/prn-summary
-                                 (report-edn/build-summary run-id exit-code nil
-                                                           {:error {:type :step-load/failed
-                                                                    :errors (:errors load-result)}})))
-                              (when-not (:edn opts)
-                                (binding [*out* *err*]
-                                  (println "Step load errors:")
-                                  (doseq [err (:errors load-result)]
-                                    (println " " (:path err) "-" (-> err :error :message)))))
-                              {:exit-code exit-code
-                               :run-id run-id
-                               :status :planning-failed
-                               :errors (:errors load-result)})
-
-                            ;; 5b. Load built-in step definitions.
-                            ;; Must happen AFTER step-loader clears the registry
-                            ;; and loads user steps, so built-ins coexist with
-                            ;; user-defined steps.
-                            (do
-                              (load-built-in-steps!)
-
-                              ;; 6. Compile suite (bind all pickles)
-                              (let [stepdefs (registry/all-stepdefs)
-                                    {:keys [plans runnable? diagnostics]} (compile/compile-suite config all-pickles stepdefs)]
-
-                                (if-not runnable?
-                                  ;; Binding issues → exit 2
-                                  (let [exit-code 2]
+              :else
+              (let [[s2 d2] (discover-features-stage run-id opts)]
+                (if (= :exit s2)
+                  d2
+                  (let [{:keys [feature-paths]} d2
+                        [s3 d3] (parse-features-stage run-id opts feature-paths)]
+                    (if (= :exit s3)
+                      d3
+                      (let [{:keys [all-pickles features]} d3
+                            [s4 d4] (load-steps-stage run-id opts step-paths)]
+                        (if (= :exit s4)
+                          d4
+                          (let [[s5 d5] (compile-suite-stage run-id opts config all-pickles report-opts)]
+                            (if (= :exit s5)
+                              d5
+                              (let [{:keys [plans diagnostics]} d5]
+                                (if (:dry-run opts)
+                                  (let [exit-code 0]
                                     (when-not (:edn opts)
-                                      (console/print-diagnostics! diagnostics report-opts))
+                                      (binding [*out* *err*]
+                                        (println (str (count plans) " scenario(s) bound successfully (dry run)"))))
                                     (when (:edn opts)
                                       (report-edn/prn-summary
-                                       (report-edn/build-summary run-id exit-code nil
-                                                                 {:diagnostics diagnostics})))
+                                       {:run/id run-id
+                                        :run/exit-code exit-code
+                                        :run/status :dry-run
+                                        :counts {:scenarios (count plans)
+                                                 :steps (reduce + (map #(count (:plan/steps %)) plans))}}))
                                     {:exit-code exit-code
                                      :run-id run-id
-                                     :status :planning-failed
-                                     :diagnostics diagnostics})
-
-                                  ;; 7. Dry run check
-                                  (if (:dry-run opts)
-                                    (let [exit-code 0]
-                                      (when-not (:edn opts)
-                                        (binding [*out* *err*]
-                                          (println (str (count plans) " scenario(s) bound successfully (dry run)"))))
-                                      (when (:edn opts)
-                                        (report-edn/prn-summary
-                                         {:run/id run-id
-                                          :run/exit-code exit-code
-                                          :run/status :dry-run
-                                          :counts {:scenarios (count plans)
-                                                   :steps (reduce + (map #(count (:plan/steps %)) plans))}}))
-                                      {:exit-code exit-code
-                                       :run-id run-id
-                                       :status :dry-run
-                                       :plans plans})
-
-                                    ;; 8. Execute all scenarios
-                                    (do
-                                      (publish-run-started! bus run-id (count features) (count all-pickles))
-                                      (let [exec-opts {:bus bus :run-id run-id
-                                                       :interfaces (:interfaces config)}
-                                            exec-result (exec/execute-suite plans exec-opts)
-                                            exit-code (compute-exit-code exec-result allow-pending?)]
-
-                                        ;; 9. Report results
-                                        (when-not (:edn opts)
-                                          (when (:verbose opts)
-                                            (doseq [scenario (:scenarios exec-result)]
-                                              (console/print-scenario! scenario report-opts)))
-                                          (console/print-failures! (:scenarios exec-result) report-opts)
-                                          (console/print-summary! exec-result report-opts))
-
-                                        (when (:edn opts)
-                                          (report-edn/prn-summary
-                                           (report-edn/build-summary run-id exit-code exec-result
-                                                                     {:diagnostics diagnostics})))
-
-                                        (publish-run-finished! bus run-id exit-code (:counts exec-result))
-                                        (events/bus-close! bus)
-
-                                        ;; 10. Return result
-                                        {:exit-code exit-code
-                                         :run-id run-id
-                                         :status (if (zero? exit-code) :passed :failed)
-                                         :counts (:counts exec-result)
-                                         :result exec-result})))))))))))))))))
-
+                                     :status :dry-run
+                                     :plans plans})
+                                  (execute-and-report-stage run-id opts bus config features
+                                                            all-pickles plans diagnostics
+                                                            allow-pending? report-opts)))))))))))))))
       ;; Catch any uncaught exceptions → exit 3
       (catch Throwable t
         (let [exit-code 3

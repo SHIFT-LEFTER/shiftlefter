@@ -1,3 +1,207 @@
+# Changelog: 0.4.5
+
+**Release Date:** 2026-06-05
+
+---
+
+**ShiftLefter now drives SMS as a first-class interface — the same zero-code step definitions that ran browsers send and receive real text messages — and locks its verb vocabulary behind frame-validated glossaries.**
+
+v0.4.0 added the intent layer and typed subjects. v0.4.5 cashes in the multi-interface promise: a 2FA password-reset scenario that spans web *and* SMS, with every capability provisioned up front and validated against the protocols each adapter claims.
+
+---
+
+## What's New
+
+### SMS Interface
+
+A second real interface alongside the browser. The `ISMS` protocol covers production sending; `ISMSInbound` adds the test-seam read path. A Twilio adapter implements `ISMS` against the live API; a MockSMS adapter implements both for deterministic tests. Built-in step definitions — `:send`, `:send-media`, `:receive`, `:see`, `:count` — need no custom code:
+
+```gherkin
+When :user/alice sends "RESET" to the service
+Then :user/alice should receive a message containing "code"
+And :service should see 1 message from :user/alice
+```
+
+Configure it like any other interface:
+
+```clojure
+;; shiftlefter.edn
+{:interfaces {:sms {:type :sms :adapter :twilio
+                    :config {:account-sid "..." :auth-token "..." :from "+1..."}}}}
+```
+
+The Twilio read path was validated against the real API.
+
+### Multi-Interface 2FA Demo
+
+`examples/04-sms-2fa/` drives a password-reset flow across web and SMS in a single scenario — the canonical example of two interfaces cooperating, with a `setup.clj` wiring shared state.
+
+### `setup.clj` Test Orchestration
+
+A convention for scenarios that need shared setup across interfaces. A `setup.clj` next to your feature files runs once, plumbing an adapter registry and any shared state into the run — see `examples/04-sms-2fa/setup.clj` for the canonical pattern.
+
+### Subject-Aware Verb Glossaries & Frames
+
+Verbs are now declared in glossaries (`verbs-web`, `verbs-sms`) with a frame-based valence schema — each verb states the arguments (frames) it accepts, cross-checked against step definitions at compile time. `:hover` and `:wait` returned to the web glossary; `:count`, `:upload`, `:check`, `:uncheck`, and `:submit` were removed as defaults (rationale in the decisions record). See Breaking Changes.
+
+### Capability Gating
+
+Adapters declare what they `:provides`; scenarios (and the stepdefs they bind) declare `:requires-protocols`. The adapter registry validates these claims at suite-load, so a scenario that needs an inbound-capable SMS adapter fails fast at load if you wired a send-only one — not mid-run.
+
+### `:be` Verb (URL assertions)
+
+The `:url` frame moved out of `:see` into a dedicated `:be` verb with an `:at` frame. The surface pattern is unchanged — existing URL assertions keep working — but the model is cleaner.
+
+---
+
+## Behavior change: scoped-eager capability provisioning is now the default
+
+**Affects:** Multi-interface scenarios under `sl run`.
+
+Capabilities (browsers, SMS clients, API clients) are now provisioned at
+**scenario start** for every interface the scenario's bound steps will
+touch — not lazily on the first step that needs them.
+
+**Why:** Bad credentials, missing config, and adapter errors now fail
+fast — before any step runs — instead of mid-scenario after a partial
+prefix has already executed. Per-interface timing markers (e.g.
+`:sms/scenario-start-ts`) become honest: set when the scenario starts,
+not when the first step happens to touch the interface.
+
+**Behavior change to expect:** A scenario that previously short-circuited
+before reaching an SMS step (e.g., a web step failed first) now pays the
+SMS bring-up cost up front. Every `:on-provision` hook fires earlier in
+the scenario than it used to.
+
+**Opt-out:**
+
+```clojure
+;; shiftlefter.edn
+{:runner {:provisioning :lazy}}   ;; revert to per-step on-first-touch
+```
+
+`:provisioning :eager` is the default; the key may be omitted. Valid
+values: `:eager` | `:lazy`.
+
+**Unaffected:**
+
+- The REPL (`shiftlefter.repl/run` and direct `execute-scenario` calls
+  with no `:provisioning` opt) keeps lazy semantics — exploratory work
+  doesn't pay bring-up for unused interfaces.
+- The per-step `ensure-capability` primitive is unchanged. Eager is
+  layered on top: the scenario-start phase calls the same primitive once
+  per `(interface, subject)` target, then per-step calls no-op.
+- `:shared-impl?` interfaces (e.g., SMS) still provision their impl
+  exactly once per scenario — Bob's eager target reuses Alice's via
+  `find-existing-shared-impl`.
+
+**Multi-interface parallelism:** When a scenario touches more than one
+interface, eager bring-up runs the per-interface groups in parallel
+(futures). Within an interface, sequentially so shared-impl handoff is
+deterministic.
+
+---
+
+## Minor Improvements
+
+- **Did-you-mean for `[:iface]` failures** — an unknown interface annotation now suggests the closest valid one instead of a bare error.
+- **ChromeDriver retry** — "Node with given id does not belong to the document" joins the retryable-error set, smoothing over a transient DOM race.
+- **Logging facade** — operational `stderr`/`println` output migrated to `clojure.tools.logging`; bring your own SLF4J binding to route it.
+- **Fixture server promoted** — the test fixture server moved into `src/shiftlefter/demo/fixture/`, retiring the `:demo` deps alias the 2FA demo previously needed.
+- **`exec.clj` split** — the runner core was split along provisioning / step-loop / cleanup seams (internal, no surface change).
+
+---
+
+## Breaking Changes
+
+- **Default web verbs removed** — `:count`, `:upload`, `:check`, `:uncheck`, and `:submit` are no longer in the default web glossary. Declare them in a project glossary if you need them.
+- **`SVOI` → `SVO`** — the subject-verb-object-instrument nomenclature collapsed to subject-verb-object across event keywords and namespaces. Code that referenced `:svoi/*` event keys or `shiftlefter.svoi.*` namespaces must use `:svo/*` and `shiftlefter.svo.*`.
+- **`browser.ctx` bridge removed** — the legacy `shiftlefter.browser.ctx` namespace is gone; the unified capability/ctx path is the only one.
+
+---
+
+## Test Results
+
+```
+1359 tests, 4160 assertions, 0 failures
+Compliance: 46/46 good, 11/11 bad (100%)
+```
+
+---
+
+# Changelog: 0.4.0
+
+**Release Date:** 2026-04-04
+
+---
+
+**v0.4.0 adds an intent layer — bind a business action like `Login.submit` to a real locator per interface — plus typed subjects with isolated sessions and runtime spec enforcement (45 fdefs).**
+
+v0.3.x made browser tests run with zero custom code. v0.4.0 adds the structural layer beneath them: a vocabulary for intent, a type system for subjects, and specs that enforce the contracts at runtime.
+
+---
+
+## What's New
+
+### Intent System
+
+Declare *what* an action means once, bind it to *how* each interface performs it. Flat intent regions hold per-interface element bindings, so `Login.submit` resolves to a real locator at run time:
+
+```clojure
+;; intent/login.edn
+{:region :Login
+ :intents {:submit {:web {:css "button[type=submit]"}}}}
+```
+
+```gherkin
+When :alice submits Login
+```
+
+Object enforcement is configurable — `:strict` (every intent reference must resolve), `:warn`, or `:off`.
+
+### Subject Types & Instances
+
+Subjects are now typed. `:user/alice` names an instance `alice` of type `user`, resolved through a two-level type/instance glossary. Each instance gets an isolated session, so multi-user scenarios don't bleed state:
+
+```gherkin
+Given :user/alice is logged in
+And :user/bob is logged in
+Then :user/alice should see her own dashboard
+```
+
+Display format is `[:type] instance` for readable reports.
+
+### Spec Instrumentation
+
+45 `fdef` specs across all namespaces, active during dev and test runs — so specs are runtime enforcement, not just documentation. Boundary guards validate external input where it enters, REPL interactions get type safety, and UTF-8 output is enforced at the stream boundary.
+
+### Test Fixture Server
+
+A configurable Ring harness (`with-fixture-server`) ships with login, dashboard, and logout pages and real multi-user session isolation — so browser scenarios have a deterministic target to drive without standing up an external app:
+
+```clojure
+(with-fixture-server [server {:port 0}]
+  ;; login / dashboard / logout pages, per-user sessions
+  (run-scenarios))
+```
+
+### Agent Documentation
+
+- **`docs/AGENT.md`** — LLM-agent instructions covering the CLI, the SVO model, step definitions, multi-user examples, intent references, and the dual browser adapters (Etaoin + Playwright).
+
+### Public Mirror Convention
+
+Local agent primers and role prompts are not part of the public release spine. The public mirror ships user-facing documentation only.
+
+---
+
+## Notes
+
+- **Source-only retroactive release.** v0.4.0 records a drop that was published to the public mirror but never tagged or released at the time. No binary artifact was built for it — binary distribution resumes at v0.4.5.
+- **Spec coverage** rather than a fresh test count: this entry reconstructs an already-public source tree, so it reports the 45 `fdef` contracts added rather than a re-run pass total.
+
+---
+
 # Changelog: 0.3.6
 
 **Release Date:** 2026-02-09

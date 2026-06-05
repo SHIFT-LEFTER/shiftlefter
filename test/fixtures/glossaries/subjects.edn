@@ -1,6 +1,8 @@
-;; Test subject glossary
+;; Test subject glossary — type/instance format
 {:subjects
- {:alice {:desc "Standard customer account"}
-  :admin {:desc "Administrative user"}
+ {:user  {:desc "Standard application user"
+          :instances [:alice :bob]}
+  :admin {:desc "Administrative user"
+          :instances [:pat :admin-banned]}
   :guest {:desc "Unauthenticated visitor"}
   :system/test-setup {:desc "Harness subject for fixtures"}}}

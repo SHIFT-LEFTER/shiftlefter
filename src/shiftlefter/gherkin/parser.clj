@@ -85,7 +85,7 @@
 (s/def ::fence #{:triple-quote :backtick})
 (s/def ::mediaType (s/or :nil nil? :str string?))
 (s/def ::cells (s/coll-of string?))
-(s/def ::source-text string?)
+(s/def ::source-text (s/nilable string?))
 (s/def ::table-row
   (s/with-gen
     (s/and (partial instance? TableRow) (s/keys :req-un [::type ::cells ::location ::source-text]))
@@ -114,8 +114,11 @@
     #(gen/fmap (fn [[loc src]]
                  (->Blank :blank loc src "" nil))
                (gen/tuple (s/gen ::location) (s/gen ::source-text)))))
-;; Keyword spec for step keywords
-(s/def ::keyword #{:given :when :then :and :but :*})
+;; Keyword spec for step keywords — parser stores canonical English strings, not Clojure keywords
+(s/def ::keyword #{"Given" "When" "Then" "And" "But" "*"})
+(s/def ::start-idx nat-int?)
+(s/def ::end-idx nat-int?)
+(s/def ::span (s/keys :req-un [::start-idx ::end-idx]))
 
 (s/def ::argument
   (s/with-gen
@@ -196,6 +199,23 @@
 (s/fdef parse-steps
   :args (s/cat :ts (s/coll-of ::tokens/token))
   :ret (s/tuple ::steps (s/coll-of ::tokens/token)))
+
+(s/fdef node->raw
+  :args (s/cat :tokens (s/coll-of ::tokens/token :kind vector?)
+               :node (s/keys :req-un [::span]))
+  :ret string?)
+
+(s/fdef get-background
+  :args (s/cat :node (s/keys :req-un [::children]))
+  :ret (s/nilable ::ast-node))
+
+(s/fdef get-scenarios
+  :args (s/cat :node (s/keys :req-un [::children]))
+  :ret (s/coll-of ::ast-node))
+
+(s/fdef get-rules
+  :args (s/cat :node (s/keys :req-un [::children]))
+  :ret (s/coll-of ::ast-node))
 
 ;; -----------------------------------------------------------------------------
 ;; Dynamic vars
@@ -388,7 +408,7 @@
         [content remaining2 incomplete?] (collect-docstring-content remaining fence base-indent)
         end-idx (or (token-idx (first remaining2)) (inc start-idx))
         span (make-span start-idx end-idx)]
-    [(->Docstring :docstring content fence mediaType (:location sep-token) (:value sep-token) (:leading-ws sep-token) span)
+    [(->Docstring :docstring content fence mediaType (:location sep-token) (:raw sep-token) (:leading-ws sep-token) span)
      remaining2
      (if incomplete? [(->error :incomplete-docstring (:location sep-token) "Unclosed docstring")] [])]))
 

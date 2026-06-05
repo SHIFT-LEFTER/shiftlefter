@@ -27,7 +27,8 @@
     :last-connected-at \"2026-01-08T12:00:00Z\"}
    ```"
   (:require [babashka.fs :as fs]
-            [clojure.edn :as edn])
+            [clojure.edn :as edn]
+            [shiftlefter.gherkin.io :as gio])
   (:import [java.time Instant]))
 
 ;; -----------------------------------------------------------------------------
@@ -141,7 +142,7 @@
 (defn load-browser-meta
   "Load browser metadata for a subject.
 
-   Returns the metadata map, or nil if file doesn't exist.
+   Returns the metadata map, or nil if file doesn't exist or is corrupt.
 
    Examples:
    ```clojure
@@ -154,7 +155,10 @@
   [subject-name]
   (let [path (browser-meta-path subject-name)]
     (when (fs/exists? path)
-      (edn/read-string (slurp path)))))
+      (try
+        (edn/read-string (gio/slurp-utf8 path))
+        (catch Exception _
+          nil)))))
 
 (defn save-browser-meta!
   "Save browser metadata for a subject.
@@ -178,7 +182,9 @@
         now (now-iso)
         ;; Load existing to preserve created-at
         existing (when (fs/exists? path)
-                   (edn/read-string (slurp path)))
+                   (try
+                     (edn/read-string (gio/slurp-utf8 path))
+                     (catch Exception _ nil)))
         existing-created-at (:created-at existing)
         meta-with-timestamps (-> meta
                                  (assoc :last-connected-at now)

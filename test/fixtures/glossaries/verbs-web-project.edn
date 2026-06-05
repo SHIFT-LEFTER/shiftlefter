@@ -1,5 +1,11 @@
-;; Project-specific web verb extensions
+;; Project-specific web verb extensions.
+;; Conforms to the frame-based ::verb-entry shape (sl-hse).
+
 {:type :web
  :verbs
- {:swipe {:desc "Swipe gesture on mobile"}
-  :pinch {:desc "Pinch gesture for zoom"}}}
+ {:swipe {:desc "Swipe gesture on mobile"
+          :frames {:default {:args []
+                             :pattern "S swipes O"}}}
+  :pinch {:desc "Pinch gesture for zoom"
+          :frames {:default {:args []
+                             :pattern "S pinches O"}}}}}

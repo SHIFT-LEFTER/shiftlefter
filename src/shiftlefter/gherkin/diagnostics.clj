@@ -7,7 +7,23 @@
      (format-error path error)           ; single error string
      (format-errors-human path errors)   ; multi-line human output
      (format-result-edn result)          ; machine-readable EDN"
-  (:require [clojure.string :as str]))
+  (:require [clojure.spec.alpha :as s]
+            [clojure.string :as str]))
+
+;; -----------------------------------------------------------------------------
+;; Specs — Diagnostic Error Shape
+;; -----------------------------------------------------------------------------
+
+(s/def ::type keyword?)
+(s/def ::message string?)
+(s/def ::line pos-int?)
+(s/def ::column pos-int?)
+(s/def ::location (s/keys :opt-un [::line ::column]))
+(s/def ::path string?)
+
+(s/def ::diagnostic-error
+  (s/keys :req-un [::type ::message]
+          :opt-un [::location ::path]))
 
 ;; -----------------------------------------------------------------------------
 ;; Error formatting

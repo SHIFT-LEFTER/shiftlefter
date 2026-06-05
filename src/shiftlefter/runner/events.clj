@@ -20,9 +20,23 @@
      (unsubscribe! bus sub)
      (close! bus))
    ```"
-  (:require [clojure.core.async :as async :refer [chan mult tap untap close! go-loop <!]])
+  (:require [clojure.core.async :as async :refer [chan mult tap untap close! go-loop <!]]
+            [clojure.spec.alpha :as s]
+            [clojure.tools.logging :as log])
   (:import [java.time Instant ZoneOffset]
            [java.time.format DateTimeFormatter]))
+
+;; -----------------------------------------------------------------------------
+;; Specs — Event Envelope
+;; -----------------------------------------------------------------------------
+
+(s/def ::type keyword?)
+(s/def ::ts string?)
+(s/def ::run-id string?)
+(s/def ::payload map?)
+
+(s/def ::event-envelope
+  (s/keys :req-un [::type ::ts ::run-id ::payload]))
 
 ;; -----------------------------------------------------------------------------
 ;; Timestamp Helper
@@ -76,9 +90,9 @@
           (try
             (handler event)
             (catch Exception e
-              ;; Log but don't crash the loop
-              (binding [*out* *err*]
-                (println "Event handler error:" (ex-message e)))))
+              ;; Log but don't crash the loop. log/error keeps the
+              ;; throwable so backends can render the stack trace.
+              (log/error e "Event handler error")))
           (recur)))
       ;; Track subscription for cleanup
       (swap! subscriptions-atom assoc sub-id sub-chan)

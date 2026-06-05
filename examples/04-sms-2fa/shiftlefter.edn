@@ -1,0 +1,18 @@
+;; ShiftLefter config for the 2FA password-reset demo.
+;;
+;; Two interfaces: a real browser (Etaoin/Chrome) and a mock SMS line.
+;; The actual MockSMS *instance* used at runtime is supplied by setup.clj —
+;; it shares the same in-memory log with the fixture HTTP server stood up
+;; alongside, so the code the server sends is the code the framework's
+;; SMS receive step polls for.
+;;
+;; Subjects glossary declares :user/alice. Verb glossaries for :web and
+;; :sms are auto-loaded from framework defaults.
+
+{:interfaces {:web {:type :web :adapter :etaoin :config {}}
+              :sms {:type :sms :adapter :sms-mock}}
+ :runner     {:step-paths ["steps/"]}
+ :glossaries {:subjects "glossary/subjects.edn"}
+ :svo        {:unknown-subject :error
+              :unknown-verb    :warn
+              :unknown-interface :error}}

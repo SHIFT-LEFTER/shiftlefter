@@ -233,7 +233,9 @@
 (deftest ^:integration repl-browser-workflow-test
   (if live-webdriver?
     (testing "REPL workflow with browser stepdefs"
-      ;; Load stepdefs
+      ;; Clear-then-reload — :reload alone re-runs defstep forms and
+      ;; the registry rejects duplicates if the ns was previously loaded.
+      (registry/clear-registry!)
       (require 'shiftlefter.stepdefs.browser :reload)
 
       (let [driver (session/make-driver webdriver-url)

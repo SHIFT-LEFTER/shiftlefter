@@ -1,37 +1,211 @@
-;; ShiftLefter default verb glossary for :web interface type
-;; Projects can extend or override via :glossaries config
+;; ShiftLefter default verb glossary for :web interface type.
+;; Projects can extend or override via :glossaries config.
+;;
+;; Each verb entry declares its valence as a closed set of frames.
+;; A frame is one valid argument shape for the verb. Frames declare
+;; their args (slot names beyond S-V-O), a human-readable surface
+;; pattern, and optionally an :implicit-object for verbs whose object
+;; is elided from the step text.
+;;
+;; Convention in :pattern strings:
+;;   S         = subject (the actor)
+;;   O         = object (the thing acted on)
+;;   UPPERCASE = a per-frame arg slot
+;;
+;; Single-frame verbs use frame name :default. Multi-frame verbs use
+;; descriptive names (:with, :from, :to, :visible, :text, ...).
+;;
+;; See sl-hse for the design rationale. sl-psc closed verbs that were
+;; permanently dropped (:upload, :check, :uncheck, :submit; the
+;; previously-standalone :count verb is now the :count frame on :see).
+;; sl-jsn (2026-05-13) reintroduced :hover and :wait as full first-class
+;; verbs with stepdef coverage.
 
 {:type :web
  :verbs
- {:click {:desc "Click on an element"}
-  :fill {:desc "Enter text into an input field"}
-  :see {:desc "Assert element is visible"}
-  :navigate {:desc "Navigate to a URL"}
-  :submit {:desc "Submit a form"}
-  :hover {:desc "Hover over an element"}
-  :drag {:desc "Drag element to a target"}
-  :select {:desc "Select option from dropdown"}
-  :check {:desc "Check a checkbox"}
-  :uncheck {:desc "Uncheck a checkbox"}
-  :scroll {:desc "Scroll to element or position"}
-  :wait {:desc "Wait for condition or element"}
-  :clear {:desc "Clear input field contents"}
-  :press {:desc "Press keyboard key or chord"}
-  :upload {:desc "Upload file to input"}
-  ;; Navigation (0.3.6)
-  :navigate-back {:desc "Navigate backward in browser history"}
-  :navigate-forward {:desc "Navigate forward in browser history"}
-  :refresh {:desc "Reload the current page"}
-  ;; Interaction (0.3.6)
-  :doubleclick {:desc "Double-click on an element"}
-  :rightclick {:desc "Right-click (context menu) on an element"}
-  :move {:desc "Move mouse to an element"}
-  :count {:desc "Count matching elements"}
-  ;; Alert handling (0.3.6)
-  :accept-alert {:desc "Accept (OK) an alert dialog"}
-  :dismiss-alert {:desc "Dismiss (Cancel) an alert dialog"}
-  ;; Window/frame management (0.3.6)
-  :maximize {:desc "Maximize the browser window"}
-  :resize {:desc "Set browser window dimensions"}
-  :switch-window {:desc "Switch to another browser window or tab"}
-  :switch-frame {:desc "Switch to an iframe or back to main frame"}}}
+ ;; ---------------------------------------------------------------------------
+ ;; Action verbs (single :default frame, locator object, no extra args)
+ ;; ---------------------------------------------------------------------------
+ {:click
+  {:desc "Click on an element"
+   :frames {:default {:args [] :pattern "S clicks O"}}}
+
+  :doubleclick
+  {:desc "Double-click on an element"
+   :frames {:default {:args [] :pattern "S double-clicks O"}}}
+
+  :rightclick
+  {:desc "Right-click (context menu) on an element"
+   :frames {:default {:args [] :pattern "S right-clicks O"}}}
+
+  :move
+  {:desc "Move mouse to an element"
+   :frames {:default {:args [] :pattern "S moves to O"}}}
+
+  :hover
+  {:desc "Hover the mouse over an element (delegates to the move-to kernel op)"
+   :frames {:default {:args [] :pattern "S hovers over O"}}}
+
+  :clear
+  {:desc "Clear input field contents"
+   :frames {:default {:args [] :pattern "S clears O"}}}
+
+  :press
+  {:desc "Press a keyboard key or chord; the key is the object"
+   :frames {:default {:args [] :pattern "S presses O"}}}
+
+  ;; ---------------------------------------------------------------------------
+  ;; Action verbs with descriptive single frames (the verb's surface form
+  ;; carries a preposition or qualifier that names the frame)
+  ;; ---------------------------------------------------------------------------
+  :fill
+  {:desc "Enter text into an input field"
+   :frames {:with {:args [:value]
+                   :pattern "S fills O with VALUE"}}}
+
+  :select
+  {:desc "Select an option from a dropdown"
+   :frames {:from {:args [:value]
+                   :pattern "S selects VALUE from O"}}}
+
+  :drag
+  {:desc "Drag an element to a target"
+   :frames {:to {:args [:target]
+                 :pattern "S drags O to TARGET"}}}
+
+  :navigate
+  {:desc "Navigate to a URL; the URL is the object"
+   :frames {:to {:args []
+                 :pattern "S navigates to O"}}}
+
+  ;; ---------------------------------------------------------------------------
+  ;; Action verbs with implicit objects (the object is elided from step text)
+  ;; ---------------------------------------------------------------------------
+  :navigate-back
+  {:desc "Navigate backward in browser history"
+   :frames {:default {:args []
+                      :pattern "S goes back"
+                      :implicit-object :browser-history}}}
+
+  :navigate-forward
+  {:desc "Navigate forward in browser history"
+   :frames {:default {:args []
+                      :pattern "S goes forward"
+                      :implicit-object :browser-history}}}
+
+  :refresh
+  {:desc "Reload the current page"
+   :frames {:default {:args []
+                      :pattern "S refreshes the page"
+                      :implicit-object :page}}}
+
+  :maximize
+  {:desc "Maximize the browser window"
+   :frames {:default {:args []
+                      :pattern "S maximizes the window"
+                      :implicit-object :window}}}
+
+  :switch-window
+  {:desc "Switch to another browser window or tab"
+   :frames {:default {:args []
+                      :pattern "S switches to the next window"
+                      :implicit-object :window}}}
+
+  :accept-alert
+  {:desc "Accept (OK) an alert dialog"
+   :frames {:default {:args []
+                      :pattern "S accepts the alert"
+                      :implicit-object :alert}}}
+
+  :dismiss-alert
+  {:desc "Dismiss (Cancel) an alert dialog"
+   :frames {:default {:args []
+                      :pattern "S dismisses the alert"
+                      :implicit-object :alert}}}
+
+  :resize
+  {:desc "Set browser window dimensions"
+   :frames {:dimensions {:args [:width :height]
+                         :pattern "S resizes the window to WIDTH by HEIGHT"
+                         :implicit-object :window}}}
+
+  ;; ---------------------------------------------------------------------------
+  ;; Multi-frame action verbs
+  ;; ---------------------------------------------------------------------------
+  :scroll
+  {:desc "Scroll the page to an element or to a named position"
+   :frames {:to-element  {:args []
+                          :pattern "S scrolls to O"}
+            :to-position {:args [:position]
+                          :pattern "S scrolls to POSITION"
+                          :implicit-object :page}}}
+
+  :switch-frame
+  {:desc "Switch into an iframe or back to the main frame"
+   :frames {:into {:args []
+                   :pattern "S switches to frame O"}
+            :main {:args []
+                   :pattern "S switches to the main frame"
+                   :implicit-object :main-frame}}}
+
+  ;; ---------------------------------------------------------------------------
+  ;; Observation verbs
+  ;; ---------------------------------------------------------------------------
+  :see
+  {:desc "Observe an element or page property"
+   :frames {:visible          {:args []
+                               :pattern "S sees O"}
+            :on-page          {:args []
+                               :pattern "S sees O on the page"}
+            :text             {:args [:text]
+                               :pattern "S sees O with text TEXT"}
+            :value            {:args [:value]
+                               :pattern "S sees O with value VALUE"}
+            :attribute        {:args [:attribute :value]
+                               :pattern "S sees O with attribute ATTRIBUTE equal to VALUE"}
+            :enabled          {:args []
+                               :pattern "S sees O enabled"}
+            :disabled         {:args []
+                               :pattern "S sees O disabled"}
+            :count            {:args [:count]
+                               :pattern "S sees COUNT O"}
+            :title            {:args []
+                               :pattern "S sees the title O"}
+            :alert            {:args []
+                               :pattern "S sees an alert"
+                               :implicit-object :alert}
+            :alert-with-text  {:args [:text]
+                               :pattern "S sees an alert with TEXT"
+                               :implicit-object :alert}}}
+
+  :not-see
+  {:desc "Observe absence of an element"
+   :frames {:invisible {:args []
+                        :pattern "S does not see O"}}}
+
+  ;; ---------------------------------------------------------------------------
+  ;; State-assertion verbs — assert properties of the subject or page that
+  ;; aren't observations of an element. `:be` generalizes "is at URL",
+  ;; "is logged in", "is admin", etc. (sl-rch extracted `:at` from `:see/:url`.)
+  ;; ---------------------------------------------------------------------------
+  :be
+  {:desc "Assert a property or state of the subject"
+   :frames {:at {:args []
+                 :pattern "S is on O"}}}
+
+  ;; ---------------------------------------------------------------------------
+  ;; Await verbs — pause until a condition is met or a duration elapses.
+  ;; The condition frames mirror :see's vocabulary (sl-hse pattern); :duration
+  ;; is the orthogonal time-based frame.
+  ;; ---------------------------------------------------------------------------
+  :wait
+  {:desc "Pause until a condition is met or a duration elapses"
+   :frames {:duration    {:args [:duration]
+                          :pattern "S waits DURATION seconds"
+                          :implicit-object :time}
+            :for-element {:args []
+                          :pattern "S waits for O"}
+            :for-text    {:args [:text]
+                          :pattern "S waits for O to show TEXT"}
+            :for-count   {:args [:count]
+                          :pattern "S waits for COUNT O"}}}}}

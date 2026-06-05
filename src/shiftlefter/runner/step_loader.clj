@@ -19,8 +19,31 @@
    ;; => {:status :error :errors [...] :loaded [...]}
    ```"
   (:require [babashka.fs :as fs]
+            [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [shiftlefter.stepengine.registry :as registry]))
+
+;; -----------------------------------------------------------------------------
+;; Specs — Step Load Result Shape
+;; -----------------------------------------------------------------------------
+
+(s/def ::status #{:ok :error})
+(s/def ::loaded (s/coll-of string?))
+(s/def ::path string?)
+(s/def ::error-type keyword?)
+(s/def ::message string?)
+(s/def ::cause (s/nilable string?))
+(s/def ::load-error (s/keys :req-un [::path]))
+(s/def ::errors (s/coll-of ::load-error))
+
+(s/def ::step-load-ok
+  (s/keys :req-un [::status ::loaded]))
+
+(s/def ::step-load-error
+  (s/keys :req-un [::status ::errors ::loaded]))
+
+(s/def ::step-load-result
+  (s/or :ok ::step-load-ok :error ::step-load-error))
 
 ;; -----------------------------------------------------------------------------
 ;; File Discovery

@@ -3,16 +3,17 @@
 
    ## Validation Process
 
-   Given an extracted SVOI map:
+   Given an extracted SVO map:
    ```clojure
-   {:subject :alice
+   {:subject :user/alice
     :verb :click
     :object \"the button\"
     :interface :web}
    ```
 
    Validates:
-   1. Subject is known in glossary
+   1. Subject is known in glossary (supports qualified `:user/alice`
+      and bare `:guest` forms)
    2. Verb is known for the interface type
    3. Interface is defined in config
 
@@ -22,18 +23,46 @@
    ;; or
    {:valid? false
     :issues [{:type :svo/unknown-subject
-              :subject :alcie
-              :known [:alice :admin]
-              :suggestion :alice}]}
+              :subject :user/alcie
+              :known [:user :admin :guest :user/alice :user/bob ...]
+              :suggestion :user/alice}]}
    ```
 
    ## Usage
 
    ```clojure
-   (validate-svoi glossaries interfaces svoi)
+   (validate-svo glossaries interfaces svo)
    ```"
-  (:require [clojure.string :as str]
-            [shiftlefter.svo.glossary :as glossary]))
+  (:require [clojure.spec.alpha :as s]
+            [clojure.string :as str]
+            [shiftlefter.svo.glossary :as glossary]
+            [shiftlefter.intent.resolve :as intent-resolve]
+            [shiftlefter.intent.state :as intent-state]))
+
+;; -----------------------------------------------------------------------------
+;; Specs — SVO Validation Issue Shapes
+;; -----------------------------------------------------------------------------
+
+(s/def ::type #{:svo/unknown-subject :svo/unknown-verb
+                :svo/unknown-interface :svo/provisioning-failed
+                :svo/unknown-object :svo/raw-locator-disallowed})
+(s/def ::subject keyword?)
+(s/def ::verb keyword?)
+(s/def ::interface keyword?)
+(s/def ::interface-type keyword?)
+(s/def ::known (s/coll-of keyword?))
+(s/def ::suggestion (s/nilable keyword?))
+
+(s/def ::svo-issue
+  (s/keys :req-un [::type]
+          :opt-un [::subject ::verb ::interface ::interface-type
+                   ::known ::suggestion]))
+
+(s/def ::valid? boolean?)
+(s/def ::issues (s/coll-of map?))
+
+(s/def ::validation-result
+  (s/keys :req-un [::valid? ::issues]))
 
 ;; -----------------------------------------------------------------------------
 ;; Levenshtein Distance (for typo suggestions)
@@ -70,15 +99,24 @@
                           [i j]))
                 [len1 len2])))))
 
+(defn- keyword->str
+  "Convert a keyword to its string form without leading colon.
+   Handles namespaced keywords: `:user/alice` → `\"user/alice\"`."
+  [kw]
+  (if (namespace kw)
+    (str (namespace kw) "/" (name kw))
+    (name kw)))
+
 (defn- suggest-similar
   "Find the most similar keyword from candidates.
+   Uses full keyword string (including namespace) for comparison.
    Returns the best match if distance <= max-distance, else nil."
   [target candidates max-distance]
   (when (and target (seq candidates))
-    (let [target-str (name target)
+    (let [target-str (keyword->str target)
           scored (map (fn [kw]
                         {:keyword kw
-                         :distance (levenshtein target-str (name kw))})
+                         :distance (levenshtein target-str (keyword->str kw))})
                       candidates)
           best (apply min-key :distance scored)]
       (when (<= (:distance best) max-distance)
@@ -90,15 +128,17 @@
 
 (defn- validate-subject
   "Validate subject against glossary.
+   Uses all-subject-forms for Levenshtein suggestions (includes qualified
+   instance forms like :user/alice alongside type keys).
    Returns issue map or nil if valid."
   [glossary subject]
   (when subject
     (when-not (glossary/known-subject? glossary subject)
-      (let [known (glossary/known-subjects glossary)
-            suggestion (suggest-similar subject known 2)]
+      (let [all-forms (glossary/all-subject-forms glossary)
+            suggestion (suggest-similar subject all-forms 2)]
         {:type :svo/unknown-subject
          :subject subject
-         :known known
+         :known all-forms
          :suggestion suggestion}))))
 
 (defn- validate-verb
@@ -128,17 +168,66 @@
          :known known
          :suggestion suggestion}))))
 
+(defn- raw-locator?
+  "Check if the object string is a raw EDN locator (starts with {)."
+  [object-str]
+  (and (string? object-str)
+       (str/starts-with? object-str "{")))
+
+(defn- validate-object
+  "Validate object (locator) against intent glossary.
+
+   Enforcement modes:
+   - :strict — raw locators disallowed, unknown intents disallowed
+   - :warn — unknown intents warn (raw locators allowed)
+   - :off — no validation
+
+   Returns issue map or nil if valid."
+  [object-str interface enforcement]
+  (when (and object-str (string? object-str) (not= enforcement :off))
+    (cond
+      ;; Raw locator check (strict mode only)
+      (and (= enforcement :strict) (raw-locator? object-str))
+      {:type :svo/raw-locator-disallowed
+       :object object-str
+       :message "Raw locators are not allowed in strict mode. Use intent references instead."}
+
+      ;; Intent reference check
+      (not (raw-locator? object-str))
+      (let [parse-result (intent-resolve/parse-intent-ref object-str)]
+        (if (:error parse-result)
+          ;; Invalid intent reference syntax
+          {:type :svo/unknown-object
+           :object object-str
+           :message (-> parse-result :error :message)}
+          ;; Valid syntax, check if intent exists
+          (try
+            (let [intents (intent-state/get-intents)
+                  resolve-result (intent-resolve/resolve-intent-ref intents (:ok parse-result) interface)]
+              (when (:error resolve-result)
+                {:type :svo/unknown-object
+                 :object object-str
+                 :interface interface
+                 :message (-> resolve-result :error :message)}))
+            (catch Exception _
+              ;; If intents not loaded yet, skip validation
+              nil))))
+
+      :else nil)))
+
 ;; -----------------------------------------------------------------------------
 ;; Public API
 ;; -----------------------------------------------------------------------------
 
-(defn validate-svoi
-  "Validate an SVOI map against glossaries and interface config.
+(defn validate-svo
+  "Validate an SVO map against glossaries and interface config.
 
    Parameters:
    - glossary: Loaded glossary from `svo.glossary/load-all-glossaries`
    - interfaces: Interface config map from `config/get-interfaces`
-   - svoi: Extracted SVOI map {:subject :verb :object :interface}
+   - svo: Extracted SVO map {:subject :verb :object :interface}
+   - opts: Optional enforcement options:
+     - :unknown-object — :strict, :warn, or :off (default :off)
 
    Returns:
    - {:valid? true :issues []} if all checks pass
@@ -148,31 +237,168 @@
    - :svo/unknown-subject — subject not in glossary
    - :svo/unknown-verb — verb not known for interface type
    - :svo/unknown-interface — interface not defined in config
+   - :svo/unknown-object — intent reference not found
+   - :svo/raw-locator-disallowed — raw locator used in strict mode
 
    Each issue includes :known (alternatives) and :suggestion (typo fix)."
-  [glossary interfaces svoi]
-  (let [{:keys [subject verb interface]} svoi
-        ;; Look up interface type from config
-        interface-def (get interfaces interface)
-        interface-type (:type interface-def)
-        ;; Collect issues
-        issues (keep identity
-                     [(validate-subject glossary subject)
-                      ;; Only validate verb if interface is known
-                      (when interface-type
-                        (validate-verb glossary interface-type verb))
-                      (validate-interface interfaces interface)])]
-    {:valid? (empty? issues)
-     :issues (vec issues)}))
+  ([glossary interfaces svo]
+   (validate-svo glossary interfaces svo nil))
+  ([glossary interfaces svo opts]
+   (let [{:keys [subject verb object interface]} svo
+         ;; Look up interface type from config
+         interface-def (get interfaces interface)
+         interface-type (:type interface-def)
+         ;; Object enforcement (default :off)
+         object-enforcement (get opts :unknown-object :off)
+         ;; Collect issues
+         issues (keep identity
+                       [(validate-subject glossary subject)
+                        ;; Only validate verb if interface is known
+                        (when interface-type
+                          (validate-verb glossary interface-type verb))
+                        (validate-interface interfaces interface)
+                        ;; Validate object/locator (when enforcement is not :off)
+                        (validate-object object interface object-enforcement)])]
+     {:valid? (empty? issues)
+      :issues (vec issues)})))
 
 (defn valid?
-  "Returns true if SVOI is valid according to validate-svoi."
-  [glossary interfaces svoi]
-  (:valid? (validate-svoi glossary interfaces svoi)))
+  "Returns true if SVO is valid according to validate-svo."
+  [glossary interfaces svo]
+  (:valid? (validate-svo glossary interfaces svo)))
+
+;; -----------------------------------------------------------------------------
+;; Stepdef-vs-Glossary Cross-Check (Tier 2) — sl-hse
+;; -----------------------------------------------------------------------------
+;;
+;; Validate every registered stepdef's :svo metadata against the loaded
+;; glossary: the verb must exist on the declared interface, the frame
+;; must exist on the verb, and the step's :args keys must match the
+;; frame's declared :args. Stepdefs without :svo metadata or whose
+;; interface isn't loaded in the glossary are skipped.
+;;
+;; This is a once-per-compile check, distinct from validate-svo (which
+;; runs per matched feature step against extracted SVOs).
+
+(defn- format-keyword-list
+  "Render a sequence of keywords as ':a, :b, :c' for error messages."
+  [kws]
+  (str/join ", " (map #(str ":" (name %)) (sort kws))))
+
+(defn- source-loc
+  "Format a stepdef source map as 'file.clj:42'."
+  [{:keys [file line]}]
+  (str (or file "?") ":" (or line "?")))
+
+(defn- check-one-stepdef
+  "Validate a single stepdef against the glossary. Returns nil if valid
+   or no :svo metadata; otherwise a stepdef-issue map."
+  [stepdef glossary]
+  (let [{:keys [metadata source]} stepdef
+        {:keys [interface svo]} metadata
+        {:keys [verb frame args]} svo]
+    (cond
+      ;; Skip: no :svo, no :interface, or no :verb to check
+      (or (nil? svo) (nil? interface) (nil? verb))
+      nil
+
+      :else
+      (let [interface-verbs (get-in glossary [:verbs interface])
+            verb-entry      (get interface-verbs verb)]
+        (cond
+          ;; Interface not loaded in glossary — skip (e.g., :sms stepdef
+          ;; in a config that only loads :web).
+          (nil? interface-verbs)
+          nil
+
+          ;; Unknown verb under this interface
+          (nil? verb-entry)
+          {:type        :stepdef/unknown-verb
+           :stepdef-id  (:stepdef/id stepdef)
+           :source      source
+           :interface   interface
+           :verb        verb
+           :known-verbs (sort (keys interface-verbs))
+           :message     (str "Step at " (source-loc source)
+                             " declares unknown verb :" (name interface) "/" (name verb)
+                             "; known :" (name interface) " verbs: "
+                             (format-keyword-list (keys interface-verbs)))}
+
+          ;; Step :svo missing :frame (Tier 1 will catch eventually, but
+          ;; defensive — bail out cleanly so we don't NPE downstream).
+          (nil? frame)
+          {:type       :stepdef/missing-frame
+           :stepdef-id (:stepdef/id stepdef)
+           :source     source
+           :interface  interface
+           :verb       verb
+           :message    (str "Step at " (source-loc source)
+                            " declares :verb :" (name interface) "/" (name verb)
+                            " but no :frame; required since sl-hse")}
+
+          ;; Frame not declared on this verb
+          (not (contains? (:frames verb-entry) frame))
+          {:type         :stepdef/unknown-frame
+           :stepdef-id   (:stepdef/id stepdef)
+           :source       source
+           :interface    interface
+           :verb         verb
+           :frame        frame
+           :known-frames (sort (keys (:frames verb-entry)))
+           :message      (str "Step at " (source-loc source)
+                              " uses unknown frame :" (name frame)
+                              " on verb :" (name interface) "/" (name verb)
+                              "; known frames: "
+                              (format-keyword-list (keys (:frames verb-entry))))}
+
+          ;; Args keyset mismatch
+          :else
+          (let [frame-args  (set (:args (get-in verb-entry [:frames frame])))
+                step-args   (set (keys (or args {})))
+                missing     (vec (sort (remove step-args frame-args)))
+                unexpected  (vec (sort (remove frame-args step-args)))]
+            (when (or (seq missing) (seq unexpected))
+              {:type           :stepdef/args-mismatch
+               :stepdef-id     (:stepdef/id stepdef)
+               :source         source
+               :interface      interface
+               :verb           verb
+               :frame          frame
+               :expected-args  (vec (sort frame-args))
+               :provided-args  (vec (sort step-args))
+               :missing-args   missing
+               :extra-args     unexpected
+               :message
+               (str "Step at " (source-loc source)
+                    " — frame :" (name interface) "/" (name verb) "/" (name frame)
+                    " expects args ["
+                    (format-keyword-list frame-args)
+                    "]; got ["
+                    (format-keyword-list step-args)
+                    "]"
+                    (when (seq missing)
+                      (str " (missing: " (format-keyword-list missing) ")"))
+                    (when (seq unexpected)
+                      (str " (unexpected: " (format-keyword-list unexpected) ")")))})))))))
+
+(defn validate-stepdefs-against-glossary
+  "Walk all stepdefs; verify each :svo's verb/frame/args are declared
+   in the loaded glossary. Returns a vector of issues; empty when valid.
+   Stepdefs whose interface is absent from the glossary are skipped
+   (interface-less stepdefs and cross-interface tooling are unaffected)."
+  [stepdefs glossary]
+  (->> stepdefs
+       (keep #(check-one-stepdef % glossary))
+       vec))
 
 ;; -----------------------------------------------------------------------------
 ;; Error Message Formatting
 ;; -----------------------------------------------------------------------------
+
+(defn- format-keyword
+  "Format a keyword for display, preserving namespace."
+  [kw]
+  (str ":" (keyword->str kw)))
 
 (defn- format-known-list
   "Format a list of known values for display.
@@ -180,7 +406,7 @@
   [known max-display]
   (let [items (take max-display known)
         remaining (- (count known) max-display)
-        formatted (str/join ", " (map #(str ":" (name %)) items))]
+        formatted (str/join ", " (map format-keyword items))]
     (if (pos? remaining)
       (str formatted ", ... (+" remaining " more)")
       formatted)))
@@ -189,7 +415,7 @@
   "Format a typo suggestion if present."
   [suggestion]
   (when suggestion
-    (str "Did you mean: :" (name suggestion) "?")))
+    (str "Did you mean: " (format-keyword suggestion) "?")))
 
 (defn format-unknown-subject
   "Format an :svo/unknown-subject issue as a human-readable error message.
@@ -202,7 +428,7 @@
   [issue]
   (let [{:keys [subject known suggestion location]} issue
         {:keys [step-text uri line]} location]
-    (str "Unknown subject :" (name subject)
+    (str "Unknown subject " (format-keyword subject)
          (when step-text (str " in step \"" step-text "\""))
          (when (and uri line) (str "\n       at " uri ":" line))
          (when (seq known)
@@ -252,8 +478,8 @@
            (str "\n       Configured interfaces: " (format-known-list known 8)))
          (when suggestion
            (str "\n       " (format-suggestion suggestion)))
-         (str "\n       Add to shiftlefter.edn: {:interfaces {:" (name interface)
-              " {:type ... :adapter ...}}}"))))
+         "\n       Add to shiftlefter.edn: {:interfaces {:" (name interface)
+         " {:type ... :adapter ...}}}")))
 
 (defn format-provisioning-failed
   "Format an :svo/provisioning-failed issue as a human-readable error message.
@@ -275,6 +501,39 @@
          (when (seq known)
            (str "\n       Configured interfaces: " (format-known-list known 8))))))
 
+(defn format-unknown-object
+  "Format an :svo/unknown-object issue as a human-readable error message.
+
+   Example output:
+   ERROR: Unknown object 'Login.unknown' in step \"When :alice clicks Login.unknown\"
+          at features/login.feature:15
+          Intent reference could not be resolved: Element 'unknown' not found in intent 'Login'"
+  [issue]
+  (let [{:keys [object interface message location]} issue
+        {:keys [step-text uri line]} location]
+    (str "Unknown object '" object "'"
+         (when step-text (str " in step \"" step-text "\""))
+         (when (and uri line) (str "\n       at " uri ":" line))
+         (when interface (str "\n       Interface: :" (name interface)))
+         (when message (str "\n       " message)))))
+
+(defn format-raw-locator-disallowed
+  "Format an :svo/raw-locator-disallowed issue as a human-readable error message.
+
+   Example output:
+   ERROR: Raw locator '{:css \"#submit\"}' in step \"When :alice clicks {:css \"#submit\"}\"
+          at features/login.feature:20
+          Raw locators are not allowed in strict mode. Use intent references instead.
+          Example: Login.submit or Checkout.pay-button"
+  [issue]
+  (let [{:keys [object message location]} issue
+        {:keys [step-text uri line]} location]
+    (str "Raw locator '" object "'"
+         (when step-text (str " in step \"" step-text "\""))
+         (when (and uri line) (str "\n       at " uri ":" line))
+         (when message (str "\n       " message))
+         "\n       Example: Login.submit or Checkout.pay-button")))
+
 (defn format-svo-issue
   "Format any SVO issue by dispatching on :type.
 
@@ -283,6 +542,8 @@
    - :svo/unknown-verb
    - :svo/unknown-interface
    - :svo/provisioning-failed
+   - :svo/unknown-object
+   - :svo/raw-locator-disallowed
 
    Returns formatted string or generic fallback for unknown types."
   [issue]
@@ -291,5 +552,7 @@
     :svo/unknown-verb (format-unknown-verb issue)
     :svo/unknown-interface (format-unknown-interface issue)
     :svo/provisioning-failed (format-provisioning-failed issue)
+    :svo/unknown-object (format-unknown-object issue)
+    :svo/raw-locator-disallowed (format-raw-locator-disallowed issue)
     ;; Fallback for unknown types
     (str "SVO issue: " (pr-str issue))))

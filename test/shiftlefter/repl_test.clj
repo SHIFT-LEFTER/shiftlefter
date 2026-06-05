@@ -3,7 +3,7 @@
             [clojure.string :as str]
             [shiftlefter.repl :as repl]
             [shiftlefter.stepengine.registry :as registry :refer [defstep]]
-            [shiftlefter.browser.ctx :as browser.ctx]
+            [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.subjects.profile :as profile]
             [shiftlefter.webdriver.session-store :as store]
             [babashka.fs :as fs]))
@@ -363,11 +363,14 @@ Feature: Test
    :type :chrome})
 
 (defn- inject-browser-into-ctx!
-  "Inject a fake browser into a named context for testing."
+  "Inject a fake browser into a named context for testing.
+
+   Stores under the bare `:cap/web` slot (no subject) — equivalent to the
+   legacy `:default` session semantics that `assoc-active-browser` produced."
   [ctx-name session-id]
   (let [current (repl/ctx ctx-name)
         browser (make-fake-browser session-id)
-        updated (browser.ctx/assoc-active-browser current browser)]
+        updated (cap/assoc-capability current :web browser :ephemeral)]
     ;; Directly update the named-contexts atom
     (swap! @#'repl/named-contexts assoc ctx-name updated)))
 
@@ -387,7 +390,7 @@ Feature: Test
     (inject-browser-into-ctx! :alice "session-123")
 
     ;; Verify browser is present
-    (is (browser.ctx/browser-present? (repl/ctx :alice)))
+    (is (some? (cap/get-capability (repl/ctx :alice) :web)))
 
     ;; Reset should report :closed (actual close fails gracefully)
     (let [actions (repl/reset-ctxs!)]

@@ -16,7 +16,8 @@
             [clojure.java.shell :as shell]
             [clojure.string :as str]
             [clojure.test.check.generators :as gen]
-            [shiftlefter.gherkin.api :as api])
+            [shiftlefter.gherkin.api :as api]
+            [shiftlefter.gherkin.io :as gio])
   (:import [java.util Random]
            [java.time Instant]))
 
@@ -756,8 +757,81 @@
   [corpus-dir]
   (->> (fs/glob corpus-dir "**.feature")
        (map str)
-       (map (fn [path] {:path path :content (slurp path)}))
+       (map (fn [path] {:path path :content (gio/slurp-utf8 path)}))
        vec))
+
+;; -----------------------------------------------------------------------------
+;; Mutation Runner — Helpers
+;; -----------------------------------------------------------------------------
+
+(defn- update-stats-for-result!
+  "Update stats atom based on mutation check result reason."
+  [stats result]
+  (case (:reason result)
+    :graceful-errors (swap! stats update :mutations/graceful inc)
+    :mutation-survived (swap! stats update :mutations/survived inc)
+    :timeout (swap! stats update :mutations/timeout inc)
+    :uncaught-exception (swap! stats update :mutations/exception inc)
+    nil))
+
+(defn- process-mutation-result!
+  "Process a single mutation result: update stats, track signatures, save artifacts.
+
+   Parameters:
+   - stats, seen-signatures, failures: atoms for accumulation
+   - result: return value from check-mutation-invariants
+   - save-dir, seed, trial-idx, mut-idx: artifact save coordinates
+   - mutated: the mutated source string
+   - merged: full merged options (for artifact metadata)
+   - verbose: print progress?
+   - label: string for verbose output (e.g. \"mut 3 (delete-line)\" or \"combo (delete-line+swap-lines)\")"
+  [stats seen-signatures failures result
+   save-dir seed trial-idx mut-idx mutated merged verbose label]
+  (let [sig (:signature result)
+        is-fail? (= :fail (:status result))
+        new-sig? (and (= :ok (:status result))
+                      (= :graceful-errors (:reason result))
+                      (not (contains? @seen-signatures sig)))
+        should-save? (or is-fail? new-sig?)]
+    (when new-sig?
+      (swap! seen-signatures conj sig))
+    (when should-save?
+      (let [path (save-mutation-artifact! save-dir seed trial-idx mut-idx
+                                          mutated result merged)]
+        (swap! stats update :artifacts/saved inc)
+        (when is-fail?
+          (swap! failures conj path))
+        (when verbose
+          (println (format "  %s trial %d %s: %s -> %s"
+                           (if is-fail? "FAIL" "NEW ")
+                           trial-idx label
+                           (name (:reason result)) path)))))))
+
+(defn- finalize-mutation-run
+  "Build summary map from accumulated stats atoms."
+  [stats seen-signatures failures trials seed verbose]
+  (let [{:keys [mutations/total mutations/graceful mutations/survived
+                mutations/timeout mutations/exception artifacts/saved]} @stats
+        unique-sigs (count @seen-signatures)
+        failed? (or (pos? timeout) (pos? exception))]
+    (when verbose
+      (println)
+      (println (format "Results: %d mutations (%d graceful, %d survived, %d timeout, %d exception)"
+                       total graceful survived timeout exception))
+      (println (format "  Unique signatures: %d, Artifacts saved: %d"
+                       unique-sigs saved)))
+    {:status (if failed? :fail :ok)
+     :trials trials
+     :seed seed
+     :mutator-version mutator-version
+     :mutations/total total
+     :mutations/graceful graceful
+     :mutations/survived survived
+     :mutations/timeout timeout
+     :mutations/exception exception
+     :signatures/unique unique-sigs
+     :artifacts/saved saved
+     :failures @failures}))
 
 ;; -----------------------------------------------------------------------------
 ;; Mutation Runner
@@ -867,115 +941,39 @@
           (let [{:keys [mutated changed?]} (apply-mutator fn source-content rng)]
             (when changed?
               (swap! stats update :mutations/total inc)
-
               (let [mutation-info {:mutator/type id
                                    :source {:kind (:kind source)
                                             :path (:path source)}
                                    :idx mut-idx}
-                    result (check-mutation-invariants mutated mutation-info timeout-ms)
-                    sig (:signature result)]
-
-                ;; Update stats
-                (case (:reason result)
-                  :graceful-errors (swap! stats update :mutations/graceful inc)
-                  :mutation-survived (swap! stats update :mutations/survived inc)
-                  :timeout (swap! stats update :mutations/timeout inc)
-                  :uncaught-exception (swap! stats update :mutations/exception inc)
-                  nil)
-
-                ;; Determine if we should save
-                (let [is-fail? (= :fail (:status result))
-                      new-sig? (and (= :ok (:status result))
-                                    (= :graceful-errors (:reason result))
-                                    (not (contains? @seen-signatures sig)))
-                      should-save? (or is-fail? new-sig?)]
-
-                  (when new-sig?
-                    (swap! seen-signatures conj sig))
-
-                  (when should-save?
-                    (let [path (save-mutation-artifact! save seed trial-idx mut-idx
-                                                        mutated result merged)]
-                      (swap! stats update :artifacts/saved inc)
-                      (when is-fail?
-                        (swap! failures conj path))
-                      (when verbose
-                        (println (format "  %s trial %d mut %d (%s): %s -> %s"
-                                         (if is-fail? "FAIL" "NEW ")
-                                         trial-idx mut-idx (name id)
-                                         (name (:reason result)) path))))))))))
+                    result (check-mutation-invariants mutated mutation-info timeout-ms)]
+                (update-stats-for-result! stats result)
+                (process-mutation-result! stats seen-signatures failures result
+                                          save seed trial-idx mut-idx mutated merged verbose
+                                          (format "mut %d (%s)" mut-idx (name id)))))))
 
         ;; Combo mutations (apply 2 mutators in sequence)
         (when (pos? combos)
           (doseq [combo-idx (range combos)]
-            (let [;; Pick 2 different mutators
-                  mut1 (rand-nth-seeded rng mutators)
+            (let [mut1 (rand-nth-seeded rng mutators)
                   mut2 (rand-nth-seeded rng (remove #(= (:id %) (:id mut1)) mutators))
                   {:keys [mutated]} (apply-mutator (:fn mut1) source-content rng)
                   {:keys [mutated changed?]} (apply-mutator (:fn mut2) mutated rng)]
               (when changed?
                 (swap! stats update :mutations/total inc)
-
                 (let [mutation-info {:mutator/type :mut/combo
                                      :combo [(:id mut1) (:id mut2)]
                                      :source {:kind (:kind source)
                                               :path (:path source)}
                                      :idx (+ (count mutators) combo-idx)}
-                      result (check-mutation-invariants mutated mutation-info timeout-ms)
-                      sig (:signature result)]
-
-                  (case (:reason result)
-                    :graceful-errors (swap! stats update :mutations/graceful inc)
-                    :mutation-survived (swap! stats update :mutations/survived inc)
-                    :timeout (swap! stats update :mutations/timeout inc)
-                    :uncaught-exception (swap! stats update :mutations/exception inc)
-                    nil)
-
-                  (let [is-fail? (= :fail (:status result))
-                        new-sig? (and (= :ok (:status result))
-                                      (= :graceful-errors (:reason result))
-                                      (not (contains? @seen-signatures sig)))
-                        should-save? (or is-fail? new-sig?)]
-
-                    (when new-sig?
-                      (swap! seen-signatures conj sig))
-
-                    (when should-save?
-                      (let [path (save-mutation-artifact! save seed trial-idx
-                                                          (+ (count mutators) combo-idx)
-                                                          mutated result merged)]
-                        (swap! stats update :artifacts/saved inc)
-                        (when is-fail?
-                          (swap! failures conj path))
-                        (when verbose
-                          (println (format "  %s trial %d combo (%s+%s): %s -> %s"
-                                           (if is-fail? "FAIL" "NEW ")
-                                           trial-idx
-                                           (name (:id mut1)) (name (:id mut2))
-                                           (name (:reason result)) path)))))))))))))
+                      result (check-mutation-invariants mutated mutation-info timeout-ms)]
+                  (update-stats-for-result! stats result)
+                  (process-mutation-result! stats seen-signatures failures result
+                                            save seed trial-idx
+                                            (+ (count mutators) combo-idx)
+                                            mutated merged verbose
+                                            (format "combo (%s+%s)"
+                                                    (name (:id mut1))
+                                                    (name (:id mut2)))))))))))
 
     ;; Summary
-    (let [{:keys [mutations/total mutations/graceful mutations/survived
-                  mutations/timeout mutations/exception artifacts/saved]} @stats
-          unique-sigs (count @seen-signatures)
-          failed? (or (pos? timeout) (pos? exception))]
-
-      (when verbose
-        (println)
-        (println (format "Results: %d mutations (%d graceful, %d survived, %d timeout, %d exception)"
-                         total graceful survived timeout exception))
-        (println (format "  Unique signatures: %d, Artifacts saved: %d"
-                         unique-sigs saved)))
-
-      {:status (if failed? :fail :ok)
-       :trials trials
-       :seed seed
-       :mutator-version mutator-version
-       :mutations/total total
-       :mutations/graceful graceful
-       :mutations/survived survived
-       :mutations/timeout timeout
-       :mutations/exception exception
-       :signatures/unique unique-sigs
-       :artifacts/saved saved
-       :failures @failures})))
+    (finalize-mutation-run stats seen-signatures failures trials seed verbose)))

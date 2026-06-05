@@ -17,8 +17,17 @@
 
    ## Registry Storage
 
-   Keyed by pattern signature (pattern-src + flags) to detect duplicates
-   even when Pattern objects are distinct instances.
+   Keyed by the pair `[pattern-sig, interface-keyword]` where:
+   - `pattern-sig` = pattern source string + flags
+   - `interface-keyword` = `:interface` metadata value, or `nil` for
+     interface-less stepdefs
+
+   This lets the same regex register under multiple interfaces (e.g.,
+   `receives a message` under `:sms`, `:whatsapp`, `:email`) — vocabulary
+   symmetry across channels. Duplicate detection still fires when the same
+   regex is registered twice under the same interface (or twice with no
+   interface). The binder disambiguates at bind-time via step-level
+   `[:interface]` annotations; see `stepengine.annotations`.
 
    ## Usage
 
@@ -30,15 +39,68 @@
    (all-stepdefs)  ;=> seq of stepdef maps
    (clear-registry!)  ;; for test isolation
    ```"
+  (:require [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen]
+            [clojure.tools.logging :as log])
   (:import [java.security MessageDigest]
            [java.util.regex Pattern]))
+
+;; -----------------------------------------------------------------------------
+;; Specs — Step :svo metadata structure (Tier 1)
+;; -----------------------------------------------------------------------------
+;;
+;; A step's :svo metadata declares how regex captures map to subject,
+;; verb, frame, object, and per-frame args. These specs check structural
+;; correctness only — that captures look like :$N, that :verb and :frame
+;; are keywords, that :args is a map of arg-name to capture-ref. Whether
+;; a verb/frame/args combination actually exists in the glossary is a
+;; semantic check (Tier 2), not handled here.
+;;
+;; See sl-hse for the design discussion.
+
+(s/def ::capture-ref
+  (s/with-gen
+    (s/and keyword?
+           #(re-matches #"\$\d+" (name %)))
+    #(gen/fmap (fn [n] (keyword (str "$" n)))
+               (gen/large-integer* {:min 1 :max 99}))))
+
+(s/def ::subject ::capture-ref)
+(s/def ::verb keyword?)
+(s/def ::frame keyword?)
+(s/def ::object (s/nilable ::capture-ref))
+(s/def ::args (s/map-of keyword? ::capture-ref))
+
+(s/def ::stepdef-svo
+  (s/keys :req-un [::subject ::verb ::frame]
+          :opt-un [::object ::args]))
+
+;; The :svo key inside step metadata points to a stepdef-svo map. Aliased
+;; so `(s/keys :opt-un [::svo])` picks up the un-namespaced :svo key.
+(s/def ::svo ::stepdef-svo)
+
+(s/def ::interface keyword?)
+
+;; Capability gating — sl-ewn (introduced) / sl-unz (lifted to suite-load).
+;;
+;; A step may declare `:requires-protocols [<qualified-keyword> ...]`. At
+;; suite-load time (post-bind, dedup-by-stepdef), the framework checks
+;; the configured adapter's `:provides` set and fails with
+;; `:stepdef/missing-capability` when a required protocol is not in the
+;; box. This lets test-seam-only steps (e.g., `simulate-inbound!`
+;; requiring `ISMSInbound`) fail with one actionable error per stepdef
+;; before any side effects, instead of N times mid-scenario.
+(s/def ::requires-protocols (s/coll-of qualified-keyword? :kind vector?))
+
+(s/def ::metadata
+  (s/keys :opt-un [::interface ::svo ::requires-protocols]))
 
 ;; -----------------------------------------------------------------------------
 ;; Registry State
 ;; -----------------------------------------------------------------------------
 
 (defonce ^:private registry-atom
-  ;; Registry storage: {pattern-sig -> stepdef-map}
+  ;; Registry storage: {[pattern-sig interface-kw-or-nil] -> stepdef-map}
   (atom {}))
 
 ;; -----------------------------------------------------------------------------
@@ -50,6 +112,15 @@
    Returns string: \"pattern-string|flags\""
   [^Pattern pattern]
   (str (.pattern pattern) "|" (.flags pattern)))
+
+(defn- registry-key
+  "Compute the registry key for a pattern + metadata.
+   Returns `[pattern-sig interface-kw-or-nil]`.
+
+   Two stepdefs collide only when BOTH the pattern signature AND the
+   interface keyword match (nil counts as its own bucket for legacy steps)."
+  [pattern metadata]
+  [(pattern-sig pattern) (:interface metadata)])
 
 (defn- sha256-hex
   "Compute SHA-256 hash of string, return as hex."
@@ -96,21 +167,20 @@
   [{:keys [file line]}]
   (str file ":" line))
 
-(defn- warn
-  "Print warning to stderr."
-  [& args]
-  (binding [*out* *err*]
-    (apply println "WARNING:" args)))
-
 (defn- validate-metadata
-  "Validate stepdef metadata shape. Prints warning if suspicious.
-   Returns the metadata unchanged."
+  "Validate stepdef metadata shape. Emits a tools.logging warn when the
+   metadata shape is suspicious. Returns the metadata unchanged."
   [metadata source]
   (when metadata
     ;; Warn if :interface without :svo
     (when (and (:interface metadata) (not (:svo metadata)))
-      (warn (str "Step at " (format-source source)
-                 " has :interface without :svo - SVO validation will be skipped"))))
+      (log/warnf "Step at %s has :interface without :svo - SVO validation will be skipped"
+                 (format-source source)))
+    ;; :requires-protocols only makes sense with an :interface; the binder
+    ;; needs an interface to look up the configured adapter.
+    (when (and (:requires-protocols metadata) (not (:interface metadata)))
+      (log/warnf "Step at %s has :requires-protocols without :interface - capability gate cannot fire"
+                 (format-source source))))
   metadata)
 
 ;; -----------------------------------------------------------------------------
@@ -134,10 +204,11 @@
   ([pattern f source]
    (register! pattern f source nil))
   ([pattern f source metadata]
-   (let [sig (pattern-sig pattern)
-         pattern-src (.pattern pattern)
+   (let [pattern-src (.pattern pattern)
          arity (fn-arity f)
-         validated-metadata (validate-metadata metadata source)]
+         validated-metadata (validate-metadata metadata source)
+         key (registry-key pattern validated-metadata)
+         iface (second key)]
      ;; Validate: reject variadic
      (when (nil? arity)
        (throw (ex-info (str "Step definition cannot be variadic: " pattern-src
@@ -146,13 +217,16 @@
                         :pattern-src pattern-src
                         :source source})))
 
-     ;; Check for duplicate
-     (when-let [existing (get @registry-atom sig)]
+     ;; Check for duplicate — same pattern AND same interface
+     (when-let [existing (get @registry-atom key)]
        (throw (ex-info (str "Duplicate step definition for pattern: " pattern-src
+                            (when iface
+                              (str " under interface " iface))
                             "\n  First defined at: " (format-source (:source existing))
                             "\n  Duplicate at: " (format-source source))
                        {:type :stepdef/duplicate
                         :pattern-src pattern-src
+                        :interface iface
                         :existing-source (:source existing)
                         :duplicate-source source})))
 
@@ -165,8 +239,14 @@
                     :fn f
                     :metadata validated-metadata}]
        ;; Store in registry
-       (swap! registry-atom assoc sig stepdef)
+       (swap! registry-atom assoc key stepdef)
        stepdef))))
+
+(s/fdef register!
+  :args (s/cat :pattern any?
+               :f       any?
+               :source  any?
+               :metadata (s/? (s/nilable ::metadata))))
 
 (defn clear-registry!
   "Clear all registered step definitions. Use for test isolation."
@@ -243,6 +323,25 @@
    - :interface — which interface this step uses (e.g., :web, :api)
    - :svo — subject/verb/object extraction map with :$1, :$2 placeholders
 
+   ## step-meta Local Binding
+
+   When a step has metadata, the macro injects a `step-meta` local binding
+   that contains the metadata map. This allows steps to access their own
+   metadata at runtime:
+
+   ```clojure
+   (defstep #\":([\\w./-]+) clicks (.*)\"
+     {:interface :web
+      :svo {:subject :$1 :verb :click :object :$2}}
+     [ctx subject locator-str]
+     ;; step-meta is automatically available:
+     ;; {:interface :web :svo {...}}
+     (let [interface (:interface step-meta)]
+       (resolve-and-click ctx subject locator-str interface)))
+   ```
+
+   For legacy steps without metadata, `step-meta` is nil.
+
    The macro captures source location automatically."
   [pattern second-arg & rest-args]
   (let [file *file*
@@ -253,17 +352,23 @@
         has-metadata? (map? second-arg)]
     (if has-metadata?
       ;; With metadata: second-arg is metadata map, first of rest-args is args
+      ;; Inject step-meta local binding so step body can access metadata
       (let [metadata second-arg
             args (first rest-args)
             body (rest rest-args)]
         `(register! ~pattern
-                    (fn ~args ~@body)
+                    (fn ~args
+                      (let [~'step-meta ~metadata]
+                        ~@body))
                     ~source-map
                     ~metadata))
       ;; Legacy: second-arg is args vector, rest-args is body
+      ;; Inject step-meta as nil for consistency
       (let [args second-arg
             body rest-args]
         `(register! ~pattern
-                    (fn ~args ~@body)
+                    (fn ~args
+                      (let [~'step-meta nil]
+                        ~@body))
                     ~source-map
                     nil)))))

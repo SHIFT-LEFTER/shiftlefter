@@ -303,7 +303,7 @@
           pickle (make-pickle "test" ["I have 5 items"])
           {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
       (is runnable?)
-      ;; SVO issues empty (no SVOI metadata on our simple step)
+      ;; SVO issues empty (no SVO metadata on our simple step)
       (is (= 0 (-> diagnostics :counts :svo-issue-count))))))
 
 (deftest test-shifted-mode-missing-glossaries-config
@@ -346,3 +346,128 @@
       (is (seq (:errors diagnostics)))
       (is (= :svo/glossary-file-not-found (-> diagnostics :errors first :type)))
       (is (= "nonexistent/verbs.edn" (-> diagnostics :errors first :path))))))
+
+;; -----------------------------------------------------------------------------
+;; Interface Annotation Pipeline (sl-1ya)
+;; -----------------------------------------------------------------------------
+
+(def ^:private shifted-config-sms-web
+  "Minimal Shifted config with :sms and :web interfaces configured."
+  {:svo {:unknown-subject :warn :unknown-verb :warn :unknown-interface :warn}
+   :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
+                :verbs {:web "test/fixtures/glossaries/verbs-web-project.edn"}}
+   :interfaces {:web {:type :web :adapter :etaoin}
+                :sms {:type :sms :adapter :mock}}})
+
+(deftest test-annotation-end-to-end-shifted-mode
+  (testing "Shifted mode + [:sms] annotation routes to the :sms stepdef"
+    ;; Identical regex under two interfaces — registry keying by interface
+    ;; (sl-86d) enables this; annotation filter (sl-1ya) picks :sms.
+    ;;
+    ;; Verbs are chosen to be valid under each stepdef's interface
+    ;; glossary post-sl-ups: the SMS side uses :send :to (the canonical
+    ;; SMS send verb); the WEB foil uses :click :default (placeholder,
+    ;; just exists to prove that annotation routing prefers :sms).
+    (registry/register! #"(\S+) sends an SMS to '([^']+)' saying '([^']*)'"
+                        (fn [_s _p _b] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :sms
+                         :svo {:subject :$1 :verb :send :frame :to
+                               :object nil
+                               :args {:to-phone :$2 :body :$3}}})
+    (registry/register! #"(\S+) sends an SMS to '([^']+)' saying '([^']*)'"
+                        (fn [_s _p _b] nil)
+                        {:ns 's :file "s.clj" :line 2}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :frame :default
+                               :object "send-button"}})
+    (let [pickle (make-pickle
+                  "annotated"
+                  ["[:sms] alice sends an SMS to '+15551234567' saying 'hi'"])
+          {:keys [runnable? plans]} (compile/compile-suite
+                                     shifted-config-sms-web
+                                     [pickle]
+                                     (registry/all-stepdefs))]
+      (is runnable?)
+      (let [step-result (-> plans first :plan/steps first)]
+        (is (= :matched (:status step-result)))
+        (is (= :sms (-> step-result :binding :svo :interface)))
+        ;; :step/text preserved with annotation visible
+        (is (= "[:sms] alice sends an SMS to '+15551234567' saying 'hi'"
+               (-> step-result :step :step/text)))))))
+
+(deftest test-annotation-unknown-interface-fails-compile
+  (testing "[:whatsapp] with no :whatsapp in config → :annotation/unknown-interface"
+    (registry/register! #"anything"
+                        (fn [] nil)
+                        {:ns 's :file "s.clj" :line 1})
+    (let [pickle (make-pickle "bad" ["[:whatsapp] anything"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite
+                                           shifted-config-sms-web
+                                           [pickle]
+                                           (registry/all-stepdefs))]
+      (is (not runnable?))
+      (let [errs (:annotation-errors diagnostics)]
+        (is (= 1 (count errs)))
+        (is (= :annotation/unknown-interface (-> errs first :type)))
+        (is (= :whatsapp (-> errs first :declared-interface)))))))
+
+(deftest test-annotation-ignored-in-vanilla-mode
+  (testing "Vanilla mode: [:foo] is literal text; if stepdef matches literally, it runs"
+    ;; Vanilla: no :svo key, no annotation processing. Pattern literally includes the prefix.
+    (registry/register! #"\[:foo\] hello"
+                        (fn [] nil)
+                        {:ns 's :file "s.clj" :line 1})
+    (let [pickle (make-pickle "vanilla" ["[:foo] hello"])
+          {:keys [runnable? plans]} (compile/compile-suite
+                                     {}  ;; vanilla
+                                     [pickle]
+                                     (registry/all-stepdefs))]
+      (is runnable?)
+      (let [step-result (-> plans first :plan/steps first)]
+        (is (= :matched (:status step-result)))
+        ;; In vanilla mode, :step/declared-interface is NOT attached
+        (is (nil? (-> step-result :step :step/declared-interface)))))))
+
+(deftest test-annotation-undefined-surfaces-other-interface-match
+  (testing "[:sms] step with only a :web stepdef → undefined + filter-info"
+    (registry/register! #"(\S+) does stuff"
+                        (fn [_s] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        ;; :verb :click is a placeholder; this test exercises
+                        ;; the annotation routing, not the verb itself.
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :frame :default
+                               :object "stuff"}})
+    (let [pickle (make-pickle "xi" ["[:sms] alice does stuff"])
+          {:keys [runnable? plans]} (compile/compile-suite
+                                     shifted-config-sms-web
+                                     [pickle]
+                                     (registry/all-stepdefs))]
+      (is (not runnable?))
+      (let [step-result (-> plans first :plan/steps first)]
+        (is (= :undefined (:status step-result)))
+        (is (= :sms (-> step-result :filter-info :declared-interface)))
+        (is (= [:web] (-> step-result :filter-info :other-interfaces)))))))
+
+(deftest test-annotation-macro-collision
+  (testing "[:sms] with macro suffix + macros enabled → :annotation/on-macro-call-unsupported"
+    (registry/register! #"anything" (fn [] nil) {:ns 's :file "s.clj" :line 1})
+    (let [macro-path "test/fixtures/macros/auth.ini"
+          config (assoc shifted-config-sms-web
+                        :runner {:macros {:enabled? true
+                                          :registry-paths [macro-path]}})
+          pickle {:pickle/id (java.util.UUID/randomUUID)
+                  :pickle/name "bad-macro"
+                  :pickle/steps [{:step/id (java.util.UUID/randomUUID)
+                                  :step/keyword "Given"
+                                  :step/text "[:sms] login as alice +"
+                                  :step/location {:line 5 :column 5}
+                                  :step/arguments []}]}
+          {:keys [runnable? diagnostics]} (compile/compile-suite
+                                           config [pickle]
+                                           (registry/all-stepdefs))]
+      (is (not runnable?))
+      (let [errs (:annotation-errors diagnostics)]
+        (is (= 1 (count errs)))
+        (is (= :annotation/on-macro-call-unsupported (-> errs first :type)))))))

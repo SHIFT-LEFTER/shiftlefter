@@ -77,50 +77,50 @@
             [])))))
 
 ;; -----------------------------------------------------------------------------
-;; extract-svoi Tests
+;; extract-svo Tests
 ;; -----------------------------------------------------------------------------
 
-(deftest extract-svoi-test
-  (testing "extracts full SVOI from metadata and captures"
+(deftest extract-svo-test
+  (testing "extracts full SVO from metadata and captures"
     (let [metadata {:interface :web
                     :svo {:subject :$1 :verb :click :object :$2}}
           captures ["Alice" "the button"]
-          result (extract/extract-svoi metadata captures)]
+          result (extract/extract-svo metadata captures)]
       (is (= :alice (:subject result)))
       (is (= :click (:verb result)))
       (is (= "the button" (:object result)))
       (is (= :web (:interface result)))))
 
   (testing "normalizes subject from string capture"
-    (let [result (extract/extract-svoi
+    (let [result (extract/extract-svo
                   {:interface :web :svo {:subject :$1 :verb :see}}
                   ["ADMIN"])]
       (is (= :admin (:subject result)))))
 
   (testing "preserves literal keyword subject"
-    (let [result (extract/extract-svoi
+    (let [result (extract/extract-svo
                   {:interface :web :svo {:subject :system/setup :verb :init}}
                   [])]
       (is (= :system/setup (:subject result)))))
 
   (testing "returns nil for nil metadata"
-    (is (nil? (extract/extract-svoi nil ["Alice"]))))
+    (is (nil? (extract/extract-svo nil ["Alice"]))))
 
   (testing "returns nil for metadata without :svo"
-    (is (nil? (extract/extract-svoi {:interface :web} ["Alice"]))))
+    (is (nil? (extract/extract-svo {:interface :web} ["Alice"]))))
 
   (testing "returns nil for empty metadata"
-    (is (nil? (extract/extract-svoi {} ["Alice"]))))
+    (is (nil? (extract/extract-svo {} ["Alice"]))))
 
   (testing "returns error for placeholder out of bounds"
-    (let [result (extract/extract-svoi
+    (let [result (extract/extract-svo
                   {:interface :web :svo {:subject :$1 :verb :click :object :$3}}
                   ["Alice" "button"])]
       (is (= :svo/placeholder-out-of-bounds (:type result)))
       (is (= :$3 (:placeholder result)))))
 
   (testing "handles object as literal string"
-    (let [result (extract/extract-svoi
+    (let [result (extract/extract-svo
                   {:interface :api :svo {:subject :$1 :verb :get :object "/api/users"}}
                   ["system"])]
       (is (= :system (:subject result)))
@@ -129,7 +129,7 @@
       (is (= :api (:interface result)))))
 
   (testing "handles nil object"
-    (let [result (extract/extract-svoi
+    (let [result (extract/extract-svo
                   {:interface :web :svo {:subject :$1 :verb :wait :object nil}}
                   ["Alice"])]
       (is (= :alice (:subject result)))

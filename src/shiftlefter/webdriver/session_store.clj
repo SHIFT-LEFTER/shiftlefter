@@ -29,7 +29,8 @@
    ```"
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [clojure.tools.logging :as log])
   (:import [java.time Instant]
            [java.util UUID]))
 
@@ -80,7 +81,8 @@
       (when (fs/exists? path)
         (try
           (edn/read-string (slurp path))
-          (catch Exception _
+          (catch Exception e
+            (log/warnf "Corrupt session handle at %s: %s" path (ex-message e))
             nil)))))
 
   (save-session-handle! [_ surface-name handle]

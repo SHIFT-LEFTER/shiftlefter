@@ -1,0 +1,65 @@
+;; ShiftLefter default verb glossary for :sms interface type.
+;; Projects can extend or override via :glossaries config — same merge
+;; semantics as verbs-web.edn (see svo/glossary.clj).
+;;
+;; Each verb declares its valence as a closed set of frames. A frame is
+;; one valid argument shape, with :args (slot names beyond S-V-O), a
+;; surface :pattern, and optionally an :implicit-object for verbs whose
+;; object is elided from the step text (e.g. SMS messages — there is no
+;; locator-like O for inbox messages).
+;;
+;; In :pattern strings:
+;;   S         = subject (the actor)
+;;   O         = object (the thing acted on; absent => :implicit-object)
+;;   UPPERCASE = a per-frame arg slot
+;;
+;; Phone-number addressing convention: the "to" preposition uniformly
+;; identifies the recipient. `:send X to PHONE` and `:receive X to PHONE`
+;; both use PHONE in the recipient sense (where the message arrives).
+;; Phone literals are interim — a future bead introduces subject→phone
+;; resolution and these slots become subject-only.
+
+{:type :sms
+ :verbs
+ {;; ---------------------------------------------------------------------------
+  ;; Outbound action verbs
+  ;; ---------------------------------------------------------------------------
+  :send
+  {:desc "Send an SMS to a phone number"
+   :frames {:to {:args [:to-phone :body]
+                 :pattern "S sends an SMS to TO-PHONE saying BODY"
+                 :implicit-object :sms-message}}}
+
+  :send-media
+  {:desc "Send an MMS (text + media) to a phone number"
+   :frames {:to {:args [:to-phone :body :media-url]
+                 :pattern "S sends an MMS to TO-PHONE with caption BODY and media MEDIA-URL"
+                 :implicit-object :mms-message}}}
+
+  ;; ---------------------------------------------------------------------------
+  ;; Inbound action verbs (poll-with-timeout)
+  ;; ---------------------------------------------------------------------------
+  ;; :receive uses a smart-default :since-ts ladder, with two explicit-baseline
+  ;; alternatives. See stepdefs/sms.clj for ladder semantics.
+  :receive
+  {:desc "Poll for an inbound SMS matching a body pattern"
+   :frames {:default     {:args    [:to-phone :match]
+                          :pattern "S receives an SMS to TO-PHONE matching MATCH"
+                          :implicit-object :sms-message}
+            :since-iso   {:args    [:to-phone :since-iso :match]
+                          :pattern "S receives an SMS to TO-PHONE since SINCE-ISO matching MATCH"
+                          :implicit-object :sms-message}
+            :within-last {:args    [:to-phone :duration :match]
+                          :pattern "S receives an SMS to TO-PHONE within the last DURATION matching MATCH"
+                          :implicit-object :sms-message}}}
+
+  ;; ---------------------------------------------------------------------------
+  ;; Observation verbs
+  ;; ---------------------------------------------------------------------------
+  ;; :see :count counts inbound messages received at TO-PHONE since
+  ;; :sms/scenario-start-ts. Single-shot (no polling).
+  :see
+  {:desc "Assert observable state about SMS messages"
+   :frames {:count {:args    [:count :to-phone]
+                    :pattern "S sees COUNT messages to TO-PHONE"
+                    :implicit-object :sms-messages}}}}}

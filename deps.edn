@@ -1,11 +1,15 @@
 {:deps {org.clojure/clojure         {:mvn/version "1.12.3"}
         org.clojure/spec.alpha      {:mvn/version "0.5.238"}
         org.clojure/test.check      {:mvn/version "1.1.2"}
+        org.clojure/tools.logging   {:mvn/version "1.3.0"}
         cheshire/cheshire           {:mvn/version "5.13.0"}
         babashka/fs                 {:mvn/version "0.5.20"}
         org.clojure/tools.cli       {:mvn/version "1.0.219"}
         org.clojure/core.async      {:mvn/version "1.6.681"}
         etaoin/etaoin               {:mvn/version "1.1.42"}
+        clj-http/clj-http           {:mvn/version "3.13.0"}
+        http-kit/http-kit           {:mvn/version "2.8.0"}
+        org.clojars.quoll/asami     {:mvn/version "2.3.4"}
         nrepl/nrepl                 {:mvn/version "1.5.0"}
         cider/cider-nrepl           {:mvn/version "0.50.0"}}
 
@@ -14,7 +18,12 @@
  :aliases
  {:dev  {:extra-paths ["dev" "test"]}
   :test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}
-                      com.microsoft.playwright/playwright {:mvn/version "1.50.0"}}
+                      com.microsoft.playwright/playwright {:mvn/version "1.50.0"}
+                      ;; ring-core retained for sl-8i4 (migrate fixture middleware
+                      ;; off hand-roll). Currently unused; promote to top-level
+                      ;; :deps when sl-8i4 runs.
+                      ring/ring-core {:mvn/version "1.12.2"}
+                      clj-http-fake/clj-http-fake {:mvn/version "1.0.4"}}
          :extra-paths ["test"]
          :main-opts  ["-m" "kaocha.runner"]}
   :run {:main-opts ["-m" "shiftlefter.core"]}
@@ -30,7 +39,7 @@
   :codox {:extra-deps {codox/codox {:mvn/version "0.10.8"}}
           :exec-fn codox.main/generate-docs
           :exec-args {:name "ShiftLefter"
-                      :version "0.3.6-SNAPSHOT"
+                      :version "0.4.5"
                       :description "Gherkin test framework with vocabulary validation"
                       :source-paths ["src"]
                       :output-path "docs/api"

@@ -22,7 +22,9 @@
             [shiftlefter.gherkin.parser]
             [shiftlefter.gherkin.pickler]
             [shiftlefter.gherkin.printer]
-            [shiftlefter.gherkin.tokens]))
+            [shiftlefter.gherkin.tokens]
+            [shiftlefter.runner.setup]
+            [shiftlefter.sms.protocol]))
 
 (defn shiftlefter-specs
   "Returns all spec keywords in :shiftlefter.* namespaces, sorted."

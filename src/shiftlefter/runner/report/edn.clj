@@ -112,17 +112,19 @@
 
 (defn- extract-planning-diagnostics
   "Extract planning diagnostics for EDN output (exit code 2).
-   Includes binding issues and SVO issues."
+   Includes binding issues, SVO issues, and suite-load lint issues."
   [diagnostics]
   (when diagnostics
-    (let [{:keys [undefined ambiguous invalid-arity svo-issues counts]} diagnostics
+    (let [{:keys [undefined ambiguous invalid-arity svo-issues
+                  suite-lint-issues counts]} diagnostics
           binding-issues (concat
                           (map #(extract-planning-issue % :undefined) undefined)
                           (map #(extract-planning-issue % :ambiguous) ambiguous)
                           (map #(extract-planning-issue % :invalid-arity) invalid-arity))]
       (cond-> {:issues (vec binding-issues)
                :counts counts}
-        (seq svo-issues) (assoc :svo-issues svo-issues)))))
+        (seq svo-issues)        (assoc :svo-issues svo-issues)
+        (seq suite-lint-issues) (assoc :suite-lint-issues suite-lint-issues)))))
 
 (defn- extract-execution-diagnostics
   "Extract diagnostics for EDN output on successful execution (exit code 0/1).

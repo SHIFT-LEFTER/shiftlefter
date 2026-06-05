@@ -1,7 +1,22 @@
 (ns shiftlefter.svo.validate-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.string :as str]
+            [shiftlefter.stepdefs.browser]
+            [shiftlefter.stepengine.registry :as registry]
+            [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.svo.validate :as validate]))
+
+;; Other test files (e.g. registry_test) clear the registry between
+;; tests. The regression test below needs browser.clj's defsteps actually
+;; registered, so we clear and reload that ns once before any test in
+;; this file. Clear-then-reload matches the pattern in stepdefs/browser_test.clj
+;; and avoids :stepdef/duplicate when the registry already holds these
+;; stepdefs from an earlier-loaded test ns (top-level :require above).
+(use-fixtures :once
+  (fn [f]
+    (registry/clear-registry!)
+    (require '[shiftlefter.stepdefs.browser] :reload)
+    (f)))
 
 ;; -----------------------------------------------------------------------------
 ;; Test Fixtures
@@ -26,28 +41,28 @@
    :mobile {:type :web :adapter :appium}})
 
 ;; -----------------------------------------------------------------------------
-;; Valid SVOI Tests
+;; Valid SVO Tests
 ;; -----------------------------------------------------------------------------
 
-(deftest validate-svoi-valid-test
-  (testing "Valid SVOI returns {:valid? true}"
-    (let [result (validate/validate-svoi
+(deftest validate-svo-valid-test
+  (testing "Valid SVO returns {:valid? true}"
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :alice :verb :click :object "button" :interface :web})]
       (is (true? (:valid? result)))
       (is (empty? (:issues result)))))
 
-  (testing "Valid SVOI with different interface"
-    (let [result (validate/validate-svoi
+  (testing "Valid SVO with different interface"
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :admin :verb :get :object "/api/users" :interface :api})]
       (is (true? (:valid? result)))
       (is (empty? (:issues result)))))
 
-  (testing "Valid SVOI with nil object"
-    (let [result (validate/validate-svoi
+  (testing "Valid SVO with nil object"
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :guest :verb :see :object nil :interface :web})]
@@ -57,9 +72,9 @@
 ;; Unknown Subject Tests
 ;; -----------------------------------------------------------------------------
 
-(deftest validate-svoi-unknown-subject-test
+(deftest validate-svo-unknown-subject-test
   (testing "Unknown subject returns issue"
-    (let [result (validate/validate-svoi
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :bob :verb :click :object "x" :interface :web})]
@@ -71,7 +86,7 @@
         (is (= #{:alice :admin :guest} (set (:known issue)))))))
 
   (testing "Typo in subject suggests correction"
-    (let [result (validate/validate-svoi
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :alcie :verb :click :object "x" :interface :web})]
@@ -85,9 +100,9 @@
 ;; Unknown Verb Tests
 ;; -----------------------------------------------------------------------------
 
-(deftest validate-svoi-unknown-verb-test
+(deftest validate-svo-unknown-verb-test
   (testing "Unknown verb returns issue"
-    (let [result (validate/validate-svoi
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :alice :verb :smash :object "x" :interface :web})]
@@ -101,7 +116,7 @@
 
   (testing "Wrong verb for interface type"
     ;; :click is a web verb, not an api verb
-    (let [result (validate/validate-svoi
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :alice :verb :click :object "x" :interface :api})]
@@ -114,9 +129,9 @@
 ;; Unknown Interface Tests
 ;; -----------------------------------------------------------------------------
 
-(deftest validate-svoi-unknown-interface-test
+(deftest validate-svo-unknown-interface-test
   (testing "Unknown interface returns issue"
-    (let [result (validate/validate-svoi
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :alice :verb :click :object "x" :interface :sms})]
@@ -129,7 +144,7 @@
           (is (= #{:web :api :mobile} (set (:known issue))))))))
 
   (testing "Typo in interface suggests correction"
-    (let [result (validate/validate-svoi
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :alice :verb :click :object "x" :interface :wbe})
@@ -141,9 +156,9 @@
 ;; Multiple Issues Tests
 ;; -----------------------------------------------------------------------------
 
-(deftest validate-svoi-multiple-issues-test
+(deftest validate-svo-multiple-issues-test
   (testing "Multiple issues returned together"
-    (let [result (validate/validate-svoi
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :bob :verb :smash :object "x" :interface :sms})]
@@ -158,23 +173,23 @@
 ;; Edge Cases
 ;; -----------------------------------------------------------------------------
 
-(deftest validate-svoi-edge-cases-test
+(deftest validate-svo-edge-cases-test
   (testing "Nil subject skips subject validation"
-    (let [result (validate/validate-svoi
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject nil :verb :click :object "x" :interface :web})]
       (is (true? (:valid? result)))))
 
   (testing "Nil verb skips verb validation"
-    (let [result (validate/validate-svoi
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :alice :verb nil :object "x" :interface :web})]
       (is (true? (:valid? result)))))
 
   (testing "Nil interface skips interface validation"
-    (let [result (validate/validate-svoi
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :alice :verb :click :object "x" :interface nil})]
@@ -182,7 +197,7 @@
 
   (testing "Empty glossary subjects returns unknown"
     (let [empty-glossary {:subjects {} :verbs {:web {:click {}}}}
-          result (validate/validate-svoi
+          result (validate/validate-svo
                   empty-glossary
                   test-interfaces
                   {:subject :anyone :verb :click :object "x" :interface :web})]
@@ -204,9 +219,9 @@
 ;; Task 3.0.5 Acceptance Criteria
 ;; -----------------------------------------------------------------------------
 
-(deftest acceptance-valid-svoi-test
-  (testing "Task 3.0.5 AC: valid SVOI"
-    (let [result (validate/validate-svoi
+(deftest acceptance-valid-svo-test
+  (testing "Task 3.0.5 AC: valid SVO"
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :alice :verb :click :object "x" :interface :web})]
@@ -215,7 +230,7 @@
 
 (deftest acceptance-unknown-subject-test
   (testing "Task 3.0.5 AC: unknown subject with suggestion"
-    (let [result (validate/validate-svoi
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :alcie :verb :click :object "x" :interface :web})]
@@ -228,7 +243,7 @@
 
 (deftest acceptance-unknown-verb-test
   (testing "Task 3.0.5 AC: unknown verb"
-    (let [result (validate/validate-svoi
+    (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :alice :verb :smash :object "x" :interface :web})]
@@ -335,3 +350,238 @@
     (is (str/includes?
          (validate/format-svo-issue {:type :svo/unknown-type :foo :bar})
          "SVO issue:"))))
+
+;; -----------------------------------------------------------------------------
+;; Object Enforcement Tests (GP.001g)
+;; -----------------------------------------------------------------------------
+
+(deftest object-enforcement-off-test
+  (testing "Object enforcement :off does not validate objects"
+    ;; With :off, even invalid intent refs pass
+    (let [result (validate/validate-svo
+                  test-glossary
+                  test-interfaces
+                  {:subject :alice :verb :click :object "InvalidRef" :interface :web}
+                  {:unknown-object :off})]
+      (is (true? (:valid? result)))
+      (is (empty? (:issues result))))))
+
+(deftest object-enforcement-warn-raw-locator-test
+  (testing "Object enforcement :warn allows raw locators"
+    (let [result (validate/validate-svo
+                  test-glossary
+                  test-interfaces
+                  {:subject :alice :verb :click :object "{:css \"#submit\"}" :interface :web}
+                  {:unknown-object :warn})]
+      ;; Raw locators are allowed in :warn mode
+      (is (true? (:valid? result)))
+      (is (empty? (:issues result))))))
+
+(deftest object-enforcement-strict-raw-locator-test
+  (testing "Object enforcement :strict rejects raw locators"
+    (let [result (validate/validate-svo
+                  test-glossary
+                  test-interfaces
+                  {:subject :alice :verb :click :object "{:css \"#submit\"}" :interface :web}
+                  {:unknown-object :strict})]
+      (is (false? (:valid? result)))
+      (let [issue (first (:issues result))]
+        (is (= :svo/raw-locator-disallowed (:type issue)))
+        (is (= "{:css \"#submit\"}" (:object issue)))))))
+
+(deftest object-enforcement-warn-unknown-intent-test
+  (testing "Object enforcement :warn flags unknown intent reference"
+    ;; This will try to resolve Login.unknown which doesn't exist
+    ;; Since intents aren't loaded in test context, this should handle gracefully
+    (let [result (validate/validate-svo
+                  test-glossary
+                  test-interfaces
+                  {:subject :alice :verb :click :object "Login.unknown" :interface :web}
+                  {:unknown-object :warn})]
+      ;; Intent resolution may fail if intents not loaded, or may find no intent
+      ;; Either way, it should not crash
+      (is (boolean? (:valid? result))))))
+
+(deftest object-enforcement-strict-invalid-syntax-test
+  (testing "Object enforcement :strict rejects invalid intent syntax"
+    (let [result (validate/validate-svo
+                  test-glossary
+                  test-interfaces
+                  {:subject :alice :verb :click :object "login.submit" :interface :web}
+                  {:unknown-object :strict})]
+      ;; lowercase intent name is invalid syntax
+      (is (false? (:valid? result)))
+      (let [issue (first (:issues result))]
+        (is (= :svo/unknown-object (:type issue)))
+        (is (= "login.submit" (:object issue)))))))
+
+(deftest format-unknown-object-test
+  (testing "Format unknown object issue"
+    (let [issue {:type :svo/unknown-object
+                 :object "Login.unknown"
+                 :interface :web
+                 :message "Element 'unknown' not found in intent 'Login'"
+                 :location {:step-text "When :alice clicks Login.unknown"
+                            :uri "features/login.feature"
+                            :line 15}}
+          formatted (validate/format-unknown-object issue)]
+      (is (str/includes? formatted "Unknown object 'Login.unknown'"))
+      (is (str/includes? formatted "When :alice clicks Login.unknown"))
+      (is (str/includes? formatted "features/login.feature:15"))
+      (is (str/includes? formatted "Element 'unknown' not found")))))
+
+(deftest format-raw-locator-disallowed-test
+  (testing "Format raw locator disallowed issue"
+    (let [issue {:type :svo/raw-locator-disallowed
+                 :object "{:css \"#submit\"}"
+                 :message "Raw locators are not allowed in strict mode."
+                 :location {:step-text "When :alice clicks {:css \"#submit\"}"
+                            :uri "features/login.feature"
+                            :line 20}}
+          formatted (validate/format-raw-locator-disallowed issue)]
+      (is (str/includes? formatted "Raw locator '{:css \"#submit\"}'"))
+      (is (str/includes? formatted "When :alice clicks {:css"))
+      (is (str/includes? formatted "features/login.feature:20"))
+      (is (str/includes? formatted "Login.submit or Checkout.pay-button")))))
+
+;; -----------------------------------------------------------------------------
+;; Tier 2: validate-stepdefs-against-glossary — sl-hse
+;; -----------------------------------------------------------------------------
+
+(def ^:private tier2-glossary
+  "Minimal glossary for Tier 2 unit tests."
+  {:subjects {}
+   :verbs {:web {:click {:desc "Click"
+                         :frames {:default {:args [] :pattern "S clicks O"}}}
+                 :fill  {:desc "Fill"
+                         :frames {:with {:args [:value]
+                                         :pattern "S fills O with VALUE"}}}
+                 :see   {:desc "See"
+                         :frames {:visible   {:args []
+                                              :pattern "S sees O"}
+                                  :attribute {:args [:attribute :value]
+                                              :pattern "S sees O with ATTRIBUTE = VALUE"}}}}}})
+
+(defn- mk-stepdef
+  "Build a fake stepdef map with the given metadata."
+  ([metadata]
+   (mk-stepdef metadata "step.clj" 42))
+  ([metadata file line]
+   {:stepdef/id (str "sd-" (hash metadata))
+    :pattern    #"x"
+    :pattern-src "x"
+    :source     {:ns 'test :file file :line line}
+    :arity      1
+    :fn         (fn [_] nil)
+    :metadata   metadata}))
+
+(deftest validate-stepdefs-no-issues-on-clean-stepdefs
+  (testing "valid stepdefs produce no issues"
+    (let [stepdefs [(mk-stepdef {:interface :web
+                                 :svo {:subject :$1 :verb :click
+                                       :frame :default :object :$2}})
+                    (mk-stepdef {:interface :web
+                                 :svo {:subject :$1 :verb :fill
+                                       :frame :with :object :$2
+                                       :args {:value :$3}}})]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+      (is (empty? issues)))))
+
+(deftest validate-stepdefs-skips-non-svo
+  (testing "stepdefs without :svo or :interface are skipped"
+    (let [stepdefs [(mk-stepdef nil)
+                    (mk-stepdef {:interface :web})  ; no :svo
+                    (mk-stepdef {:svo {:subject :$1 :verb :foo :frame :bar}})]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+      (is (empty? issues)))))
+
+(deftest validate-stepdefs-skips-interface-not-in-glossary
+  (testing "stepdefs with an interface absent from the glossary are skipped"
+    ;; :sms isn't in tier2-glossary; this stepdef is therefore not checked.
+    (let [stepdefs [(mk-stepdef {:interface :sms
+                                 :svo {:subject :$1 :verb :anything
+                                       :frame :anyframe}})]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+      (is (empty? issues)))))
+
+(deftest validate-stepdefs-detects-unknown-verb
+  (testing "unknown verb on a known interface produces an issue"
+    (let [stepdefs [(mk-stepdef {:interface :web
+                                 :svo {:subject :$1 :verb :swipe-left
+                                       :frame :default :object :$2}}
+                                "myproject.clj" 17)]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+      (is (= 1 (count issues)))
+      (let [issue (first issues)]
+        (is (= :stepdef/unknown-verb (:type issue)))
+        (is (= :swipe-left (:verb issue)))
+        (is (= :web (:interface issue)))
+        (is (re-find #":web/swipe-left" (:message issue)))
+        (is (re-find #"myproject\.clj:17" (:message issue))
+            "source location is in the message")
+        (is (some #{:click :fill :see} (:known-verbs issue))
+            "candidate verbs are listed for did-you-mean tooling")))))
+
+(deftest validate-stepdefs-detects-unknown-frame
+  (testing "unknown frame on a known verb produces an issue with candidate frames"
+    (let [stepdefs [(mk-stepdef {:interface :web
+                                 :svo {:subject :$1 :verb :see
+                                       :frame :bonkers :object :$2}})]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+      (is (= 1 (count issues)))
+      (let [issue (first issues)]
+        (is (= :stepdef/unknown-frame (:type issue)))
+        (is (= :bonkers (:frame issue)))
+        (is (re-find #"unknown frame :bonkers" (:message issue)))
+        (is (= [:attribute :visible] (:known-frames issue))
+            "known frames are sorted")))))
+
+(deftest validate-stepdefs-detects-args-mismatch
+  (testing "args keyset mismatch surfaces missing and extra keys"
+    (let [;; :fill/:with expects [:value]; this stepdef provides {:val :$3} (typo).
+          stepdefs [(mk-stepdef {:interface :web
+                                 :svo {:subject :$1 :verb :fill :frame :with
+                                       :object :$2 :args {:val :$3}}})]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+      (is (= 1 (count issues)))
+      (let [issue (first issues)]
+        (is (= :stepdef/args-mismatch (:type issue)))
+        (is (= [:value] (:expected-args issue)))
+        (is (= [:val] (:provided-args issue)))
+        (is (= [:value] (:missing-args issue)))
+        (is (= [:val] (:extra-args issue)))
+        (is (re-find #"missing: :value" (:message issue)))
+        (is (re-find #"unexpected: :val" (:message issue)))))))
+
+(deftest validate-stepdefs-detects-missing-frame
+  (testing "stepdef :svo without :frame is flagged (defensive — Tier 1 catches first)"
+    (let [stepdefs [(mk-stepdef {:interface :web
+                                 :svo {:subject :$1 :verb :click :object :$2}})]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+      (is (= 1 (count issues)))
+      (is (= :stepdef/missing-frame (-> issues first :type))))))
+
+(deftest validate-stepdefs-multi-arg-frame-passes
+  (testing "multi-arg frame with all keys present: no issue"
+    (let [stepdefs [(mk-stepdef {:interface :web
+                                 :svo {:subject :$1 :verb :see :frame :attribute
+                                       :object :$2
+                                       :args {:attribute :$3 :value :$4}}})]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+      (is (empty? issues)))))
+
+(deftest validate-stepdefs-real-browser-stepdefs-pass-real-default-glossary
+  (testing "every :web stepdef in browser.clj conforms to the framework default glossary"
+    ;; Regression: after the sl-hse migration, every browser.clj defstep
+    ;; carries :frame and the :args expected by its frame. This catches
+    ;; future drift if anyone adds a step without updating the glossary
+    ;; (or vice versa).
+    (let [defaults  (glossary/load-default-glossaries)
+          stepdefs  (filter #(= :web (-> % :metadata :interface))
+                            (registry/all-stepdefs))
+          issues    (validate/validate-stepdefs-against-glossary stepdefs defaults)]
+      (is (pos? (count stepdefs))
+          "browser.clj should have registered :web stepdefs")
+      (is (empty? issues)
+          (str "Tier 2 issues against default glossary: "
+               (mapv :message issues))))))

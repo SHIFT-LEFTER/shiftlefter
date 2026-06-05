@@ -1,5 +1,6 @@
 (ns shiftlefter.runner.config-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.spec.alpha :as s]
+            [clojure.test :refer [deftest is testing]]
             [shiftlefter.runner.config :as config]))
 
 ;; -----------------------------------------------------------------------------
@@ -126,6 +127,20 @@
            (config/get-macro-registry-paths {:runner {:macros {:registry-paths ["a.ini" "b.ini"]}}})))
     (is (= [] (config/get-macro-registry-paths {})))  ;; default
     (is (= [] (config/get-macro-registry-paths {:runner {:macros {}}})))))  ;; default
+
+(deftest test-provisioning-mode
+  (testing "provisioning-mode extracts strategy with :eager as default (sl-aa5)"
+    (is (= :eager (config/provisioning-mode {})))                                       ;; absent → :eager
+    (is (= :eager (config/provisioning-mode {:runner {}})))                             ;; missing key → :eager
+    (is (= :eager (config/provisioning-mode {:runner {:provisioning :eager}})))
+    (is (= :lazy  (config/provisioning-mode {:runner {:provisioning :lazy}}))))
+  (testing ":runner spec accepts :eager and :lazy, rejects others"
+    (is (s/valid? :shiftlefter.runner.config/runner
+                                   {:step-paths ["s/"] :allow-pending? false :provisioning :eager}))
+    (is (s/valid? :shiftlefter.runner.config/runner
+                                   {:step-paths ["s/"] :allow-pending? false :provisioning :lazy}))
+    (is (not (s/valid? :shiftlefter.runner.config/runner
+                                        {:step-paths ["s/"] :allow-pending? false :provisioning :nope})))))
 
 ;; -----------------------------------------------------------------------------
 ;; Normalize / Validation Tests

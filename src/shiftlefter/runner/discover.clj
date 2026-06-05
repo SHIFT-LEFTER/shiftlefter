@@ -18,7 +18,28 @@
    ;=> [\"extra.feature\" \"features/a.feature\" \"features/sub/b.feature\" ...]
    ```"
   (:require [babashka.fs :as fs]
+            [clojure.spec.alpha :as s]
             [clojure.string :as str]))
+
+;; -----------------------------------------------------------------------------
+;; Specs — Discovery Result Shapes
+;; -----------------------------------------------------------------------------
+
+(s/def ::status #{:ok :error})
+(s/def ::files (s/coll-of string?))
+(s/def ::type keyword?)
+(s/def ::message string?)
+(s/def ::paths (s/coll-of string?))
+
+(s/def ::discover-ok
+  (s/keys :req-un [::status ::files]))
+
+(s/def ::discover-error
+  (s/keys :req-un [::status ::type ::message]
+          :opt-un [::paths]))
+
+(s/def ::discover-result
+  (s/or :ok ::discover-ok :error ::discover-error))
 
 ;; -----------------------------------------------------------------------------
 ;; Path Classification

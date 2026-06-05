@@ -1,6 +1,8 @@
 (ns shiftlefter.stepengine.registry-test
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
-            [shiftlefter.stepengine.registry :as registry]))
+  (:require [clojure.spec.alpha :as s]
+            [clojure.test :refer [deftest is testing use-fixtures]]
+            [shiftlefter.stepengine.registry :as registry]
+            [shiftlefter.test-helpers.log-capture :as log-capture]))
 
 ;; -----------------------------------------------------------------------------
 ;; Test Fixtures
@@ -287,26 +289,25 @@
       (is (nil? ((:fn sd) {} "Alice"))))))
 
 (deftest test-metadata-warning-interface-without-svo
-  (testing "Warning is printed when :interface without :svo"
-    (let [warning-output (with-out-str
-                           (binding [*err* *out*]
-                             (registry/register! #"bad metadata step"
-                                                 (fn [] nil)
-                                                 {:ns 't :file "t.clj" :line 1}
-                                                 {:interface :web})))]
-      (is (re-find #"(?i)warning" warning-output))
-      (is (re-find #":interface without :svo" warning-output)))))
+  (testing "Warning is emitted when :interface without :svo (sl-5wj: via tools.logging)"
+    (let [logs (log-capture/with-captured-logs
+                 #(registry/register! #"bad metadata step"
+                                      (fn [] nil)
+                                      {:ns 't :file "t.clj" :line 1}
+                                      {:interface :web}))]
+      (is (some (log-capture/level-msg? :warn ":interface without :svo") logs)
+          "warn-level log should mention :interface without :svo"))))
 
 (deftest test-metadata-no-warning-complete
   (testing "No warning when metadata has both :interface and :svo"
-    (let [warning-output (with-out-str
-                           (binding [*err* *out*]
-                             (registry/register! #"good metadata step"
-                                                 (fn [] nil)
-                                                 {:ns 't :file "t.clj" :line 1}
-                                                 {:interface :web
-                                                  :svo {:subject :$1 :verb :do}})))]
-      (is (= "" warning-output)))))
+    (let [logs (log-capture/with-captured-logs
+                 #(registry/register! #"good metadata step"
+                                      (fn [] nil)
+                                      {:ns 't :file "t.clj" :line 1}
+                                      {:interface :web
+                                       :svo {:subject :$1 :verb :do}}))]
+      (is (empty? (filter (fn [[lvl _]] (= :warn lvl)) logs))
+          "no warn-level log should be emitted for complete metadata"))))
 
 ;; -----------------------------------------------------------------------------
 ;; Task 3.0.4 Acceptance Criteria
@@ -344,3 +345,235 @@
       (is (some? sd))
       (is (= :web (get-in sd [:metadata :interface])))
       (is (= :navigate (get-in sd [:metadata :svo :verb]))))))
+
+;; -----------------------------------------------------------------------------
+;; GP.001c: step-meta Injection Tests
+;; -----------------------------------------------------------------------------
+
+(deftest test-step-meta-available-with-metadata
+  (testing "step-meta is available inside step body when metadata present"
+    (registry/defstep #"step with meta"
+      {:interface :web
+       :svo {:subject :$1 :verb :test}}
+      [ctx]
+      ;; step-meta should be bound to the metadata map
+      step-meta)
+
+    (let [sd (first (registry/all-stepdefs))
+          step-fn (:fn sd)
+          result (step-fn {})]
+      (is (map? result) "step-meta should be a map")
+      (is (= :web (:interface result)))
+      (is (= {:subject :$1 :verb :test} (:svo result))))))
+
+(deftest test-step-meta-nil-without-metadata
+  (testing "step-meta is nil for legacy steps without metadata"
+    (registry/defstep #"legacy step no meta"
+      [ctx]
+      step-meta)
+
+    (let [sd (first (registry/all-stepdefs))
+          step-fn (:fn sd)
+          result (step-fn {})]
+      (is (nil? result) "step-meta should be nil for legacy steps"))))
+
+(deftest test-step-meta-interface-access
+  (testing "step-meta :interface is accessible"
+    (registry/defstep #"interface access test"
+      {:interface :mobile
+       :svo {:subject :$1 :verb :tap :object :$2}}
+      [ctx]
+      (:interface step-meta))
+
+    (let [sd (first (registry/all-stepdefs))
+          step-fn (:fn sd)
+          result (step-fn {})]
+      (is (= :mobile result)))))
+
+(deftest test-step-meta-does-not-affect-execution
+  (testing "step-meta injection doesn't break step execution"
+    (registry/defstep #"compute with meta (\d+)"
+      {:interface :web :svo {:subject :$1 :verb :compute}}
+      [ctx n-str]
+      {:computed (* 2 (parse-long n-str))
+       :interface (:interface step-meta)})
+
+    (let [sd (first (registry/all-stepdefs))
+          step-fn (:fn sd)
+          result (step-fn {} "21")]
+      (is (= 42 (:computed result)))
+      (is (= :web (:interface result))))))
+
+(deftest test-step-meta-with-multiple-captures
+  (testing "step-meta works with multiple regex captures"
+    (registry/defstep #"(.*) gives (.*) to (.*)"
+      {:interface :api
+       :svo {:subject :$1 :verb :give :object :$2}}
+      [ctx giver gift receiver]
+      {:giver giver
+       :gift gift
+       :receiver receiver
+       :interface (:interface step-meta)})
+
+    (let [sd (first (registry/all-stepdefs))
+          step-fn (:fn sd)
+          result (step-fn {} "Alice" "book" "Bob")]
+      (is (= "Alice" (:giver result)))
+      (is (= "book" (:gift result)))
+      (is (= "Bob" (:receiver result)))
+      (is (= :api (:interface result))))))
+
+;; -----------------------------------------------------------------------------
+;; Interface-Keyed Registration (sl-86d — vocabulary symmetry)
+;; -----------------------------------------------------------------------------
+
+(deftest test-same-pattern-different-interfaces-ok
+  (testing "Same regex under different interfaces registers cleanly — no duplicate error"
+    (registry/register! #"(\S+) receives a message"
+                        (fn [_s] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :sms
+                         :svo {:subject :$1 :verb :receive :object "message"}})
+    (registry/register! #"(\S+) receives a message"
+                        (fn [_s] nil)
+                        {:ns 's :file "s.clj" :line 2}
+                        {:interface :whatsapp
+                         :svo {:subject :$1 :verb :receive :object "message"}})
+    (registry/register! #"(\S+) receives a message"
+                        (fn [_s] nil)
+                        {:ns 's :file "s.clj" :line 3}
+                        {:interface :email
+                         :svo {:subject :$1 :verb :receive :object "message"}})
+    (is (= 3 (count (registry/all-stepdefs))))
+    (is (= #{:sms :whatsapp :email}
+           (into #{} (map #(-> % :metadata :interface) (registry/all-stepdefs)))))))
+
+(deftest test-same-pattern-same-interface-still-duplicate
+  (testing "Same regex + same interface still rejects as duplicate"
+    (registry/register! #"(\S+) receives a message"
+                        (fn [_s] nil)
+                        {:ns 's :file "first.clj" :line 1}
+                        {:interface :sms
+                         :svo {:subject :$1 :verb :receive :object "message"}})
+    (try
+      (registry/register! #"(\S+) receives a message"
+                          (fn [_s] nil)
+                          {:ns 's :file "second.clj" :line 42}
+                          {:interface :sms
+                           :svo {:subject :$1 :verb :receive :object "message"}})
+      (is false "Should have thrown on same-pattern-same-interface duplicate")
+      (catch Exception e
+        (let [msg (.getMessage e)
+              data (ex-data e)]
+          (is (= :stepdef/duplicate (:type data)))
+          (is (= :sms (:interface data)))
+          (is (re-find #"(?i)duplicate" msg))
+          (is (re-find #":sms" msg) "Error message mentions the interface")
+          (is (re-find #"first\.clj:1" msg))
+          (is (re-find #"second\.clj:42" msg)))))))
+
+(deftest test-interface-less-stepdef-keyed-independently
+  (testing "Stepdef with no :interface metadata coexists with interface-tagged versions"
+    ;; Interface-less — legacy "escape hatch" like `pauses for N seconds`
+    (registry/register! #"(\S+) receives a message"
+                        (fn [_s] nil)
+                        {:ns 's :file "legacy.clj" :line 1})
+    (registry/register! #"(\S+) receives a message"
+                        (fn [_s] nil)
+                        {:ns 's :file "sms.clj" :line 1}
+                        {:interface :sms
+                         :svo {:subject :$1 :verb :receive :object "message"}})
+    (is (= 2 (count (registry/all-stepdefs))))
+    ;; Two stepdefs, one with interface, one without
+    (is (= #{nil :sms}
+           (into #{} (map #(-> % :metadata :interface) (registry/all-stepdefs)))))))
+
+(deftest test-two-interface-less-same-pattern-still-duplicate
+  (testing "Two interface-less stepdefs with same regex still collide (backward compat)"
+    (registry/register! #"pauses for (\d+) seconds"
+                        (fn [_n] nil)
+                        {:ns 's :file "first.clj" :line 1})
+    (try
+      (registry/register! #"pauses for (\d+) seconds"
+                          (fn [_n] nil)
+                          {:ns 's :file "second.clj" :line 1})
+      (is false "Should have thrown — both interface-less key to [sig nil]")
+      (catch Exception e
+        (is (= :stepdef/duplicate (:type (ex-data e))))))))
+
+;; -----------------------------------------------------------------------------
+;; Step :svo Metadata Spec Tests (Tier 1) — sl-hse
+;; -----------------------------------------------------------------------------
+;;
+;; A step's :svo metadata declares how regex captures map to subject,
+;; verb, frame, object, and per-frame args. The Tier 1 spec validates
+;; structural correctness (capture refs look like :$N, keys are
+;; well-typed) without consulting the glossary. Glossary cross-checks
+;; are Tier 2 (validate.clj). Instrumentation and s/fdef on register!
+;; are wired in a later checkpoint; these tests exercise the spec
+;; definitions directly.
+
+(deftest capture-ref-spec-test
+  (testing ":$N is a valid capture-ref"
+    (is (true?  (s/valid? :shiftlefter.stepengine.registry/capture-ref :$1)))
+    (is (true?  (s/valid? :shiftlefter.stepengine.registry/capture-ref :$10))))
+
+  (testing "non-:$N keywords are rejected"
+    (is (false? (s/valid? :shiftlefter.stepengine.registry/capture-ref :foo)))
+    (is (false? (s/valid? :shiftlefter.stepengine.registry/capture-ref :$foo)))
+    (is (false? (s/valid? :shiftlefter.stepengine.registry/capture-ref :user/alice)))
+    (is (false? (s/valid? :shiftlefter.stepengine.registry/capture-ref "$1"))
+        "strings are rejected — capture-ref must be a keyword")))
+
+(deftest stepdef-svo-spec-test
+  (testing "valid :svo metadata for a multi-arg frame"
+    (is (true? (s/valid? :shiftlefter.stepengine.registry/stepdef-svo
+                         {:subject :$1
+                          :verb :see
+                          :frame :attribute
+                          :object :$2
+                          :args {:attribute :$3 :value :$4}}))))
+
+  (testing "valid :svo metadata for a zero-arg frame"
+    (is (true? (s/valid? :shiftlefter.stepengine.registry/stepdef-svo
+                         {:subject :$1 :verb :click :frame :default :object :$2}))))
+
+  (testing "valid :svo metadata for an implicit-object frame (no :object key)"
+    (is (true? (s/valid? :shiftlefter.stepengine.registry/stepdef-svo
+                         {:subject :$1
+                          :verb :resize
+                          :frame :dimensions
+                          :args {:width :$2 :height :$3}}))
+        "implicit-object frames omit :object; the verb's frame-entry supplies it"))
+
+  (testing ":frame is required (this is the migration teeth)"
+    (is (false? (s/valid? :shiftlefter.stepengine.registry/stepdef-svo
+                          {:subject :$1 :verb :click :object :$2}))
+        "old-shape :svo without :frame is rejected"))
+
+  (testing ":subject must be a capture-ref"
+    (is (false? (s/valid? :shiftlefter.stepengine.registry/stepdef-svo
+                          {:subject :alice :verb :click :frame :default}))
+        "literal subject keywords are rejected — must come from a capture")
+    (is (false? (s/valid? :shiftlefter.stepengine.registry/stepdef-svo
+                          {:subject "$1" :verb :click :frame :default}))
+        "string subject is rejected"))
+
+  (testing ":args values must be capture-refs"
+    (is (false? (s/valid? :shiftlefter.stepengine.registry/stepdef-svo
+                          {:subject :$1 :verb :fill :frame :with
+                           :object :$2 :args {:value "literal"}}))
+        "literal arg values are rejected — args must reference captures"))
+
+  (testing ":object accepts nil (for verbs whose frame supplies an implicit object)"
+    (is (true? (s/valid? :shiftlefter.stepengine.registry/stepdef-svo
+                         {:subject :$1 :verb :refresh :frame :default :object nil})))))
+
+(deftest stepdef-svo-explain-test
+  (testing "explain-data identifies the missing :frame key"
+    (let [explain (s/explain-data :shiftlefter.stepengine.registry/stepdef-svo
+                                  {:subject :$1 :verb :click :object :$2})
+          problems (:clojure.spec.alpha/problems explain)]
+      (is (some? explain))
+      (is (some #(re-find #":frame" (pr-str (:pred %))) problems)
+          "predicate names :frame as the missing key"))))

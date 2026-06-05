@@ -1,21 +1,20 @@
 ;; Subject Glossary for SVO Demo
 ;;
 ;; Subjects represent the actors in your test scenarios.
-;; Each subject is a keyword with a description.
+;; Types are top-level keys; instances are session handles under :instances.
+;; Types without :instances are singletons (used directly in steps).
 ;;
-;; Subjects are normalized from step text:
-;;   "Alice" -> :alice
-;;   "System Admin" -> :system-admin
+;; In Gherkin, use :type/instance form:
+;;   :user/alice, :user/bob, :admin, :guest
 ;;
-;; Using a glossary helps:
-;; - Catch typos ("Alcie" vs "Alice")
-;; - Enforce consistent naming across features
-;; - Document who/what each subject represents
+;; Legacy flat format (no :instances) still works — each entry is a singleton.
 
 {:subjects
- {;; Human actors
-  :alice {:desc "Standard customer with verified account"}
-  :bob {:desc "New customer in onboarding"}
+ {;; Human actors with instances
+  :user {:desc "Standard application user"
+         :instances [:alice :bob]}
+
+  ;; Singleton roles (no instances needed)
   :admin {:desc "Administrative user with elevated privileges"}
   :guest {:desc "Unauthenticated visitor"}
 
