@@ -134,7 +134,21 @@
                   ["Alice"])]
       (is (= :alice (:subject result)))
       (is (= :wait (:verb result)))
-      (is (nil? (:object result))))))
+      (is (nil? (:object result)))))
+
+  (testing "carries :frame through for frame lookup at validation (sl-rlxa)"
+    (let [result (extract/extract-svo
+                  {:interface :web
+                   :svo {:subject :$1 :verb :navigate :frame :to :object :$2}}
+                  ["Alice" "http://localhost:9090/login"])]
+      (is (= :to (:frame result)))
+      (is (= "http://localhost:9090/login" (:object result)))))
+
+  (testing "omits :frame key when metadata declares none (legacy stepdefs)"
+    (let [result (extract/extract-svo
+                  {:interface :web :svo {:subject :$1 :verb :click :object :$2}}
+                  ["Alice" "the button"])]
+      (is (not (contains? result :frame))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Edge Cases

@@ -28,7 +28,7 @@
 (def generator-version
   "Bump this when generator logic changes to preserve reproducibility.
    Format: [major minor] where major = breaking change, minor = additions."
-  [2 0])  ; FZ2: Added tags, tables, docstrings, outlines
+  [2 1])  ; sl-2c68: descriptions (Feature/Scenario/Outline/Examples) + Background
 
 ;; -----------------------------------------------------------------------------
 ;; Presets
@@ -125,6 +125,26 @@
   (gen/fmap #(str/join " " %)
             (gen/vector gen-identifier 1 5)))
 
+(defn gen-description
+  "Generator for an optional multi-line description block at the given base
+   indent (string). Produces nil ~half the time. Lines are lowercase text so
+   they can't collide with keywords, tags, pipes, or docstring fences. Some
+   lines carry extra relative indentation; interior blank lines occur too.
+   Emitted lines end with \\n (ready to splice after a header line)."
+  [base-indent]
+  (gen/one-of
+   [(gen/return nil)
+    (gen/let [line-specs (gen/vector (gen/tuple gen-text
+                                                (gen/elements ["" "" "  " "    "])
+                                                (gen/frequency [[9 (gen/return false)]
+                                                                [1 (gen/return true)]]))
+                                     1 3)]
+      (->> line-specs
+           (map (fn [[text extra blank-before?]]
+                  (str (when blank-before? "\n")
+                       base-indent extra text "\n")))
+           (apply str)))]))
+
 (def gen-tag
   "Generator for a single tag."
   (gen/fmap #(str "@" %) gen-identifier))
@@ -183,12 +203,22 @@
          (when arg (str "\n" arg)))))
 
 (def gen-scenario
-  "Generator for a scenario with tags and steps."
+  "Generator for a scenario with tags, optional description, and steps."
   (gen/let [tags gen-tags
             name gen-identifier
+            desc (gen-description "    ")
             steps (gen/vector gen-step 1 5)]
     (str (or tags "")
          "  Scenario: " name "\n"
+         (when desc (str desc "\n"))
+         (str/join "\n" steps))))
+
+(def gen-background
+  "Generator for a Background block with optional description."
+  (gen/let [desc (gen-description "    ")
+            steps (gen/vector gen-step 1 3)]
+    (str "  Background:\n"
+         (when desc (str desc "\n"))
          (str/join "\n" steps))))
 
 (defn gen-example-row-with-count
@@ -198,20 +228,26 @@
             (gen/vector gen-identifier n)))
 
 (def gen-examples
-  "Generator for an Examples block with consistent cell counts."
-  (gen/let [num-cols (gen/choose 2 3)
+  "Generator for an Examples block with optional description and consistent
+   cell counts."
+  (gen/let [desc (gen-description "      ")
+            num-cols (gen/choose 2 3)
             header (gen-example-row-with-count num-cols)
             rows (gen/vector (gen-example-row-with-count num-cols) 1 3)]
-    (str "    Examples:\n" header "\n" (str/join "\n" rows))))
+    (str "    Examples:\n"
+         (when desc (str desc "\n"))
+         header "\n" (str/join "\n" rows))))
 
 (def gen-scenario-outline
-  "Generator for a scenario outline with examples."
+  "Generator for a scenario outline with optional description and examples."
   (gen/let [tags gen-tags
             name gen-identifier
+            desc (gen-description "    ")
             steps (gen/vector gen-step 1 3)
             examples gen-examples]
     (str (or tags "")
          "  Scenario Outline: " name "\n"
+         (when desc (str desc "\n"))
          (str/join "\n" steps) "\n\n"
          examples)))
 
@@ -222,12 +258,20 @@
                gen-scenario-outline]))  ; 2/3 scenarios, 1/3 outlines
 
 (def gen-feature
-  "Generator for a complete feature file."
+  "Generator for a complete feature file with optional description and
+   optional Background."
   (gen/let [tags gen-tags
             name gen-identifier
+            desc (gen-description "  ")
+            background (gen/one-of [(gen/return nil)
+                                    (gen/return nil)
+                                    gen-background])
             scenarios (gen/vector gen-scenario-or-outline 1 3)]
     (str (or tags "")
-         "Feature: " name "\n\n"
+         "Feature: " name "\n"
+         (when desc desc)
+         "\n"
+         (when background (str background "\n\n"))
          (str/join "\n\n" scenarios) "\n")))
 
 (defn generate-from-gen

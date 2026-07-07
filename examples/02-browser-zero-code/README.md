@@ -2,6 +2,16 @@
 
 Run browser automation tests without writing any Clojure. ShiftLefter includes built-in steps for common web interactions.
 
+> **Mode: Vanilla** — deliberately. There is no `:svo` in the config, so any
+> subject name is accepted and ShiftLefter behaves like a standard Gherkin
+> runner (`sl orient` will say so). That's the zero-setup entry point; the
+> next example, [`02b`](../02b-browser-multi-actor/), adds the glossary and
+> runs Shifted.
+
+> **Network note:** the scenario drives `the-internet.herokuapp.com`, a
+> public demo site — so this example needs internet access. It's kept
+> external on purpose: zero code *and* zero local setup.
+
 ## What You Get
 
 A working browser test that:
@@ -41,27 +51,34 @@ Feature: Login page
 ```clojure
 ;; shiftlefter.edn
 {:interfaces {:web {:type :web
-                   :adapter :etaoin}}}
+                    :adapter :etaoin
+                    :config {:adapter-opts
+                             {:prefs {"profile.password_manager_leak_detection" false}}}}}}
 ```
 
 This tells ShiftLefter to auto-provision a Chrome browser when steps need one.
+The `:prefs` line is cosmetic: the demo site's canned password is in public
+breach lists, so without it Chrome shows a native "password found in a data
+breach" warning after login. That warning is harmless to the test — it's
+browser UI, not page content, so WebDriver reads the page underneath it —
+but it's noisy, so the config turns leak detection off for the automation
+profile. (`:adapter-opts` passes options straight through to the backend —
+see `docs/CAPABILITIES.md`.)
 
 ## Prerequisites
 
 - **Chrome** browser installed
-- **ChromeDriver** on your PATH (must match your Chrome version)
-  - macOS: `brew install chromedriver`
-  - Or download from https://chromedriver.chromium.org/downloads
+- **ChromeDriver** matching your Chrome version, either on your PATH
+  (macOS: `brew install chromedriver`) or pointed at via
+  `~/.shiftlefter/config.edn` (`:chromedriver-path`)
 
 ## Try It
 
+From this directory (release zip installs `sl`; in a checkout of this repo
+substitute `bin/sl`):
+
 ```bash
-# Create a working directory
-mkdir -p my-browser-test/features && cd my-browser-test
-
-# Create the files above, then:
-
-# Check that steps bind correctly
+# Check that steps bind correctly — no browser opens
 sl run --dry-run features/
 
 # Run the tests (watch Chrome open and fill forms!)

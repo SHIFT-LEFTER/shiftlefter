@@ -2,7 +2,12 @@
 
 When built-in steps aren't enough, write your own in Clojure.
 
-This example uses **vanilla mode** — standard Cucumber-style steps that work exactly like you'd expect from any Gherkin runner. ShiftLefter also supports **shifted mode** with subject-verb-object validation, multi-actor scenarios, and requirements traceability. See the main README for more on that.
+> **Mode: Vanilla** — standard Cucumber-style steps that work exactly like
+> you'd expect from any Gherkin runner; there is no `:svo` in the config, so
+> no vocabulary validation runs (`sl orient` will say `Mode: Vanilla`).
+> ShiftLefter's **Shifted mode** adds subject-verb-object validation and
+> multi-actor scenarios — [`02b`](../02b-browser-multi-actor/) is the first
+> Shifted example, and [the examples index](../README.md) has the full path.
 
 ## The Feature File
 
@@ -50,12 +55,17 @@ Feature: Cucumber basket
 
 ```clojure
 ;; shiftlefter.edn
-{:step-paths ["steps/"]}
+{:runner {:step-paths ["steps/"]}}
 ```
 
-This tells ShiftLefter where to find your step definition files.
+This tells ShiftLefter where to find your step definition files. (`"steps/"`
+also happens to be the default, but declaring it under `:runner` is the real
+config key — a bare top-level `:step-paths` is ignored.)
 
 ## Try It
+
+From this directory (release zip installs `sl`; in a checkout of this repo
+substitute `bin/sl`):
 
 ```bash
 sl run features/

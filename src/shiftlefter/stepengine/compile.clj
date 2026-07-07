@@ -51,7 +51,12 @@
 
 (defn- shifted-mode?
   "Check if config indicates Shifted mode (SVO validation enabled).
-   Per A1: Shifted mode is indicated by presence of :svo key."
+   Per A1: Shifted mode is indicated by presence of :svo key.
+
+   Invariant (sl-ieie): `runner.config/load-config` includes :svo in its
+   result iff the USER's config contained it — default-config's :svo block
+   is only merged under an explicit user opt-in. So this check on the loaded
+   config faithfully reflects user intent: no :svo key = Vanilla."
   [config]
   (contains? config :svo))
 
@@ -165,7 +170,8 @@
                                      :ambiguous-count     0
                                      :invalid-arity-count 0
                                      :svo-issue-count     0
-                                     :total-issues        0}}}
+                                     :error-count         1
+                                     :total-issues        1}}}
 
       (seq stepdef-issues)
       {:plans      []
@@ -203,11 +209,12 @@
                          :ambiguous         []
                          :invalid-arity     []
                          :svo-issues        []
-                         :counts            {:undefined-count     0
-                                             :ambiguous-count     0
-                                             :invalid-arity-count 0
-                                             :svo-issue-count     0
-                                             :total-issues        0}}}
+                         :counts            {:undefined-count        0
+                                             :ambiguous-count        0
+                                             :invalid-arity-count    0
+                                             :svo-issue-count        0
+                                             :annotation-error-count (count (:errors annotation-result))
+                                             :total-issues           (count (:errors annotation-result))}}}
           ;; Annotation pass OK (or skipped) — proceed
           (let [pickles (:pickles annotation-result)
                 bind-result
@@ -225,11 +232,12 @@
                                      :ambiguous     []
                                      :invalid-arity []
                                      :svo-issues    []
-                                     :counts        {:undefined-count     0
-                                                     :ambiguous-count     0
+                                     :counts        {:undefined-count   0
+                                                     :ambiguous-count   0
                                                      :invalid-arity-count 0
-                                                     :svo-issue-count     0
-                                                     :total-issues        0}}}
+                                                     :svo-issue-count   0
+                                                     :macro-error-count (count errors)
+                                                     :total-issues      (count errors)}}}
                       ;; Registry loaded, expand pickles
                       (let [{:keys [pickles errors]} (expand-pickles pickles registry)]
                         (if (seq errors)
@@ -241,11 +249,12 @@
                                          :ambiguous     []
                                          :invalid-arity []
                                          :svo-issues    []
-                                         :counts        {:undefined-count     0
-                                                         :ambiguous-count     0
+                                         :counts        {:undefined-count   0
+                                                         :ambiguous-count   0
                                                          :invalid-arity-count 0
-                                                         :svo-issue-count     0
-                                                         :total-issues        0}}}
+                                                         :svo-issue-count   0
+                                                         :macro-error-count (count errors)
+                                                         :total-issues      (count errors)}}}
                           ;; Expansion succeeded, bind with opts
                           (bind/bind-suite pickles stepdefs binding-opts))))))]
             ;; Suite-load lint (sl-unz): post-bind, dedup-by-stepdef pass.

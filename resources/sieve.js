@@ -7,12 +7,31 @@
 
   var CLICKABLE_TAGS = ["button", "summary"];
   var TYPABLE_TYPES = [
-    "text", "email", "password", "search", "tel", "url", "number", "date",
-    "datetime-local", "month", "week", "time"
+    "text",
+    "email",
+    "password",
+    "search",
+    "tel",
+    "url",
+    "number",
+    "date",
+    "datetime-local",
+    "month",
+    "week",
+    "time",
   ];
   var LANDMARK_TAGS = ["nav", "main", "footer", "aside", "header", "section", "article"];
   var CHROME_ROLES = ["navigation", "banner", "contentinfo", "complementary", "main", "region"];
-  var CLICKABLE_ROLES = ["button", "link", "tab", "checkbox", "radio", "switch", "menuitem", "option"];
+  var CLICKABLE_ROLES = [
+    "button",
+    "link",
+    "tab",
+    "checkbox",
+    "radio",
+    "switch",
+    "menuitem",
+    "option",
+  ];
   var TYPABLE_ROLES = ["textbox", "searchbox", "spinbutton"];
   var READABLE_ROLES = ["heading", "alert", "status", "log", "marquee", "timer"];
   var CUSTOM_TAGS = ["canvas", "video", "audio", "svg"];
@@ -46,7 +65,7 @@
       x: Math.round(r.left + window.scrollX),
       y: Math.round(r.top + window.scrollY),
       w: Math.round(r.width),
-      h: Math.round(r.height)
+      h: Math.round(r.height),
     };
   }
 
@@ -61,10 +80,13 @@
     // 2. aria-labelledby
     var labelledBy = el.getAttribute("aria-labelledby");
     if (labelledBy) {
-      var parts = labelledBy.split(/\s+/).map(function(id) {
-        var ref = document.getElementById(id);
-        return ref ? (ref.textContent || "").trim() : "";
-      }).filter(Boolean);
+      var parts = labelledBy
+        .split(/\s+/)
+        .map(function (id) {
+          var ref = document.getElementById(id);
+          return ref ? (ref.textContent || "").trim() : "";
+        })
+        .filter(Boolean);
       if (parts.length > 0) return parts.join(" ");
     }
 
@@ -106,7 +128,8 @@
     var locators = {};
     if (el.id) locators.id = el.id;
     if (el.name) locators.name = el.name;
-    var testid = el.getAttribute("data-testid") || el.getAttribute("data-cy") || el.getAttribute("data-test");
+    var testid =
+      el.getAttribute("data-testid") || el.getAttribute("data-cy") || el.getAttribute("data-test");
     if (testid) locators.testid = testid;
     if (el.tagName === "A" && el.getAttribute("href")) locators.href = el.getAttribute("href");
     var ariaLabel = el.getAttribute("aria-label");
@@ -129,10 +152,7 @@
 
       if (LANDMARK_TAGS.indexOf(tag) !== -1 || (role && CHROME_ROLES.indexOf(role) !== -1)) {
         // Use aria-label, id, or tag as the region name
-        var name = current.getAttribute("aria-label")
-                || current.id
-                || role
-                || tag;
+        var name = current.getAttribute("aria-label") || current.id || role || tag;
         parts.unshift(name);
       } else if (tag === "form") {
         var formName = current.getAttribute("aria-label") || current.id || "form";
@@ -256,7 +276,10 @@
       return result;
     }
     // Inferred clickable: has onclick or tabindex
-    if (el.hasAttribute("onclick") || el.hasAttribute("tabindex") && el.getAttribute("tabindex") !== "-1") {
+    if (
+      el.hasAttribute("onclick") ||
+      (el.hasAttribute("tabindex") && el.getAttribute("tabindex") !== "-1")
+    ) {
       result.category = "clickable";
       result.confidence = "inferred";
       result.elementType = null;
@@ -297,9 +320,18 @@
       return result;
     }
     // Paragraphs and text containers with actual visible text
-    if ((tag === "p" || tag === "span" || tag === "li" || tag === "td" || tag === "th" ||
-         tag === "blockquote" || tag === "figcaption" || tag === "small" || tag === "label") &&
-        hasContent(el)) {
+    if (
+      (tag === "p" ||
+        tag === "span" ||
+        tag === "li" ||
+        tag === "td" ||
+        tag === "th" ||
+        tag === "blockquote" ||
+        tag === "figcaption" ||
+        tag === "small" ||
+        tag === "label") &&
+      hasContent(el)
+    ) {
       var text = (el.innerText || "").trim();
       if (text.length > 0) {
         result.category = "readable";
@@ -336,7 +368,7 @@
     var u = window.location;
     var params = {};
     var searchParams = new URLSearchParams(u.search);
-    searchParams.forEach(function(value, key) {
+    searchParams.forEach(function (value, key) {
       params[key] = value;
     });
     return {
@@ -348,7 +380,7 @@
       pathname: u.pathname,
       search: u.search || null,
       params: params,
-      hash: u.hash ? u.hash.replace("#", "") : null
+      hash: u.hash ? u.hash.replace("#", "") : null,
     };
   }
 
@@ -356,8 +388,97 @@
   // Main sieve function
   // =========================================================================
 
+  function elementClasses(el) {
+    if (el.className && typeof el.className === "string") {
+      var c = el.className.trim();
+      return c ? c.split(/\s+/) : [];
+    }
+    return [];
+  }
+
+  // Annotate kept (classified) elements with containment, and emit the
+  // structural wrapper-ancestors of kept elements as category "structure"
+  // nodes — so the containment tree is reconstructable (sl-wbn). This is a
+  // DUMB structural extractor: it decides nothing about what is a collection
+  // or a widget; that interpretation lives in deterministic Clojure analysis.
+  function annotateContainment(keptEls, keptRecords) {
+    var recordOf = new Map();
+    for (var i = 0; i < keptEls.length; i++) recordOf.set(keptEls[i], keptRecords[i]);
+
+    // Wrapper ancestors of kept elements (unclassified containers we used to drop).
+    var structureEls = new Set();
+    for (var k = 0; k < keptEls.length; k++) {
+      var cur = keptEls[k].parentElement;
+      while (cur && cur !== document.body && cur !== document.documentElement) {
+        if (!recordOf.has(cur)) structureEls.add(cur);
+        cur = cur.parentElement;
+      }
+    }
+    function inUnion(el) {
+      return recordOf.has(el) || structureEls.has(el);
+    }
+    function nearestUnionAncestor(el) {
+      var p = el.parentElement;
+      while (p) {
+        if (inUnion(p)) return p;
+        p = p.parentElement;
+      }
+      return null;
+    }
+
+    // Document order over the union (kept + structure).
+    var ordered = [];
+    var all = document.querySelectorAll("*");
+    for (var a = 0; a < all.length; a++) if (inUnion(all[a])) ordered.push(all[a]);
+    var indexOf = new Map();
+    for (var x = 0; x < ordered.length; x++) indexOf.set(ordered[x], x);
+
+    var out = [];
+    for (var o = 0; o < ordered.length; o++) {
+      var el = ordered[o];
+      var parentEl = nearestUnionAncestor(el);
+      var depth = 0;
+      var d = parentEl;
+      while (d) {
+        depth++;
+        d = nearestUnionAncestor(d);
+      }
+      var rec = recordOf.get(el);
+      if (!rec) {
+        rec = {
+          category: "structure",
+          roles: ["structure"],
+          confidence: "certain",
+          tag: el.tagName.toLowerCase(),
+          elementType: null,
+          label: null,
+          locators: collectLocators(el),
+          state: { visible: true },
+          rect: getAbsoluteRect(el),
+          region: deriveRegion(el),
+          form: null,
+          ariaRole: el.getAttribute("role") || null,
+        };
+      }
+      rec.index = o;
+      rec.parentIndex = parentEl ? indexOf.get(parentEl) : null;
+      rec.depth = depth;
+      rec.classes = elementClasses(el);
+      out.push(rec);
+    }
+    // Sibling order among nodes sharing a parent (out is already doc-ordered).
+    var seen = {};
+    for (var q = 0; q < out.length; q++) {
+      var key = out[q].parentIndex === null ? "root" : out[q].parentIndex;
+      seen[key] = seen[key] === undefined ? 0 : seen[key] + 1;
+      out[q].order = seen[key];
+    }
+    return out;
+  }
+
   function runSieve() {
-    var elements = [];
+    var keptEls = [];
+    var keptRecords = [];
     var forms = [];
     var iframes = [];
 
@@ -365,7 +486,7 @@
     var formEls = document.querySelectorAll("form");
     for (var f = 0; f < formEls.length; f++) {
       var form = formEls[f];
-      var formId = form.id || form.getAttribute("aria-label") || ("form-" + f);
+      var formId = form.id || form.getAttribute("aria-label") || "form-" + f;
       var formInputIds = [];
       var inputs = form.querySelectorAll("input, select, textarea, button");
       for (var i = 0; i < inputs.length; i++) {
@@ -393,7 +514,7 @@
         src: iframe.src || null,
         sameOrigin: sameOrigin,
         elementCount: childCount,
-        rect: getAbsoluteRect(iframe)
+        rect: getAbsoluteRect(iframe),
       });
     }
 
@@ -404,7 +525,11 @@
       var tag = el.tagName.toLowerCase();
 
       // Skip script, style, meta, noscript, template, br, hr
-      if (["script", "style", "meta", "link", "noscript", "template", "br", "hr", "head"].indexOf(tag) !== -1) {
+      if (
+        ["script", "style", "meta", "link", "noscript", "template", "br", "hr", "head"].indexOf(
+          tag,
+        ) !== -1
+      ) {
         continue;
       }
 
@@ -417,22 +542,34 @@
 
       // Skip elements with zero/tiny dimensions (unless they're landmarks)
       var rect = getAbsoluteRect(el);
-      if (rect.w < MIN_DIMENSION && rect.h < MIN_DIMENSION && classification.category !== "chrome") {
+      if (
+        rect.w < MIN_DIMENSION &&
+        rect.h < MIN_DIMENSION &&
+        classification.category !== "chrome"
+      ) {
         continue;
       }
 
       // Skip readable elements that are children of interactive elements
       if (classification.category === "readable") {
-        var interactiveParent = el.closest("button, a, input, select, textarea, [role=button], [role=link]");
+        var interactiveParent = el.closest(
+          "button, a, input, select, textarea, [role=button], [role=link]",
+        );
         if (interactiveParent && interactiveParent !== el) continue;
 
         // Skip readable children of other readable elements (e.g., <small> inside <p>)
-        var readableParent = el.parentElement ? el.parentElement.closest("p, li, td, th, blockquote, figcaption, h1, h2, h3, h4, h5, h6") : null;
+        var readableParent = el.parentElement
+          ? el.parentElement.closest(
+              "p, li, td, th, blockquote, figcaption, h1, h2, h3, h4, h5, h6",
+            )
+          : null;
         if (readableParent && readableParent !== el) continue;
 
         // Skip readable elements that are just wrappers for a single interactive child
         // (e.g., <li><a>Terms</a></li> — the <a> carries the interaction, <li> is noise)
-        var interactiveChild = el.querySelector("a, button, input, select, textarea, [role=button], [role=link]");
+        var interactiveChild = el.querySelector(
+          "a, button, input, select, textarea, [role=button], [role=link]",
+        );
         if (interactiveChild) {
           var elText = (el.innerText || "").trim();
           var childText = (interactiveChild.innerText || "").trim();
@@ -441,15 +578,17 @@
 
         // Skip readable elements inside chrome landmarks when the landmark already
         // carries the same text as its label (e.g., <p> inside <footer>)
-        var landmarkParent = el.closest("nav, main, footer, aside, header, [role=navigation], [role=banner], [role=contentinfo], [role=complementary]");
+        var landmarkParent = el.closest(
+          "nav, main, footer, aside, header, [role=navigation], [role=banner], [role=contentinfo], [role=complementary]",
+        );
         if (landmarkParent && landmarkParent !== el) {
           var landmarkTag = landmarkParent.tagName.toLowerCase();
           if (landmarkTag !== "main") {
             // Non-main chrome: skip readable children whose text is redundant
             // with the landmark's own label
             var elText = (el.innerText || "").trim();
-            var landmarkLabel = landmarkParent.getAttribute("aria-label")
-                             || (landmarkParent.innerText || "").trim();
+            var landmarkLabel =
+              landmarkParent.getAttribute("aria-label") || (landmarkParent.innerText || "").trim();
             if (elText && elText === landmarkLabel) continue;
           }
         }
@@ -474,7 +613,7 @@
         rect: rect,
         region: deriveRegion(el),
         form: null,
-        ariaRole: el.getAttribute("role") || null
+        ariaRole: el.getAttribute("role") || null,
       };
 
       // Associate with form if inside one
@@ -482,21 +621,25 @@
       if (parentForm) {
         // Match the same ID logic used in the forms collection above
         var formIndex = Array.prototype.indexOf.call(formEls, parentForm);
-        record.form = parentForm.id || parentForm.getAttribute("aria-label")
-                   || (formIndex !== -1 ? "form-" + formIndex : "form");
+        record.form =
+          parentForm.id ||
+          parentForm.getAttribute("aria-label") ||
+          (formIndex !== -1 ? "form-" + formIndex : "form");
       }
 
-      elements.push(record);
+      keptRecords.push(record);
+      keptEls.push(el);
     }
+
+    // Annotate containment and emit structural wrapper nodes (sl-wbn).
+    var elements = annotateContainment(keptEls, keptRecords);
 
     // Build region tree from chrome elements
     var regions = {};
     for (var ri = 0; ri < elements.length; ri++) {
       if (elements[ri].category === "chrome" && elements[ri].region === null) {
         // Top-level landmark — use aria-label or tag, not innerText
-        var name = elements[ri].locators["aria-label"]
-                || elements[ri].ariaRole
-                || elements[ri].tag;
+        var name = elements[ri].locators["aria-label"] || elements[ri].ariaRole || elements[ri].tag;
         regions[name] = {};
       }
     }
@@ -507,11 +650,11 @@
       title: document.title,
       viewport: {
         w: window.innerWidth,
-        h: window.innerHeight
+        h: window.innerHeight,
       },
       window: {
         w: window.outerWidth,
-        h: window.outerHeight
+        h: window.outerHeight,
       },
       elements: elements,
       forms: forms,
@@ -520,17 +663,21 @@
       meta: {
         description: (document.querySelector('meta[name="description"]') || {}).content || null,
         ogTitle: (document.querySelector('meta[property="og:title"]') || {}).content || null,
-        canonical: (document.querySelector('link[rel="canonical"]') || {}).href || null
+        canonical: (document.querySelector('link[rel="canonical"]') || {}).href || null,
       },
       storage: (function collectStorage() {
         // Keys only — no values. Wrapped for cross-origin safety.
         var result = { localStorage: [], sessionStorage: [] };
-        try { result.localStorage = Object.keys(localStorage); } catch(e) {}
-        try { result.sessionStorage = Object.keys(sessionStorage); } catch(e) {}
+        try {
+          result.localStorage = Object.keys(localStorage);
+        } catch (e) {}
+        try {
+          result.sessionStorage = Object.keys(sessionStorage);
+        } catch (e) {}
         return result;
       })(),
       console: [], // populated externally if needed
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     };
   }
 

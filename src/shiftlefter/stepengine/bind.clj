@@ -49,6 +49,7 @@
             [clojure.string :as str]
             [shiftlefter.stepengine.annotations :as annotations]
             [shiftlefter.svo.extract :as extract]
+            [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.svo.validate :as validate]))
 
 ;; -----------------------------------------------------------------------------
@@ -328,7 +329,11 @@
      :invalid-arity invalid-arity}))
 
 (defn- issue-counts
-  "Count issues by type."
+  "Count issues by type. :total-issues includes every issue family —
+   per-family counts must sum to it (sl-89ii); a machine consumer gating
+   on :total-issues must never read 0 when any family is nonzero. Blocking
+   is judged separately (see bind-suite): warn-level SVO issues count here
+   without blocking."
   [{:keys [undefined ambiguous invalid-arity svo-issues]}]
   {:undefined-count     (count undefined)
    :ambiguous-count     (count ambiguous)
@@ -336,7 +341,8 @@
    :svo-issue-count     (count svo-issues)
    :total-issues        (+ (count undefined)
                            (count ambiguous)
-                           (count invalid-arity))})
+                           (count invalid-arity)
+                           (count svo-issues))})
 
 ;; -----------------------------------------------------------------------------
 ;; SVO Validation
@@ -344,7 +350,8 @@
 
 (def ^:private issue-type->config-key
   "Map SVO issue types to their config keys."
-  {:svo/unknown-subject :unknown-subject
+  {:svo/missing-subject :unknown-subject
+   :svo/unknown-subject :unknown-subject
    :svo/unknown-verb :unknown-verb
    :svo/unknown-interface :unknown-interface
    :svo/unknown-object :unknown-object
@@ -403,6 +410,24 @@
   [svo-issues]
   (some #(= :error (:severity %)) svo-issues))
 
+(defn- stamp-costumes
+  "Stamp each bound step's SVO with the costume its subject `:wears` (sl-rnm).
+
+   Resolves the costume here — at bind time, the one place the glossary is in
+   scope — so the runtime provisioning path can read `(:wears svo)` without
+   the glossary being threaded to it. No-op in vanilla mode (no glossary) or
+   when a subject wears nothing."
+  [plans glossary]
+  (if-not glossary
+    plans
+    (letfn [(stamp-step [bound-step]
+              (if-let [subject (-> bound-step :binding :svo :subject)]
+                (if-let [costume (glossary/costume-for-subject glossary subject)]
+                  (assoc-in bound-step [:binding :svo :wears] costume)
+                  bound-step)
+                bound-step))]
+      (mapv #(update % :plan/steps (partial mapv stamp-step)) plans))))
+
 (defn bind-suite
   "Bind all pickles to stepdefs, producing plans and diagnostics.
 
@@ -428,10 +453,12 @@
   ([pickles stepdefs]
    (bind-suite pickles stepdefs nil))
   ([pickles stepdefs opts]
-   (let [plans (mapv #(bind-pickle % stepdefs) pickles)
+   (let [{:keys [glossary interfaces svo]} opts
+         ;; Bind, then stamp each SVO with the costume its subject :wears
+         ;; (sl-rnm) — the runtime provisioning path reads (:wears svo).
+         plans (stamp-costumes (mapv #(bind-pickle % stepdefs) pickles) glossary)
          binding-issues (collect-issues plans)
          ;; SVO validation (only if opts provided)
-         {:keys [glossary interfaces svo]} opts
          svo-issues (collect-svo-issues plans glossary interfaces svo)
          all-issues (assoc binding-issues :svo-issues (or svo-issues []))
          counts (issue-counts all-issues)
@@ -440,7 +467,11 @@
          ;; (shiftlefter.stepengine.suite-lint), called from compile-suite
          ;; before bind-suite — so reaching this point implies the suite
          ;; already passed those static checks.
-         binding-ok? (zero? (:total-issues counts))
+         ;; Gate on binding issues only — :total-issues now also counts SVO
+         ;; issues (sl-89ii), and warn-level SVO issues must not block.
+         binding-ok? (zero? (+ (:undefined-count counts)
+                               (:ambiguous-count counts)
+                               (:invalid-arity-count counts)))
          svo-ok? (not (svo-issues-blocking? svo-issues))
          runnable? (and binding-ok? svo-ok?)]
      {:plans plans

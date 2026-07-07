@@ -1,0 +1,15 @@
+;; Post — a consistent-markup component that self-locates via :root
+;; (design §7.2, self-rooted). The same `article[data-testid='post']` hook is
+;; used everywhere it appears, so it needs no parent :selector.
+;;
+;; A post may QUOTE another post (recursion: :quoted -> Post) and carry COMMENTS
+;; (:comment -> Comment, a cross-type child that reuses the author binding).
+;; Both declared collections become instance boundaries for resolving Post's own
+;; elements — the nearest-enclosing-instance rule (§8.1): Post.author is the
+;; post's own author, never the quote's or a comment's.
+{:intent "Post"
+ :root {:web {:css "article[data-testid='post']"}}
+ :elements {:author  {:bindings {:web {:css "[data-testid='author']"}}}
+            :content {:bindings {:web {:css "[data-testid='content']"}}}}
+ :collections {:quoted  {:intent "Post"    :optional true :count {:max 1}}
+               :comment {:intent "Comment" :cardinality :many :optional true}}}

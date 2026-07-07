@@ -1,5 +1,5 @@
 (ns shiftlefter.intent.loader-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [shiftlefter.intent.loader :as loader]
             [babashka.fs :as fs]))
 
@@ -283,3 +283,253 @@
         (is (:collection entry) "Collection flag should be preserved"))
       (finally
         (cleanup-temp-dir dir)))))
+
+;; -----------------------------------------------------------------------------
+;; :collections / :root nesting schema (sl-tl9)
+;; -----------------------------------------------------------------------------
+
+(deftest loads-collections-and-root-into-regions
+  (testing "A self-rooted Bookmarks+Tweet pair loads; :regions is populated"
+    (let [dir (create-temp-intents-dir
+               {"bookmarks.edn"
+                (pr-str {:intent "Bookmarks"
+                         :root {:web {:css "[aria-label^='Timeline: Bookmarks']"}}
+                         :collections {:tweet {:intent "Tweet" :cardinality :many}}
+                         :elements {:title {:bindings {:web {:css "h2"}}}}})
+                "tweet.edn"
+                (pr-str {:intent "Tweet"
+                         :reusable true
+                         :root {:web {:css "article[data-testid='tweet']"}}
+                         :elements {:author {:bindings {:web {:css "[data-testid='User-Name']"}}}}
+                         :collections {:quoted {:intent "Tweet" :optional true :count {:max 1}}}})})]
+      (try
+        (let [result (loader/load-all-intents (str dir))
+              intents (:ok result)]
+          (is (:ok result) "Should load successfully")
+          (is (= #{"Bookmarks" "Tweet"} (set (keys (:regions intents)))))
+          (is (= {:intent "Tweet" :cardinality :many}
+                 (loader/get-collection intents "Bookmarks" "tweet")))
+          (is (= {:web {:css "article[data-testid='tweet']"}}
+                 (loader/get-root intents "Tweet")))
+          (is (true? (:reusable (loader/get-region intents "Tweet")))
+              "the :reusable marker is preserved")
+          ;; :lookup stays element-keyed and still works for nested elements.
+          (is (= {:css "[data-testid='User-Name']"}
+                 (:ok (loader/get-binding intents "Tweet" "author" :web)))))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest flat-intents-load-unchanged-no-root-required
+  (testing "An existing flat intent (no :root, no :collections) still loads"
+    (let [dir (create-temp-intents-dir
+               {"login.edn"
+                (pr-str {:intent "Login"
+                         :elements {:submit {:bindings {:web {:css "button"}}}}})})]
+      (try
+        (let [result (loader/load-all-intents (str dir))
+              intents (:ok result)]
+          (is (:ok result) "Flat files need no migration")
+          (is (nil? (loader/get-root intents "Login")))
+          (is (= {} (:collections (loader/get-region intents "Login")))))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest collections-only-intent-loads-without-elements
+  (testing "§7.2 — a collections-only intent may omit :elements entirely"
+    (let [dir (create-temp-intents-dir
+               {"timeline.edn"
+                (pr-str {:intent "Timeline"
+                         :collections {:tweet {:intent "Tweet" :cardinality :many}}})
+                "tweet.edn"
+                (pr-str {:intent "Tweet"
+                         :root {:web {:css "article[data-testid='tweet']"}}
+                         :elements {:author {:bindings {:web {:css "[data-testid='User-Name']"}}}}})})]
+      (try
+        (let [result (loader/load-all-intents (str dir))
+              intents (:ok result)]
+          (is (:ok result) "collections-only intent loads with no :elements key")
+          (is (nil? (:errors result)))
+          (is (= #{} (:elements (loader/get-region intents "Timeline")))
+              "its element set is empty")
+          (is (= {:tweet {:intent "Tweet" :cardinality :many}}
+                 (:collections (loader/get-region intents "Timeline")))))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest no-selector-no-root-is-a-loud-load-error
+  (testing "§7.5 — a collection referencing a rootless component with no :selector"
+    (let [dir (create-temp-intents-dir
+               {"fbt.edn"
+                (pr-str {:intent "FrequentlyBoughtTogether"
+                         :collections {:item {:intent "ProductCard"}}
+                         :elements {:heading {:bindings {:web {:css "h3"}}}}})
+                "product-card.edn"
+                (pr-str {:intent "ProductCard"
+                         :elements {:price {:bindings {:web {:css ".a-price"}}}}})})]
+      (try
+        (let [result (loader/load-all-intents (str dir))]
+          (is (:errors result))
+          (is (= :intent/missing-anchor (-> result :errors first :type)))
+          (is (= (str "FrequentlyBoughtTogether.item references ProductCard, "
+                      "which declares no :root and was given no :selector "
+                      "— add one or the other.")
+                 (-> result :errors first :message))))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest parent-selector-satisfies-anchor
+  (testing "A rootless component is fine when the parent supplies a :selector"
+    (let [dir (create-temp-intents-dir
+               {"fbt.edn"
+                (pr-str {:intent "FrequentlyBoughtTogether"
+                         :collections {:item {:intent "ProductCard"
+                                              :selector {:web {:css ".fbt-item"}}}}
+                         :elements {:heading {:bindings {:web {:css "h3"}}}}})
+                "product-card.edn"
+                (pr-str {:intent "ProductCard"
+                         :elements {:price {:bindings {:web {:css ".a-price"}}}}})})]
+      (try
+        (is (:ok (loader/load-all-intents (str dir))))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest unrooted-does-not-satisfy-anchor
+  (testing ":unrooted is NOT a concrete root — still a load error without :selector"
+    (let [dir (create-temp-intents-dir
+               {"fbt.edn"
+                (pr-str {:intent "FrequentlyBoughtTogether"
+                         :collections {:item {:intent "ProductCard"}}
+                         :elements {:heading {:bindings {:web {:css "h3"}}}}})
+                "product-card.edn"
+                (pr-str {:intent "ProductCard"
+                         :root :unrooted
+                         :elements {:price {:bindings {:web {:css ".a-price"}}}}})})]
+      (try
+        (is (= :intent/missing-anchor
+               (-> (loader/load-all-intents (str dir)) :errors first :type)))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest unknown-referenced-component-is-a-load-error
+  (testing "A collection referencing an unloaded intent fails loud"
+    (let [dir (create-temp-intents-dir
+               {"timeline.edn"
+                (pr-str {:intent "Timeline"
+                         :collections {:tweet {:intent "Tweet"}}
+                         :elements {:heading {:bindings {:web {:css "h2"}}}}})})]
+      (try
+        (is (= :intent/unknown-component
+               (-> (loader/load-all-intents (str dir)) :errors first :type)))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest collection-element-name-collision-rejected
+  (testing "A name used as both element and collection is a loud error"
+    (let [dir (create-temp-intents-dir
+               {"x.edn"
+                (pr-str {:intent "X"
+                         :root {:web {:css "#x"}}
+                         :collections {:item {:intent "X"}}
+                         :elements {:item {:bindings {:web {:css ".item"}}}}})})]
+      (try
+        (is (= :intent/name-collision
+               (-> (loader/load-all-intents (str dir)) :errors first :type)))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest invalid-collection-shape-rejected
+  (testing "A collection missing its :intent reference is rejected"
+    (let [dir (create-temp-intents-dir
+               {"x.edn"
+                (pr-str {:intent "X"
+                         :collections {:item {:cardinality :many}}
+                         :elements {:heading {:bindings {:web {:css "h1"}}}}})})]
+      (try
+        (is (= :intent/missing-collection-intent
+               (-> (loader/load-all-intents (str dir)) :errors first :type)))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+;; -----------------------------------------------------------------------------
+;; §8.1 instance-boundary precompute + load validation (sl-h7h)
+;; -----------------------------------------------------------------------------
+
+(deftest computes-web-boundary-union-from-collections
+  (testing "a component's :web boundary is the CSS union of its collections'
+            effective instance selectors (:selector else component :root)"
+    (let [dir (create-temp-intents-dir
+               {"post.edn"
+                (pr-str {:intent "Post"
+                         :root {:web {:css "article[data-testid='post']"}}
+                         :elements {:author {:bindings {:web {:css "[data-testid='author']"}}}}
+                         :collections {:quoted  {:intent "Post" :optional true}
+                                       :comment {:intent "Comment" :cardinality :many}}})
+                "comment.edn"
+                (pr-str {:intent "Comment"
+                         :root {:web {:css "[data-testid='comment']"}}
+                         :elements {:body {:bindings {:web {:css "[data-testid='body']"}}}}})})]
+      (try
+        (let [intents (:ok (loader/load-all-intents (str dir)))]
+          ;; quoted -> Post root; comment -> Comment root. Union, in order.
+          (is (= "article[data-testid='post'], [data-testid='comment']"
+                 (loader/get-boundary-css intents "Post" :web)))
+          ;; Comment declares no collections → empty boundary (nothing to prune).
+          (is (= "" (loader/get-boundary-css intents "Comment" :web))))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest boundary-selector-prefers-collection-selector-over-root
+  (testing "a parent :selector overrides the component :root in the boundary union"
+    (let [dir (create-temp-intents-dir
+               {"fbt.edn"
+                (pr-str {:intent "FBT"
+                         :collections {:item {:intent "ProductCard"
+                                              :selector {:web {:css ".fbt-item"}}}}
+                         :elements {:heading {:bindings {:web {:css "h3"}}}}})
+                "product-card.edn"
+                (pr-str {:intent "ProductCard"
+                         :root {:web {:css ".never-used-as-boundary"}}
+                         :elements {:price {:bindings {:web {:css ".a-price"}}}}})})]
+      (try
+        (let [intents (:ok (loader/load-all-intents (str dir)))]
+          (is (= ".fbt-item" (loader/get-boundary-css intents "FBT" :web))))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest xpath-boundary-selector-is-a-loud-load-error
+  (testing "acceptance #4 — a boundary whose :web selector is XPath (closest()
+            can't use it) fails load with a precise message"
+    (let [dir (create-temp-intents-dir
+               {"feed.edn"
+                (pr-str {:intent "Feed"
+                         :root {:web {:css "[data-testid='feed']"}}
+                         :collections {:post {:intent "Post"
+                                              :selector {:web {:xpath "//article"}}}}
+                         :elements {}})
+                "post.edn"
+                (pr-str {:intent "Post"
+                         :root {:web {:css "article"}}
+                         :elements {:author {:bindings {:web {:css ".a"}}}}})})]
+      (try
+        (let [result (loader/load-all-intents (str dir))]
+          (is (:errors result))
+          (is (= :intent/boundary-not-css (-> result :errors first :type)))
+          (is (= "Feed" (-> result :errors first :intent)))
+          (is (= :post (-> result :errors first :collection))))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest unknown-interface-boundary-is-blank
+  (testing "get-boundary-css returns \"\" for an unknown intent or non-:web
+            interface (no pruning rather than a crash)"
+    (let [dir (create-temp-intents-dir
+               {"login.edn"
+                (pr-str {:intent "Login"
+                         :elements {:submit {:bindings {:web {:css "button"}}}}})})]
+      (try
+        (let [intents (:ok (loader/load-all-intents (str dir)))]
+          (is (= "" (loader/get-boundary-css intents "Login" :web)))
+          (is (= "" (loader/get-boundary-css intents "Login" :mobile)))
+          (is (= "" (loader/get-boundary-css intents "Nonexistent" :web))))
+        (finally
+          (cleanup-temp-dir dir))))))

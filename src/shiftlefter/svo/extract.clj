@@ -37,11 +37,13 @@
 
 (s/def ::subject keyword?)
 (s/def ::verb keyword?)
+(s/def ::frame (s/nilable keyword?))
 (s/def ::object any?)
 (s/def ::interface keyword?)
 
 (s/def ::svo
-  (s/keys :req-un [::subject ::verb ::object ::interface]))
+  (s/keys :req-un [::subject ::verb ::object ::interface]
+          :opt-un [::frame]))
 
 (s/def ::placeholder keyword?)
 (s/def ::index pos-int?)
@@ -162,12 +164,16 @@
 
    The :subject value is normalized to a lowercase keyword.
    The :object value is left as-is (string from capture or literal).
-   The :verb and :interface are literal keywords from metadata.
+   The :verb, :frame, and :interface are literal keywords from metadata;
+   :frame is carried through so validation can look up the frame's
+   per-slot value kinds (sl-rlxa).
 
    Examples:
-     (extract-svo {:interface :web :svo {:subject :$1 :verb :click :object :$2}}
+     (extract-svo {:interface :web
+                   :svo {:subject :$1 :verb :click :frame :default :object :$2}}
                    [\"Alice\" \"the button\"])
-     => {:subject :alice :verb :click :object \"the button\" :interface :web}
+     => {:subject :alice :verb :click :frame :default
+         :object \"the button\" :interface :web}
 
      (extract-svo nil [\"x\"])
      => nil
@@ -186,7 +192,8 @@
               subject (if (string? subject-raw)
                         (normalize-subject subject-raw)
                         subject-raw)]
-          {:subject subject
-           :verb (:verb substituted)
-           :object (:object substituted)
-           :interface interface})))))
+          (cond-> {:subject subject
+                   :verb (:verb substituted)
+                   :object (:object substituted)
+                   :interface interface}
+            (:frame substituted) (assoc :frame (:frame substituted))))))))

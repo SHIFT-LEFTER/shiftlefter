@@ -265,9 +265,95 @@
           output (printer/canonical input)]
       (is (re-find #"  Background:\n    Given setup" output)))))
 
-;; Note: canonical-formats-description test removed because the current parser
-;; doesn't support free-form feature descriptions (rejects them as invalid keywords).
-;; This is a parser limitation, not a formatter issue.
+;; -----------------------------------------------------------------------------
+;; Description formatting (sl-2c68)
+;; -----------------------------------------------------------------------------
+
+(deftest canonical-formats-multiline-feature-description
+  (testing "multi-line Feature description normalizes to a fixed column (sl-2c68 repro)"
+    (let [input "Feature: Demo\n  desc line one\n  and line two\n\n  Scenario: S\n    Given a step\n"
+          once (printer/canonical input)]
+      (is (= "Feature: Demo\n  desc line one\n  and line two\n\n  Scenario: S\n    Given a step\n"
+             once))
+      (is (= once (printer/canonical once)) "canonical output is a fixed point"))))
+
+(deftest canonical-description-preserves-relative-indent
+  (testing "intentional relative indentation inside a description survives"
+    (let [input "Feature: Demo\n  desc line one\n    - indented bullet\n  and line two\n\n  Scenario: S\n    Given a step\n"
+          once (printer/canonical input)]
+      (is (str/includes? once "\n  desc line one\n    - indented bullet\n  and line two\n"))
+      (is (= once (printer/canonical once))))))
+
+(deftest canonical-description-preserves-interior-blank-lines
+  (testing "blank line between description paragraphs survives"
+    (let [input "Feature: Demo\n  para one\n\n  para two\n\n  Scenario: S\n    Given a step\n"
+          once (printer/canonical input)]
+      (is (str/includes? once "\n  para one\n\n  para two\n"))
+      (is (= once (printer/canonical once))))))
+
+(deftest canonical-formats-rule-description
+  (testing "multi-line Rule description is idempotent"
+    (let [input "Feature: Demo\n\n  Rule: R\n    rule desc one\n    rule desc two\n\n    Scenario: S\n      Given a step\n"
+          once (printer/canonical input)]
+      (is (str/includes? once "    rule desc one\n    rule desc two"))
+      (is (= once (printer/canonical once))))))
+
+(deftest canonical-preserves-scenario-description
+  (testing "Scenario description is emitted, not deleted"
+    (let [input "Feature: Demo\n\n  Scenario: S\n    scenario desc line\n    Given a step\n"
+          once (printer/canonical input)]
+      (is (= "Feature: Demo\n\n  Scenario: S\n    scenario desc line\n\n    Given a step\n"
+             once))
+      (is (= once (printer/canonical once))))))
+
+(deftest canonical-preserves-background-description
+  (testing "Background description is emitted, not deleted"
+    (let [input "Feature: Demo\n\n  Background:\n    bg desc\n    Given base\n\n  Scenario: S\n    Given a step\n"
+          once (printer/canonical input)]
+      (is (str/includes? once "  Background:\n    bg desc\n\n    Given base"))
+      (is (= once (printer/canonical once))))))
+
+(deftest canonical-preserves-examples-description
+  (testing "Examples description is emitted, not deleted"
+    (let [input "Feature: Demo\n\n  Scenario Outline: S\n    Given a <x>\n\n    Examples:\n      ex desc line\n      | x |\n      | 1 |\n"
+          once (printer/canonical input)]
+      (is (str/includes? once "  Examples:\n    ex desc line\n\n    | x |"))
+      (is (= once (printer/canonical once))))))
+
+;; -----------------------------------------------------------------------------
+;; Comment handling (sl-q2uj)
+;; -----------------------------------------------------------------------------
+
+(deftest canonical-preserves-top-comments-verbatim
+  (testing "comments above the Feature line survive without hash-doubling"
+    (let [input "# top one\n# top two\nFeature: X\n\n  Scenario: S\n    Given a\n"
+          once (printer/canonical input)]
+      (is (str/starts-with? once "# top one\n# top two\n"))
+      (is (= once (printer/canonical once)) "top comments are idempotent"))))
+
+(deftest lost-comments-detects-interior-comments
+  (testing "comment between steps is reported with line and text"
+    (is (= [{:line 5 :text "# mid"}]
+           (printer/lost-comments
+            "Feature: X\n\n  Scenario: S\n    Given a\n    # mid\n    When b\n"))))
+  (testing "comment between scenarios is reported"
+    (is (= [{:line 4 :text "# between scenarios"}]
+           (printer/lost-comments
+            "Feature: X\n\n  Scenario: A\n# between scenarios\n    Given a\n"))))
+  (testing "top-of-file comments are not lost"
+    (is (= [] (printer/lost-comments
+               "# top\nFeature: X\n\n  Scenario: S\n    Given a\n"))))
+  (testing "comment-free input reports nothing"
+    (is (= [] (printer/lost-comments
+               "Feature: X\n\n  Scenario: S\n    Given a\n")))))
+
+(deftest lost-comments-regression-known-files
+  (testing "the three comment-bearing files from the sl-2c68 sweep are detected"
+    (doseq [f ["examples/05-nested-self-rooted/features/feed.feature"
+               "examples/svo-demo/features/login.feature"
+               "drives/artifacts/run2-opus-source-access/features/storefront.feature"]]
+      (is (seq (printer/lost-comments (slurp f)))
+          (str f " should report lost comments")))))
 
 ;; -----------------------------------------------------------------------------
 ;; Idempotence tests: format(format(x)) == format(x)

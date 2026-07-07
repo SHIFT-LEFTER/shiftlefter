@@ -13,4 +13,4 @@ Feature: Multi-actor browser test
     And :user/bob should see 'You logged into a secure area!'
     And :user/alice should be on '/secure'
     And :user/bob should be on '/secure'
-    And pause for 3 seconds
+    And :user/alice waits 3 seconds

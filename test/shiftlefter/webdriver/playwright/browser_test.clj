@@ -3,6 +3,7 @@
             [clojure.string :as str]
             [shiftlefter.webdriver.playwright.browser :as pw-browser]
             [shiftlefter.webdriver.playwright.keys :as pw-keys]
+            [shiftlefter.browser.locators :as locators]
             [shiftlefter.browser.protocol :as bp]))
 
 ;; =============================================================================
@@ -201,5 +202,38 @@
         (bp/open-to! browser "https://example.com")
         (bp/refresh! browser)
         (is (= "https://example.com/" (bp/get-url browser)))))
+    (testing "skipped - no SHIFTLEFTER_LIVE_PLAYWRIGHT=1"
+      (is true))))
+
+;; Parity counterpart of the etaoin query-all test: same heterogeneous fixture,
+;; same expectations — query-all returns Nth MATCH (T2), not #root's 2nd child.
+(def ^:private query-all-fixture-html
+  (str "data:text/html,"
+       "<div id='root'>"
+       "<span class='ad'>A1</span>"
+       "<span class='tweet'>T1</span>"
+       "<span class='ad'>A2</span>"
+       "<span class='tweet'>T2</span>"
+       "<span class='tweet'>T3</span>"
+       "</div>"))
+
+(deftest playwright-query-all-test
+  (if live-playwright?
+    (let [browser @test-browser
+          tweet (locators/resolve-locator {:css ".tweet"})]
+      (bp/open-to! browser query-all-fixture-html)
+      (testing "document scope finds all matches in order"
+        (let [matches (bp/query-all browser :document tweet)]
+          (is (= 3 (count matches)))
+          (is (every? :el matches))
+          (testing "handles round-trip via {:el}"
+            (is (= "T1" (bp/get-text browser (nth matches 0))))
+            (is (= "T2" (bp/get-text browser (nth matches 1)))
+                "2nd MATCH is T2, not the :nth-child(2) element T1"))))
+      (testing "scoped query within #root"
+        (let [root (first (bp/query-all browser :document (locators/resolve-locator {:id "root"})))
+              scoped (bp/query-all browser root (locators/resolve-locator {:css ".tweet"}))]
+          (is (= 3 (count scoped)))
+          (is (= "T3" (bp/get-text browser (last scoped)))))))
     (testing "skipped - no SHIFTLEFTER_LIVE_PLAYWRIGHT=1"
       (is true))))

@@ -1,6 +1,8 @@
 (ns shiftlefter.svo.validate-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.string :as str]
+            [babashka.fs :as fs]
+            [shiftlefter.intent.state :as intent-state]
             [shiftlefter.stepdefs.browser]
             [shiftlefter.stepengine.registry :as registry]
             [shiftlefter.svo.glossary :as glossary]
@@ -174,12 +176,13 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest validate-svo-edge-cases-test
-  (testing "Nil subject skips subject validation"
+  (testing "Nil subject emits missing-subject"
     (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject nil :verb :click :object "x" :interface :web})]
-      (is (true? (:valid? result)))))
+      (is (false? (:valid? result)))
+      (is (= :svo/missing-subject (-> result :issues first :type)))))
 
   (testing "Nil verb skips verb validation"
     (let [result (validate/validate-svo
@@ -415,6 +418,61 @@
         (is (= :svo/unknown-object (:type issue)))
         (is (= "login.submit" (:object issue)))))))
 
+;; -----------------------------------------------------------------------------
+;; Object Kind: :location slots accept literal URLs — sl-rlxa
+;; -----------------------------------------------------------------------------
+
+(def ^:private location-glossary
+  "Glossary whose :navigate/:to and :be/:at frames declare :object-kind
+   :location, mirroring the framework verbs-web.edn; :click stays intent-only."
+  {:subjects {:alice {:desc "Standard customer"}}
+   :verbs {:web {:click    {:desc "Click element"
+                            :frames {:default {:args [] :pattern "S clicks O"}}}
+                 :navigate {:desc "Navigate to URL"
+                            :frames {:to {:args [] :pattern "S navigates to O"
+                                          :object-kind :location}}}
+                 :be       {:desc "Assert state"
+                            :frames {:at {:args [] :pattern "S is on O"
+                                          :object-kind :location}}}}}})
+
+(deftest object-kind-location-url-literal-test
+  (testing "URL literal in a :location slot passes under :strict (sl-rlxa)"
+    (doseq [svo [{:subject :alice :verb :navigate :frame :to
+                  :object "http://localhost:9090/login" :interface :web}
+                 {:subject :alice :verb :be :frame :at
+                  :object "http://localhost:9090/dashboard" :interface :web}]]
+      (let [result (validate/validate-svo location-glossary test-interfaces
+                                          svo {:unknown-object :strict})]
+        (is (true? (:valid? result))
+            (str "URL literal must not trip :unknown-object for " (:verb svo)))
+        (is (empty? (:issues result))))))
+
+  (testing "URL literal in a :location slot passes under :warn"
+    (let [result (validate/validate-svo
+                  location-glossary test-interfaces
+                  {:subject :alice :verb :navigate :frame :to
+                   :object "https://example.com/a/b?q=1" :interface :web}
+                  {:unknown-object :warn})]
+      (is (true? (:valid? result))))))
+
+(deftest object-kind-intent-slot-still-strict-test
+  (testing "intent-only slot still rejects invalid refs under :strict"
+    (let [result (validate/validate-svo
+                  location-glossary test-interfaces
+                  {:subject :alice :verb :click :frame :default
+                   :object "login.submit" :interface :web}
+                  {:unknown-object :strict})]
+      (is (false? (:valid? result)))
+      (is (= :svo/unknown-object (:type (first (:issues result)))))))
+
+  (testing "SVO without :frame (legacy stepdef) keeps intent validation"
+    (let [result (validate/validate-svo
+                  location-glossary test-interfaces
+                  {:subject :alice :verb :click
+                   :object "login.submit" :interface :web}
+                  {:unknown-object :strict})]
+      (is (false? (:valid? result))))))
+
 (deftest format-unknown-object-test
   (testing "Format unknown object issue"
     (let [issue {:type :svo/unknown-object
@@ -585,3 +643,58 @@
       (is (empty? issues)
           (str "Tier 2 issues against default glossary: "
                (mapv :message issues))))))
+
+;; -----------------------------------------------------------------------------
+;; Object validation — nested (multi-segment) intent references (sl-tl9)
+;; -----------------------------------------------------------------------------
+;;
+;; validate-object pulls intents from the global intent-state. We populate that
+;; cache from a temp dir (get-intents with no args returns the cached value once
+;; loaded), then validate nested object refs statically — no browser involved.
+
+(defn- with-nested-intents
+  "Load a Bookmarks+Tweet schema into intent-state, run `f`, then clear."
+  [f]
+  (let [dir (fs/create-temp-dir {:prefix "svo-nested-"})]
+    (try
+      (spit (fs/file dir "bookmarks.edn")
+            (pr-str {:intent "Bookmarks"
+                     :root {:web {:css "[aria-label^='Timeline: Bookmarks']"}}
+                     :collections {:tweet {:intent "Tweet" :cardinality :many}}
+                     :elements {:title {:bindings {:web {:css "h2"}}}}}))
+      (spit (fs/file dir "tweet.edn")
+            (pr-str {:intent "Tweet"
+                     :root {:web {:css "article[data-testid='tweet']"}}
+                     :elements {:author {:bindings {:web {:css "[data-testid='User-Name']"}}}}
+                     :collections {:quoted {:intent "Tweet" :optional true}}}))
+      (intent-state/reload-intents! (str dir))
+      (f)
+      (finally
+        (intent-state/clear-intents!)
+        (fs/delete-tree dir)))))
+
+(deftest validate-object-accepts-valid-nested-ref
+  (with-nested-intents
+    (fn []
+      (testing "A structurally valid nested ref passes strict object validation"
+        (let [result (validate/validate-svo
+                      test-glossary test-interfaces
+                      {:subject :alice :verb :click
+                       :object "Bookmarks.tweet[2].quoted.author" :interface :web}
+                      {:unknown-object :strict})]
+          (is (empty? (filter #(= :svo/unknown-object (:type %)) (:issues result)))
+              "the nested path walks cleanly: tweet -> quoted -> author"))))))
+
+(deftest validate-object-rejects-unknown-segment
+  (with-nested-intents
+    (fn []
+      (testing "An unknown mid-path segment is :svo/unknown-object naming the segment"
+        (let [result (validate/validate-svo
+                      test-glossary test-interfaces
+                      {:subject :alice :verb :click
+                       :object "Bookmarks.tweet[2].bogus.author" :interface :web}
+                      {:unknown-object :strict})
+              issue (first (filter #(= :svo/unknown-object (:type %)) (:issues result)))]
+          (is (some? issue) "unknown segment should be flagged")
+          (is (str/includes? (:message issue) "bogus")
+              "the message names the offending segment"))))))

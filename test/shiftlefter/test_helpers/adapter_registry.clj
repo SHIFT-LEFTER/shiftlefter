@@ -54,6 +54,7 @@
    | Key             | Default                            | What it does |
    |-----------------|------------------------------------|--------------|
    | `:impl`         | `{:type :test-impl}`               | Value returned in `{:ok ...}` from factory |
+   | `:impl-key`     | absent                             | Mirrors the production `:impl-key` registry contract — when set, provisioning extracts `(get factory-result impl-key)` as the step-facing impl and keeps the whole result as the cleanup handle. Set `:impl` to a wrapping map (e.g. `{:browser fake :driver d}`) to exercise the unwrap. |
    | `:factory`      | derived from `:impl` / `:fail?`    | Full factory override — `(fn [config] -> {:ok ...} \\| {:error ...})`. Bypasses `:impl`/`:fail?`/`:error`. Use when the test needs per-call impl variation (e.g., minted ids). |
    | `:on-provision` | absent                             | `(fn [ctx impl] -> ctx)` hook |
    | `:provides`     | `[]`                               | Qualified protocol keywords |
@@ -110,6 +111,7 @@
 ;; -----------------------------------------------------------------------------
 
 (s/def ::impl any?)
+(s/def ::impl-key keyword?)
 ;; fn-valued specs use the project's standard with-gen idiom; ifn? alone
 ;; can't be sampled by test.check (see shiftlefter.stepengine.bind/::fn).
 (s/def ::factory (s/with-gen ifn? #(gen/return (constantly {:ok {:type :test-impl}}))))
@@ -123,7 +125,7 @@
 ;; instance checks etc.) make for noisier failures than the runtime one.
 
 (s/def ::adapter-spec
-  (s/keys :opt-un [::impl ::factory ::on-provision ::provides ::cleanup ::fail? ::error]))
+  (s/keys :opt-un [::impl ::impl-key ::factory ::on-provision ::provides ::cleanup ::fail? ::error]))
 
 (s/def ::adapter-specs
   (s/map-of keyword? ::adapter-spec))
@@ -213,7 +215,9 @@
            :cleanup  (build-cleanup adapter-name spec)
            :provides (or (:provides spec) [])}
     (some? (:on-provision spec))
-    (assoc :on-provision (build-on-provision adapter-name spec))))
+    (assoc :on-provision (build-on-provision adapter-name spec))
+    (some? (:impl-key spec))
+    (assoc :impl-key (:impl-key spec))))
 
 (defn- build-interface-entry
   "Build one interfaces-config entry from a spec.

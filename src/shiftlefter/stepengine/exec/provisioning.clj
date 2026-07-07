@@ -12,7 +12,8 @@
    `collect-provisioning-targets` is what lets the step-loop /
    provisioning split avoid a cross-feature forward-declare."
   (:require [shiftlefter.adapters.registry :as registry]
-            [shiftlefter.capabilities.ctx :as cap]))
+            [shiftlefter.capabilities.ctx :as cap]
+            [shiftlefter.costume :as costume]))
 
 ;; -----------------------------------------------------------------------------
 ;; Step-shape helpers (shared with step_loop)
@@ -46,8 +47,17 @@
      A custom registry lets test orchestration (e.g. setup.clj) hand the
      scenario a pre-built capability instance — see runner/setup.clj.
 
+   The factory result is split into the step-facing `:impl` and the
+   `:cleanup-handle` (sl-091): when the adapter declares `:impl-key`, the
+   impl is `(get factory-result impl-key)` (e.g. the bare IBrowser) while the
+   whole result is retained as the cleanup handle (it carries the driver the
+   `:cleanup` fn needs). Adapters without `:impl-key` keep the result verbatim
+   as the impl. A declared `:impl-key` must yield an impl satisfying the
+   adapter's `:provides`; a mismatch fails provisioning here rather than at the
+   first step.
+
    Returns:
-   - {:ok {:impl <instance> :mode :ephemeral}} on success
+   - {:ok {:impl <instance> :mode :ephemeral :cleanup-handle <result>}} on success
    - {:error {:type :svo/provisioning-failed ...}} on failure"
   [interface-name interfaces registry]
   (let [interface-config (get interfaces interface-name)]
@@ -73,7 +83,58 @@
                                    (name interface-name) " (" (name adapter-name) ")"
                                    (when adapter-msg (str ": " adapter-msg)))
                      :adapter-error adapter-msg}})
-          {:ok {:impl (:ok result) :mode :ephemeral}})))))
+          ;; Split factory result into step-facing impl + cleanup handle.
+          (let [raw      (:ok result)
+                ikey     (if registry
+                           (registry/impl-key adapter-name registry)
+                           (registry/impl-key adapter-name))
+                impl     (if ikey (get raw ikey) raw)
+                mismatch (if registry
+                           (registry/check-extracted-impl adapter-name impl registry)
+                           (registry/check-extracted-impl adapter-name impl))]
+            (if mismatch
+              {:error {:type :svo/provisioning-failed
+                       :interface interface-name
+                       :adapter adapter-name
+                       :reason :adapter/impl-protocol-mismatch
+                       :missing-protocols mismatch
+                       :message (str "Adapter :" (name adapter-name) " for :"
+                                     (name interface-name)
+                                     " produced an impl that does not satisfy "
+                                     (pr-str mismatch)
+                                     " — check its :impl-key in the registry")}}
+              {:ok {:impl impl :mode :ephemeral :cleanup-handle raw}})))))))
+
+(defn- provision-costume
+  "Provision a capability by attaching to the costume a subject `:wears` (sl-rnm).
+
+   Launch-or-attach to the earmarked Chrome — the session the human launched
+   and logged into once — instead of fresh-spawning. The capability is
+   `:persistent` so scenario-end cleanup never tears the session down (that
+   is the whole point: the authed session survives).
+
+   One live wearer per costume per scenario: two WebDriver sessions cannot
+   share one Chrome (etaoin limitation). The runner provisions one capability
+   per (interface, subject), so a single wearer is the norm; a second wearer is
+   rejected upstream in `ensure-capability-for-svo` (see
+   `costume-already-worn-error`) before this fn is reached.
+
+   Returns:
+   - {:ok {:impl <CostumeBrowser> :mode :persistent}} on success
+   - {:error {:type :svo/provisioning-failed ...}} on failure (missing/locked
+     costume → the scenario fails cleanly via the normal provisioning error path)"
+  [interface-name costume-name]
+  (let [result (costume/connect-costume! costume-name)]
+    (if (:error result)
+      (let [costume-msg (get-in result [:error :message])]
+        {:error {:type :svo/provisioning-failed
+                 :interface interface-name
+                 :costume costume-name
+                 :message (str "Costume attach failed for :" (name interface-name)
+                               " wearing :" (name costume-name)
+                               (when costume-msg (str ": " costume-msg)))
+                 :costume-error (:error result)}})
+      {:ok {:impl (:browser result) :mode :persistent}})))
 
 (defn- run-on-provision-hook
   "Invoke the adapter's `:on-provision` hook (if any) and wrap the result.
@@ -108,6 +169,32 @@
                                  adapter-name ": " (.getMessage t))
                    :cause   (.getMessage t)}})))))
 
+(def ^:private worn-costumes-key
+  "ctx key holding {costume-name wearer} for costumes provisioned this
+   scenario. Internal bookkeeping — NOT under the `:cap/` namespace, so it
+   never shows up in `cap/all-capabilities` or cleanup enumeration."
+  ::worn-costumes)
+
+(defn- costume-already-worn-error
+  "One-wearer-per-costume guard (sl-s7t).
+
+   Two subjects resolving to the same costume would attach two WebDriver
+   sessions to one Chrome (etaoin can't share a session) — a silent
+   double-attach that breaks the sessions. Fail cleanly instead.
+
+   Returns an `:svo/provisioning-failed` error (so it flows through the
+   existing provisioning error path and `format-provisioning-failed`), tagged
+   `:reason :costume/already-worn` for precise matching."
+  [interface-name costume-name subject existing-wearer]
+  {:error {:type :svo/provisioning-failed
+           :interface interface-name
+           :costume costume-name
+           :reason :costume/already-worn
+           :message (str "subject " (pr-str subject) " wears costume "
+                         (pr-str costume-name) ", already worn by "
+                         (pr-str existing-wearer)
+                         " this scenario; one wearer per costume")}})
+
 (defn- ensure-capability-for-svo
   "Provision (interface, subject) into ctx if not already present.
 
@@ -117,6 +204,10 @@
 
    Honors `:shared-impl?` via `find-existing-shared-impl` and runs the
    adapter's `:on-provision` hook (sl-yzu) on the freshly provisioned impl.
+
+   Enforces one live wearer per costume per scenario (sl-s7t): a second
+   subject resolving to an already-worn costume fails cleanly via
+   `costume-already-worn-error` rather than double-attaching.
 
    Parameters:
    - scenario-ctx: current scenario context
@@ -154,15 +245,40 @@
       (let [interface-config (get interfaces interface-name)
             adapter-name     (:adapter interface-config)
             shared?          (:shared-impl? interface-config)
-            existing-impl    (when shared?
+            costume          (:wears svo)
+            ;; One-wearer-per-costume (sl-s7t): if this costume is already worn
+            ;; by another (interface, subject) this scenario, refuse to attach
+            ;; a second WebDriver session to the same Chrome.
+            existing-wearer  (when costume
+                               (get-in scenario-ctx [worn-costumes-key costume]))
+            existing-impl    (when (and shared? (not costume))
                                (cap/find-existing-shared-impl scenario-ctx interface-name))
-            result           (if existing-impl
-                               {:ok {:impl existing-impl :mode :ephemeral}}
-                               (provision-capability interface-name interfaces registry))]
+            ;; A subject that :wears a costume attaches to that authed session
+            ;; (:persistent) — this wins over fresh-spawn and shared-impl.
+            result           (cond
+                               existing-wearer (costume-already-worn-error
+                                                interface-name costume subject existing-wearer)
+                               costume       (provision-costume interface-name costume)
+                               existing-impl {:ok {:impl existing-impl :mode :ephemeral}}
+                               :else         (provision-capability interface-name interfaces registry))]
         (if (:error result)
           result
-          (let [{:keys [impl mode]} (:ok result)
-                ctx' (cap/assoc-capability scenario-ctx interface-name impl mode subject)]
+          (let [{:keys [impl mode cleanup-handle]} (:ok result)
+                cap-k (cap/capability-key interface-name subject)
+                ctx' (-> scenario-ctx
+                         (cap/assoc-capability interface-name impl mode subject)
+                         ;; Step-facing impl and cleanup handle diverge for
+                         ;; wrapping adapters (browser: IBrowser vs driver,
+                         ;; sl-091). Stash the handle only when it differs, so
+                         ;; cleanup can reach the driver while steps see the
+                         ;; bare impl. Adapters where they coincide (SMS) stay
+                         ;; as {:impl :mode}.
+                         (cond-> (and cleanup-handle
+                                      (not (identical? cleanup-handle impl)))
+                           (assoc-in [cap-k :cleanup-handle] cleanup-handle))
+                         ;; Record the costume as worn so a later wearer is caught.
+                         (cond-> costume
+                           (assoc-in [worn-costumes-key costume] (or subject interface-name))))]
             ;; Generic adapter `:on-provision` hook — adapters seed per-
             ;; interface scenario state (e.g., :sms/scenario-start-ts) here
             ;; rather than the engine special-casing each interface type.
@@ -209,7 +325,10 @@
                    key   [iface subj]]
             :when (and iface (not (contains? @seen key)))]
       (vswap! seen conj key)
-      (vswap! result conj! {:interface iface :subject subj}))
+      ;; Preserve :wears so the eager phase attaches to costumes too (sl-rnm);
+      ;; the lazy path reads the full bound svo, so only this rebuild needs it.
+      (vswap! result conj! (cond-> {:interface iface :subject subj}
+                             (:wears svo) (assoc :wears (:wears svo)))))
     (persistent! @result)))
 
 (defn- provision-group-sequential

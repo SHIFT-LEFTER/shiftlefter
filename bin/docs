@@ -4,5 +4,5 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 echo "Generating API docs..."
-clj -X:codox
+clj -T:build docs
 echo "Done. Open docs/api/index.html"

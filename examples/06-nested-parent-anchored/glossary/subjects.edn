@@ -1,0 +1,4 @@
+;; Subject glossary — who acts in the scenarios.
+{:subjects
+ {:user {:desc "A shopper browsing the catalog"
+         :instances [:shopper]}}}

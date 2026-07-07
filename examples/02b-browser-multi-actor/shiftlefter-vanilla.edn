@@ -1,0 +1,11 @@
+;; Vanilla-mode contrast config — no :svo, no glossary. Any subject name
+;; is accepted; ShiftLefter behaves like a standard Gherkin runner.
+;; Run with: sl run -c shiftlefter-vanilla.edn --dry-run features/
+;;
+;; :prefs — see shiftlefter.edn (suppresses Chrome's breach warning for
+;; the demo site's canned password).
+
+{:interfaces {:web {:type :web
+                    :adapter :etaoin
+                    :config {:adapter-opts
+                             {:prefs {"profile.password_manager_leak_detection" false}}}}}}

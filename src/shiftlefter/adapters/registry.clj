@@ -11,6 +11,18 @@
    An adapter entry has:
    - `:factory`      — function that takes config, returns capability
    - `:cleanup`      — function that takes capability, cleans up resources
+   - `:impl-key`     — optional. When the factory wraps the protocol-bearing
+                        impl inside a map (e.g. browser factories return
+                        `{:ok {:browser <IBrowser> :etaoin-driver <driver>}}`),
+                        `:impl-key` names the key holding the step-facing impl
+                        (`:browser`). Provisioning extracts that value as the
+                        capability `:impl` and keeps the whole factory result as
+                        the `:cleanup-handle` (so cleanup still sees the driver).
+                        Declaring `:impl-key` is also a promise that the extracted
+                        value satisfies `:provides` — `check-extracted-impl`
+                        enforces it at provision time (sl-091). Adapters whose
+                        factory returns the impl directly (or a bundle the
+                        interface consumes by convention, like SMS) omit it.
    - `:provides`     — vector of qualified protocol keywords the produced
                         impl satisfies (e.g.,
                         `[:shiftlefter.sms.protocol/ISMS
@@ -69,9 +81,11 @@
    role names would otherwise collide with future capabilities."
   {:etaoin     {:factory  etaoin/create-browser
                 :cleanup  etaoin/close-browser
+                :impl-key :browser
                 :provides [:shiftlefter.browser.protocol/IBrowser]}
    :playwright {:factory  playwright/create-browser
                 :cleanup  playwright/close-browser
+                :impl-key :browser
                 :provides [:shiftlefter.browser.protocol/IBrowser]}
    :sms-mock   {:factory      sms-mock/create-sms
                 :cleanup      sms-mock/close-sms
@@ -153,6 +167,56 @@
    (on-provision adapter-name default-registry))
   ([adapter-name registry]
    (get-in registry [adapter-name :on-provision])))
+
+(defn impl-key
+  "Return the adapter's `:impl-key`, or nil.
+
+   When non-nil, the factory wraps the protocol-bearing impl under this key
+   and provisioning should extract `(get factory-result impl-key)` as the
+   step-facing impl, keeping the full result as the cleanup handle. nil means
+   the factory's result is itself the impl (the default / SMS-bundle path)."
+  ([adapter-name]
+   (impl-key adapter-name default-registry))
+  ([adapter-name registry]
+   (get-in registry [adapter-name :impl-key])))
+
+(defn check-extracted-impl
+  "Verify an `:impl-key` adapter's extracted impl satisfies its `:provides`.
+
+   Guards the sl-091 failure mode: a wrapping factory whose `:impl-key`
+   points at the wrong (or no) sub-value, silently storing a non-protocol
+   object as the capability impl. The `:impl-key` declaration is a promise
+   that the extracted value satisfies every declared protocol; this enforces
+   it at provision time so the failure is a clear error rather than a cryptic
+   'no protocol impl' at the first step.
+
+   Only adapters that declare `:impl-key` are checked. Adapters without one
+   return the factory result verbatim (or a bundle the interface consumes by
+   convention, like SMS, whose `:provides` describes a nested object) and are
+   exempt.
+
+   Returns:
+   - nil                     — satisfied, or adapter has no `:impl-key`/`:provides`
+   - vector of keywords      — the `:provides` protocols the impl fails to
+                                satisfy (or that could not be resolved)"
+  ([adapter-name impl]
+   (check-extracted-impl adapter-name impl default-registry))
+  ([adapter-name impl registry]
+   (when (impl-key adapter-name registry)
+     (let [declared (provides adapter-name registry)
+           ;; Style exception: requiring-resolve on a :provides keyword is
+           ;; resolution-for-validation, not dynamic dispatch — :provides is
+           ;; deliberately data (keywords), so calling satisfies? requires
+           ;; turning the keyword into its protocol object. No protocol-var
+           ;; alternative without coupling the registry to every protocol ns.
+           unsatisfied (remove (fn [proto-kw]
+                                 (try
+                                   (satisfies? @(requiring-resolve (symbol proto-kw))
+                                               impl)
+                                   (catch Throwable _ false)))
+                               declared)]
+       (when (seq unsatisfied)
+         (vec unsatisfied))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Capability Operations

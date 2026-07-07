@@ -55,21 +55,22 @@
             (is (:ok result))
             (is (= {:accessibility-id "email-field"} (:ok result)))))
 
-        (testing "Intent with positive index"
+        ;; sl-nrv: resolution returns the BASE binding for every index form;
+        ;; the index is applied at the browser boundary (Nth match).
+        (testing "Intent with positive index — base binding"
           (let [result (resolve/resolve-intent-string intents "Login.submit[1]" :web)]
             (is (:ok result))
-            (is (= {:css "button.login-submit:nth-child(1)"} (:ok result)))))
+            (is (= {:css "button.login-submit"} (:ok result)))))
 
-        (testing "Intent with negative index"
+        (testing "Intent with negative index — base binding"
           (let [result (resolve/resolve-intent-string intents "Login.submit[-1]" :web)]
             (is (:ok result))
-            (is (= {:css "button.login-submit:nth-last-child(1)"} (:ok result)))))
+            (is (= {:css "button.login-submit"} (:ok result)))))
 
-        (testing "Intent with wildcard index"
+        (testing "Intent with wildcard index — base binding"
           (let [result (resolve/resolve-intent-string intents "Login.submit[*]" :web)]
             (is (:ok result))
-            (is (= {:css "button.login-submit"} (:ok result))
-                "Wildcard should not modify selector")))
+            (is (= {:css "button.login-submit"} (:ok result)))))
 
         (testing "Unknown intent returns error"
           (let [result (resolve/resolve-intent-string intents "Unknown.submit" :web)]

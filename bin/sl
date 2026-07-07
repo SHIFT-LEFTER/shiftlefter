@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# ShiftLefter CLI wrapper
+# ShiftLefter CLI wrapper — ALWAYS runs the built jar (sl-72e).
 #
-# Usage modes:
-#   1. JAR mode (recommended): Works from any directory
-#      - Requires: JAR built (clj -T:build uberjar) and Java installed
-#      - Run from anywhere: sl run path/to/features --step-paths path/to/steps
+# This is the single, canonical wrapper: the dev tree and the release zip run the
+# SAME script. It expects a `shiftlefter*.jar` sitting NEXT TO this script (flat
+# layout) — true in both places:
+#   - dev:     `clj -T:build uberjar` links bin/shiftlefter.jar -> the built jar
+#   - release: the zip ships `sl` + `shiftlefter-vX.Y.Z.jar` side by side
 #
-#   2. Source mode (development): Works only from project root
-#      - Used when JAR doesn't exist or Java isn't found
-#      - Must cd to project root first: cd /path/to/shiftlefter && bin/sl run ...
+# `sl` is therefore always the artifact users get — there is NO source fallback.
+# It never reads live src/; the warm daemon and cold floor both load the jar,
+# frozen at build time. Edit src/ and re-run `sl` and you get the OLD jar until
+# you rebuild (the warm daemon bounces itself on a jar rebuild).
 #
-# For active development without rebuilding JAR, run from project root.
+# To run the CLI against live src/ (no jar, no daemon — the old "source mode"),
+# use `bin/sl-dev`. For interactive exploration use the REPL (`bin/repl-eval`).
+#
+# Requires: a built jar (clj -T:build uberjar) and a working Java.
 
 set -euo pipefail
 
@@ -19,9 +24,38 @@ set -euo pipefail
 USER_CWD="$PWD"
 export SL_USER_CWD="$USER_CWD"
 
+# --no-daemon (sl-x6r): a wrapper-only global flag. Strip it before anything else
+# so it never reaches the jar (parse-opts would reject an unknown option) and force
+# the cold path. SL_NO_DAEMON=1 is the env equivalent (checked at routing time).
+SL_NO_DAEMON_FLAG=0
+_sl_args=()
+for _sl_a in "$@"; do
+    if [[ "$_sl_a" == "--no-daemon" ]]; then
+        SL_NO_DAEMON_FLAG=1
+    else
+        _sl_args+=("$_sl_a")
+    fi
+done
+# bash 3.2 + `set -u` safe expansion of a possibly-empty array
+set -- ${_sl_args[@]+"${_sl_args[@]}"}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-JAR_FILE="$PROJECT_DIR/target/shiftlefter.jar"
+
+# Flat discovery (sl-72e): the jar lives next to this script. One rule serves both
+# the dev tree (bin/shiftlefter.jar) and the release zip (shiftlefter-vX.Y.Z.jar),
+# so the warm-path E2E exercises the very script that ships. Glob into an array and
+# take the first real match; with no nullglob a no-match leaves the literal pattern,
+# which `-f` rejects -> empty JAR_FILE, handled at dispatch (hard error, no source
+# fallback) rather than silently switching to source.
+_sl_jars=("$SCRIPT_DIR"/shiftlefter*.jar)
+JAR_FILE=""
+[[ -f "${_sl_jars[0]}" ]] && JAR_FILE="${_sl_jars[0]}"
+# AppCDS archive (sl-s3u cold floor): a per-machine class-data cache built next
+# to the jar (named off it, so it tracks the jar it was built for). NOT portable
+# and NOT shipped — keyed to the exact JDK + jar, each machine builds its own on
+# first run. A Windows launcher (future) must replicate the same build/use logic;
+# the .jsa mechanism itself is cross-platform.
+JSA_FILE="${JAR_FILE%.jar}.jsa"
 
 # Find Java executable, checking common locations
 find_java() {
@@ -63,11 +97,6 @@ find_java() {
 
     # No working Java found
     echo ""
-}
-
-# Check if we're in the project directory (for clj fallback)
-in_project_dir() {
-    [[ "$(pwd)" == "$PROJECT_DIR" ]] || [[ "$(pwd)/" == "$PROJECT_DIR/"* ]]
 }
 
 # Handle `sl repl --clj` — clj-based REPL for user deps.edn merging
@@ -130,20 +159,17 @@ handle_repl_clj() {
         exit 1
     fi
 
-    # Find ShiftLefter source: JAR or project dir
-    local jar_or_source=""
-    if [[ -f "$JAR_FILE" ]]; then
-        jar_or_source="$JAR_FILE"
-    elif in_project_dir; then
-        jar_or_source="$PROJECT_DIR"
-    else
-        echo "Error: ShiftLefter JAR not found. Build with: clj -T:build uberjar" >&2
+    # The bundled jar is the dep root (always-jar, sl-72e). For a source-rooted
+    # REPL that merges your deps.edn, use `bin/sl-dev repl --clj` instead.
+    if [[ -z "$JAR_FILE" || ! -f "$JAR_FILE" ]]; then
+        echo "Error: ShiftLefter JAR not found next to sl. Build with: clj -T:build uberjar" >&2
+        echo "       (Or run against source with: bin/sl-dev repl --clj)" >&2
         exit 1
     fi
 
     # Build deps map — nREPL + CIDER are bundled in the JAR, but for clj mode
     # we pull them as deps so clj's classloader picks them up
-    local sl_dep="{:deps {shiftlefter/shiftlefter {:local/root \"$jar_or_source\"}"
+    local sl_dep="{:deps {shiftlefter/shiftlefter {:local/root \"$JAR_FILE\"}"
     sl_dep="$sl_dep nrepl/nrepl {:mvn/version \"1.5.0\"} cider/cider-nrepl {:mvn/version \"0.50.0\"}"
     sl_dep="$sl_dep}}"
 
@@ -185,7 +211,7 @@ fi
 # If lib/*.jar files exist, use -cp mode instead of -jar to include them
 build_classpath() {
     local jar="$1"
-    local lib_dir="$PROJECT_DIR/lib"
+    local lib_dir="$SCRIPT_DIR/lib"
     if [[ -d "$lib_dir" ]] && ls "$lib_dir"/*.jar &>/dev/null 2>&1; then
         echo "$jar:$lib_dir/*"
     else
@@ -193,40 +219,329 @@ build_classpath() {
     fi
 }
 
-if [[ -f "$JAR_FILE" ]]; then
-    JAVA_CMD=$(find_java)
-    if [[ -n "$JAVA_CMD" ]]; then
-        # Check for classpath extension
-        EXTRA_CP=$(build_classpath "$JAR_FILE")
-        if [[ -n "$EXTRA_CP" ]]; then
-            # Extended classpath mode: include lib/*.jar
-            exec "$JAVA_CMD" -cp "$EXTRA_CP" clojure.main -m shiftlefter.core "$@"
-        fi
-        # JAR mode: works from anywhere
-        exec "$JAVA_CMD" -jar "$JAR_FILE" "$@"
-    else
-        # JAR exists but no Java - fall back to clj if in project dir
-        if in_project_dir; then
-            exec clj -M:run "$@"
+# AppCDS cold floor (sl-s3u). Freshness is an mtime stat (never hash the 42MB
+# jar): the archive is usable only while it is newer than the jar.
+cds_is_fresh() {
+    [[ -f "$JSA_FILE" && "$JSA_FILE" -nt "$JAR_FILE" ]]
+}
+
+# Kick a background rebuild when the archive is missing or stale, then return
+# immediately — no invocation ever blocks on archive creation. The build runs
+# `--help`, which loads core's full require tree (incl. runner), so one archive
+# speeds up fmt AND run. A unique temp name + atomic mv means concurrent first
+# runs can't corrupt the archive (worst case: a duplicate build). All build
+# output (and any mv/rm error on a read-only install) is discarded, so the user
+# never sees archive churn; a failed build simply degrades to a cold run.
+maybe_build_cds() {
+    local java_cmd="$1"
+    cds_is_fresh && return 0
+    (
+        tmp="$(mktemp -u "${JSA_FILE}.XXXXXX")" || exit 0
+        if "$java_cmd" -XX:ArchiveClassesAtExit="$tmp" -jar "$JAR_FILE" --help \
+               && [[ -s "$tmp" ]]; then
+            mv -f "$tmp" "$JSA_FILE"
         else
-            echo "Error: Java not found and not in ShiftLefter project directory." >&2
-            echo "" >&2
-            echo "Options:" >&2
-            echo "  1. Install Java (e.g., 'brew install openjdk')" >&2
-            echo "  2. Run from project directory: cd $PROJECT_DIR && bin/sl $*" >&2
-            exit 1
+            rm -f "$tmp"
+        fi
+    ) >/dev/null 2>&1 &
+    return 0
+}
+
+# Echo the CDS flag pair when the archive is fresh, else nothing. Kicks the
+# background rebuild first (maybe_build_cds). Callers word-split the result into
+# argv: a fresh archive yields two tokens, a missing/stale one yields zero.
+# -Xshare:auto guarantees a stale/mismatched archive (e.g. after a JDK upgrade,
+# which mtime cannot see) is silently ignored — degrade, never fail.
+cds_flags() {
+    local java_cmd="$1"
+    maybe_build_cds "$java_cmd"
+    if cds_is_fresh; then
+        echo "-Xshare:auto -XX:SharedArchiveFile=$JSA_FILE"
+    fi
+}
+
+# exec a cold `java -jar` run, prefixing CDS flags when the archive is fresh.
+exec_jar() {
+    local java_cmd="$1"; shift
+    local cds; cds=$(cds_flags "$java_cmd")
+    # shellcheck disable=SC2086  # $cds is a deliberately word-split flag list (0 or 2 tokens)
+    exec "$java_cmd" $cds -jar "$JAR_FILE" "$@"
+}
+
+# --- Warm execution path (sl-x6r): per-project daemon + Java dispatch client ----
+#
+# Routing (denylist, not allowlist — a new core command is warm by default):
+# everything dispatches to a resident per-project daemon over its bundled nREPL,
+# EXCEPT the cold escapes below. The client is shiftlefter.client.NreplClient,
+# a Clojure-free class inside the uberjar (boots ~30ms; no bb, no extra install).
+# Design + rationale: notes/sl-n2h/warm-execution-path-design.md.
+
+# Portable canonicalization (resolve symlinks). Used only for the JDK-path
+# staleness compare; returns empty if no canonicalizer exists (then we skip that
+# check rather than thrash, since the daemon records a *canonical* java path while
+# find_java returns a symlinked one).
+canon_path() {
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$1" 2>/dev/null
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null
+    fi
+}
+
+# Exact byte size of a file (portable: BSD stat, then GNU stat). -L dereferences,
+# so a symlinked jar (the dev flat layout, bin/shiftlefter.jar -> target/) reports
+# the TARGET's size — matching the daemon's recorded jar-size instead of the 25-byte
+# link path, which would otherwise read as 'stale' and bounce the daemon every call.
+file_size() { stat -L -f %z "$1" 2>/dev/null || stat -L -c %s "$1" 2>/dev/null; }
+
+# Nearest ancestor of $1 containing shiftlefter.edn, sl/shiftlefter.edn (the
+# sl-directory config layout), OR .git (a .git *file* counts — that's a linked
+# worktree). MUST match shiftlefter.project-context/instance-root exactly:
+# wrapper and daemon have to agree on where .shiftlefter/daemon.edn lives
+# (sl-v7l6). No anchor -> caller runs cold (we don't spawn a daemon for an
+# unconfigured tree).
+find_instance_root() {
+    local dir="$1" parent
+    while true; do
+        if [[ -e "$dir/shiftlefter.edn" || -e "$dir/sl/shiftlefter.edn" || -e "$dir/.git" ]]; then
+            printf '%s\n' "$dir"
+            return 0
+        fi
+        parent="$(dirname "$dir")"
+        [[ "$parent" == "$dir" ]] && return 1
+        dir="$parent"
+    done
+}
+
+# Read a single scalar field out of daemon.edn (single-line EDN via pr-str).
+edn_num() { sed -n "s/.*:$2 \\([0-9][0-9]*\\).*/\\1/p" "$1"; }
+edn_str() { sed -n "s/.*:$2 \"\\([^\"]*\\)\".*/\\1/p" "$1"; }
+
+# Liveness + staleness of the daemon recorded in $1 (daemon.edn). Sets globals
+# D_PID / D_PORT. Budget < 5ms (no JVM): an edn read, a kill -0, a stat, and a
+# canonicalized java compare. Return: 0 usable, 1 absent, 2 dead, 3 stale.
+read_daemon() {
+    local edn="$1"
+    [[ -f "$edn" ]] || return 1
+    D_PID="$(edn_num "$edn" pid)"
+    D_PORT="$(edn_num "$edn" port)"
+    [[ -n "$D_PID" && -n "$D_PORT" ]] || return 2
+    kill -0 "$D_PID" 2>/dev/null || return 2
+    # Staleness. Size is an exact, unit-free identity check; the -nt ordering catches
+    # a rebuild (the daemon recorded jar mtime in *millis*, which `stat` seconds can't
+    # compare — so we use file ordering, not the recorded mtime). Either -> bounce.
+    local rec_size cur_size
+    rec_size="$(edn_num "$edn" jar-size)"
+    cur_size="$(file_size "$JAR_FILE")"
+    [[ -n "$rec_size" && "$rec_size" == "$cur_size" ]] || return 3
+    [[ "$JAR_FILE" -nt "$edn" ]] && return 3
+    # JDK path change (e.g. an upgrade): respawn so the daemon runs the new java.
+    local rec_java cur_canon rec_canon
+    rec_java="$(edn_str "$edn" java)"
+    cur_canon="$(canon_path "$JAVA_CMD")"
+    rec_canon="$(canon_path "$rec_java")"
+    if [[ -n "$cur_canon" && -n "$rec_canon" && "$cur_canon" != "$rec_canon" ]]; then
+        return 3
+    fi
+    return 0
+}
+
+# Block until a pid is gone, or timeout. $2 = tenths of a second.
+wait_pid_gone() {
+    local pid="$1" n="$2" i
+    for ((i = 0; i < n; i++)); do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+# Block until daemon.edn appears, or ~10s timeout.
+wait_for_edn() {
+    local edn="$1" i
+    for ((i = 0; i < 100; i++)); do
+        [[ -f "$edn" ]] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+# Auto-spawn the daemon for $root. A spawn.lock dir (atomic mkdir) elects exactly
+# one spawner under concurrent first-calls, so only one daemon per root is ever
+# started; losers just wait for the winner's daemon.edn. Spawn goes through the
+# CDS-enabled java (fast start) and backgrounds via nohup, stderr -> daemon.log.
+# Returns 0 once a daemon.edn exists, 1 on timeout (caller falls back to cold).
+spawn_daemon() {
+    local java_cmd="$1" root="$2"
+    local sdir="$root/.shiftlefter" edn lock
+    edn="$sdir/daemon.edn"
+    lock="$sdir/spawn.lock"
+    mkdir -p "$sdir" 2>/dev/null || return 1
+    if mkdir "$lock" 2>/dev/null; then
+        # We won the election: emit the one-line spawn breadcrumb (tty-gated, our own
+        # stderr — the backgrounded daemon's System/console is nil so its own
+        # breadcrumb is suppressed; this is the wrapper's job per the design).
+        [[ -t 2 ]] && printf 'ShiftLefter daemon started — sl daemon status\n' >&2
+        rm -f "$edn"  # clear any dead breadcrumb so wait_for_edn sees OURS
+        local cds; cds=$(cds_flags "$java_cmd")
+        # shellcheck disable=SC2086  # $cds is a deliberately word-split flag list
+        nohup "$java_cmd" $cds -jar "$JAR_FILE" daemon serve >>"$sdir/daemon.log" 2>&1 &
+        wait_for_edn "$edn"; local ok=$?
+        rmdir "$lock" 2>/dev/null
+        return $ok
+    fi
+    # Another wrapper is spawning; just wait for the daemon.edn it will write.
+    wait_for_edn "$edn"
+}
+
+# True for the top-level `sl --help` / `sl -h` / bare `sl` — the one case that must
+# NOT auto-spawn a JVM (don't boot a daemon just to print usage). A *subcommand*
+# --help (e.g. `sl fmt --help`) is still warm-eligible.
+is_bare_help() {
+    case "${1:-}" in
+        --help|-h|"") return 0 ;;
+    esac
+    return 1
+}
+
+# Commands that must run cold (COLD-DENYLIST, by category — see design doc):
+# interactive (repl), process-owning (costume init), the daemon controls
+# themselves, and the full test suite (verify --ci). Everything else warms.
+is_cold_command() {
+    case "${1:-}" in
+        repl)   return 0 ;;
+        daemon) return 0 ;;  # serve/status/stop/bare — status+stop intercepted earlier
+    esac
+    [[ "${1:-}" == "costume" && "${2:-}" == "init" ]] && return 0
+    if [[ "${1:-}" == "verify" ]]; then
+        local a
+        for a in "$@"; do [[ "$a" == "--ci" ]] && return 0; done
+    fi
+    return 1
+}
+
+# Ensure a usable warm daemon for $root, spawning/bouncing as needed. Sets D_PORT.
+# Returns 0 if a warm port is ready, 1 if the caller should fall back to cold.
+ensure_warm_port() {
+    local java_cmd="$1" root="$2"; shift 2
+    local edn="$root/.shiftlefter/daemon.edn"
+    read_daemon "$edn"; local st=$?
+    case $st in
+        0) return 0 ;;                              # usable — D_PORT already set
+        3) do_daemon_stop "$java_cmd" >/dev/null 2>&1 ;;  # stale — stop then respawn
+        2) rm -f "$edn" ;;                          # dead — clean the breadcrumb
+    esac
+    is_bare_help "$@" && return 1                   # never spawn just to print usage
+    spawn_daemon "$java_cmd" "$root" || return 1
+    read_daemon "$edn"                              # re-read to pick up D_PORT
+}
+
+# Routing gate. Either runs the warm client (and exits with its code), or returns
+# so the caller falls through to the cold exec_jar. A 69 from the client means the
+# daemon vanished between our liveness check and the connect — safe to retry cold
+# because the client buffers all output (nothing was written yet).
+maybe_route_warm() {
+    local java_cmd="$1"; shift
+    [[ "$SL_NO_DAEMON_FLAG" == 1 || -n "${SL_NO_DAEMON:-}" ]] && return 0
+    env | grep -q '^SHIFTLEFTER_' && return 0  # daemon env is frozen at spawn; don't lie
+    is_cold_command "$@" && return 0
+    local root
+    root="$(find_instance_root "$USER_CWD")" || return 0
+    ensure_warm_port "$java_cmd" "$root" "$@" || return 0
+    "$java_cmd" -cp "$JAR_FILE" shiftlefter.client.NreplClient "$D_PORT" "$USER_CWD" "$@"
+    local rc=$?
+    [[ $rc == 69 ]] && return 0
+    exit $rc
+}
+
+# `sl daemon status` — wrapper-owned (not wired in the jar). Pure bash, no JVM.
+do_daemon_status() {
+    local root edn pid live
+    root="$(find_instance_root "$USER_CWD")" \
+        || { echo "sl daemon: no instance root above $USER_CWD (need shiftlefter.edn or .git)"; return 0; }
+    edn="$root/.shiftlefter/daemon.edn"
+    if [[ ! -f "$edn" ]]; then
+        echo "sl daemon: no daemon running for $root"
+        return 0
+    fi
+    pid="$(edn_num "$edn" pid)"
+    if kill -0 "$pid" 2>/dev/null; then live="alive"; else live="DEAD (stale daemon.edn)"; fi
+    echo "sl daemon for $root: $live"
+    cat "$edn"
+    echo
+    return 0
+}
+
+# `sl daemon stop` — wrapper-owned. Prefer a graceful stop (eval stop!, which lets
+# the daemon delete its own daemon.edn), then SIGTERM, then SIGKILL. The manual
+# test (sl-rju) showed SIGTERM can be ignored, hence the escalation.
+do_daemon_stop() {
+    local java_cmd="$1" root edn pid port
+    root="$(find_instance_root "$USER_CWD")" \
+        || { echo "sl daemon: no instance root above $USER_CWD"; return 0; }
+    edn="$root/.shiftlefter/daemon.edn"
+    if [[ ! -f "$edn" ]]; then
+        echo "sl daemon: no daemon to stop for $root"
+        return 0
+    fi
+    pid="$(edn_num "$edn" pid)"
+    port="$(edn_num "$edn" port)"
+    if [[ -n "$java_cmd" && -n "$port" ]]; then
+        "$java_cmd" -cp "$JAR_FILE" shiftlefter.client.NreplClient "$port" "$root" \
+            --sl-internal-stop >/dev/null 2>&1 || true
+        if wait_pid_gone "$pid" 20; then
+            rm -f "$edn"; echo "sl daemon: stopped (pid $pid)"; return 0
         fi
     fi
-else
-    # No JAR - must use clj from project dir
-    if in_project_dir; then
-        exec clj -M:run "$@"
-    else
-        echo "Error: ShiftLefter JAR not found and not in project directory." >&2
-        echo "" >&2
-        echo "Options:" >&2
-        echo "  1. Build the JAR: cd $PROJECT_DIR && clj -T:build uberjar" >&2
-        echo "  2. Run from project directory: cd $PROJECT_DIR && bin/sl $*" >&2
-        exit 1
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        if wait_pid_gone "$pid" 30; then
+            rm -f "$edn"; echo "sl daemon: stopped via SIGTERM (pid $pid)"; return 0
+        fi
+        kill -9 "$pid" 2>/dev/null || true
+        wait_pid_gone "$pid" 20 || true
+        rm -f "$edn"; echo "sl daemon: killed (pid $pid)"; return 0
     fi
+    rm -f "$edn"
+    echo "sl daemon: removed stale daemon.edn (pid ${pid:-?} not running)"
+    return 0
+}
+
+# Always-jar dispatch (sl-72e). No source fallback: a missing jar or Java is a
+# hard error pointing at the build / bin/sl-dev, never a silent switch to source.
+if [[ -z "$JAR_FILE" || ! -f "$JAR_FILE" ]]; then
+    echo "Error: no ShiftLefter jar found next to $(basename "${BASH_SOURCE[0]}")." >&2
+    echo "" >&2
+    echo "  1. Build it:                 clj -T:build uberjar" >&2
+    echo "  2. Run against live src/:    bin/sl-dev $*" >&2
+    exit 1
 fi
+
+JAVA_CMD=$(find_java)
+if [[ -z "$JAVA_CMD" ]]; then
+    echo "Error: no working Java found (the jar needs a JVM to run)." >&2
+    echo "" >&2
+    echo "  Install Java, e.g.: brew install openjdk" >&2
+    exit 1
+fi
+
+# Check for classpath extension
+EXTRA_CP=$(build_classpath "$JAR_FILE")
+if [[ -n "$EXTRA_CP" ]]; then
+    # Extended classpath mode: include lib/*.jar. Intentionally NO CDS —
+    # the archive is keyed to the plain `-jar` classpath, so a lib/*.jar
+    # run would mismatch it. Rare path; staying cold is correct.
+    exec "$JAVA_CMD" -cp "$EXTRA_CP" clojure.main -m shiftlefter.core "$@"
+fi
+# Wrapper-owned daemon controls (status/stop are not wired in the jar), then
+# warm routing. maybe_route_warm execs/exits on the warm path; it returns
+# only when routing declines, falling through to the cold floor below.
+if [[ "${1:-}" == "daemon" ]]; then
+    case "${2:-}" in
+        status) do_daemon_status; exit $? ;;
+        stop)   do_daemon_stop "$JAVA_CMD"; exit $? ;;
+    esac
+fi
+maybe_route_warm "$JAVA_CMD" "$@"
+# JAR mode cold floor (AppCDS, sl-s3u) — reached when warm routing declines.
+exec_jar "$JAVA_CMD" "$@"

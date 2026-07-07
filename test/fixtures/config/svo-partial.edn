@@ -1,0 +1,4 @@
+;; Partial :svo config — opts into Shifted mode with one enforcement
+;; override; the remaining levels come from default-config (sl-ieie).
+{:parser {:dialect "en"}
+ :svo {:unknown-subject :error}}

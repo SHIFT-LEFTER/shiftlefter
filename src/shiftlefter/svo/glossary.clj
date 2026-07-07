@@ -56,11 +56,18 @@
 ;; -----------------------------------------------------------------------------
 
 ;; Glossary shape: {:subjects {kw -> map} :verbs {kw -> {kw -> map}}}
-;; Subject entries may contain :instances (vector of keywords) for type/instance grouping.
+;; Subject entries may contain :instances (vector of keywords) for type/instance grouping,
+;; and an optional :wears (costume keyword) so the subject attaches to a persistent
+;; authenticated session instead of fresh-spawning. See sl-rnm.
 (s/def ::instances (s/coll-of keyword? :kind vector?))
-(s/def ::subject-entry (s/and map? #(if (contains? % :instances)
-                                       (s/valid? ::instances (:instances %))
-                                       true)))
+(s/def ::wears keyword?)
+(s/def ::subject-entry (s/and map?
+                              #(if (contains? % :instances)
+                                 (s/valid? ::instances (:instances %))
+                                 true)
+                              #(if (contains? % :wears)
+                                 (s/valid? ::wears (:wears %))
+                                 true)))
 (s/def ::subjects (s/map-of keyword? ::subject-entry))
 
 ;; Verb entries declare a closed set of frames. Each frame declares the
@@ -652,11 +659,16 @@
   (vec (keys (:subjects glossary))))
 
 (defn all-subject-forms
-  "Returns all valid subject forms: type keys + qualified instance forms.
-   Useful for Levenshtein suggestion candidates."
+  "Returns all RESOLVABLE subject forms: singleton type keys + qualified
+   instance forms. Bare type keys that have :instances are excluded —
+   resolve-subject returns nil for them, so listing them as known subjects
+   (or suggesting them for typos) would mislead (sl-6e7p).
+   Useful for Levenshtein suggestion candidates and 'Known subjects' hints."
   [glossary]
   (let [subjects (:subjects glossary)]
-    (into (vec (keys subjects))
+    (into (vec (keep (fn [[type-kw entry]]
+                       (when-not (:instances entry) type-kw))
+                     subjects))
           (mapcat (fn [[type-kw entry]]
                     (map #(keyword (name type-kw) (name %))
                          (:instances entry)))
@@ -682,6 +694,19 @@
   "Returns all subject type keywords."
   [glossary]
   (vec (keys (:subjects glossary))))
+
+(defn costume-for-subject
+  "Resolve the costume a subject `:wears`, or nil.
+
+   The `:wears` keyword lives on the subject *type* entry, so an instance
+   (`:user/alice`) inherits its type's costume. Resolves singleton, type,
+   and instance subject forms uniformly via `resolve-subject`. See sl-rnm.
+
+   Returns the costume keyword (e.g. `:finance`) or nil if the subject is
+   unknown or wears nothing."
+  [glossary subject]
+  (when-let [type-kw (:type (resolve-subject glossary subject))]
+    (:wears (get-in glossary [:subjects type-kw]))))
 
 (defn singleton?
   "Returns true if the subject type is a singleton (no instances)."

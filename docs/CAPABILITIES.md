@@ -7,14 +7,16 @@ ShiftLefter works in tiers. Each tier adds capabilities without removing any fro
 | You have | You can |
 |---|---|
 | **Java 11+** | Run features, format files, start the REPL, use built-in browser steps |
-| **Java 11+ and write `.clj` files** | All of the above, plus write custom step definitions using 8 bundled libraries |
+| **Java 11+ and write `.clj` files** | All of the above, plus write custom step definitions using the bundled libraries (HTTP, JSON, filesystem, browser, async, …) |
 | **Java 11+ and Clojure CLI** | All of the above, plus use your own `deps.edn`, add any Clojure library |
 
 ---
 
 ## Tier A: Run & Format (Java only)
 
-**Prerequisites:** Java 11 or later. Nothing else.
+**Prerequisites:** Java 11 or later — nothing else for running and formatting.
+Driving a real browser additionally needs Chrome and a matching **ChromeDriver**
+(see the browser-steps note below).
 
 **What you can do:**
 
@@ -26,7 +28,7 @@ ShiftLefter works in tiers. Each tier adds capabilities without removing any fro
 - `sl repl` — start an interactive Clojure REPL with ShiftLefter loaded
 - `sl repl --nrepl` — start an nREPL server for IDE integration (VS Code/Calva, Emacs/CIDER)
 
-You can use the [built-in browser steps](browser-getting-started.md) to drive Chrome/Firefox without writing any code.
+You can use the [built-in browser steps](browser-getting-started.md) to drive Chrome (or Firefox via the Playwright backend) without writing any code. This needs a matching **ChromeDriver** — found on your `PATH` or via `:chromedriver-path` in your config, so it doesn't have to be on `PATH`.
 
 ---
 
@@ -34,7 +36,13 @@ You can use the [built-in browser steps](browser-getting-started.md) to drive Ch
 
 **Prerequisites:** Same as Tier A. No Clojure CLI needed.
 
-**What's new:** Write `.clj` step definition files. The runner loads them via `load-file`, giving your code access to everything bundled in the JAR.
+**What's new:** Write `.clj` step definition files — for the cases the built-in
+vocabulary doesn't cover: **test fixtures / data setup**, genuinely **niche web**
+(canvas, custom JS), or a **new interface**. For ordinary web/SMS behavior you
+shouldn't need this — use built-in steps and the glossary (see
+[Add domain language](extending-vocabulary.md)). When you do need it, the runner
+loads `.clj` files via `load-file`, giving your code access to everything bundled
+in the JAR.
 
 ### Bundled Libraries
 
@@ -48,7 +56,14 @@ These Clojure libraries are included and available in your step definitions:
 | `core.async` | 1.6.681 | Async channels | `(async/>!! ch val)` |
 | `spec.alpha` | 0.5.238 | Data validation | `(s/valid? ::spec data)` |
 | `test.check` | 1.1.2 | Property-based testing | `(gen/sample (s/gen int?))` |
+| `clj-http` | 3.13.0 | HTTP client | `(http/get "https://...")` |
+| `http-kit` | 2.8.0 | Async HTTP client/server | `(hk/get "https://...")` |
+| `tools.logging` | 1.3.0 | Logging facade | `(log/info "...")` |
 | `clojure` | 1.12.3 | Core language + `clojure.test`, `clojure.string`, etc. | `(str/split s #",")` |
+
+> This is the subset most useful when writing steps. The released jar bundles a
+> few more (e.g. `asami`, `tools.cli`, `nrepl`); anything on the jar's classpath is
+> available to your step definitions via `require`.
 
 ### Java Standard Library
 

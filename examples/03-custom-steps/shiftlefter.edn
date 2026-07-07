@@ -1,1 +1,5 @@
-{:step-paths ["steps/"]}
+;; Step definition paths live under :runner. (A bare top-level :step-paths
+;; is NOT read by the runner — it only appears to work because "steps/" is
+;; also the default.)
+
+{:runner {:step-paths ["steps/"]}}

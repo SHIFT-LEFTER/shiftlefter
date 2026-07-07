@@ -1,6 +1,8 @@
 (ns shiftlefter.runner.config-test
-  (:require [clojure.spec.alpha :as s]
+  (:require [babashka.fs :as fs]
+            [clojure.spec.alpha :as s]
             [clojure.test :refer [deftest is testing]]
+            [shiftlefter.paths :as paths]
             [shiftlefter.runner.config :as config]))
 
 ;; -----------------------------------------------------------------------------
@@ -43,6 +45,22 @@
     (is (= "en" (config/get-dialect config/default-config)))
     (is (= ["steps/"] (config/get-step-paths config/default-config)))
     (is (= false (config/allow-pending? config/default-config)))))
+
+(deftest find-default-config-anchored-to-user-cwd-test
+  (testing "find-default-config resolves shiftlefter.edn against SL_USER_CWD"
+    (let [tmp (str (fs/create-temp-dir))]
+      (try
+        ;; No shiftlefter.edn in the user dir yet -> nil even though one may
+        ;; exist at the raw process CWD.
+        (with-redefs [paths/user-cwd (constantly tmp)]
+          (is (nil? (config/find-default-config))))
+        ;; Drop a config in the user dir -> discovered as an absolute path.
+        (spit (str (fs/path tmp "shiftlefter.edn")) "{}")
+        (with-redefs [paths/user-cwd (constantly tmp)]
+          (is (= (str (fs/real-path (fs/path tmp "shiftlefter.edn")))
+                 (config/find-default-config))))
+        (finally
+          (fs/delete-tree tmp))))))
 
 (deftest test-load-config-missing-explicit-path-throws
   (testing "Missing explicit config path throws"
@@ -91,6 +109,50 @@
 ;; -----------------------------------------------------------------------------
 ;; Deep Merge Tests
 ;; -----------------------------------------------------------------------------
+
+;; -----------------------------------------------------------------------------
+;; Shifted-Mode Opt-In Tests (sl-ieie)
+;; -----------------------------------------------------------------------------
+
+(deftest test-load-config-no-user-svo-means-vanilla
+  (testing "User config without :svo → loaded config has NO :svo key (Vanilla)"
+    (let [cfg (config/load-config {:config-path "test/fixtures/config/minimal.edn"})]
+      (is (not (contains? cfg :svo)))
+      ;; Everything else still merges from defaults
+      (is (= "de" (get-in cfg [:parser :dialect])))
+      (is (= ["steps/"] (get-in cfg [:runner :step-paths]))))))
+
+(deftest test-load-config-user-svo-merges-defaults
+  (testing "User config with partial :svo → Shifted; defaults merged under it"
+    (let [cfg (config/load-config {:config-path "test/fixtures/config/svo-partial.edn"})]
+      (is (contains? cfg :svo))
+      ;; User override wins
+      (is (= :error (get-in cfg [:svo :unknown-subject])))
+      ;; Unspecified levels come from default-config
+      (is (= :warn (get-in cfg [:svo :unknown-verb])))
+      (is (= :error (get-in cfg [:svo :unknown-interface])))
+      (is (= :off (get-in cfg [:svo :unknown-object]))))))
+
+(deftest test-load-config-no-config-file-is-vanilla
+  (testing "No config file at all → defaults WITHOUT :svo (Vanilla)"
+    (let [tmp (str (fs/create-temp-dir))]
+      (try
+        (with-redefs [paths/user-cwd (constantly tmp)]
+          (let [cfg (config/load-config {})]
+            (is (not (contains? cfg :svo)))
+            ;; Remaining defaults intact
+            (is (= "en" (get-in cfg [:parser :dialect])))
+            (is (= ["steps/"] (get-in cfg [:runner :step-paths])))))
+        (finally
+          (fs/delete-tree tmp))))))
+
+(deftest test-default-config-still-documents-svo-defaults
+  (testing "default-config keeps the :svo opt-in defaults block"
+    (is (= {:unknown-subject :warn
+            :unknown-verb :warn
+            :unknown-interface :error
+            :unknown-object :off}
+           (:svo config/default-config)))))
 
 (deftest test-deep-merge-behavior
   (testing "Config merges deeply, not shallowly"

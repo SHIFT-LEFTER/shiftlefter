@@ -6,9 +6,10 @@
    This stepdef pulls the first capture out and types it into a browser
    field. That's the cross-interface handoff.
 
-   A future bead (γ — generic ctx-interpolation) may make this expressible
-   in step text directly (e.g. `{ctx.sms.captures.groups.0}`); until then,
-   custom stepdefs are how you compose interfaces. They're easy to write."
+   A planned follow-up (generic ctx-interpolation) may make this
+   expressible in step text directly (e.g. `{ctx.sms.captures.groups.0}`);
+   until then, custom stepdefs are how you compose interfaces. They're easy
+   to write."
   (:require [clojure.edn :as edn]
             [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.browser.locators :as loc]
@@ -22,6 +23,12 @@
   (let [kw (keyword s)]
     (if (namespace kw) (keyword (name kw)) kw)))
 
+;; No :svo declaration here — deliberately. The :fill verb's only frame
+;; (:with) requires a :value captured from step text, but this step's value
+;; comes from ctx. Declaring the frame without the capture is a hard
+;; planning error; omitting :svo just logs a "SVO validation will be
+;; skipped" notice for this one step. Expressing ctx-sourced args is
+;; future ctx-interpolation territory.
 (defstep #":([\w./-]+) fills (\{[^}]+\}) with the SMS code"
   {:interface :web
    :requires-protocols [:shiftlefter.browser.protocol/IBrowser]}

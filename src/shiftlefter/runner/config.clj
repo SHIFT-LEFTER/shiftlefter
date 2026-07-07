@@ -31,10 +31,10 @@
    (load-config {:config-path \"my-config.edn\"})
    ;=> {:parser {:dialect \"en\"} :runner {...} ...}
    ```"
-  (:require [babashka.fs :as fs]
-            [clojure.edn :as edn]
+  (:require [clojure.edn :as edn]
             [clojure.spec.alpha :as s]
-            [shiftlefter.gherkin.io :as io]))
+            [shiftlefter.gherkin.io :as io]
+            [shiftlefter.project-context :as project-context]))
 
 ;; -----------------------------------------------------------------------------
 ;; Specs — Config Shape
@@ -109,7 +109,13 @@
   #{:web :api :sms :email})
 
 (def default-config
-  "Built-in default configuration."
+  "Built-in default configuration.
+
+   NOTE: the :svo block documents the enforcement defaults that apply once
+   a user OPTS IN to Shifted mode by putting an :svo key in their config.
+   `load-config` strips :svo from its result when the user's config lacks
+   the key — presence of :svo in a loaded config therefore means the user
+   asked for Shifted mode (sl-ieie; ARCHITECTURE.md ':svo absent = Vanilla')."
   {:parser {:dialect "en"}
    :runner {:step-paths ["steps/"]
             :allow-pending? false
@@ -120,7 +126,7 @@
    :interfaces {:web {:type :web
                       :adapter :etaoin
                       :config {}}}
-   ;; SVO enforcement settings
+   ;; SVO enforcement settings (Shifted mode opt-in defaults — see docstring)
    :svo {:unknown-subject :warn
          :unknown-verb :warn
          :unknown-interface :error
@@ -162,14 +168,16 @@
        :path path})))
 
 (defn find-default-config
-  "Find the default config file (./shiftlefter.edn) if it exists.
+  "Find the default config file `shiftlefter.edn` if it exists.
 
-   Returns the path string or nil. Public so the runner can use it to
-   locate sibling files (notably setup.clj, see runner/setup.clj)."
+   Resolved against `shiftlefter.paths/user-cwd` (the project the user ran `sl`
+   from), NOT the raw process CWD — which is the install dir when `sl` runs from
+   PATH. Returns the resolved absolute path string or nil. Public so the runner
+   can use it to locate sibling files (notably setup.clj, see runner/setup.clj)."
   []
-  (let [path "shiftlefter.edn"]
-    (when (fs/exists? path)
-      path)))
+  (let [context (project-context/resolve)]
+    (when (= :discovered (:config-source context))
+      (:config-path context))))
 
 (defn resolve-config-path
   "Resolve which shiftlefter.edn would actually be loaded for the given opts.
@@ -179,7 +187,10 @@
      2. ./shiftlefter.edn
      3. nil (built-in defaults, no config file)"
   [opts]
-  (or (:config-path opts) (find-default-config)))
+  (:config-path (or (:project-context opts)
+                    (project-context/resolve
+                     (cond-> {}
+                       (:config-path opts) (assoc :config-path (:config-path opts)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API
@@ -198,39 +209,51 @@
 
    Returns merged config map.
 
+   Mode invariant (sl-ieie): the result contains :svo iff the USER's config
+   contained :svo. Shifted mode is explicit opt-in — when the user's config
+   has :svo, the default enforcement levels are deep-merged under it; when
+   it doesn't (or no config file exists), :svo is absent from the result and
+   the run is Vanilla. `stepengine.compile/shifted-mode?` keys on this.
+
    Throws on:
    - Explicit config path doesn't exist
    - Config file parse error"
   ([] (load-config {}))
   ([opts]
-   (let [explicit-path (:config-path opts)
-         default-path (find-default-config)]
+   (let [context (or (:project-context opts)
+                     (project-context/resolve
+                      (cond-> {}
+                        (:config-path opts) (assoc :config-path (:config-path opts)))))
+         config-path (:config-path context)
+         diagnostic (first (:diagnostics context))]
      (cond
-       ;; Explicit path specified
-       explicit-path
-       (if (fs/exists? explicit-path)
-         (let [result (read-config-file explicit-path)]
-           (if (= :ok (:status result))
-             (deep-merge default-config (:config result))
-             (throw (ex-info (:message result)
-                             {:type (:type result)
-                              :path explicit-path}))))
-         (throw (ex-info (str "Config file not found: " explicit-path)
-                         {:type :config/not-found
-                          :path explicit-path})))
+       (= :config/not-found (:type diagnostic))
+       (throw (ex-info (:message diagnostic)
+                       {:type :config/not-found
+                        :path (:path diagnostic)}))
 
-       ;; Default config exists
-       default-path
-       (let [result (read-config-file default-path)]
+       (= :project-context/ambiguous-config (:type diagnostic))
+       (throw (ex-info (:message diagnostic)
+                       {:type (:type diagnostic)
+                        :paths (:paths diagnostic)}))
+
+       config-path
+       (let [result (read-config-file config-path)]
          (if (= :ok (:status result))
-           (deep-merge default-config (:config result))
+           (let [user-config (:config result)
+                 merged (deep-merge default-config user-config)]
+             ;; Shifted mode is user opt-in: keep :svo (with defaults merged
+             ;; under it) only when the user's config has the key (sl-ieie).
+             (if (contains? user-config :svo)
+               merged
+               (dissoc merged :svo)))
            (throw (ex-info (:message result)
                            {:type (:type result)
-                            :path default-path}))))
+                            :path config-path}))))
 
-       ;; No config file, use defaults
+       ;; No config file, use defaults — no user :svo, so Vanilla (sl-ieie)
        :else
-       default-config))))
+       (dissoc default-config :svo)))))
 
 (defn load-config-safe
   "Like load-config but returns error map instead of throwing.

@@ -348,6 +348,54 @@
       (is (= "nonexistent/verbs.edn" (-> diagnostics :errors first :path))))))
 
 ;; -----------------------------------------------------------------------------
+;; Vanilla vs Shifted Twin (sl-ieie)
+;; -----------------------------------------------------------------------------
+
+(defn- register-mismatched-stepdef!
+  "Register a stepdef whose :svo declares a frame absent from the test
+   glossary (verb :swipe only has :default). The same stepdef is compiled
+   under a vanilla and a shifted config to pin mode-dependent behavior."
+  []
+  (registry/register! #"(\w+) swipes the (.+)"
+                      (fn [ctx _subject _thing] ctx)
+                      {:ns 's :file "s.clj" :line 1}
+                      {:interface :web
+                       :svo {:subject :$1
+                             :verb :swipe
+                             :frame :nope
+                             :object :$2}}))
+
+(def ^:private ieie-glossaries
+  {:subjects "test/fixtures/glossaries/subjects.edn"
+   :verbs {:web "test/fixtures/glossaries/verbs-web-project.edn"}})
+
+(deftest test-vanilla-skips-stepdef-glossary-validation
+  (testing "no :svo key → Tier-2 stepdef check and SVO stage skipped; suite runs (sl-ieie)"
+    (register-mismatched-stepdef!)
+    (let [config {:interfaces {:web {:type :web :adapter :etaoin}}
+                  ;; :glossaries present but ignored without :svo — mode is
+                  ;; keyed on :svo alone
+                  :glossaries ieie-glossaries}
+          pickle (make-pickle "test" ["Alice swipes the card"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
+      (is runnable?)
+      (is (empty? (:stepdef-issues diagnostics)))
+      (is (empty? (:svo-issues diagnostics)))
+      (is (empty? (:errors diagnostics))))))
+
+(deftest test-shifted-twin-catches-stepdef-glossary-mismatch
+  (testing "same stepdef with :svo key present → Tier-2 catches the bad frame"
+    (register-mismatched-stepdef!)
+    (let [config {:svo {}
+                  :interfaces {:web {:type :web :adapter :etaoin}}
+                  :glossaries ieie-glossaries}
+          pickle (make-pickle "test" ["Alice swipes the card"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
+      (is (not runnable?))
+      (is (= 1 (count (:stepdef-issues diagnostics))))
+      (is (= :stepdef/unknown-frame (-> diagnostics :stepdef-issues first :type))))))
+
+;; -----------------------------------------------------------------------------
 ;; Interface Annotation Pipeline (sl-1ya)
 ;; -----------------------------------------------------------------------------
 

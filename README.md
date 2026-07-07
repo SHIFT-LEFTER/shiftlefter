@@ -1,16 +1,49 @@
 # ShiftLefter
 
-**Gherkin test framework with vocabulary validation** — parse, format, run, and catch mistakes before execution. 100% Cucumber-compatible parser, built in Clojure.
+**Gherkin test framework with a typed behavioral vocabulary** — parse, format, run, and catch mistakes before execution. Built in Clojure.
 
-## Status: v0.3.6
+An agent can write you a passing browser test in one shot today. That's not the hard part anymore. The hard part is the **second** shot, and the tenth: each regeneration re-derives your app from scratch — its own selectors, its own names, its own idea of who "the user" is — and the suite drifts faster the more agents (and models) touch it. ShiftLefter gives that loop something stable to stand on: a typed vocabulary you define once, shared by every agent and every human on the team, and validated before anything runs. ([The full problem statement and fit check →](docs/FIT.md))
 
-ShiftLefter provides a complete BDD testing framework with Gherkin parsing, validation, formatting, and test execution. The parser is 100% Cucumber-compatible; the runner executes scenarios with step definitions written in Clojure.
+## Status: v0.5.0
 
-**Current:** Parser, formatter, runner, macro expansion, multi-actor browser testing (Etaoin + Playwright), SVO validation, REPL with nREPL/CIDER, tutorial examples
+ShiftLefter is an early, openly-scoped foundation for driving real software behavior from Gherkin — multiple users, multiple interfaces, all checked before anything runs. The core — driving a browser with multiple independent actors over a typed glossary you control — is solid and meant to be built on. The surrounding test-suite machinery and the traceability graph are on the way.
 
-**Next:** Executable traceability, intent regions, supplanting what the screenplay pattern was aiming for with the data-oriented, queryable, far simpler SVO model
+It's for **building new (greenfield) behavior**, especially if you want a disciplined, agent-authorable test vocabulary. It is **not yet** a drop-in replacement for a commercial Cucumber/Selenium suite. Not sure if it fits your project? [Would ShiftLefter work for my project?](docs/FIT.md) is a practical fit check you can hand to your agent.
 
-**Future:** Use case ↔ feature mapping & generation, observation lineage from real-world requirements through to running tests
+ShiftLefter runs in two modes. **Vanilla** is a plain Gherkin runner — parse, bind, run, no vocabulary required. **Shifted** — the advertised path, and where the value lives — adds a project glossary (the `:svo` key in `shiftlefter.edn`), so every scenario is validated against your vocabulary at planning time, before anything runs. `sl orient` tells you which mode a project is in; [the multi-actor example](examples/02b-browser-multi-actor/) is the first Shifted project on the learning path.
+
+### What makes it different
+
+- **Typed behavioral vocabulary** — steps resolve to a Subject–Verb–Object triple and validate at bind time, before any expensive E2E run starts.
+- **User-controlled project vocabulary** — your glossary defines which subjects, verbs, and intents are valid; unknown ones are caught with Levenshtein "did you mean?" suggestions.
+- **Interface-level steps, not page scripts** — built-in browser steps drive real per-subject sessions; intent references (`Login.submit`) replace brittle selectors.
+- **Plan and diagnose before executing** — dry-run binding, suite-load lint, and structured diagnostics surface problems without launching a browser.
+- **Many personas, many interfaces** — multiple instances of a subject type run in separate sessions; web and SMS interfaces co-exist in one feature.
+- **Agent-first authoring** — durable project artifacts (glossary, costumes, config) instead of one-shot generated scripts; a coding agent orients via `sl orient` and `sl agent-doc`.
+
+**Why it's built this way.** These aren't six separate features bolted together — they fall out of one idea: treat behavior as a typed vocabulary you own, and validate it before you run it. Once that foundation holds, multi-actor sessions, interface-level steps, and agent-authorability come almost for free. The deeper design-philosophy read, [Why it's built this way](docs/PHILOSOPHY.md), goes into the reasoning — you never need it to use ShiftLefter, but it's there if you want to know why it's shaped this way.
+
+### What's solid, what's preview, what's roadmap
+
+**Solid — build on it**
+
+- Multi-actor browser driving — multiple independent sessions with real isolation.
+- The typed SVO/glossary discipline — your vocabulary, validated before execution.
+- The `sl` CLI — run, format, dry-run, diagnose.
+- Gherkin parsing & lossless formatting — Cucumber-compliant (46/46 official test files).
+
+**Preview — works, expect change before 1.0**
+
+- Glossary *authoring*, and bootstrapping one from an existing app.
+- Macros as domain verbs — they work, but they're a stopgap; the polished form is coming.
+- The SIEVE browser-inspection server (dev / REPL) — see [Sieve Server](#sieve-server-development--preview).
+
+**Not here yet — roadmap**
+
+- xUnit / HTML / JSON reporting (today: console + structured EDN).
+- Test fixtures and hooks as first-class features.
+- Brownfield migration of an existing suite.
+- The traceability graph — the destination: executable traceability, use-case ↔ feature mapping & generation, and observation lineage from real-world requirements through to running tests.
 
 ---
 
@@ -19,6 +52,22 @@ ShiftLefter provides a complete BDD testing framework with Gherkin parsing, vali
 ### Quick Start (Java only — most users)
 
 **Requirements:** Java 11 or later
+
+One-line installer — drops a runnable `sl` + jar into `./sl/` and prints the
+agent on-ramp breadcrumb (see below):
+
+```bash
+# From the public release (once published):
+curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash
+
+# Or from a locally built release-zip (dev / pre-release):
+clj -T:build release-zip :version '"0.5.0"'
+release/install.sh --zip target/shiftlefter-v0.5.0.zip
+
+export PATH="$PWD/sl:$PATH"
+```
+
+Or unpack a release zip yourself:
 
 1. Download the latest release zip from [releases](https://github.com/SHIFT-LEFTER/shiftlefter/releases)
 2. Unzip and add to PATH:
@@ -29,11 +78,23 @@ ShiftLefter provides a complete BDD testing framework with Gherkin parsing, vali
 3. Run:
    ```bash
    sl --help
+   sl --version
    sl fmt --check your-file.feature
    sl run features/ --step-paths steps/
    ```
 
 This is all you need to run features, format files, start the REPL (`sl repl`), connect your IDE (`sl repl --nrepl`), and use built-in browser steps. No Clojure toolchain needed — just Java.
+
+### Agent on-ramp
+
+ShiftLefter ships an agent surface a coding agent can't discover by grepping —
+built-in vocabulary (`sl agent-doc builtins`) and project validation (`sl orient`).
+You can't run a command to discover the command exists (the bootstrap paradox), so
+the entry point has to be advertised *outside* the tool. The installer prints a
+short breadcrumb stanza at the end of install; **paste it into your agent file**
+(`AGENTS.md` / `CLAUDE.md` / `.cursor/rules`) or startup prompt. The same stanza
+ships as a flat `agents-breadcrumb.md` in the release artifact. (Once `sl init`
+exists it will place the breadcrumb for you.)
 
 ### Writing Custom Step Definitions
 
@@ -57,7 +118,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for full development setup.
 
 ShiftLefter ships with working examples that cover the most common workflows. Each one is self-contained and designed to run as-is.
 
-**Validate and format your existing feature files.** If you already have `.feature` files, start here. ShiftLefter can parse and validate any Cucumber-compatible Gherkin — no configuration, no step definitions, no Clojure. You'll also see how `sl fmt` can enforce canonical formatting in CI or reformat files in place. [→ Validate & Format](examples/01-validate-and-format/)
+**Validate and format your existing feature files.** If you already have `.feature` files, start here. ShiftLefter can parse and validate any standard Gherkin — no configuration, no step definitions, no Clojure. You'll also see how `sl fmt` can enforce canonical formatting in CI or reformat files in place. [→ Validate & Format](examples/01-validate-and-format/)
 
 **Run a browser test without writing any code.** ShiftLefter includes built-in step definitions for common browser operations — navigation, clicking, filling forms, and verifying results. This example drives a real browser through a complete scenario using only a `.feature` file and a one-line config. No custom steps, no Clojure. [→ Zero-Code Browser Test](examples/02-browser-zero-code/)
 
@@ -65,13 +126,18 @@ ShiftLefter ships with working examples that cover the most common workflows. Ea
 
 **Write your first step definitions.** When you're ready to go beyond the built-in steps, this example walks through `defstep` — pattern matching, captures, context passing, and assertions. A classic cucumbers-and-counting scenario in about 20 lines of Clojure. [→ Your First Steps](examples/03-custom-steps/)
 
+The path continues past these four: cross-interface web + SMS in one scenario (04), nested intent addressing (05 and 06), and a legacy-migration reference project (svo-demo). The full ordered index — what each example teaches, which mode it runs in, and what it needs — is [examples/README.md](examples/README.md).
+
 ---
 
 ## CLI
 
 The `sl` command provides test execution, file validation, and formatting.
 
-> **Note:** Examples use `sl` assuming you installed via the release zip. Substitute `java -jar shiftlefter-v0.3.5.jar` if running the jar directly, or `bin/sl` if running from source.
+> **Note:** Examples use `sl` assuming you installed via the release zip. In a
+> checkout of this repo, substitute `bin/sl` (it runs the built jar — the same
+> script the release ships) or `java -jar shiftlefter.jar` to run the jar
+> directly. To run the CLI against live, unbuilt source, use `bin/sl-dev`.
 
 ### Running Tests
 
@@ -97,15 +163,16 @@ sl run features/ --step-paths steps/ -v
 | Flag | Config equivalent | Description |
 |------|-------------------|-------------|
 | `--step-paths p1,p2` | `:runner {:step-paths [...]}` | Comma-separated paths to step definition directories |
-| `--config-path PATH` | — | Path to config file (default: `shiftlefter.edn` in current directory) |
+| `-c, --config FILE` | — | Path to config file (default: `shiftlefter.edn` in current directory) |
 | `--dry-run` | — | Bind steps but don't execute (verify all steps have definitions) |
 | `--edn` | — | Output results as EDN to stdout |
 | `-v, --verbose` | — | Show each step as it executes |
+| `--version` | — | Print ShiftLefter version |
 
 ### Validation & Formatting
 
 ```bash
-# Validate files/directories (checks parse + lossless roundtrip)
+# Validate files/directories (checks parse + canonical formatting)
 sl fmt --check path/to/file.feature
 sl fmt --check features/           # recursive directory
 
@@ -123,7 +190,8 @@ sl fmt --canonical path/to/file.feature
 # Fuzz testing (generate random valid Gherkin, verify invariants)
 sl gherkin fuzz --preset smoke
 
-# Verify repo health (fast validator checks)
+# Verify framework repo health (development tool — in a consumer
+# project it prints a notice and does nothing)
 sl verify
 
 # Full CI verification (includes test suite, compliance, fuzz smoke)
@@ -132,6 +200,75 @@ sl verify --ci
 # Machine-readable output
 sl verify --edn
 ```
+
+### Costumes (durable authenticated browser sessions)
+
+```bash
+# Create a costume — launches Chrome once so you can log in by hand
+sl costume init finance --chrome-path /path/to/chrome
+
+# List and remove costumes
+sl costume list
+sl costume destroy finance
+```
+
+A costume is a named, reusable bundle of authenticated state (a Chrome profile)
+that an actor *wears*. See [docs/COSTUMES.md](docs/COSTUMES.md).
+
+### Agent on-ramp commands
+
+```bash
+# Validate the current project + project a read-only view of accepted truth
+sl orient
+
+# Print built-in vocabulary an agent can't discover by grepping
+sl agent-doc builtins
+```
+
+---
+
+## Logging
+
+ShiftLefter uses `clojure.tools.logging` as its logging facade. The runnable
+release jar includes Logback so CLI users get formatted diagnostic logs out of
+the box; source and library users keep control of their own logging backend.
+
+### CLI / Jar Users
+
+The release zip and standalone jar bundle `logback-classic` plus a default
+`logback.xml`. Logs at `INFO` and above go to stderr with timestamp, level, and
+logger name.
+
+Override the logging configuration with the standard Logback system property:
+
+```bash
+java -Dlogback.configurationFile=/path/to/logback.xml \
+  -jar shiftlefter.jar run features/ --step-paths steps/
+```
+
+### Source-Dev Users
+
+When running from source, for example with `clojure -M:run`, ShiftLefter does
+not force a logging backend into `deps.edn`. Add one in your own dev alias when
+you want formatted logs:
+
+```clojure
+{:aliases
+ {:dev
+  {:extra-deps {ch.qos.logback/logback-classic {:mvn/version "1.5.16"}}}}}
+```
+
+You can also add a local `resources/logback.xml` for per-namespace log levels.
+
+### Library Consumers
+
+If you use ShiftLefter APIs from your own application, bring the logging binding
+that matches your application stack: Logback, Log4j2, `slf4j-simple`, or another
+SLF4J provider. ShiftLefter logs through `clojure.tools.logging`; it does not
+choose a concrete backend for library consumers.
+
+The architectural rationale is recorded in the project decisions as “Logging
+stack — tools.logging facade, no bound binding in source distribution.”
 
 ---
 
@@ -214,8 +351,8 @@ Configure glossaries and enforcement in `shiftlefter.edn`:
 
 ```clojure
 {:glossaries
- {:subjects "config/glossaries/subjects.edn"
-  :verbs {:web "config/glossaries/verbs-web.edn"}}
+ {:subjects "glossary/subjects.edn"
+  :verbs {:web "glossary/verbs/web.edn"}}
 
  :interfaces
  {:web {:type :web :adapter :etaoin :config {:headless true}}}
@@ -231,7 +368,7 @@ Benefits:
 - Catch typos at bind time ("Alcie" → "Did you mean :alice?")
 - Validate verbs against interface types
 - Auto-provision capabilities (browsers, API clients)
-- Emit `:step/svoi` events for traceability
+- Emit `:step/svo` events for traceability
 
 See `examples/02b-browser-multi-actor/` for a working example with glossary validation.
 
@@ -249,7 +386,7 @@ ShiftLefter looks for `shiftlefter.edn` in the current directory. Copy `shiftlef
           :allow-pending? false}}     ;; true = pending steps don't fail the run
 ```
 
-**Browser backend** — choose between Etaoin (default, bundled) and Playwright (add to `lib/` or `deps.edn`):
+**Browser backend** — the bundled WebDriver backend (`:etaoin`, the default) or Playwright (add to `lib/` or `deps.edn`); switching is one config line:
 
 ```clojure
 {:interfaces
@@ -390,10 +527,14 @@ Each subject gets its own isolated context:
 (repl/reset-ctxs!)
 ```
 
-### Sieve Server (Development)
+### Sieve Server (Development) — Preview
+
+> **Preview — expect change before 1.0.** The sieve server and its UI are a
+> development surface that will evolve; don't build on its shape yet.
 
 When the REPL starts, it automatically launches the sieve HTTP server on port 3333
-with a headed Chrome browser. The toddler loop UI connects here.
+with a headed Chrome browser. The *toddler loop* — an interactive UI for stepping
+through and inspecting the page data the sieve extracts — connects here.
 
 ```clojure
 ;; The server env is available as a var
@@ -431,7 +572,7 @@ no browser features, but everything else works.
 ## Behavioral Guarantees
 
 ### Compliance
-- **100% Cucumber-compatible** (46/46 official test files passing)
+- **Parser: 100% Gherkin-compatible** (46/46 official Cucumber test files passing)
 - Token format, AST structure, and pickle output match Cucumber reference implementation
 - 11/11 invalid files correctly rejected with appropriate errors
 
@@ -470,11 +611,18 @@ See [ERRATA.md](ERRATA.md) for known edge cases and workarounds.
 
 ## Documentation
 
-- [docs/CAPABILITIES.md](docs/CAPABILITIES.md) — What you can do at each installation tier, bundled libraries, browser backend config
+**[docs/README.md](docs/README.md) is the docs front door** — what 0.5 is (and
+isn't), plus a task-based index of every guide. Highlights:
+
+- [docs/FIT.md](docs/FIT.md) — Would ShiftLefter work for my project? A practical fit check (hand it to your agent)
 - [docs/browser-getting-started.md](docs/browser-getting-started.md) — Browser automation quick start (built-in steps)
-- [docs/PERSISTENT-SUBJECTS.md](docs/PERSISTENT-SUBJECTS.md) — Multi-actor persistent browser sessions
-- [API Reference](docs/api/index.html) — Generated API docs for all 51 namespaces (Codox)
-- [docs/SVO.md](docs/SVO.md) — SVO validation guide (glossaries, defstep metadata, migration)
+- [docs/SVO.md](docs/SVO.md) — SVO validation guide (glossaries, defstep metadata, incremental adoption)
+- [docs/AGENT.md](docs/AGENT.md) — the agent surface: operating doctrine + built-in vocabulary (also packaged: `sl agent-doc`)
+- [docs/CAPABILITIES.md](docs/CAPABILITIES.md) — What you can do at each installation tier, bundled libraries, browser backend config
+- [docs/LOCATORS.md](docs/LOCATORS.md) — Choosing web locators that survive refactors
+- [docs/COSTUMES.md](docs/COSTUMES.md) — Costumes & wardrobe: durable authenticated browser sessions actors wear
+- [docs/multiple-actors.md](docs/multiple-actors.md), [docs/across-interfaces.md](docs/across-interfaces.md), [docs/extending-vocabulary.md](docs/extending-vocabulary.md) — capability guides
+- [docs/adoption.md](docs/adoption.md) — Bring existing Gherkin (preview)
 - [docs/GLOSSARY.md](docs/GLOSSARY.md) — Terminology reference
 - [docs/FUZZ.md](docs/FUZZ.md) — Fuzz testing and delta debugging
 - [CONTRIBUTING.md](CONTRIBUTING.md) — Development setup and contribution guide
@@ -493,6 +641,7 @@ resources/shiftlefter/         # Runtime data and templates
 ├── gherkin/i18n.json         # Dialect definitions (70+ languages)
 ├── glossaries/               # Default glossary files
 └── templates/shiftlefter.edn # Config template for `sl init` (future)
+resources/logback.xml          # Default logging config for release jars
 ```
 
 **Not in the JAR (but in the repo):**
@@ -514,7 +663,7 @@ bin/                           # Dev scripts (kaocha, kondo, compliance, repl-ev
 
 ## Testing
 
-**1029 tests, 3200+ assertions, 0 failures**
+**1546 tests, 4921 assertions, 0 failures**
 
 ```bash
 # Run full test suite
@@ -544,8 +693,8 @@ CLI commands return consistent exit codes for scripting and CI integration.
 ### `sl fmt --check`
 | Code | Meaning |
 |------|---------|
-| 0 | All files valid (parse OK, roundtrip OK) |
-| 1 | One or more files invalid (parse errors or roundtrip mismatch) |
+| 0 | All files valid (parse OK, canonically formatted) |
+| 1 | One or more files invalid (parse errors or not in canonical form) |
 | 2 | No `.feature` files found, or path doesn't exist |
 
 ### `sl fmt --write`

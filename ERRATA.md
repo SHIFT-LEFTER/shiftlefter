@@ -206,7 +206,7 @@ Built-in browser step definitions (e.g., `:subject clicks {:css "..."}`) are alw
 Users who happen to define a step pattern identical to a built-in browser step will get an ambiguous match error. In practice this is unlikely — the built-in patterns use a specific SVO structure with subject extraction (`:subject verb object`) that custom steps rarely duplicate exactly.
 
 **Our workaround**:
-Use a different pattern for your custom step. The built-in patterns are listed in `docs/CAPABILITIES.md` and in the browser step source (`src/shiftlefter/stepdefs/browser.clj`).
+Use a different pattern for your custom step. The authoritative list of built-in patterns is `sl agent-doc builtins` (also published as the built-in vocabulary section of `docs/AGENT.md`).
 
 **Upstream status**: By design. The registry intentionally rejects ambiguous matches to prevent silent wrong-step execution. A config-driven disable mechanism was considered (WI-033.004) but deferred indefinitely — the collision is unlikely and the error message is clear.
 

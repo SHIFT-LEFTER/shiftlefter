@@ -1,2 +1,21 @@
+;; Primary config — Shifted mode: the glossary declares who can act, and
+;; :svo validates every scenario at planning time, before a browser opens.
+;;
+;; The :svo levels below are the recommended baseline (same as examples
+;; 04-06): unknown subjects and interfaces are hard errors; unknown verbs
+;; warn (builtin verbs cover the common web actions).
+;;
+;; :prefs — the demo site's canned password is in public breach lists, so
+;; Chrome pops a native "password found in a data breach" warning after
+;; login. It's harmless to the test (native UI, not DOM — WebDriver reads
+;; the page underneath), just noisy; this pref turns leak detection off
+;; for the automation profile.
+
 {:interfaces {:web {:type :web
-                   :adapter :etaoin}}}
+                    :adapter :etaoin
+                    :config {:adapter-opts
+                             {:prefs {"profile.password_manager_leak_detection" false}}}}}
+ :glossaries {:subjects "glossary/subjects.edn"}
+ :svo {:unknown-subject :error
+       :unknown-verb :warn
+       :unknown-interface :error}}

@@ -261,35 +261,55 @@
          "    Matches:\n"
          (str/join "\n" (map #(str "      • " (:pattern-src %) " at " (format-location (:source %))) alts)))))
 
+(defn- format-issue-label
+  "Severity label for a diagnostic issue: yellow WARNING for :warn,
+   red ERROR otherwise (missing :severity defaults to :error — blocking
+   issues and legacy shapes without the key keep their current look)."
+  [issue use-color?]
+  (if (= :warn (:severity issue))
+    (colorize "WARNING: " :yellow use-color?)
+    (colorize "ERROR: " :red use-color?)))
+
 (defn- format-svo-issue
-  "Format an SVO issue for display with color."
+  "Format an SVO issue for display with color, labeled per :severity."
   [issue use-color?]
   (let [formatted (validate/format-svo-issue issue)
         lines (str/split-lines formatted)
-        ;; First line gets ERROR: prefix
-        first-line (str "  " (colorize "ERROR: " :red use-color?) (first lines))
+        ;; First line gets the severity label prefix
+        first-line (str "  " (format-issue-label issue use-color?) (first lines))
         ;; Rest are indented continuation
         rest-lines (map #(str "  " %) (rest lines))]
     (str/join "\n" (cons first-line rest-lines))))
 
-(defn- format-suite-lint-issue
-  "Format a suite-load lint issue (sl-unz) for display with color.
-   The issue's `:message` already includes source file:line for stepdef
-   issues; we just prefix with ERROR and indent."
+(defn- format-message-issue
+  "Format a diagnostic that carries its detail in `:message` (suite-load
+   lint issues, stepdef glossary issues, annotation/macro errors, generic
+   planning errors). The `:message` already includes source file:line
+   where applicable; we just prefix with the severity label and indent."
   [issue use-color?]
   (let [lines      (str/split-lines (or (:message issue) ""))
-        first-line (str "  " (colorize "ERROR: " :red use-color?) (first lines))
+        first-line (str "  " (format-issue-label issue use-color?) (first lines))
         rest-lines (map #(str "         " %) (rest lines))]
     (str/join "\n" (cons first-line rest-lines))))
 
+(def ^:private wrapper-error-types
+  "Error types under :diagnostics :errors whose payload is already rendered
+   by a dedicated section — skipped by the generic errors section to avoid
+   double-printing."
+  #{:stepdef/glossary-mismatch :suite-lint/failed})
+
 (defn print-diagnostics!
   "Print planning diagnostics (undefined/ambiguous steps, SVO issues,
-   suite-load lint issues).
+   suite-load lint issues, stepdef glossary issues, annotation/macro
+   errors, generic planning errors).
    Outputs to stderr."
   [diagnostics opts]
   (let [use-color? (colors-enabled? opts)
         {:keys [undefined ambiguous invalid-arity svo-issues
-                suite-lint-issues counts]} diagnostics]
+                suite-lint-issues stepdef-issues annotation-errors
+                macro-errors errors counts]} diagnostics
+        ;; Generic errors not already covered by a dedicated section
+        other-errors (remove #(wrapper-error-types (:type %)) errors)]
     (binding [*out* *err*]
       (when (seq undefined)
         (println (colorize "\nUndefined steps:" :yellow use-color?))
@@ -317,11 +337,60 @@
       (when (seq suite-lint-issues)
         (println (colorize "\nSuite-load lint issues:" :yellow use-color?))
         (doseq [issue suite-lint-issues]
-          (println (format-suite-lint-issue issue use-color?))
+          (println (format-message-issue issue use-color?))
           (println)))
 
-      (println)
-      (println (colorize (str (:total-issues counts) " binding issue(s) found. Cannot execute.") :red use-color?)))))
+      (when (seq stepdef-issues)
+        (println (colorize "\nStepdef glossary issues:" :yellow use-color?))
+        (doseq [issue stepdef-issues]
+          (println (format-message-issue issue use-color?))
+          (println)))
+
+      (when (seq annotation-errors)
+        (println (colorize "\nAnnotation errors:" :yellow use-color?))
+        (doseq [err annotation-errors]
+          (println (format-message-issue err use-color?))
+          (println)))
+
+      (when (seq macro-errors)
+        (println (colorize "\nMacro errors:" :yellow use-color?))
+        (doseq [err macro-errors]
+          (println (format-message-issue err use-color?))
+          (println)))
+
+      (when (seq other-errors)
+        (println (colorize "\nPlanning errors:" :yellow use-color?))
+        (doseq [err other-errors]
+          (println (format-message-issue err use-color?))
+          (println)))
+
+      ;; :total-issues covers every issue family (sl-89ii), but legacy
+      ;; diagnostics shapes may omit it — never claim "0 issues" above a
+      ;; Cannot execute; fall back to the number of items rendered above
+      ;; (warn-level SVO issues included: they were printed too).
+      (let [rendered (+ (count undefined) (count ambiguous)
+                        (count invalid-arity) (count suite-lint-issues)
+                        (count stepdef-issues) (count annotation-errors)
+                        (count macro-errors) (count other-errors)
+                        (count svo-issues))
+            total    (max (or (:total-issues counts) 0) rendered)]
+        (println)
+        (println (colorize (str total " binding issue(s) found. Cannot execute.") :red use-color?))))))
+
+(defn print-warnings!
+  "Print warn-level SVO issues that did not block the run (success paths:
+   dry-run and execute). No-op when diagnostics carry none — no noise on
+   clean runs.
+   Outputs to stderr."
+  [diagnostics opts]
+  (let [use-color? (colors-enabled? opts)
+        warns (filter #(= :warn (:severity %)) (:svo-issues diagnostics))]
+    (when (seq warns)
+      (binding [*out* *err*]
+        (println (colorize "\nSVO validation warnings:" :yellow use-color?))
+        (doseq [issue warns]
+          (println (format-svo-issue issue use-color?))
+          (println))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Summary Output

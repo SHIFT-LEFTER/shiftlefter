@@ -5,7 +5,11 @@
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing use-fixtures]]
    [clojure.tools.cli :refer [parse-opts]]
-   [shiftlefter.core :as core])
+   [shiftlefter.core :as core]
+   [shiftlefter.costume :as costume]
+   [shiftlefter.paths :as paths]
+   [shiftlefter.project-context :as project-context]
+   [shiftlefter.version :as version])
   (:import
    [java.net Socket]))
 
@@ -15,9 +19,10 @@
 (def check-files #'core/check-files)
 (def format-single-file #'core/format-single-file)
 (def format-files #'core/format-files)
-(def get-user-cwd #'core/get-user-cwd)
-(def resolve-user-path #'core/resolve-user-path)
-(def resolve-user-paths #'core/resolve-user-paths)
+;; user-cwd and user-path resolution live in shiftlefter.paths.
+(def get-user-cwd paths/user-cwd)
+(def resolve-user-path paths/resolve-user-path)
+(def resolve-user-paths paths/resolve-user-paths)
 
 ;; Test fixture for temp files
 (def ^:dynamic *temp-dir* nil)
@@ -204,17 +209,7 @@
 ;; Path Resolution tests (for PATH-based usage)
 ;; -----------------------------------------------------------------------------
 
-(deftest get-user-cwd-test
-  (testing "returns SL_USER_CWD when set"
-    ;; Can't easily test this without modifying env, but we test the fallback
-    (is (string? (get-user-cwd)))
-    (is (not (str/blank? (get-user-cwd)))))
-
-  (testing "falls back to user.dir when SL_USER_CWD not set"
-    ;; The default behavior when env var not set
-    (let [cwd (get-user-cwd)]
-      (is (= cwd (or (System/getenv "SL_USER_CWD")
-                     (System/getProperty "user.dir")))))))
+;; get-user-cwd behavior is covered by shiftlefter.paths-test/user-cwd-test.
 
 (deftest resolve-user-path-test
   (testing "absolute paths returned unchanged"
@@ -291,6 +286,36 @@
     (let [parsed (parse-opts ["--check" "--edn" "file.feature"] core/cli-options)]
       (is (empty? (:errors parsed)))))
 
+  (testing "-c and --config select explicit config"
+    (let [short-parsed (parse-opts ["-c" "shiftlefter.edn" "file.feature"] core/cli-options)
+          long-parsed (parse-opts ["--config" "shiftlefter.edn" "file.feature"] core/cli-options)]
+      (is (empty? (:errors short-parsed)))
+      (is (= "shiftlefter.edn" (get-in short-parsed [:options :config])))
+      (is (empty? (:errors long-parsed)))
+      (is (= "shiftlefter.edn" (get-in long-parsed [:options :config])))))
+
+  (testing "--config-path is not a public flag"
+    (let [parsed (parse-opts ["--config-path" "shiftlefter.edn" "file.feature"] core/cli-options)]
+      (is (seq (:errors parsed)))))
+
+  (testing "-c no longer means fmt check"
+    (let [parsed (parse-opts ["fmt" "-c" "path/to/config.edn" "file.feature"] core/cli-options)]
+      (is (empty? (:errors parsed)))
+      (is (= "path/to/config.edn" (get-in parsed [:options :config])))
+      (is (not (:check (:options parsed))))))
+
+  (testing "-v and --verbose select verbose, not version"
+    (doseq [flag ["-v" "--verbose"]]
+      (let [parsed (parse-opts [flag "file.feature"] core/cli-options)]
+        (is (empty? (:errors parsed)))
+        (is (:verbose (:options parsed)))
+        (is (not (:version (:options parsed)))))))
+
+  (testing "--version is long-only"
+    (let [parsed (parse-opts ["--version"] core/cli-options)]
+      (is (empty? (:errors parsed)))
+      (is (:version (:options parsed)))))
+
   (testing "Known fuzz flags produce no errors"
     (let [parsed (parse-opts ["--trials" "100" "--seed" "42" "--preset" "smoke"] core/cli-options)]
       (is (empty? (:errors parsed)))))
@@ -357,6 +382,115 @@
       (is (contains? #{0 2} exit-code)))))
 
 ;; -----------------------------------------------------------------------------
+;; dispatch tests (sl-uaq) — exit codes WITHOUT exiting the JVM
+;; -----------------------------------------------------------------------------
+
+(deftest dispatch-test
+  (testing "--help prints usage and returns 0 (no System/exit)"
+    ;; Pre-de-exit this couldn't be tested because -main called System/exit
+    ;; on most branches; dispatch returns the code so we can assert it directly.
+    (let [out (with-out-str (let [code (core/dispatch ["--help"])]
+                              (is (= 0 code))))]
+      (is (str/includes? out "Usage:"))
+      (is (str/includes? out "sl repl"))
+      (is (str/includes? out "sl agent-doc [topic]"))
+      (is (str/includes? out "-c FILE|--config FILE"))
+      (is (not (str/includes? out "--config-path")))))
+
+  (testing "--version prints version and bypasses project context"
+    (let [called? (atom false)
+          out (with-out-str
+                (with-redefs [project-context/resolve (fn [& _]
+                                                        (reset! called? true)
+                                                        (throw (ex-info "unexpected context resolution" {})))
+                              version/version (constantly "9.8.7-test")]
+                  (let [code (core/dispatch ["--version"])]
+                    (is (= 0 code)))))]
+      (is (= "9.8.7-test\n" out))
+      (is (false? @called?))))
+
+  (testing "run -c normalizes public config flag to internal config-path"
+    (let [captured (atom nil)
+          code (with-redefs [project-context/resolve (fn [opts]
+                                                       (reset! captured opts)
+                                                       {:project-root "."
+                                                        :config-root "."
+                                                        :config-path (:config-path opts)
+                                                        :config-source :explicit
+                                                        :diagnostics []})
+                            core/run-cmd (fn [_paths opts _project-context]
+                                           (is (= "test/fixtures/config/minimal.edn"
+                                                  (:config opts)))
+                                           (is (= "test/fixtures/config/minimal.edn"
+                                                  (:config-path opts)))
+                                           0)]
+                 (core/dispatch ["run" "-c" "test/fixtures/config/minimal.edn"
+                                 "examples/01-validate-and-format/login.feature"]))]
+      (is (= 0 code))
+      (is (= {:config-path "test/fixtures/config/minimal.edn"} @captured))))
+
+  (testing "parse error returns 1 and writes to *err*"
+    (let [err (java.io.StringWriter.)
+          code (binding [*err* err] (core/dispatch ["--bogus-flag"]))]
+      (is (= 1 code))
+      (is (str/includes? (str err) "Use --help for usage."))))
+
+  (testing "unknown command returns 2, hint on *err*, stdout clean (sl-von)"
+    (let [out  (java.io.StringWriter.)
+          err  (java.io.StringWriter.)
+          code (binding [*out* out *err* err] (core/dispatch ["totally-unknown"]))]
+      (is (= 2 code) "unknown command is a usage error (2), not success (0)")
+      (is (= "" (str out)) "stdout stays clean for machine consumers")
+      (is (str/includes? (str err) "Unknown command"))))
+
+  (testing "repl branch returns the :repl sentinel without blocking"
+    ;; The whole point: dispatch must NOT launch the (blocking) REPL — -main does.
+    (is (= :repl (core/dispatch ["repl"]))))
+
+  (testing "agent-doc defaults to overview and bypasses project context"
+    (let [called? (atom false)
+          out (with-out-str
+                (with-redefs [project-context/resolve (fn [& _]
+                                                        (reset! called? true)
+                                                        (throw (ex-info "unexpected context resolution" {})))]
+                  (is (= 0 (core/dispatch ["agent-doc"])))))]
+      (is (str/includes? out "# ShiftLefter Agent Overview"))
+      (is (false? @called?))))
+
+  (testing "agent-doc --list prints available topics"
+    (let [out (with-out-str
+                (is (= 0 (core/dispatch ["agent-doc" "--list"]))))]
+      (is (str/includes? out "Available agent-doc topics:"))
+      (is (str/includes? out "vocabulary"))))
+
+  (testing "agent-doc missing topic writes to stderr and returns 1"
+    (let [out (java.io.StringWriter.)
+          err (java.io.StringWriter.)
+          code (binding [*out* out
+                         *err* err]
+                 (core/dispatch ["agent-doc" "missing"]))]
+      (is (= 1 code))
+      (is (= "" (str out)))
+      (is (str/includes? (str err) "Unknown agent-doc topic: missing"))))
+
+  (testing "fmt --check returns 0 for canonical, 1 for non-canonical"
+    ;; Bind *out* to a sink so we keep the return value (with-out-str discards it).
+    (let [good (str (jio/file *temp-dir* "good.feature"))
+          bad  (str (jio/file *temp-dir* "bad.feature"))]
+      (spit good "Feature: T\n\n  Scenario: S\n    Given step\n")
+      (spit bad  "Feature:  T\n  Scenario: S\n    Given step\n")
+      (binding [*out* (java.io.StringWriter.)]
+        (is (= 0 (core/dispatch ["fmt" "--check" good])))
+        (is (= 1 (core/dispatch ["fmt" "--check" bad]))))))
+
+  (testing "run --dry-run reaches the runner and returns a real exit code"
+    (let [code (binding [*out* (java.io.StringWriter.)]
+                 (core/dispatch ["run" "--dry-run" "--edn"
+                                 "examples/01-validate-and-format/login.feature"]))]
+      ;; 0 (all bound) or 2 (undefined steps) — never the crash code 3.
+      (is (contains? #{0 2} code)))))
+
+;; -----------------------------------------------------------------------------
 ;; Audit completeness test (Step 6)
 ;; -----------------------------------------------------------------------------
 
@@ -374,8 +508,9 @@
                               set)
           ;; :paths comes from positional arguments, not flags
           positional-keys #{:paths}
-          covered-keys (into positional-keys
-                             (map keyword cli-long-flags))]
+          covered-keys (-> (into positional-keys
+                                  (map keyword cli-long-flags))
+                           (conj :config-path))]
       (doseq [k runner-keys]
         (is (contains? covered-keys k)
             (str "Runner opt :" (name k) " has no CLI flag or positional source"))))))
@@ -503,3 +638,72 @@
       ;; Should have a reasonable number of public vars (currently 32)
       (is (>= (count publics) 20)
           (str "Expected 20+ public vars, got " (count publics))))))
+
+;; -----------------------------------------------------------------------------
+;; sl costume CLI dispatch (sl-rnm)
+;; -----------------------------------------------------------------------------
+
+(defn- silent-costume-cmd
+  "Run costume-cmd with stdout/stderr suppressed; returns the exit code."
+  [arguments options]
+  (binding [*out* (java.io.StringWriter.)
+            *err* (java.io.StringWriter.)]
+    (core/costume-cmd arguments options)))
+
+(deftest costume-cmd-init-test
+  (testing "init dispatches to init-costume! and returns 0 on success"
+    (let [called (atom nil)]
+      (with-redefs [costume/init-costume! (fn [n opts]
+                                            (reset! called [n opts])
+                                            {:status :launched :costume n :port 9300 :pid 1})]
+        (is (= 0 (silent-costume-cmd ["costume" "init" "x"] {})))
+        (is (= [:x {}] @called) "name coerced to keyword, no chrome-path"))))
+  (testing "--chrome-path is threaded into init-costume! opts"
+    (let [called (atom nil)]
+      (with-redefs [costume/init-costume! (fn [n opts]
+                                            (reset! called [n opts])
+                                            {:status :launched :costume n :port 9300 :pid 1})]
+        (is (= 0 (silent-costume-cmd ["costume" "init" "x"] {:chrome-path "/opt/chrome"})))
+        (is (= [:x {:chrome-path "/opt/chrome"}] @called)))))
+  (testing "init without a name returns 1 and does not provision"
+    (let [called (atom false)]
+      (with-redefs [costume/init-costume! (fn [_ _] (reset! called true) {:status :launched})]
+        (is (= 1 (silent-costume-cmd ["costume" "init"] {})))
+        (is (false? @called)))))
+  (testing "init returns 1 when init-costume! errors"
+    (with-redefs [costume/init-costume! (fn [_ _] {:error {:type :costume/already-exists
+                                                           :message "exists"}})]
+      (is (= 1 (silent-costume-cmd ["costume" "init" "x"] {}))))))
+
+(deftest costume-cmd-list-test
+  (testing "list dispatches to list-costumes and returns 0"
+    (let [called (atom false)]
+      (with-redefs [costume/list-costumes (fn [] (reset! called true)
+                                            [{:name "x" :status :alive :port 9300 :pid 1}])]
+        (is (= 0 (silent-costume-cmd ["costume" "list"] {})))
+        (is (true? @called)))))
+  (testing "list returns 0 even when empty"
+    (with-redefs [costume/list-costumes (fn [] [])]
+      (is (= 0 (silent-costume-cmd ["costume" "list"] {}))))))
+
+(deftest costume-cmd-destroy-test
+  (testing "destroy dispatches to destroy-costume! and returns 0 on success"
+    (let [called (atom nil)]
+      (with-redefs [costume/destroy-costume! (fn [n] (reset! called n)
+                                               {:status :destroyed :costume n})]
+        (is (= 0 (silent-costume-cmd ["costume" "destroy" "x"] {})))
+        (is (= :x @called)))))
+  (testing "destroy without a name returns 1 and does not call destroy-costume!"
+    (let [called (atom false)]
+      (with-redefs [costume/destroy-costume! (fn [_] (reset! called true) {:status :destroyed})]
+        (is (= 1 (silent-costume-cmd ["costume" "destroy"] {})))
+        (is (false? @called)))))
+  (testing "destroy returns 1 when destroy-costume! errors"
+    (with-redefs [costume/destroy-costume! (fn [_] {:error {:type :costume/not-found
+                                                            :message "no such costume"}})]
+      (is (= 1 (silent-costume-cmd ["costume" "destroy" "x"] {}))))))
+
+(deftest costume-cmd-unknown-subcommand-test
+  (testing "missing or unknown subcommand returns 1"
+    (is (= 1 (silent-costume-cmd ["costume"] {})))
+    (is (= 1 (silent-costume-cmd ["costume" "bogus"] {})))))

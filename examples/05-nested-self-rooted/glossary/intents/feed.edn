@@ -1,0 +1,7 @@
+;; Feed — the flat timeline. Self-rooted Post mounted with NO :selector, so it
+;; falls back to Post's own :root (§7.5). Demonstrates the self-rooted ergonomic:
+;; define Post once, mount it here with zero per-place wiring.
+{:intent "Feed"
+ :elements {}
+ :root {:web {:css "[data-testid='feed']"}}
+ :collections {:post {:intent "Post" :cardinality :many}}}

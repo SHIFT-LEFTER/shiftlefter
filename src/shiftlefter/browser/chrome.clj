@@ -360,15 +360,12 @@
    - :port — debug port
    - :user-data-dir — profile directory path
 
-   Optional:
-   - :stealth — if true, add legacy browser options
-
    Returns a vector of argument strings."
-  [{:keys [port user-data-dir stealth]}]
-  (cond-> [(str "--remote-debugging-port=" port)
-           (str "--user-data-dir=" user-data-dir)
-           "--no-first-run"
-           "--no-default-browser-check"]))
+  [{:keys [port user-data-dir]}]
+  [(str "--remote-debugging-port=" port)
+   (str "--user-data-dir=" user-data-dir)
+   "--no-first-run"
+   "--no-default-browser-check"])
 
 (defn- get-pid
   "Get the PID of a Process. Works on Java 9+."
@@ -408,7 +405,6 @@
 
    Optional:
    - `:chrome-path` — explicit path to Chrome binary (default: auto-detect)
-   - `:stealth` — if true, add legacy browser options (default: false)
    - `:cdp-timeout-ms` — timeout waiting for CDP ready (default: 10000)
 
    Returns:
@@ -418,15 +414,14 @@
    Examples:
    ```clojure
    (launch! {:port 9222
-             :user-data-dir \"/tmp/test-profile\"
-             :stealth true})
+             :user-data-dir \"/tmp/test-profile\"})
    ;; => {:pid 12345 :port 9222 :process #object[Process ...]}
 
    ;; CDP endpoint is now reachable
    (probe-cdp 9222)
    ;; => {:status :alive ...}
    ```"
-  [{:keys [port user-data-dir chrome-path stealth cdp-timeout-ms]
+  [{:keys [port user-data-dir chrome-path cdp-timeout-ms]
     :or {cdp-timeout-ms default-cdp-ready-timeout-ms}}]
   (let [;; Find Chrome binary
         binary (if chrome-path
@@ -439,8 +434,7 @@
       binary
       ;; Build args and launch
       (let [args (build-chrome-args {:port port
-                                     :user-data-dir user-data-dir
-                                     :stealth stealth})
+                                     :user-data-dir user-data-dir})
             cmd (into [binary] args)]
         (try
           (let [builder (ProcessBuilder. ^java.util.List cmd)

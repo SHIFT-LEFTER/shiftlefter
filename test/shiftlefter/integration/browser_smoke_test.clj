@@ -171,7 +171,18 @@
   (switch-to-main-frame! [this]
     (require '[etaoin.api :as eta])
     ((resolve 'etaoin.api/switch-frame-top) driver)
-    this))
+    this)
+  (query-all [_this scope locator]
+    (require '[etaoin.api :as eta])
+    (let [q (:q locator)
+          ids (if (and (map? scope) (:el scope))
+                ((resolve 'etaoin.api/query-all-from) driver (:el scope) q)
+                ((resolve 'etaoin.api/query-all) driver q))]
+      (mapv (fn [id] {:el id}) ids)))
+  ;; Smoke test doesn't exercise §8.1 pruning — mirror query-all (boundary
+  ;; ignored). The real fused filter is covered by the example-05 e2e.
+  (query-all-pruned [this scope locator _boundary-css]
+    (bp/query-all this scope locator)))
 
 ;; -----------------------------------------------------------------------------
 ;; Integration Tests
@@ -312,7 +323,7 @@
     (is (false? (repl/surface? :alice)))))
 
 ;; -----------------------------------------------------------------------------
-;; Persistent Subject Integration Tests
+;; Costume Integration Tests
 ;; -----------------------------------------------------------------------------
 ;; These require SHIFTLEFTER_LIVE_CHROME=1 (Chrome installed, no ChromeDriver)
 
@@ -320,37 +331,37 @@
   "True if live Chrome tests should run."
   (some? (System/getenv "SHIFTLEFTER_LIVE_CHROME")))
 
-(deftest ^:integration persistent-subject-lifecycle-test
+(deftest ^:integration costume-lifecycle-test
   (if live-chrome?
-    (let [subject-name (keyword (str "test-" (System/currentTimeMillis)))]
-      (require '[shiftlefter.subjects :as subjects])
+    (let [costume-name (keyword (str "test-" (System/currentTimeMillis)))]
+      (require '[shiftlefter.costume :as costume])
       (try
-        (testing "init-persistent! creates subject and launches Chrome"
-          (let [result ((resolve 'shiftlefter.subjects/init-persistent!) subject-name {:stealth true})]
-            (is (= :connected (:status result)) (str "Failed: " result))
+        (testing "init-costume! launches Chrome WITHOUT attaching (launch-only)"
+          (let [result ((resolve 'shiftlefter.costume/init-costume!) costume-name)]
+            (is (= :launched (:status result)) (str "Failed: " result))
             (is (integer? (:port result)))
             (is (integer? (:pid result)))
-            (is (some? (:browser result)))))
+            (is (not (contains? result :browser)) "init must not attach a browser")))
 
-        (testing "list-persistent shows the subject as alive"
-          (let [subjects ((resolve 'shiftlefter.subjects/list-persistent))
-                our-subject (first (filter #(= (name subject-name) (:name %)) subjects))]
-            (is (some? our-subject))
-            (is (= :alive (:status our-subject)))))
+        (testing "list-costumes shows the costume as alive"
+          (let [costumes ((resolve 'shiftlefter.costume/list-costumes))
+                our-costume (first (filter #(= (name costume-name) (:name %)) costumes))]
+            (is (some? our-costume))
+            (is (= :alive (:status our-costume)))))
 
-        (testing "destroy-persistent! kills Chrome and cleans up"
-          (let [result ((resolve 'shiftlefter.subjects/destroy-persistent!) subject-name)]
+        (testing "destroy-costume! kills Chrome and cleans up"
+          (let [result ((resolve 'shiftlefter.costume/destroy-costume!) costume-name)]
             (is (= :destroyed (:status result)))))
 
-        (testing "subject no longer listed after destroy"
-          (let [subjects ((resolve 'shiftlefter.subjects/list-persistent))
-                our-subject (first (filter #(= (name subject-name) (:name %)) subjects))]
-            (is (nil? our-subject))))
+        (testing "costume no longer listed after destroy"
+          (let [costumes ((resolve 'shiftlefter.costume/list-costumes))
+                our-costume (first (filter #(= (name costume-name) (:name %)) costumes))]
+            (is (nil? our-costume))))
 
         (finally
           ;; Cleanup in case test failed mid-way
           (try
-            ((resolve 'shiftlefter.subjects/destroy-persistent!) subject-name)
+            ((resolve 'shiftlefter.costume/destroy-costume!) costume-name)
             (catch Exception _)))))
     (testing "skipped - SHIFTLEFTER_LIVE_CHROME not set"
       (is true "Integration test skipped"))))

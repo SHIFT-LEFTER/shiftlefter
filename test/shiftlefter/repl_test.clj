@@ -4,7 +4,7 @@
             [shiftlefter.repl :as repl]
             [shiftlefter.stepengine.registry :as registry :refer [defstep]]
             [shiftlefter.capabilities.ctx :as cap]
-            [shiftlefter.subjects.profile :as profile]
+            [shiftlefter.costume.wardrobe :as wardrobe]
             [shiftlefter.webdriver.session-store :as store]
             [babashka.fs :as fs]))
 
@@ -463,61 +463,67 @@ Feature: Test
           (is (= 1 (count @(:saves spy-store)))))))))
 
 ;; -----------------------------------------------------------------------------
-;; Persistent Subject Re-export Tests (Task 2.6.9)
+;; Costume Re-export Tests (Task 2.6.9)
 ;; -----------------------------------------------------------------------------
 
-(def ^:dynamic *test-home* nil)
+(def repl-test-meta
+  {:debug-port 9999
+   :chrome-pid 12345
+   :user-data-dir "/tmp/test"})
 
-(defn with-temp-home-for-subjects
-  "Fixture that redirects user.home to a temp directory for subject tests."
+(defn with-temp-wardrobe-for-costumes
+  "Fixture that redirects the wardrobe root to a temp directory outside the repo.
+
+   Stubs ensure-gitignored! so re-export tests never touch the repo's .gitignore;
+   the temp dir is outside the repo and untracked so the git-tracked guard passes."
   [f]
-  (let [temp-dir (str (fs/create-temp-dir {:prefix "sl-repl-subjects-test-"}))]
+  (let [temp-dir (str (fs/create-temp-dir {:prefix "sl-repl-costume-test-"}))]
     (try
-      (with-redefs [profile/home-dir (constantly temp-dir)]
-        (binding [*test-home* temp-dir]
-          (f)))
+      (with-redefs [wardrobe/wardrobe-dir (constantly temp-dir)
+                    wardrobe/ensure-gitignored! (constantly nil)]
+        (f))
       (finally
         (fs/delete-tree temp-dir)))))
 
-(deftest test-persistent-subject-reexports-list
-  (testing "list-persistent-subjects re-exports subjects/list-persistent"
-    (with-temp-home-for-subjects
+(deftest test-costume-reexports-list
+  (testing "list-costumes re-exports costume/list-costumes"
+    (with-temp-wardrobe-for-costumes
       (fn []
-        ;; Should return empty list when no subjects
-        (is (= [] (repl/list-persistent-subjects)))
-        ;; Create a profile manually
-        (profile/ensure-dirs! :test-reexport)
-        (profile/save-browser-meta! :test-reexport {:debug-port 9999})
+        ;; Should return empty list when no costumes
+        (is (= [] (repl/list-costumes)))
+        ;; Create a costume manually
+        (wardrobe/ensure-dirs! :test-reexport)
+        (wardrobe/save-costume-meta! :test-reexport repl-test-meta)
         ;; Now should list it
-        (let [result (repl/list-persistent-subjects)]
+        (let [result (repl/list-costumes)]
           (is (= 1 (count result)))
           (is (= "test-reexport" (:name (first result)))))))))
 
-(deftest test-persistent-subject-reexports-destroy
-  (testing "destroy-persistent-subject! re-exports subjects/destroy-persistent!"
-    (with-temp-home-for-subjects
+(deftest test-costume-reexports-destroy
+  (testing "destroy-costume! re-exports costume/destroy-costume!"
+    (with-temp-wardrobe-for-costumes
       (fn []
-        ;; Create a profile
-        (profile/ensure-dirs! :doomed)
-        (profile/save-browser-meta! :doomed {:debug-port 9999})
-        (is (profile/profile-exists? :doomed))
+        ;; Create a costume
+        (wardrobe/ensure-dirs! :doomed)
+        (wardrobe/save-costume-meta! :doomed repl-test-meta)
+        (is (wardrobe/costume-exists? :doomed))
         ;; Destroy via repl function
-        (let [result (repl/destroy-persistent-subject! :doomed)]
+        (let [result (repl/destroy-costume! :doomed)]
           (is (= :destroyed (:status result)))
-          (is (not (profile/profile-exists? :doomed))))))))
+          (is (not (wardrobe/costume-exists? :doomed))))))))
 
-(deftest test-persistent-subject-reexports-not-found
+(deftest test-costume-reexports-not-found
   (testing "re-exports return proper errors"
-    (with-temp-home-for-subjects
+    (with-temp-wardrobe-for-costumes
       (fn []
         ;; connect to nonexistent should error
-        (let [result (repl/connect-persistent-subject! :nonexistent)]
+        (let [result (repl/connect-costume! :nonexistent)]
           (is (:error result))
-          (is (= :subject/not-found (get-in result [:error :type]))))
+          (is (= :costume/not-found (get-in result [:error :type]))))
         ;; destroy nonexistent should error
-        (let [result (repl/destroy-persistent-subject! :nonexistent)]
+        (let [result (repl/destroy-costume! :nonexistent)]
           (is (:error result))
-          (is (= :subject/not-found (get-in result [:error :type]))))))))
+          (is (= :costume/not-found (get-in result [:error :type]))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Shifted Mode Tests (WI-031.011)

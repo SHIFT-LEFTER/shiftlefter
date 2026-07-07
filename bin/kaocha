@@ -1,3 +1,14 @@
 #!/usr/bin/env bash
+# Test runner. Bare invocation runs :unit + :e2e ONLY — the :daemon suite
+# (sl-7wv warm-path shell E2E) spawns real daemon JVMs, so it is opt-in:
+#   ./bin/kaocha           → unit + e2e (e2e self-skips without a webdriver)
+#   ./bin/kaocha unit      → fast suite only
+#   ./bin/kaocha e2e       → live-browser example validators
+#   ./bin/kaocha daemon    → warm-path shell E2E (needs a built jar; self-skips otherwise)
+# Naming a suite (any arg) overrides the default and runs exactly what you ask.
 
-clj -M:test "$@"
+if [ "$#" -eq 0 ]; then
+    exec clj -M:test unit e2e
+fi
+
+exec clj -M:test "$@"

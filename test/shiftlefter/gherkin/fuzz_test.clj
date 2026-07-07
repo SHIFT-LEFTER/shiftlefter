@@ -2,10 +2,13 @@
   "Tests for the fuzz harness."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
+            [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
+            [clojure.test.check.properties :as prop]
             [babashka.fs :as fs]
             [shiftlefter.gherkin.api :as api]
-            [shiftlefter.gherkin.fuzz :as fuzz]))
+            [shiftlefter.gherkin.fuzz :as fuzz]
+            [shiftlefter.gherkin.printer :as printer]))
 
 ;; -----------------------------------------------------------------------------
 ;; Generator version
@@ -185,6 +188,51 @@
                 (str "Second format failed for seed " seed))
             (is (= (:output result1) (:output result2))
                 (str "Canonical not idempotent for seed " seed))))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-2c68: canonical idempotence + description preservation properties
+;; -----------------------------------------------------------------------------
+
+(defn- dedent
+  "Normalize a description for comparison: strip the common leading-whitespace
+   prefix from non-blank lines (blank lines compare as empty)."
+  [description]
+  (let [lines (str/split-lines (or description ""))
+        non-blank (remove str/blank? lines)
+        prefix (when (seq non-blank)
+                 (reduce (fn [a b]
+                           (->> (map vector a b)
+                                (take-while (fn [[x y]] (= x y)))
+                                (map first)
+                                (apply str)))
+                         (map #(re-find #"^[ \t]*" %) non-blank)))]
+    (mapv #(if (str/blank? %) "" (subs % (count prefix))) lines)))
+
+(defn- collect-descriptions
+  "All non-blank descriptions in an AST in document order, dedent-normalized,
+   tagged with node type. Covers Feature, Rule, Background, Scenario/Outline,
+   and Examples."
+  [ast]
+  (letfn [(node-descs [node]
+            (concat
+             (when-not (str/blank? (:description node))
+               [[(:type node) (dedent (:description node))]])
+             (mapcat node-descs (:children node))
+             (mapcat node-descs (:examples node))))]
+    (vec (mapcat node-descs ast))))
+
+(defspec canonical-fmt-idempotent 100
+  (prop/for-all [content fuzz/gen-feature]
+    (let [once (printer/canonical content)
+          twice (printer/canonical once)]
+      (= once twice))))
+
+(defspec canonical-preserves-descriptions 100
+  (prop/for-all [content fuzz/gen-feature]
+    (let [canonical (printer/canonical content)
+          before (collect-descriptions (:ast (api/parse-string content)))
+          after (collect-descriptions (:ast (api/parse-string canonical)))]
+      (= before after))))
 
 (deftest run-with-generated-features-passes
   (testing "fuzz run with test.check generators passes"

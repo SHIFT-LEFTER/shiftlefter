@@ -71,11 +71,33 @@
    - `switch-to-frame!`      — switch to iframe
    - `switch-to-main-frame!` — switch back to main page
 
+   ## Element Handles & Scoped Find (added 0.4.6)
+
+   - `query-all` — find ALL elements matching a locator within a scope, returning
+     a vector of element-handle targets (document-scoped or element-scoped).
+
+   ### Resolved-target union
+
+   Every element-taking op accepts a **resolved target**, which is now one of:
+
+   ```clj
+   {:q  <query>}    ; find-by-query in the current document (the original shape)
+   {:el <handle>}   ; act on / scope within an ALREADY-LOCATED element
+   ```
+
+   A `<handle>` is **backend-native and opaque to callers** — an etaoin element-id
+   under `EtaoinBrowser`, a Playwright `Locator` under `PlaywrightBrowser`. Nothing
+   outside the adapter inspects it. A handle is itself a valid target: an element
+   located via `query-all` flows straight back into `click!`/`fill!`/`get-text`
+   with no re-find. This is the capability nested intent addressing builds on
+   (see `_docs/active/intent-addressing-nesting.md` §8) and the mechanism the flat
+   resolver uses to index by the Nth *match* (not `:nth-child`).
+
    ## Return Values
 
    Mutating ops (`!` suffix) return the browser instance for chaining.
    Query ops (`element-count`, `get-text`, `get-url`, `get-title`, `visible?`,
-   `get-attribute`, `get-value`, `enabled?`, `get-alert-text`)
+   `get-attribute`, `get-value`, `enabled?`, `get-alert-text`, `query-all`)
    return their result directly.")
 
 (defprotocol IBrowser
@@ -199,4 +221,49 @@
     "Switch context to the iframe matching locator. Returns this.")
 
   (switch-to-main-frame! [this]
-    "Switch context back to the main page (top-level frame). Returns this."))
+    "Switch context back to the main page (top-level frame). Returns this.")
+
+  ;; --- Element Handles & Scoped Find (0.4.6) ---
+
+  (query-all [this scope locator]
+    "Find ALL elements matching `locator`, in document order, within `scope`.
+
+     - scope:   `:document` (or nil) — search the whole page / platform top
+                container. `{:el <handle>}` — search WITHIN that element
+                (element-rooted query).
+     - locator: a resolved query target `{:q <query>}` (the thing to match).
+
+     Returns a VECTOR of element-handle targets `[{:el h1} {:el h2} ...]`,
+     possibly empty. Each element is itself a valid resolved target — pass it
+     straight to any element-taking op with no re-find.
+
+     Backend-neutral: handles never leak a backend type to the caller.
+     Point-in-time: resolves against the DOM as it is NOW; no staleness
+     guarantee — a consumer over a virtualized/re-rendering feed re-calls and
+     dedups (that is the consumer's job, not this method's).")
+
+  (query-all-pruned [this scope locator boundary-css]
+    "Like `query-all`, but excludes matches whose nearest enclosing INSTANCE
+     BOUNDARY lies strictly inside `scope` — the nearest-enclosing-instance
+     rule (intent-addressing-nesting.md §8.1, sl-h7h).
+
+     - scope, locator: as `query-all`.
+     - boundary-css:   a CSS selector string — the union of the boundary set
+                       (the effective instance selectors of the current
+                       component's declared collections). nil or blank means
+                       NO pruning: behaves exactly like `query-all` (and the
+                       locator may then be XPath, as `query-all` allows).
+
+     The query and the boundary filter are ONE operation (a single scoped
+     `querySelectorAll` + per-candidate `Element.closest(boundary-css)`), so a
+     hop costs the same single round trip as `query-all` — never query-then-
+     filter as two calls. The per-candidate check keeps a candidate when its
+     nearest boundary ancestor is absent, is the scope itself, or sits above
+     the scope; it prunes one that sits strictly between the candidate and the
+     scope (that match belongs to the nested instance).
+
+     When pruning is active the locator must be CSS-expressible (it drives
+     `querySelectorAll`); a non-CSS locator under a non-blank boundary is a
+     loud error, never a silent miss.
+
+     Returns a VECTOR of element-handle targets `[{:el h} …]`, as `query-all`."))

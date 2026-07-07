@@ -1,5 +1,0 @@
-{:interfaces {:web {:type :web
-                   :adapter :etaoin}}
- :glossaries {:subjects "glossary/subjects.edn"}
- :svo {:unknown-subject :error
-       :unknown-verb :error}}

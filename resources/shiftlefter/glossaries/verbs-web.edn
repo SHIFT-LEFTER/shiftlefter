@@ -15,6 +15,13 @@
 ;; Single-frame verbs use frame name :default. Multi-frame verbs use
 ;; descriptive names (:with, :from, :to, :visible, :text, ...).
 ;;
+;; Frames may declare :object-kind, the accepted value kind for the O slot
+;; (sl-rlxa). Absent means :intent — the object must be an intent reference
+;; and is validated against the intent glossary under :svo {:unknown-object ...}.
+;; :location means the slot accepts a literal URL (mirroring the raw-EDN-locator
+;; doctrine: allowed, never an :unknown-object error); named-location /
+;; intent-ref resolution for :location slots lands additively in sl-3jr4.
+;;
 ;; See sl-hse for the design rationale. sl-psc closed verbs that were
 ;; permanently dropped (:upload, :check, :uncheck, :submit; the
 ;; previously-standalone :count verb is now the :count frame on :see).
@@ -76,7 +83,8 @@
   :navigate
   {:desc "Navigate to a URL; the URL is the object"
    :frames {:to {:args []
-                 :pattern "S navigates to O"}}}
+                 :pattern "S navigates to O"
+                 :object-kind :location}}}
 
   ;; ---------------------------------------------------------------------------
   ;; Action verbs with implicit objects (the object is elided from step text)
@@ -191,7 +199,8 @@
   :be
   {:desc "Assert a property or state of the subject"
    :frames {:at {:args []
-                 :pattern "S is on O"}}}
+                 :pattern "S is on O"
+                 :object-kind :location}}}
 
   ;; ---------------------------------------------------------------------------
   ;; Await verbs — pause until a condition is met or a duration elapses.

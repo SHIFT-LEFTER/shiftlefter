@@ -8,44 +8,77 @@
 ;; Parsing Tests
 ;; -----------------------------------------------------------------------------
 
+;; Parser output shape (sl-tl9): {:intent <name> :path [{:name :index} ...] :raw}.
+;; Flat refs are a single-segment path; nested refs carry collection hops.
+
+(defn- only-seg
+  "The sole segment of a flat reference's parsed :path."
+  [result]
+  (-> result :ok :path first))
+
 (deftest parse-basic-reference
   (let [result (resolve/parse-intent-ref "Login.submit")]
     (is (:ok result))
     (is (= "Login" (-> result :ok :intent)))
-    (is (= "submit" (-> result :ok :element)))
-    (is (nil? (-> result :ok :index)))))
+    (is (= [{:name "submit" :index nil}] (-> result :ok :path)))
+    (is (= "Login.submit" (-> result :ok :raw)))))
 
 (deftest parse-reference-with-positive-index
   (testing "Index 1"
     (let [result (resolve/parse-intent-ref "Login.submit[1]")]
       (is (:ok result))
-      (is (= 1 (-> result :ok :index)))))
+      (is (= 1 (:index (only-seg result))))))
 
   (testing "Large index"
     (let [result (resolve/parse-intent-ref "Grades.assignment[999]")]
       (is (:ok result))
-      (is (= 999 (-> result :ok :index)))))
+      (is (= 999 (:index (only-seg result))))))
 
-  (testing "Index 0"
+  (testing "Index 0 (parses; rejected as a HARD error at resolution)"
     (let [result (resolve/parse-intent-ref "Test.item[0]")]
       (is (:ok result))
-      (is (= 0 (-> result :ok :index))))))
+      (is (= 0 (:index (only-seg result)))))))
 
 (deftest parse-reference-with-negative-index
   (testing "Index -1 (last)"
     (let [result (resolve/parse-intent-ref "Login.item[-1]")]
       (is (:ok result))
-      (is (= -1 (-> result :ok :index)))))
+      (is (= -1 (:index (only-seg result))))))
 
   (testing "Index -2 (second from last)"
     (let [result (resolve/parse-intent-ref "Login.item[-2]")]
       (is (:ok result))
-      (is (= -2 (-> result :ok :index))))))
+      (is (= -2 (:index (only-seg result)))))))
 
 (deftest parse-reference-with-wildcard
   (let [result (resolve/parse-intent-ref "Grades.assignment[*]")]
     (is (:ok result))
-    (is (= :all (-> result :ok :index)))))
+    (is (= :all (:index (only-seg result))))))
+
+(deftest parse-nested-reference
+  (testing "Collection hops + element, with a mid-path index"
+    (let [result (resolve/parse-intent-ref "Bookmarks.tweet[2].quoted.author")]
+      (is (:ok result))
+      (is (= "Bookmarks" (-> result :ok :intent)))
+      (is (= [{:name "tweet" :index 2}
+              {:name "quoted" :index nil}
+              {:name "author" :index nil}]
+             (-> result :ok :path)))))
+
+  (testing "Terminal collection reference (Nth instance)"
+    (let [result (resolve/parse-intent-ref "Bookmarks.tweet[2]")]
+      (is (:ok result))
+      (is (= [{:name "tweet" :index 2}] (-> result :ok :path)))))
+
+  (testing "Single [*] anywhere in the path is allowed"
+    (is (:ok (resolve/parse-intent-ref "Bookmarks.tweet[*].author")))
+    (is (:ok (resolve/parse-intent-ref "Bookmarks.tweet[*]")))))
+
+(deftest reject-multiple-wildcards
+  (testing "More than one [*] is the single-[*] MVP boundary error"
+    (let [result (resolve/parse-intent-ref "Grid.row[*].cell[*].value")]
+      (is (:error result))
+      (is (= :intent/multiple-wildcards (-> result :error :type))))))
 
 (deftest parse-valid-naming-variants
   (testing "Multi-word PascalCase intent"
@@ -61,17 +94,17 @@
   (testing "Element with hyphens"
     (let [result (resolve/parse-intent-ref "Login.submit-button")]
       (is (:ok result))
-      (is (= "submit-button" (-> result :ok :element)))))
+      (is (= "submit-button" (:name (only-seg result))))))
 
   (testing "Element with underscores"
     (let [result (resolve/parse-intent-ref "Login.submit_btn")]
       (is (:ok result))
-      (is (= "submit_btn" (-> result :ok :element)))))
+      (is (= "submit_btn" (:name (only-seg result))))))
 
   (testing "Element with numbers"
     (let [result (resolve/parse-intent-ref "Login.field2")]
       (is (:ok result))
-      (is (= "field2" (-> result :ok :element)))))
+      (is (= "field2" (:name (only-seg result))))))
 
   (testing "Intent with hyphen"
     (let [result (resolve/parse-intent-ref "Buy-Box.submit")]
@@ -149,66 +182,35 @@
     (is (not (resolve/intent-ref? "   ")))))
 
 ;; -----------------------------------------------------------------------------
-;; CSS Index Application
+;; Indexing is NOT applied at resolution (sl-nrv)
 ;; -----------------------------------------------------------------------------
+;;
+;; The resolver returns the BASE binding for every reference, regardless of
+;; index. Index application moved to the browser boundary (the Nth *match* via
+;; `IBrowser/query-all` — see shiftlefter.browser.intent-test), which is also
+;; the fix for the latent `:nth-child` bug. These tests pin that contract: the
+;; resolver never rewrites the selector.
 
-(deftest apply-css-index-positive
+(deftest css-index-not-applied-at-resolution
   (let [intents {:lookup {["Test" "item"] {:bindings {:web {:css ".item"}}}}}]
-    (testing "Index 1"
-      (let [result (resolve/resolve-intent-string intents "Test.item[1]" :web)]
-        (is (:ok result))
-        (is (= {:css ".item:nth-child(1)"} (:ok result)))))
+    (testing "positive index returns the base selector (no :nth-child)"
+      (is (= {:css ".item"} (:ok (resolve/resolve-intent-string intents "Test.item[1]" :web))))
+      (is (= {:css ".item"} (:ok (resolve/resolve-intent-string intents "Test.item[5]" :web)))))
+    (testing "negative index returns the base selector (no :nth-last-child)"
+      (is (= {:css ".item"} (:ok (resolve/resolve-intent-string intents "Test.item[-1]" :web))))
+      (is (= {:css ".item"} (:ok (resolve/resolve-intent-string intents "Test.item[-2]" :web)))))
+    (testing "wildcard and no-index also return the base selector"
+      (is (= {:css ".item"} (:ok (resolve/resolve-intent-string intents "Test.item[*]" :web))))
+      (is (= {:css ".item"} (:ok (resolve/resolve-intent-string intents "Test.item" :web)))))))
 
-    (testing "Index 5"
-      (let [result (resolve/resolve-intent-string intents "Test.item[5]" :web)]
-        (is (:ok result))
-        (is (= {:css ".item:nth-child(5)"} (:ok result)))))))
-
-(deftest apply-css-index-negative
-  (let [intents {:lookup {["Test" "item"] {:bindings {:web {:css ".item"}}}}}]
-    (testing "Index -1 (last)"
-      (let [result (resolve/resolve-intent-string intents "Test.item[-1]" :web)]
-        (is (:ok result))
-        (is (= {:css ".item:nth-last-child(1)"} (:ok result)))))
-
-    (testing "Index -2 (second from last)"
-      (let [result (resolve/resolve-intent-string intents "Test.item[-2]" :web)]
-        (is (:ok result))
-        (is (= {:css ".item:nth-last-child(2)"} (:ok result)))))))
-
-(deftest apply-css-index-wildcard
-  (let [intents {:lookup {["Test" "item"] {:bindings {:web {:css ".item"}}}}}
-        result (resolve/resolve-intent-string intents "Test.item[*]" :web)]
-    (is (:ok result))
-    (is (= {:css ".item"} (:ok result)) "Wildcard should not modify selector")))
-
-(deftest apply-css-index-none
-  (let [intents {:lookup {["Test" "item"] {:bindings {:web {:css ".item"}}}}}
-        result (resolve/resolve-intent-string intents "Test.item" :web)]
-    (is (:ok result))
-    (is (= {:css ".item"} (:ok result)) "No index should not modify selector")))
-
-;; -----------------------------------------------------------------------------
-;; XPath Index Application
-;; -----------------------------------------------------------------------------
-
-(deftest apply-xpath-index-positive
+(deftest xpath-index-not-applied-at-resolution
   (let [intents {:lookup {["Test" "item"] {:bindings {:web {:xpath "//div[@class='item']"}}}}}
-        result (resolve/resolve-intent-string intents "Test.item[1]" :web)]
-    (is (:ok result))
-    (is (= {:xpath "(//div[@class='item'])[1]"} (:ok result)))))
-
-(deftest apply-xpath-index-negative
-  (let [intents {:lookup {["Test" "item"] {:bindings {:web {:xpath "//div[@class='item']"}}}}}]
-    (testing "Last item"
-      (let [result (resolve/resolve-intent-string intents "Test.item[-1]" :web)]
-        (is (:ok result))
-        (is (= {:xpath "(//div[@class='item'])[last()]"} (:ok result)))))
-
-    (testing "Second from last"
-      (let [result (resolve/resolve-intent-string intents "Test.item[-2]" :web)]
-        (is (:ok result))
-        (is (= {:xpath "(//div[@class='item'])[last()-1]"} (:ok result)))))))
+        base {:xpath "//div[@class='item']"}]
+    (is (= base (:ok (resolve/resolve-intent-string intents "Test.item[1]" :web))))
+    (is (= base (:ok (resolve/resolve-intent-string intents "Test.item[-1]" :web))))
+    (is (= base (:ok (resolve/resolve-intent-string intents "Test.item[-2]" :web))))
+    (is (= base (:ok (resolve/resolve-intent-string intents "Test.item[*]" :web))))
+    (is (= base (:ok (resolve/resolve-intent-string intents "Test.item" :web))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Resolution Error Cases
@@ -266,8 +268,8 @@
             (let [result (resolve/resolve-intent-string intents "Login.email" :mobile)]
               (is (= {:accessibility-id "email-field"} (:ok result)))))
 
-          (testing "With index"
+          (testing "With index — base binding (index applied at browser boundary)"
             (let [result (resolve/resolve-intent-string intents "Login.submit[2]" :web)]
-              (is (= {:css "button.submit:nth-child(2)"} (:ok result)))))))
+              (is (= {:css "button.submit"} (:ok result)))))))
       (finally
         (cleanup-temp-dir dir)))))

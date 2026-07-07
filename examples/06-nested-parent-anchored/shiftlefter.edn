@@ -1,0 +1,13 @@
+;; ShiftLefter config — parent-anchored nested addressing demo (sl-1ps example 06).
+;;
+;; One interface (:web via Etaoin). The :intents glossary is loaded by the
+;; runner into the intent state at startup (runner Stage 1b) so the browser
+;; step path resolves nested addresses like Dashboard.featured[1].rating.stars
+;; against this example's own intents. setup.clj stands up the fixture server.
+{:interfaces {:web {:type :web :adapter :etaoin :config {}}}
+ :runner     {:step-paths []}
+ :glossaries {:subjects "glossary/subjects.edn"
+              :intents  "glossary/intents"}
+ :svo        {:unknown-subject :error
+              :unknown-verb    :warn
+              :unknown-interface :error}}

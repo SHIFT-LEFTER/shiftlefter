@@ -1,0 +1,8 @@
+;; Comment — a child component of Post. Self-locates via :root on
+;; [data-testid='comment']. It reuses the [data-testid='author'] binding, which
+;; is exactly the cross-type pollution case (§8.1): without nearest-enclosing-
+;; instance pruning, a comment's author would also satisfy Post.author.
+{:intent "Comment"
+ :root {:web {:css "[data-testid='comment']"}}
+ :elements {:author {:bindings {:web {:css "[data-testid='author']"}}}
+            :body   {:bindings {:web {:css "[data-testid='body']"}}}}}

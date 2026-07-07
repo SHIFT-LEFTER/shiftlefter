@@ -1,0 +1,8 @@
+;; Self-contained mini-project: pulls in the shiftlefter framework from the
+;; repo root via :local/root. Running `clj -M:demo` from THIS directory means
+;; cwd = example root, so the glossary/feature/intents paths in shiftlefter.edn
+;; resolve correctly. (Same convention as examples/04-sms-2fa.)
+{:deps {com.shift-lefter/shiftlefter {:local/root "../.."}}
+
+ :aliases
+ {:demo {:main-opts ["-m" "shiftlefter.core" "run" "features/"]}}}

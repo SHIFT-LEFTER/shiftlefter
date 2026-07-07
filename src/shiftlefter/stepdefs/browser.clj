@@ -105,8 +105,11 @@
    and no longer supported."
   (:require [shiftlefter.stepengine.registry :refer [defstep]]
             [shiftlefter.capabilities.ctx :as cap]
+            [shiftlefter.browser.errors :as browser-errors]
             [shiftlefter.browser.locators :as locators]
             [shiftlefter.browser.protocol :as bp]
+            [shiftlefter.browser.target :as target]
+            [shiftlefter.browser.intent :as browser-intent]
             [shiftlefter.intent.state :as intent-state]
             [shiftlefter.intent.resolve :as intent-resolve]
             [clojure.edn :as edn]
@@ -121,11 +124,14 @@
   "Regex pattern string for capturing locators in step text.
 
    Matches:
-   - Intent references: Login.submit, Login.submit[1], Login.submit[-1], Login.submit[*]
+   - Flat intent references: Login.submit, Login.submit[1], Login.submit[-1], Login.submit[*]
+   - Nested (multi-segment) references: Bookmarks.tweet[2].quoted.author,
+     Dashboard.featured[1].rating.stars — each `.segment` may carry an index
+     (the resolver walks them; the step layer must capture the whole address).
    - EDN maps: {:css \"#foo\"}, {:id \"bar\"}
 
    NOTE: Vector shorthand ([...]) is deprecated and no longer matched."
-  "[A-Z][A-Za-z0-9_-]*\\.[a-z][a-z0-9_-]*(?:\\[-?\\d+\\]|\\[\\*\\])?|\\{[^}]+\\}")
+  "[A-Z][A-Za-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*(?:\\[-?\\d+\\]|\\[\\*\\])?)+|\\{[^}]+\\}")
 
 ;; Pre-built pattern strings for common step patterns
 (def ^:private click-pattern
@@ -256,25 +262,28 @@
                       :data {:input locator-str}}]}))))))
 
 (defn- retryable-error?
-  "Check if exception is a transient browser error worth retrying.
-   Includes: stale element, no such element, assertion failures, and
-   the Chrome navigation-race inspector error.
+  "Check if exception is a transient error worth retrying the step for. Two
+   classes (sl-jxi):
 
-   The 'Node with given id does not belong to the document' string is
-   chromedriver's surface for an element handle being resolved against
-   one DOM and queried after the DOM has been swapped (e.g. the click
-   that triggers navigation has fired but the element was looked up on
-   the previous page). Conceptually the same as a stale-element
-   reference — Chrome just surfaces it via a different error path.
-   Surfaced by sl-bnk stress run; deeper audit tracked separately."
+   1. WebDriver/Chrome DOM-in-flux errors — delegated to
+      `browser-errors/transient-dom-error?`, the single source of truth shared
+      with costume/browser.clj's `session-error?` so the two cannot drift. That
+      predicate covers the structured W3C codes (stale element reference, no
+      such element, detached shadow root) and the legacy message surfaces,
+      including the chromedriver inspector error 'Node with given id does not
+      belong to the document' surfaced by the sl-bnk stress run.
+   2. ShiftLefter verification-step signals that mean 'not present yet, poll':
+      a `:browser/assertion-failed` result, and an `:intent/index-out-of-range`
+      diagnostic (an indexed intent match not yet in the DOM — same class as
+      'no such element' for a wait/verify step). These are NOT WebDriver errors
+      and are intentionally local to this predicate (session-error? must not
+      reconnect on them)."
   [e]
-  (let [msg (str (ex-message e) " " (ex-data e))
-        data (ex-data e)]
-    (or (.contains msg "stale element")
-        (.contains msg "StaleElementReferenceException")
-        (.contains msg "no such element")
-        (.contains msg "Node with given id does not belong to the document")
-        (= :browser/assertion-failed (:type data)))))
+  (let [data (ex-data e)
+        err-types (set (map :type (:errors data)))]
+    (or (browser-errors/transient-dom-error? e)
+        (= :browser/assertion-failed (:type data))
+        (contains? err-types :intent/index-out-of-range))))
 
 (def ^:dynamic *retry-timeout-ms*
   "Default timeout in milliseconds for verification step retries.
@@ -440,21 +449,60 @@
                        :session-key subject
                        :available-sessions (web-subjects-in-ctx ctx)})))))
 
+(defn- resolve-target*
+  "Browser-aware resolution of a locator string to a resolved target.
+
+   - EDN locators (`{…}`) resolve purely via `locators/resolve-locator`.
+   - Intent references resolve via `browser.intent/resolve-target`, which uses
+     the live `browser` to index by the Nth *match* (`[n]`/`[-n]`) and to return
+     the whole `[*]` collection — fixing the flat `:nth-child` bug.
+
+   Returns a target (`{:q}` / `{:el}` / `[{:el} …]`) or, on a resolution error,
+   throws with the resolver's own specific message(s) lifted into `ex-message`
+   (sl-h84) — so a feature-writer sees e.g. \"Feed.post[99]: index 99 is out of
+   range — 4 matches found\" instead of a generic string. The structured
+   `:errors` stays in `ex-data` for the reporters' detail line. Callers needing a
+   single element pass the result through `target/ensure-single`."
+  [browser locator-str interface]
+  (let [result (cond
+                 (str/starts-with? locator-str "{")
+                 (parse-locator locator-str interface)
+
+                 interface
+                 (browser-intent/resolve-target browser (intent-state/get-intents)
+                                                 locator-str interface)
+
+                 :else
+                 (parse-locator locator-str interface))]
+    (if (and (map? result) (:errors result))
+      ;; Lift the resolver's specific message(s) into ex-message — the §5/§7.5
+      ;; "loud, specific, actionable" contract is invisible to users otherwise.
+      ;; Multiple errors (e.g. nested-resolution) join; empty falls back.
+      (let [errs (:errors result)
+            msg  (->> errs (keep :message) (str/join "; "))]
+        (throw (ex-info (if (str/blank? msg) "Invalid locator" msg)
+                        {:errors errs})))
+      result)))
+
 (defn- with-subject-locator
   "Subject-extracting variant of with-locator.
-   Resolves locator, looks up the subject's browser, executes op-fn.
+   Looks up the subject's browser, resolves the locator against the live DOM,
+   executes op-fn with a SINGLE resolved target.
 
    Interface parameter enables intent reference resolution:
    - If interface is nil, only EDN locators work
-   - If interface is provided (e.g., :web), intent refs like Login.submit resolve"
+   - If interface is provided (e.g., :web), intent refs like Login.submit resolve
+     (including `[n]`/`[-n]` Nth-match indexing).
+
+   Action steps are single-target: a `[*]` reference is a loud
+   `:browser/target-cardinality` error (via `target/ensure-single`)."
   ([ctx subject-str locator-str op-fn]
    (with-subject-locator ctx subject-str locator-str nil op-fn))
   ([ctx subject-str locator-str interface op-fn]
-   (let [resolved (parse-locator locator-str interface)]
-     (if (locators/valid? resolved)
-       (with-subject-browser ctx subject-str
-         (fn [browser] (op-fn browser resolved)))
-       (throw (ex-info "Invalid locator" {:errors (:errors resolved)}))))))
+   (with-subject-browser ctx subject-str
+     (fn [browser]
+       (let [resolved (resolve-target* browser locator-str interface)]
+         (op-fn browser (target/ensure-single resolved locator-str)))))))
 
 (defn- with-subject-query
   "Subject-extracting query helper. Returns [ctx browser] for query use.
@@ -525,20 +573,12 @@
   {:interface :web
    :svo {:subject :$1 :verb :drag :frame :to :object :$2 :args {:target :$3}}}
   [ctx subject-str from-str to-str]
-  (let [interface (:interface step-meta)
-        from-resolved (parse-locator from-str interface)
-        to-resolved (parse-locator to-str interface)]
-    (cond
-      (not (locators/valid? from-resolved))
-      (throw (ex-info "Invalid from locator" {:errors (:errors from-resolved)}))
-
-      (not (locators/valid? to-resolved))
-      (throw (ex-info "Invalid to locator" {:errors (:errors to-resolved)}))
-
-      :else
-      (with-subject-browser ctx subject-str
-        (fn [browser]
-          (bp/drag-to! browser from-resolved to-resolved))))))
+  (let [interface (:interface step-meta)]
+    (with-subject-browser ctx subject-str
+      (fn [browser]
+        (let [from (target/ensure-single (resolve-target* browser from-str interface) from-str)
+              to   (target/ensure-single (resolve-target* browser to-str interface) to-str)]
+          (bp/drag-to! browser from to))))))
 
 (defstep fill-pattern
   {:interface :web
@@ -700,146 +740,154 @@
          :object :$3 :args {:count :$2}}}
   [ctx subject-str count-str locator-str]
   (let [expected (parse-long count-str)
-        resolved (parse-locator locator-str (:interface step-meta))]
-    (when-not (locators/valid? resolved)
-      (throw (ex-info "Invalid locator" {:errors (:errors resolved)})))
-    (let [[ctx' browser] (with-subject-query ctx subject-str)]
-      (with-retry
-        (fn []
-          (let [actual (bp/element-count browser resolved)]
-            (when-not (= expected actual)
-              (throw (ex-info (str "Expected " expected " elements but found " actual)
-                               {:type :browser/assertion-failed
-                                :expected expected
-                                :actual actual
-                                :locator locator-str}))))))
-      ctx')))
+        [ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [resolved (resolve-target* browser locator-str (:interface step-meta))
+              actual (if (target/targets? resolved)
+                       (count resolved)              ; [*] collection — count the vector
+                       (bp/element-count browser resolved))]
+          (when-not (= expected actual)
+            (throw (ex-info (str "Expected " expected " elements but found " actual)
+                             {:type :browser/assertion-failed
+                              :expected expected
+                              :actual actual
+                              :locator locator-str}))))))
+    ctx'))
 
 (defstep should-see-text-pattern
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :text
          :object :$2 :args {:text :$3}}}
   [ctx subject-str locator-str expected-text]
-  (let [resolved (parse-locator locator-str (:interface step-meta))]
-    (when-not (locators/valid? resolved)
-      (throw (ex-info "Invalid locator" {:errors (:errors resolved)})))
-    (let [[ctx' browser] (with-subject-query ctx subject-str)]
-      (with-retry
-        (fn []
-          (let [actual (bp/get-text browser resolved)]
-            (when-not (.contains (str actual) expected-text)
-              (throw (ex-info (str "Expected element text to contain '" expected-text
-                                   "' but was '" actual "'")
-                               {:type :browser/assertion-failed
-                                :expected expected-text
-                                :actual actual
-                                :locator locator-str}))))))
-      ctx')))
+  (let [[ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [resolved (target/ensure-single
+                        (resolve-target* browser locator-str (:interface step-meta))
+                        locator-str)
+              actual (bp/get-text browser resolved)]
+          (when-not (.contains (str actual) expected-text)
+            (throw (ex-info (str "Expected element text to contain '" expected-text
+                                 "' but was '" actual "'")
+                             {:type :browser/assertion-failed
+                              :expected expected-text
+                              :actual actual
+                              :locator locator-str}))))))
+    ctx'))
 
 (defstep should-see-value-pattern
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :value
          :object :$2 :args {:value :$3}}}
   [ctx subject-str locator-str expected-value]
-  (let [resolved (parse-locator locator-str (:interface step-meta))]
-    (when-not (locators/valid? resolved)
-      (throw (ex-info "Invalid locator" {:errors (:errors resolved)})))
-    (let [[ctx' browser] (with-subject-query ctx subject-str)]
-      (with-retry
-        (fn []
-          (let [actual (bp/get-value browser resolved)]
-            (when-not (= expected-value actual)
-              (throw (ex-info (str "Expected element value '" expected-value
-                                   "' but was '" actual "'")
-                               {:type :browser/assertion-failed
-                                :expected expected-value
-                                :actual actual
-                                :locator locator-str}))))))
-      ctx')))
+  (let [[ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [resolved (target/ensure-single
+                        (resolve-target* browser locator-str (:interface step-meta))
+                        locator-str)
+              actual (bp/get-value browser resolved)]
+          (when-not (= expected-value actual)
+            (throw (ex-info (str "Expected element value '" expected-value
+                                 "' but was '" actual "'")
+                             {:type :browser/assertion-failed
+                              :expected expected-value
+                              :actual actual
+                              :locator locator-str}))))))
+    ctx'))
 
 (defstep should-see-attr-pattern
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :attribute
          :object :$2 :args {:attribute :$3 :value :$4}}}
   [ctx subject-str locator-str attr-name expected-value]
-  (let [resolved (parse-locator locator-str (:interface step-meta))]
-    (when-not (locators/valid? resolved)
-      (throw (ex-info "Invalid locator" {:errors (:errors resolved)})))
-    (let [[ctx' browser] (with-subject-query ctx subject-str)]
-      (with-retry
-        (fn []
-          (let [actual (bp/get-attribute browser resolved attr-name)]
-            (when-not (= expected-value actual)
-              (throw (ex-info (str "Expected attribute '" attr-name "' to be '" expected-value
-                                   "' but was '" actual "'")
-                               {:type :browser/assertion-failed
-                                :expected expected-value
-                                :actual actual
-                                :attribute attr-name
-                                :locator locator-str}))))))
-      ctx')))
+  (let [[ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [resolved (target/ensure-single
+                        (resolve-target* browser locator-str (:interface step-meta))
+                        locator-str)
+              actual (bp/get-attribute browser resolved attr-name)]
+          (when-not (= expected-value actual)
+            (throw (ex-info (str "Expected attribute '" attr-name "' to be '" expected-value
+                                 "' but was '" actual "'")
+                             {:type :browser/assertion-failed
+                              :expected expected-value
+                              :actual actual
+                              :attribute attr-name
+                              :locator locator-str}))))))
+    ctx'))
 
 (defstep should-see-enabled-pattern
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :enabled :object :$2}}
   [ctx subject-str locator-str]
-  (let [resolved (parse-locator locator-str (:interface step-meta))]
-    (when-not (locators/valid? resolved)
-      (throw (ex-info "Invalid locator" {:errors (:errors resolved)})))
-    (let [[ctx' browser] (with-subject-query ctx subject-str)]
-      (with-retry
-        (fn []
+  (let [[ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [resolved (target/ensure-single
+                        (resolve-target* browser locator-str (:interface step-meta))
+                        locator-str)]
           (when-not (bp/enabled? browser resolved)
             (throw (ex-info (str "Expected element to be enabled: " locator-str)
                              {:type :browser/assertion-failed
-                              :locator locator-str})))))
-      ctx')))
+                              :locator locator-str}))))))
+    ctx'))
 
 (defstep should-see-disabled-pattern
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :disabled :object :$2}}
   [ctx subject-str locator-str]
-  (let [resolved (parse-locator locator-str (:interface step-meta))]
-    (when-not (locators/valid? resolved)
-      (throw (ex-info "Invalid locator" {:errors (:errors resolved)})))
-    (let [[ctx' browser] (with-subject-query ctx subject-str)]
-      (with-retry
-        (fn []
+  (let [[ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [resolved (target/ensure-single
+                        (resolve-target* browser locator-str (:interface step-meta))
+                        locator-str)]
           (when (bp/enabled? browser resolved)
             (throw (ex-info (str "Expected element to be disabled: " locator-str)
                              {:type :browser/assertion-failed
-                              :locator locator-str})))))
-      ctx')))
+                              :locator locator-str}))))))
+    ctx'))
 
 (defstep should-see-locator-pattern
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :visible :object :$2}}
   [ctx subject-str locator-str]
-  (let [resolved (parse-locator locator-str (:interface step-meta))]
-    (when-not (locators/valid? resolved)
-      (throw (ex-info "Invalid locator" {:errors (:errors resolved)})))
-    (let [[ctx' browser] (with-subject-query ctx subject-str)]
-      (with-retry
-        (fn []
+  (let [[ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [resolved (target/ensure-single
+                        (resolve-target* browser locator-str (:interface step-meta))
+                        locator-str)]
           (when-not (bp/visible? browser resolved)
             (throw (ex-info (str "Expected element to be visible: " locator-str)
                              {:type :browser/assertion-failed
-                              :locator locator-str})))))
-      ctx')))
+                              :locator locator-str}))))))
+    ctx'))
 
 (defstep should-not-see-pattern
   {:interface :web
    :svo {:subject :$1 :verb :not-see :frame :invisible :object :$2}}
   [ctx subject-str locator-str]
-  (let [resolved (parse-locator locator-str (:interface step-meta))]
-    (when-not (locators/valid? resolved)
-      (throw (ex-info "Invalid locator" {:errors (:errors resolved)})))
-    (let [[ctx' browser] (with-subject-query ctx subject-str)]
-      (when (bp/visible? browser resolved)
-        (throw (ex-info (str "Expected element to NOT be visible: " locator-str)
-                         {:type :browser/assertion-failed
-                          :locator locator-str})))
-      ctx')))
+  (let [[ctx' browser] (with-subject-query ctx subject-str)
+        resolved (try
+                   (target/ensure-single
+                    (resolve-target* browser locator-str (:interface step-meta))
+                    locator-str)
+                   (catch clojure.lang.ExceptionInfo e
+                     ;; An out-of-range / absent indexed match means the element
+                     ;; isn't present — exactly what "should not see" asserts.
+                     (let [errs (:errors (ex-data e))]
+                       (if (some #(#{:intent/index-out-of-range :intent/zero-index} (:type %)) errs)
+                         ::absent
+                         (throw e)))))]
+    (when (and (not= ::absent resolved) (bp/visible? browser resolved))
+      (throw (ex-info (str "Expected element to NOT be visible: " locator-str)
+                       {:type :browser/assertion-failed
+                        :locator locator-str})))
+    ctx'))
 
 (defstep #":([\w./-]+) should be on '([^']+)'"
   {:interface :web
@@ -924,18 +972,18 @@
   {:interface :web
    :svo {:subject :$1 :verb :wait :frame :for-element :object :$2}}
   [ctx subject-str locator-str]
-  (let [resolved (parse-locator locator-str (:interface step-meta))]
-    (when-not (locators/valid? resolved)
-      (throw (ex-info "Invalid locator" {:errors (:errors resolved)})))
-    (let [[ctx' browser] (with-subject-query ctx subject-str)]
-      (with-retry
-        (fn []
+  (let [[ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [resolved (target/ensure-single
+                        (resolve-target* browser locator-str (:interface step-meta))
+                        locator-str)]
           (when-not (bp/visible? browser resolved)
             (throw (ex-info (str "Waited but element never became visible: " locator-str)
                             {:type    :browser/assertion-failed
-                             :locator locator-str}))))
-        *wait-timeout-ms*)
-      ctx')))
+                             :locator locator-str})))))
+      *wait-timeout-ms*)
+    ctx'))
 
 ;; :wait :for-text — block until element contains the expected text
 ;; (mirror of :see :text).
@@ -944,22 +992,22 @@
    :svo {:subject :$1 :verb :wait :frame :for-text
          :object :$2 :args {:text :$3}}}
   [ctx subject-str locator-str expected-text]
-  (let [resolved (parse-locator locator-str (:interface step-meta))]
-    (when-not (locators/valid? resolved)
-      (throw (ex-info "Invalid locator" {:errors (:errors resolved)})))
-    (let [[ctx' browser] (with-subject-query ctx subject-str)]
-      (with-retry
-        (fn []
-          (let [actual (bp/get-text browser resolved)]
-            (when-not (.contains (str actual) expected-text)
-              (throw (ex-info (str "Waited but element text never contained '" expected-text
-                                   "' (last seen: '" actual "')")
-                              {:type     :browser/assertion-failed
-                               :expected expected-text
-                               :actual   actual
-                               :locator  locator-str})))))
-        *wait-timeout-ms*)
-      ctx')))
+  (let [[ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [resolved (target/ensure-single
+                        (resolve-target* browser locator-str (:interface step-meta))
+                        locator-str)
+              actual (bp/get-text browser resolved)]
+          (when-not (.contains (str actual) expected-text)
+            (throw (ex-info (str "Waited but element text never contained '" expected-text
+                                 "' (last seen: '" actual "')")
+                            {:type     :browser/assertion-failed
+                             :expected expected-text
+                             :actual   actual
+                             :locator  locator-str})))))
+      *wait-timeout-ms*)
+    ctx'))
 
 ;; :wait :for-count — block until N matching elements exist (mirror of :see :count).
 (defstep wait-for-count-pattern
@@ -968,19 +1016,19 @@
          :object :$3 :args {:count :$2}}}
   [ctx subject-str count-str locator-str]
   (let [expected (parse-long count-str)
-        resolved (parse-locator locator-str (:interface step-meta))]
-    (when-not (locators/valid? resolved)
-      (throw (ex-info "Invalid locator" {:errors (:errors resolved)})))
-    (let [[ctx' browser] (with-subject-query ctx subject-str)]
-      (with-retry
-        (fn []
-          (let [actual (bp/element-count browser resolved)]
-            (when-not (= expected actual)
-              (throw (ex-info (str "Waited but element count never reached " expected
-                                   " (last seen: " actual ")")
-                              {:type     :browser/assertion-failed
-                               :expected expected
-                               :actual   actual
-                               :locator  locator-str})))))
-        *wait-timeout-ms*)
-      ctx')))
+        [ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [resolved (resolve-target* browser locator-str (:interface step-meta))
+              actual (if (target/targets? resolved)
+                       (count resolved)
+                       (bp/element-count browser resolved))]
+          (when-not (= expected actual)
+            (throw (ex-info (str "Waited but element count never reached " expected
+                                 " (last seen: " actual ")")
+                            {:type     :browser/assertion-failed
+                             :expected expected
+                             :actual   actual
+                             :locator  locator-str})))))
+      *wait-timeout-ms*)
+    ctx'))

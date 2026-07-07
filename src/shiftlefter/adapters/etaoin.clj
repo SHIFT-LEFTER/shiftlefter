@@ -12,8 +12,8 @@
    ## Cleanup
 
    `close-browser` closes the browser session and releases resources."
-  (:require [clojure.java.io :as io]
-            [etaoin.api :as eta]
+  (:require [etaoin.api :as eta]
+            [shiftlefter.config.user :as user-config]
             [shiftlefter.webdriver.etaoin.browser :as browser]))
 
 ;; -----------------------------------------------------------------------------
@@ -45,15 +45,9 @@
   (try
     (let [headless? (get config :headless false)
           adapter-opts (get config :adapter-opts {})
-          ;; Chromedriver discovery: adapter-opts :path-driver > ~/.shiftlefter/config.edn > PATH
-          path-driver (or (:path-driver adapter-opts)
-                         (try
-                           (some-> (io/file (str (System/getProperty "user.home")
-                                                 "/.shiftlefter/config.edn"))
-                                   slurp
-                                   read-string
-                                   :chromedriver-path)
-                           (catch Exception _ nil)))
+          ;; Chromedriver discovery: adapter-opts :path-driver > config.edn > PATH.
+          ;; Shared resolver — single source of truth with the costume path.
+          path-driver (user-config/resolve-chromedriver-path adapter-opts)
           adapter-opts (if path-driver
                          (assoc adapter-opts :path-driver path-driver)
                          adapter-opts)

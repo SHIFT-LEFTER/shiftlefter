@@ -5,6 +5,12 @@ verification code — arrives by SMS. ShiftLefter reads it back from the
 mock SMS line and types it into the form. One scenario, two interfaces,
 no plumbing in the feature file.
 
+> **Mode: Shifted** — the config carries `:svo` and a subject glossary, so
+> the scenario validates against the project vocabulary at planning time
+> (`sl orient` will say `Mode: Shifted`). This is also the first example
+> with `setup.clj` orchestration — see
+> [the examples index](../README.md) for where it sits on the path.
+
 ## The Punchline
 
 ```gherkin
@@ -16,7 +22,7 @@ Feature: Two-factor password reset via SMS
     And  :user/alice clicks {:css "button[type=\"submit\"]"}
     Then :user/alice should see 'Enter Verification Code'
 
-    When [:sms] :user/alice receives an SMS to '+15550001111' within the last 1 minute matching /verification code is: (\d{6})/
+    When [:sms] :user/alice receives an SMS to '+15550001111' matching /verification code is: (\d{6})/
     And  :user/alice fills {:id "code"} with the SMS code
     And  :user/alice clicks {:css "button[type=\"submit\"]"}
     Then :user/alice should see 'Code verified for alice'
@@ -45,10 +51,15 @@ types a captured value into a browser field. So you write one:
     ctx))
 ```
 
-That's the entire bridge between web and SMS. Future versions of
-ShiftLefter will likely make this expressible as `{ctx.sms.captures.groups.0}`
-in step text directly (a tracked follow-up). For now, custom stepdefs
-are how you compose interfaces — and they're easy.
+That's the entire bridge between web and SMS. A planned follow-up
+(generic ctx-interpolation) may make this expressible as
+`{ctx.sms.captures.groups.0}` in step text directly. For now, custom
+stepdefs are how you compose interfaces — and they're easy.
+
+One expected notice at load time: `Step … has :interface without :svo —
+SVO validation will be skipped`. That's accurate — this step's value comes
+from ctx rather than step text, which the SVO arg model can't declare yet,
+so the step opts out of SVO validation.
 
 ## Standing Up the SUT — `setup.clj`
 
@@ -93,7 +104,9 @@ Two non-obvious bits worth highlighting:
 
 ## Running It
 
-ChromeDriver must be on PATH (`brew install chromedriver` on macOS).
+Needs a local ChromeDriver matching your Chrome — on PATH
+(`brew install chromedriver` on macOS) or via `~/.shiftlefter/config.edn`
+(`:chromedriver-path`).
 
 ```bash
 cd examples/04-sms-2fa
@@ -101,22 +114,24 @@ clj -M:demo
 ```
 
 `setup.clj` consumes `shiftlefter.demo.fixture.*` — first-class
-namespaces under `src/` since sl-7ui (2026-05-12), so the `:demo`
-alias just sets `:main-opts`; no classpath hack needed.
+namespaces under the framework's `src/`, so the `:demo` alias just sets
+`:main-opts`; no classpath hack needed.
 
 A Chrome window opens, drives the form through both stages, and exits
 clean. Test passes; setup.clj's `:stop` releases port 9090.
 
-### Why `within the last 1 minute`?
+### The receive window
 
-The receive step uses an explicit baseline (`within the last 1 minute`)
-rather than the default smart baseline. Reason: `:sms/scenario-start-ts`
-is set when the SMS interface is *first provisioned*, which (in this
-scenario) is when the receive step itself runs — *after* the fixture
-server's send. The within-last form pins the window to wall-clock past,
-catching the just-sent code. A future bead (sl-3mq, the `:on-provision`
-adapter hook) will let setup.clj seed scenario-start-ts at scenario
-start so the default `receives an SMS … matching /…/` form Just Works.
+The receive step's default smart baseline Just Works here: the SMS
+adapter's `:on-provision` hook seeds `:sms/scenario-start-ts` when the
+interface is provisioned, and provisioning is eager by default — every
+interface a scenario touches is provisioned at scenario start, before the
+fixture server sends the code. So the step reads "any matching SMS since
+the scenario started."
+
+An explicit wall-clock window is also available when you need one —
+`receives an SMS to '…' within the last 1 minute matching /…/` — e.g.
+for messages sent before the scenario began.
 
 ## What This Proves
 

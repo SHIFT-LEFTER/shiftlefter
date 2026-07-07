@@ -4,4 +4,17 @@
 {:parser {:dialect "en"}       ;; Language dialect (en, fr, de, etc.)
 
  :runner {:step-paths ["steps/"]      ;; Where to find step definitions
-          :allow-pending? false}}     ;; Exit 0 even with pending steps?
+          :allow-pending? false}      ;; Exit 0 even with pending steps?
+
+ ;; --- Shifted mode (the advertised path) ---
+ ;; Uncomment to validate scenarios against a project glossary at planning
+ ;; time, before anything runs. The presence of :svo enables Shifted mode;
+ ;; `sl orient` confirms which mode you're in. See docs/SVO.md for the
+ ;; glossary file formats.
+ ;;
+ ;; :interfaces {:web {:type :web :adapter :etaoin}}   ; bundled WebDriver backend
+ ;; :glossaries {:subjects "glossary/subjects.edn"}
+ ;; :svo {:unknown-subject :error
+ ;;       :unknown-verb    :warn
+ ;;       :unknown-interface :error}
+ }

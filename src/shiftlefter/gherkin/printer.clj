@@ -114,6 +114,10 @@
 ;;   - 1 blank line between sections (Feature, Scenario, Background, Rule)
 ;;   - Tags on their own line, space-separated
 ;;   - Docstrings indented to step level + 2
+;;   - Descriptions (Feature, Rule, Scenario, Background, Examples): directly
+;;     under the header, one indent level deeper, then 1 blank line before the
+;;     next block. Dedented by the common leading-whitespace prefix so relative
+;;     indentation inside a description is preserved (sl-2c68).
 ;; -----------------------------------------------------------------------------
 
 (def ^:private indent-unit "  ")  ; 2 spaces
@@ -202,6 +206,41 @@
   (when (seq tags)
     (str (indent indent-level) (str/join " " (map :name tags)))))
 
+(defn- leading-ws-prefix
+  "Leading whitespace of a line."
+  [line]
+  (re-find #"^[ \t]*" line))
+
+(defn- common-prefix
+  "Longest common prefix of two strings."
+  [a b]
+  (->> (map vector a b)
+       (take-while (fn [[x y]] (= x y)))
+       (map first)
+       (apply str)))
+
+(defn- dedent-lines
+  "Strip the longest common leading-whitespace prefix of the non-blank lines
+   from each non-blank line. Blank lines become empty strings."
+  [lines]
+  (let [non-blank (remove str/blank? lines)
+        prefix (when (seq non-blank)
+                 (reduce common-prefix (map leading-ws-prefix non-blank)))]
+    (map #(if (str/blank? %) "" (subs % (count prefix))) lines)))
+
+(defn- format-description
+  "Format description lines to a fixed column.
+
+   Dedents by the common leading-whitespace prefix (preserving intentional
+   relative indentation), then indents each non-blank line to indent-level.
+   This makes canonical formatting a fixed point regardless of the source
+   indentation the parser preserved."
+  [description indent-level]
+  (when (and description (not (str/blank? description)))
+    (let [indent-str (indent indent-level)
+          lines (dedent-lines (str/split-lines description))]
+      (str/join "\n" (map #(if (str/blank? %) "" (str indent-str %)) lines)))))
+
 (defn- format-examples
   "Format an Examples table."
   [examples indent-level]
@@ -210,6 +249,7 @@
         name-str (if (str/blank? (:name examples)) "" (str ": " (:name examples)))
         tags-line (format-tags (:tags examples) indent-level)
         header (str indent-str kw ":" name-str)
+        desc (format-description (:description examples) (inc indent-level))
         ;; Examples uses :table-header and :table-body, not :table
         table-header (:table-header examples)
         table-body (:table-body examples)
@@ -228,6 +268,7 @@
                        (str table-indent "| " (str/join " | " padded) " |")))]
     (str (when tags-line (str tags-line "\n"))
          header "\n"
+         (when desc (str desc "\n\n"))
          (str/join "\n" (map format-row all-rows)))))
 
 (defn- format-scenario
@@ -241,10 +282,12 @@
         name-str (:name scenario)
         tags-line (format-tags (:tags scenario) indent-level)
         header (str indent-str type-keyword ": " name-str)
+        desc (format-description (:description scenario) (inc indent-level))
         steps-str (format-steps (:steps scenario) (inc indent-level))
         examples (:examples scenario)]
     (str (when tags-line (str tags-line "\n"))
          header "\n"
+         (when desc (str desc "\n\n"))
          steps-str
          (when (seq examples)
            (str "\n\n" (str/join "\n\n" (map #(format-examples % indent-level) examples)))))))
@@ -256,18 +299,12 @@
         kw (or (:keyword-text background) "Background")
         tags-line (format-tags (:tags background) indent-level)
         header (str indent-str kw ":")
+        desc (format-description (:description background) (inc indent-level))
         steps-str (format-steps (:steps background) (inc indent-level))]
     (str (when tags-line (str tags-line "\n"))
          header "\n"
+         (when desc (str desc "\n\n"))
          steps-str)))
-
-(defn- format-description
-  "Format feature description lines."
-  [description indent-level]
-  (when (and description (not (str/blank? description)))
-    (let [indent-str (indent indent-level)
-          lines (str/split-lines (str/trim description))]
-      (str/join "\n" (map #(str indent-str %) lines)))))
 
 (defn- format-rule
   "Format a Rule node."
@@ -318,9 +355,10 @@
          "\n")))
 
 (defn- format-comment
-  "Format a Comment node."
+  "Format a Comment node. :text is the trimmed comment line and already
+   includes the leading #."
   [comment-node]
-  (str "# " (:text comment-node)))
+  (:text comment-node))
 
 (defn format-canonical
   "Format AST to canonical Gherkin style.
@@ -393,6 +431,46 @@
     (if (seq errors)
       (throw (ex-info "Parse errors" {:errors errors}))
       (:output (format-canonical ast)))))
+
+;; -----------------------------------------------------------------------------
+;; Comment-loss detection (sl-q2uj guard)
+;; -----------------------------------------------------------------------------
+;;
+;; format-canonical only emits comments that sit above the Feature line;
+;; interior comments (between steps, scenarios, etc.) are parsed but dropped.
+;; Until the printer learns comment attachment (post-0.5), callers use this
+;; to refuse destructive writes and to report comment-bearing files.
+
+(s/def ::line pos-int?)
+(s/def ::text string?)
+(s/def ::lost-comment (s/keys :req-un [::line ::text]))
+
+(defn- comment-tokens
+  "Comment tokens in a Gherkin string, in document order."
+  [s]
+  (filter #(= :comment (:type %)) (lexer/lex s)))
+
+(defn lost-comments
+  "Comment lines in s that canonical formatting would drop.
+
+   Compares comment tokens in the input against those in the canonical
+   output, matched by trimmed text as a multiset. Returns a vector of
+   {:line N :text \"# ...\"} in input order; empty when canonical
+   formatting is comment-safe for s. Throws on parse errors (like
+   `canonical`)."
+  [s]
+  (let [kept (frequencies (map :value (comment-tokens (canonical s))))
+        note-loss (fn [[acc kept] tok]
+                    (if (pos? (get kept (:value tok) 0))
+                      [acc (update kept (:value tok) dec)]
+                      [(conj acc {:line (:line (:location tok))
+                                  :text (:value tok)})
+                       kept]))]
+    (first (reduce note-loss [[] kept] (comment-tokens s)))))
+
+(s/fdef lost-comments
+  :args (s/cat :s string?)
+  :ret (s/coll-of ::lost-comment :kind vector?))
 
 ;; -----------------------------------------------------------------------------
 ;; Additional fdefs

@@ -126,6 +126,144 @@
       (is (str/includes? output "a.clj:1"))
       (is (str/includes? output "b.clj:2")))))
 
+(deftest test-print-diagnostics-stepdef-issues
+  (testing "Shows stepdef glossary issues with message detail (sl-b49d)"
+    (let [diagnostics {:undefined []
+                       :ambiguous []
+                       :invalid-arity []
+                       :stepdef-issues [{:type :stepdef/unknown-frame
+                                         :source {:file "steps.clj" :line 12}
+                                         :message "Step at steps.clj:12 uses unknown frame :nope on verb :web/click; known frames: :on"}
+                                        {:type :stepdef/unknown-verb
+                                         :source {:file "steps.clj" :line 30}
+                                         :message "Step at steps.clj:30 declares unknown verb :web/smash; known :web verbs: :click"}]
+                       :errors [{:type :stepdef/glossary-mismatch
+                                 :issues []
+                                 :message "Found 2 stepdef(s) inconsistent with the glossary"}]
+                       :counts {:stepdef-issue-count 2 :total-issues 2}}
+          output (with-err-str (console/print-diagnostics! diagnostics {:no-color true}))]
+      (is (str/includes? output "Stepdef glossary issues:"))
+      (is (str/includes? output "steps.clj:12"))
+      (is (str/includes? output "unknown frame :nope"))
+      (is (str/includes? output "steps.clj:30"))
+      (is (str/includes? output "2 binding issue(s)"))
+      ;; The :stepdef/glossary-mismatch wrapper error is rendered via the
+      ;; dedicated section, not double-printed as a generic planning error
+      (is (not (str/includes? output "Planning errors:"))))))
+
+(deftest test-print-diagnostics-generic-errors
+  (testing "Shows generic planning errors and never claims 0 issues"
+    (let [diagnostics {:undefined []
+                       :ambiguous []
+                       :invalid-arity []
+                       :errors [{:type :svo/missing-glossaries-config
+                                 :message "Shifted mode requires :glossaries config"}]
+                       :counts {:total-issues 0}}
+          output (with-err-str (console/print-diagnostics! diagnostics {:no-color true}))]
+      (is (str/includes? output "Planning errors:"))
+      (is (str/includes? output "Shifted mode requires :glossaries config"))
+      (is (str/includes? output "1 binding issue(s)"))
+      (is (not (str/includes? output "0 binding issue(s)"))))))
+
+(deftest test-print-diagnostics-annotation-and-macro-errors
+  (testing "Shows annotation and macro errors with message detail"
+    (let [diagnostics {:undefined []
+                       :ambiguous []
+                       :invalid-arity []
+                       :annotation-errors [{:type :annotation/unknown-interface
+                                            :message "Step declares interface :foo but no such interface is configured"}]
+                       :macro-errors [{:type :macro/undefined
+                                       :message "Undefined macro: 'login +'"}]
+                       :counts {:total-issues 0}}
+          output (with-err-str (console/print-diagnostics! diagnostics {:no-color true}))]
+      (is (str/includes? output "Annotation errors:"))
+      (is (str/includes? output "Step declares interface :foo"))
+      (is (str/includes? output "Macro errors:"))
+      (is (str/includes? output "Undefined macro: 'login +'"))
+      (is (str/includes? output "2 binding issue(s)")))))
+
+(deftest test-print-diagnostics-svo-severity-labels
+  (testing "SVO issues labeled per :severity (sl-prkp)"
+    (let [diagnostics {:undefined []
+                       :ambiguous []
+                       :invalid-arity []
+                       :svo-issues [{:type :svo/unknown-subject
+                                     :subject :alcie
+                                     :known [:alice]
+                                     :severity :warn
+                                     :location {:step-text "When :alcie clicks" :uri "f.feature" :line 3}}
+                                    {:type :svo/unknown-interface
+                                     :interface :foo
+                                     :known [:web]
+                                     :severity :error
+                                     :location {:step-text "s" :uri "f.feature" :line 4}}]
+                       :counts {:svo-issue-count 2 :total-issues 2}}
+          output (with-err-str (console/print-diagnostics! diagnostics {:no-color true}))]
+      (is (str/includes? output "WARNING: Unknown subject :alcie"))
+      (is (str/includes? output "ERROR: Unknown interface :foo"))
+      (is (not (str/includes? output "ERROR: Unknown subject")))
+      ;; sl-89ii: every rendered issue counts toward the total, warns included
+      (is (str/includes? output "2 binding issue(s)")))))
+
+(deftest test-print-diagnostics-svo-missing-severity-defaults-error
+  (testing "SVO issue without :severity keeps the ERROR label"
+    (let [diagnostics {:undefined []
+                       :ambiguous []
+                       :invalid-arity []
+                       :svo-issues [{:type :svo/unknown-verb
+                                     :verb :smash
+                                     :known [:click]
+                                     :location {:step-text "s" :uri "f.feature" :line 5}}]
+                       :counts {:svo-issue-count 1 :total-issues 0}}
+          output (with-err-str (console/print-diagnostics! diagnostics {:no-color true}))]
+      (is (str/includes? output "ERROR: Unknown verb :smash")))))
+
+(deftest test-print-diagnostics-suite-lint-severity
+  (testing "Suite-lint issues (always :severity :error) keep the ERROR label"
+    (let [diagnostics {:undefined []
+                       :ambiguous []
+                       :invalid-arity []
+                       :suite-lint-issues [{:type :stepdef/undefined-interface
+                                            :severity :error
+                                            :message "Stepdef at steps.clj:8 requires undefined interface :sms"}]
+                       :errors [{:type :suite-lint/failed
+                                 :issues []
+                                 :message "Suite-load lint found 1 issue(s)"}]
+                       :counts {:total-issues 1}}
+          output (with-err-str (console/print-diagnostics! diagnostics {:no-color true}))]
+      (is (str/includes? output "Suite-load lint issues:"))
+      (is (str/includes? output "ERROR: Stepdef at steps.clj:8"))
+      (is (not (str/includes? output "Planning errors:"))))))
+
+;; -----------------------------------------------------------------------------
+;; print-warnings! Tests (sl-qk8l)
+;; -----------------------------------------------------------------------------
+
+(deftest test-print-warnings-renders-warn-svo-issues
+  (testing "Warn-level SVO issues render with the WARNING label on stderr"
+    (let [diagnostics {:svo-issues [{:type :svo/unknown-subject
+                                     :subject :alcie
+                                     :known [:alice]
+                                     :severity :warn
+                                     :location {:step-text "When :alcie clicks"
+                                                :uri "f.feature" :line 3}}]
+                       :counts {:svo-issue-count 1 :total-issues 1}}
+          output (with-err-str (console/print-warnings! diagnostics {:no-color true}))]
+      (is (str/includes? output "SVO validation warnings:"))
+      (is (str/includes? output "WARNING: Unknown subject :alcie")))))
+
+(deftest test-print-warnings-silent-when-no-warns
+  (testing "No output on clean diagnostics or error-only SVO issues"
+    (let [clean {:svo-issues [] :counts {:svo-issue-count 0 :total-issues 0}}
+          errors-only {:svo-issues [{:type :svo/unknown-subject
+                                     :subject :bad
+                                     :severity :error
+                                     :location {:step-text "s" :uri "f.feature" :line 1}}]
+                       :counts {:svo-issue-count 1 :total-issues 1}}]
+      (is (= "" (with-err-str (console/print-warnings! clean {:no-color true}))))
+      (is (= "" (with-err-str (console/print-warnings! errors-only {:no-color true}))))
+      (is (= "" (with-err-str (console/print-warnings! nil {:no-color true})))))))
+
 ;; -----------------------------------------------------------------------------
 ;; Color Tests
 ;; -----------------------------------------------------------------------------

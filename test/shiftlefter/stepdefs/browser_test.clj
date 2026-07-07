@@ -3,6 +3,7 @@
             [shiftlefter.stepengine.registry :as registry]
             [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.browser.protocol :as bp]
+            [shiftlefter.browser.intent :as browser-intent]
             [shiftlefter.stepdefs.browser]))
 
 ;; -----------------------------------------------------------------------------
@@ -114,7 +115,14 @@
     this)
   (switch-to-main-frame! [this]
     (swap! calls conj {:op :switch-to-main-frame})
-    this))
+    this)
+  (query-all [_this scope locator]
+    (swap! calls conj {:op :query-all :scope scope :locator locator})
+    (get @config :query-all []))
+  (query-all-pruned [_this scope locator boundary-css]
+    (swap! calls conj {:op :query-all-pruned :scope scope :locator locator
+                       :boundary boundary-css})
+    (get @config :query-all-pruned (get @config :query-all []))))
 
 (defn make-fake-browser
   ([] (->FakeBrowser (atom []) (atom {})))
@@ -476,11 +484,11 @@
                             (invoke-step ":user opens the browser to 'https://example.com'" ctx))))))
 
 (deftest test-invalid-locator
-  (testing "throws on invalid locator"
+  (testing "throws with the resolver's specific message (sl-h84), not a generic one"
     (let [browser (make-fake-browser)
           ctx (make-ctx-with-subject :user browser)]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                            #"Invalid locator"
+                            #"Map locator has no valid selector key"
                             (invoke-step ":user clicks {:invalid \"x\"}" ctx))))))
 
 ;; =============================================================================
@@ -931,6 +939,20 @@
         (is (some? (find-stepdef text))
             (str "Should find stepdef for intent reference pattern: " text))))))
 
+(deftest test-nested-intent-reference-patterns-match
+  (testing "Multi-segment nested intent addresses match step patterns (sl-1ps)"
+    ;; The resolver walks nested addresses; the step layer must capture the
+    ;; WHOLE address, not truncate at the first index. Pre-fix, locator-re
+    ;; stopped at Region.element[n], so these surfaced as 'undefined steps'.
+    (let [patterns [":alice clicks Bookmarks.tweet[2].quoted.author"
+                    ":alice should see Dashboard.featured[1].title with text 'Widget A'"
+                    ":alice should see Dashboard.featured[1].rating.stars with text '4.5'"
+                    ":alice should see Thread.post[1].comment[2].author with text 'Carol'"
+                    ":alice should see Feed.post[3].author with text 'Carol'"]]
+      (doseq [text patterns]
+        (is (some? (find-stepdef text))
+            (str "Should find stepdef for nested intent address: " text))))))
+
 (deftest test-intent-reference-pattern-rejects-invalid
   (testing "Invalid intent references don't match step patterns"
     ;; These should NOT match (invalid format)
@@ -944,3 +966,86 @@
       (doseq [text invalid-patterns]
         (is (nil? (find-stepdef text))
             (str "Should NOT find stepdef for invalid pattern: " text))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-h84 — resolution errors surface the resolver's specific message
+;;
+;; The §5/§7.5 "loud, specific, actionable" messages used to be collapsed into a
+;; generic "Invalid locator" ex-message (the good text buried in ex-data, never
+;; the headline). resolve-target* now lifts the resolver's own message(s).
+;; -----------------------------------------------------------------------------
+
+(def ^:private resolve-target* #'shiftlefter.stepdefs.browser/resolve-target*)
+
+(defn- thrown-ex
+  "Run `f`, returning the ExceptionInfo it throws (or nil if it doesn't)."
+  [f]
+  (try (f) nil (catch clojure.lang.ExceptionInfo e e)))
+
+(deftest resolution-error-lifts-specific-message-edn-path
+  (testing "a locator error's own message becomes ex-message, not 'Invalid locator'"
+    (let [e (thrown-ex #(resolve-target* nil "{:css \"a\" :id \"b\"}" nil))]
+      (is (some? e))
+      (is (= "Map locator has multiple selector keys" (ex-message e)))
+      (is (not= "Invalid locator" (ex-message e)))
+      (is (seq (:errors (ex-data e))) "structured :errors preserved for reporters"))))
+
+(deftest resolution-error-lifts-intent-message
+  (testing "the intent message (e.g. index-out-of-range) reaches the user verbatim"
+    (with-redefs [browser-intent/resolve-target
+                  (fn [_ _ _ _]
+                    {:errors [{:type :intent/index-out-of-range
+                               :message "Feed.post[99]: index 99 is out of range — 4 matches found"
+                               :data {:ref "Feed.post[99]" :index 99 :count 4}}]})]
+      (let [e (thrown-ex #(resolve-target* (make-fake-browser) "Feed.post[99]" :web))]
+        (is (= "Feed.post[99]: index 99 is out of range — 4 matches found"
+               (ex-message e)))
+        (is (= :intent/index-out-of-range
+               (-> e ex-data :errors first :type))
+            "structured detail still available to reporters")))))
+
+(deftest resolution-multi-error-messages-join
+  (testing "multiple resolver errors join into the ex-message"
+    (with-redefs [browser-intent/resolve-target
+                  (fn [_ _ _ _]
+                    {:errors [{:type :a :message "first thing wrong"}
+                              {:type :b :message "second thing wrong"}]})]
+      (let [e (thrown-ex #(resolve-target* (make-fake-browser) "Whatever.thing" :web))]
+        (is (= "first thing wrong; second thing wrong" (ex-message e)))))))
+
+(deftest resolution-error-without-messages-falls-back
+  (testing "a malformed error vector with no :message keeps the generic fallback"
+    (with-redefs [browser-intent/resolve-target
+                  (fn [_ _ _ _] {:errors [{:type :weird}]})]
+      (let [e (thrown-ex #(resolve-target* (make-fake-browser) "Whatever.thing" :web))]
+        (is (= "Invalid locator" (ex-message e)))))))
+
+;; -----------------------------------------------------------------------------
+;; retryable-error? (sl-jxi) — step-retry predicate over the shared classifier
+;; -----------------------------------------------------------------------------
+
+(def ^:private retryable-error?
+  #'shiftlefter.stepdefs.browser/retryable-error?)
+
+(deftest retryable-error-classes
+  (testing "delegates DOM-in-flux errors to the shared classifier"
+    (is (retryable-error?
+         (ex-info "stale" {:type :etaoin/http-error
+                           :response {:value {:error "stale element reference"}}}))
+        "structured W3C transient code")
+    (is (retryable-error?
+         (ex-info "Node with given id does not belong to the document" {}))
+        "sl-bnk inspector message stays retryable"))
+
+  (testing "ShiftLefter verification-step signals are retryable (poll-until-present)"
+    (is (retryable-error? (ex-info "assert" {:type :browser/assertion-failed}))
+        ":browser/assertion-failed")
+    (is (retryable-error?
+         (ex-info "idx" {:errors [{:type :intent/index-out-of-range}]}))
+        ":intent/index-out-of-range diagnostic"))
+
+  (testing "non-transient errors are NOT retried (over-match guard)"
+    (is (not (retryable-error?
+              (ex-info "click intercepted" {:type :etaoin/http-error
+                                            :response {:value {:error "element click intercepted"}}}))))
+    (is (not (retryable-error? (ex-info "boom" {}))))))

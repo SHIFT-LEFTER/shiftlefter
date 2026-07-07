@@ -411,18 +411,24 @@
     (is (false? (glossary/singleton? test-glossary :unknown)))))
 
 (deftest all-subject-forms-test
-  (testing "returns type keys plus qualified instance forms"
+  (testing "returns singleton type keys plus qualified instance forms"
     (let [forms (glossary/all-subject-forms test-glossary)]
-      ;; Type keys
-      (is (some #{:user} forms))
-      (is (some #{:admin} forms))
+      ;; Singleton type keys (resolvable standalone)
       (is (some #{:guest} forms))
       (is (some #{:test-harness/fixture-insertion} forms))
       ;; Qualified instances
       (is (some #{:user/alice} forms))
       (is (some #{:user/bob} forms))
       (is (some #{:admin/pat} forms))
-      (is (some #{:admin/admin-banned} forms)))))
+      (is (some #{:admin/admin-banned} forms))))
+
+  (testing "excludes bare types-with-instances — unresolvable, so listing or
+            suggesting them misleads (sl-6e7p)"
+    (let [forms (glossary/all-subject-forms test-glossary)]
+      (is (not-any? #{:user} forms))
+      (is (not-any? #{:admin} forms))
+      ;; every listed form must actually resolve
+      (is (every? #(glossary/known-subject? test-glossary %) forms)))))
 
 ;; -----------------------------------------------------------------------------
 ;; known-subject? with types/instances
@@ -695,3 +701,33 @@
         (is (re-find #"frame :default" (:message pinch-err))
             "frame name is surfaced for nested failures")
         (is (re-find #"missing required key :pattern" (:message pinch-err)))))))
+
+;; -----------------------------------------------------------------------------
+;; Costume :wears — schema + resolution (sl-rnm)
+;; -----------------------------------------------------------------------------
+
+(deftest subject-entry-wears-schema-test
+  (testing "::subject-entry accepts an optional :wears keyword"
+    (is (s/valid? ::glossary/subject-entry {:wears :finance}))
+    (is (s/valid? ::glossary/subject-entry {:instances [:alice :bob] :wears :finance}))
+    (is (s/valid? ::glossary/subject-entry {:instances [:alice :bob]})
+        "entries without :wears still conform")
+    (is (s/valid? ::glossary/subject-entry {})
+        "empty entry (singleton) still conforms"))
+  (testing "::subject-entry rejects a non-keyword :wears"
+    (is (not (s/valid? ::glossary/subject-entry {:wears "finance"})))))
+
+(deftest costume-for-subject-test
+  (let [glossary {:subjects {:operator {:instances [:alice] :wears :finance}
+                             :admin {:wears :ops}
+                             :guest {}}
+                  :instance-index {:alice :operator}}]
+    (testing "resolves an instance to its type's costume"
+      (is (= :finance (glossary/costume-for-subject glossary :alice)))
+      (is (= :finance (glossary/costume-for-subject glossary :operator/alice))))
+    (testing "resolves a singleton type's costume directly"
+      (is (= :ops (glossary/costume-for-subject glossary :admin))))
+    (testing "nil when the subject wears nothing"
+      (is (nil? (glossary/costume-for-subject glossary :guest))))
+    (testing "nil for an unknown subject"
+      (is (nil? (glossary/costume-for-subject glossary :nobody))))))

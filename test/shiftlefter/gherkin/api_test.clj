@@ -151,6 +151,26 @@
       (is (= :parse-errors (:reason result)))
       (is (vector? (:details result))))))
 
+;; sl-q2uj: comment-bearing files get a third state, distinct from
+;; OK and NEEDS FORMATTING.
+
+(def feature-with-interior-comment
+  "Feature: Test\n\n  Scenario: Basic\n    Given a step\n    # between steps\n    When another\n")
+
+(def feature-with-top-comment
+  "# top of file\n\nFeature: Test\n\n  Scenario: Basic\n    Given a step\n")
+
+(deftest fmt-check-returns-comments-state-for-interior-comments
+  (testing "interior comments produce :comments status with line info"
+    (let [result (api/fmt-check feature-with-interior-comment)]
+      (is (= :comments (:status result)))
+      (is (= [{:line 5 :text "# between steps"}] (:comments result))))))
+
+(deftest fmt-check-top-comments-are-not-flagged
+  (testing "comments above the Feature line are preserved by canonical, so no :comments state"
+    (let [result (api/fmt-check feature-with-top-comment)]
+      (is (= :ok (:status result))))))
+
 ;; -----------------------------------------------------------------------------
 ;; fmt-canonical tests
 ;; -----------------------------------------------------------------------------
@@ -174,6 +194,16 @@
     (let [result (api/fmt-canonical invalid-feature)]
       (is (= :error (:status result)))
       (is (= :parse-errors (:reason result))))))
+
+(deftest fmt-canonical-reports-lost-comments
+  (testing "carries :lost-comments when output would drop interior comments (sl-q2uj)"
+    (let [result (api/fmt-canonical feature-with-interior-comment)]
+      (is (= :ok (:status result)))
+      (is (= [{:line 5 :text "# between steps"}] (:lost-comments result)))))
+  (testing "no :lost-comments key when formatting is comment-safe"
+    (let [result (api/fmt-canonical feature-with-top-comment)]
+      (is (= :ok (:status result)))
+      (is (not (contains? result :lost-comments))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Envelope contract enforcement

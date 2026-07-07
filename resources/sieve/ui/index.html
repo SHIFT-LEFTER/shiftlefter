@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SIEVE Toddler Shell — walking skeleton</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Toolbar -->
+<div id="toolbar">
+  <input type="text" id="url-input" data-testid="url-input" placeholder="Enter URL and press Navigate..." aria-label="Target URL">
+  <button type="button" class="btn" id="btn-navigate" data-testid="btn-navigate">Navigate</button>
+  <button type="button" class="btn btn-primary" id="btn-sieve" data-testid="btn-sieve">Sieve</button>
+  <button type="button" class="btn" id="btn-proposal" data-testid="btn-proposal">Write Proposal</button>
+  <span id="status-indicator" data-testid="status-indicator">Ready</span>
+</div>
+
+<!-- Metadata strip -->
+<div id="metadata-strip" data-testid="metadata-strip"></div>
+
+<!-- Screenshot viewport -->
+<div id="viewport">
+  <div id="empty-state">
+    <div>Click <kbd>Sieve</kbd> to capture the current page</div>
+    <div>or enter a URL and click <kbd>Navigate</kbd></div>
+  </div>
+  <div id="screenshot-container" style="display:none;">
+    <img id="screenshot-img" data-testid="screenshot-img" alt="Page screenshot">
+    <svg id="overlay-svg" data-testid="overlay-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+  </div>
+</div>
+
+<!-- Bottom panel -->
+<div id="panel">
+  <div id="panel-info">
+    <div id="element-detail" data-testid="element-detail">
+      <div style="color:#555;">No elements loaded. Click Sieve to start.</div>
+    </div>
+    <div id="summary" data-testid="summary"></div>
+  </div>
+  <div id="panel-controls">
+    <div class="category-row">
+      <button type="button" class="cat-btn" data-cat="clickable" data-testid="cat-clickable" onclick="classify('clickable')"><u>c</u>lick</button>
+      <button type="button" class="cat-btn" data-cat="typable" data-testid="cat-typable" onclick="classify('typable')"><u>t</u>ype</button>
+      <button type="button" class="cat-btn" data-cat="readable" data-testid="cat-readable" onclick="classify('readable')"><u>r</u>ead</button>
+      <button type="button" class="cat-btn" data-cat="chrome" data-testid="cat-chrome" onclick="classify('chrome')">chr(<u>x</u>)</button>
+      <button type="button" class="cat-btn" data-cat="custom" data-testid="cat-custom" onclick="classify('custom')">c<u>u</u>stom</button>
+    </div>
+    <div class="rename-row">
+      <label>Intent</label>
+      <input id="intent-input" data-testid="intent-input" placeholder="e.g. Login">
+      <label>Name</label>
+      <input id="name-input" data-testid="name-input" placeholder="e.g. email">
+      <label>Notes</label>
+      <input id="notes-input" data-testid="notes-input" placeholder="optional">
+    </div>
+    <div class="category-row">
+      <button type="button" class="cat-btn" data-decision="accept" data-testid="btn-accept" onclick="decide('accept')"><u>a</u>ccept</button>
+      <button type="button" class="cat-btn" data-decision="reject" data-testid="btn-reject" onclick="decide('reject')">re<u>j</u>ect</button>
+      <button type="button" class="cat-btn" data-decision="ambiguous" data-testid="btn-ambiguous" onclick="decide('ambiguous')">a<u>m</u>biguous</button>
+    </div>
+    <div class="nav-row">
+      <button type="button" class="nav-btn" data-testid="nav-prev" onclick="navigate(-1)" title="Previous element">&larr;</button>
+      <button type="button" class="nav-btn" data-testid="nav-next" onclick="navigate(1)" title="Next element">&rarr;</button>
+      <span id="progress" data-testid="progress">—</span>
+      <span id="classified-count" data-testid="classified-count"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Error toast -->
+<div id="toast" data-testid="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

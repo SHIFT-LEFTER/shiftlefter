@@ -24,9 +24,12 @@
             [clojure.tools.logging :as log]
             [shiftlefter.gherkin.api :as api]
             [shiftlefter.gherkin.io :as io]
+            [shiftlefter.costume.wardrobe :as wardrobe]
+            [shiftlefter.project-context :as project-context]
             [shiftlefter.runner.config :as config]
             [shiftlefter.runner.discover :as discover]
             [shiftlefter.runner.events :as events]
+            [shiftlefter.intent.state :as intent-state]
             [shiftlefter.runner.report.console :as console]
             [shiftlefter.runner.report.edn :as report-edn]
             [shiftlefter.runner.setup :as setup]
@@ -139,6 +142,38 @@
       (and (pos? (or pending 0)) (not allow-pending?)) 1
       :else 0)))
 
+(defn- resolve-glossary-config [project-context glossary-config]
+  (when glossary-config
+    (cond-> glossary-config
+      (:subjects glossary-config)
+      (update :subjects #(project-context/resolve-config-path project-context %))
+
+      (:intents glossary-config)
+      (update :intents #(project-context/resolve-config-path project-context %))
+
+      (:verbs glossary-config)
+      (update :verbs (fn [verbs]
+                       (into {}
+                             (map (fn [[interface-type path]]
+                                    [interface-type
+                                     (project-context/resolve-config-path project-context path)]))
+                             verbs))))))
+
+(defn- resolve-config-declared-paths
+  "Resolve path-bearing config values against :config-root exactly once for a run."
+  [project-context config]
+  (cond-> config
+    (seq (get-in config [:runner :step-paths]))
+    (update-in [:runner :step-paths]
+               #(project-context/resolve-config-paths project-context %))
+
+    (seq (get-in config [:runner :macros :registry-paths]))
+    (update-in [:runner :macros :registry-paths]
+               #(project-context/resolve-config-paths project-context %))
+
+    (:glossaries config)
+    (update :glossaries #(resolve-glossary-config project-context %))))
+
 ;; -----------------------------------------------------------------------------
 ;; Event Publishing
 ;; -----------------------------------------------------------------------------
@@ -183,21 +218,62 @@
    Returns [:continue {:config ... :step-paths ... :allow-pending? ...}]
    or [:exit error-result]."
   [run-id opts]
-  (let [config-result (config/load-config-safe {:config-path (:config-path opts)})]
+  (let [project-context (:project-context opts)
+        config-result (config/load-config-safe {:project-context project-context})]
     (if (= :error (:status config-result))
       [:exit (report-planning-error! run-id opts
                {:error {:type :config/error :message (:message config-result)}
                 :stderr-msg #(println "Config error:" (:message config-result))})]
-      (let [config (:config config-result)]
+      (let [config (resolve-config-declared-paths project-context (:config config-result))]
         [:continue {:config config
-                    :step-paths (or (:step-paths opts) (config/get-step-paths config))
+                    :step-paths (or (some->> (:step-paths opts)
+                                             (project-context/resolve-cli-paths project-context))
+                                    (config/get-step-paths config))
                     :allow-pending? (config/allow-pending? config)}]))))
+
+(defn- load-intents-stage
+  "Stage 1b: Load the intents glossary into the global intent-state from config.
+
+   Reads `:glossaries {:intents <path>}`, resolves it relative to the config
+   file's directory (the same base-dir rule setup.clj uses), and loads it via
+   `intent-state/reload-intents!` so the browser step path's `resolve-target`
+   sees this project's intents — not a stale hardcoded `glossary/intents`.
+
+   Absent `:intents` → clear state (a project may legitimately have no intents).
+   A malformed/invalid intents glossary is a planning failure (exit 2),
+   consistent with the other config/setup stages.
+
+   Returns [:continue nil] or [:exit error-result]."
+  [run-id opts config]
+  (let [intents-path (:intents (config/get-glossary-config config))]
+    (if-not intents-path
+      (do (intent-state/clear-intents!) [:continue nil])
+      (let [project-context (or (:project-context opts)
+                                (project-context/resolve
+                                 (cond-> {}
+                                   (:config-path opts) (assoc :config-path (:config-path opts)))))
+            dir (if (fs/absolute? intents-path)
+                  intents-path
+                  (project-context/resolve-config-path project-context intents-path))]
+        (try
+          (intent-state/reload-intents! dir)
+          [:continue nil]
+          (catch clojure.lang.ExceptionInfo e
+            [:exit (report-planning-error! run-id opts
+                     {:error {:type :glossary/intents-load-failed
+                              :message (str "Failed to load intents from " dir)
+                              :errors (:errors (ex-data e))}
+                      :stderr-msg #(do (println "Intents load error:" (ex-message e))
+                                       (doseq [err (:errors (ex-data e))]
+                                         (println " " (:message err))))})]))))))
 
 (defn- discover-features-stage
   "Stage 2: Discover feature files.
    Returns [:continue {:feature-paths [...]}] or [:exit error-result]."
   [run-id opts]
-  (let [discover-result (discover/discover-feature-files-or-error (:paths opts))]
+  (let [project-context (:project-context opts)
+        paths (project-context/resolve-cli-paths project-context (:paths opts))
+        discover-result (discover/discover-feature-files-or-error paths)]
     (if (= :error (:status discover-result))
       [:exit (report-planning-error! run-id opts
                {:error {:type (:type discover-result) :message (:message discover-result)}
@@ -263,6 +339,20 @@
                 :diagnostics diagnostics}])
       [:continue {:plans plans :diagnostics diagnostics}])))
 
+(defn- dry-run-edn-summary
+  "Build the EDN summary for a dry-run success, including warn-level SVO
+   diagnostics that would otherwise be dropped (sl-qk8l). `group-label`
+   is non-nil on the setup-group path only."
+  [run-id plans diagnostics group-label]
+  (cond-> {:run/id run-id
+           :run/exit-code 0
+           :run/status :dry-run
+           :counts {:scenarios (count plans)
+                    :steps (reduce + (map #(count (:plan/steps %)) plans))}}
+    group-label (assoc :group group-label)
+    (report-edn/execution-diagnostics diagnostics)
+    (assoc :diagnostics (report-edn/execution-diagnostics diagnostics))))
+
 (defn- execute-and-report-stage
   "Stage 8-10: Execute scenarios, report results, return exit code."
   [run-id opts bus config features all-pickles plans diagnostics allow-pending? report-opts]
@@ -280,7 +370,10 @@
         (doseq [scenario (:scenarios exec-result)]
           (console/print-scenario! scenario report-opts)))
       (console/print-failures! (:scenarios exec-result) report-opts)
-      (console/print-summary! exec-result report-opts))
+      (console/print-summary! exec-result report-opts)
+      ;; Warn-level SVO issues didn't block execution but must still reach a
+      ;; human (sl-qk8l/sl-6h4r) — EDN output already carries them.
+      (console/print-warnings! diagnostics report-opts))
     (when (:edn opts)
       (report-edn/prn-summary
        (report-edn/build-summary run-id exit-code exec-result {:diagnostics diagnostics})))
@@ -309,7 +402,7 @@
    - [:loaded {:setups [...] :path}] — loaded successfully
    - [:exit error-result]           — load failed, treat as planning error"
   [run-id opts config]
-  (if-let [setup-path (setup/find-setup-file (config/resolve-config-path opts))]
+  (if-let [setup-path (setup/find-setup-file (:project-context opts))]
     (let [{:keys [ok error]} (setup/load-setup setup-path config)]
       (if error
         [:exit (report-planning-error! run-id opts
@@ -382,9 +475,13 @@
                     (if (:dry-run opts)
                       (let [exit-code 0]
                         (when-not (:edn opts)
+                          (console/print-warnings! diagnostics report-opts)
                           (binding [*out* *err*]
                             (println (str "[" label "] " (count plans)
                                           " scenario(s) bound successfully (dry run)"))))
+                        (when (:edn opts)
+                          (report-edn/prn-summary
+                           (dry-run-edn-summary run-id plans diagnostics label)))
                         {:exit-code exit-code :run-id run-id :status :dry-run
                          :group-label label :plans plans})
                       (-> (execute-and-report-stage
@@ -452,62 +549,70 @@
     :result <exec-result>
     :diagnostics <bind-diagnostics>}"
   [opts]
-  (let [run-id (str (java.util.UUID/randomUUID))
+  (let [project-context (or (:project-context opts)
+                            (project-context/resolve
+                             (cond-> {}
+                               (:config-path opts) (assoc :config-path (:config-path opts)))))
+        opts (assoc opts :project-context project-context)
+        run-id (str (java.util.UUID/randomUUID))
         bus (events/make-memory-bus)
         report-opts (select-keys opts [:verbose :no-color])]
-    (try
+    (binding [wardrobe/*project-context* project-context]
+      (try
       (let [[s1 d1] (load-config-stage run-id opts)]
         (if (= :exit s1) d1
           (let [{:keys [config step-paths allow-pending?]} d1
-                ;; Setup-aware branch (sl-dbu): load setup.clj if present.
-                ;; If found, it owns the feature plan — bypass discovery and
-                ;; the single-suite pipeline; loop over groups instead.
-                [s-setup d-setup] (load-setup-stage run-id opts config)]
-            (cond
-              (= :exit s-setup) d-setup
+                ;; Stage 1b: load this project's intents glossary into
+                ;; intent-state before any features run, so the browser step
+                ;; path resolves nested addresses against the right glossary.
+                [s-int d-int] (load-intents-stage run-id opts config)]
+            (if (= :exit s-int) d-int
+              (let [;; Setup-aware branch (sl-dbu): load setup.clj if present.
+                    ;; If found, it owns the feature plan — bypass discovery and
+                    ;; the single-suite pipeline; loop over groups instead.
+                    [s-setup d-setup] (load-setup-stage run-id opts config)]
+                (cond
+                  (= :exit s-setup) d-setup
 
-              (= :loaded s-setup)
-              (let [[s4 d4] (load-steps-stage run-id opts step-paths)
-                    setup-base-dir (str (fs/parent (:path d-setup)))]
-                (if (= :exit s4) d4
-                  (run-with-setups! run-id opts config (:setups d-setup)
-                                    setup-base-dir bus report-opts allow-pending?)))
+                  (= :loaded s-setup)
+                  (let [[s4 d4] (load-steps-stage run-id opts step-paths)
+                        setup-base-dir (str (fs/parent (:path d-setup)))]
+                    (if (= :exit s4) d4
+                      (run-with-setups! run-id opts config (:setups d-setup)
+                                        setup-base-dir bus report-opts allow-pending?)))
 
-              :else
-              (let [[s2 d2] (discover-features-stage run-id opts)]
-                (if (= :exit s2)
-                  d2
-                  (let [{:keys [feature-paths]} d2
-                        [s3 d3] (parse-features-stage run-id opts feature-paths)]
-                    (if (= :exit s3)
-                      d3
-                      (let [{:keys [all-pickles features]} d3
-                            [s4 d4] (load-steps-stage run-id opts step-paths)]
-                        (if (= :exit s4)
-                          d4
-                          (let [[s5 d5] (compile-suite-stage run-id opts config all-pickles report-opts)]
-                            (if (= :exit s5)
-                              d5
-                              (let [{:keys [plans diagnostics]} d5]
-                                (if (:dry-run opts)
-                                  (let [exit-code 0]
-                                    (when-not (:edn opts)
-                                      (binding [*out* *err*]
-                                        (println (str (count plans) " scenario(s) bound successfully (dry run)"))))
-                                    (when (:edn opts)
-                                      (report-edn/prn-summary
-                                       {:run/id run-id
-                                        :run/exit-code exit-code
-                                        :run/status :dry-run
-                                        :counts {:scenarios (count plans)
-                                                 :steps (reduce + (map #(count (:plan/steps %)) plans))}}))
-                                    {:exit-code exit-code
-                                     :run-id run-id
-                                     :status :dry-run
-                                     :plans plans})
-                                  (execute-and-report-stage run-id opts bus config features
-                                                            all-pickles plans diagnostics
-                                                            allow-pending? report-opts)))))))))))))))
+                  :else
+                  (let [[s2 d2] (discover-features-stage run-id opts)]
+                    (if (= :exit s2)
+                      d2
+                      (let [{:keys [feature-paths]} d2
+                            [s3 d3] (parse-features-stage run-id opts feature-paths)]
+                        (if (= :exit s3)
+                          d3
+                          (let [{:keys [all-pickles features]} d3
+                                [s4 d4] (load-steps-stage run-id opts step-paths)]
+                            (if (= :exit s4)
+                              d4
+                              (let [[s5 d5] (compile-suite-stage run-id opts config all-pickles report-opts)]
+                                (if (= :exit s5)
+                                  d5
+                                  (let [{:keys [plans diagnostics]} d5]
+                                    (if (:dry-run opts)
+                                      (let [exit-code 0]
+                                        (when-not (:edn opts)
+                                          (console/print-warnings! diagnostics report-opts)
+                                          (binding [*out* *err*]
+                                            (println (str (count plans) " scenario(s) bound successfully (dry run)"))))
+                                        (when (:edn opts)
+                                          (report-edn/prn-summary
+                                           (dry-run-edn-summary run-id plans diagnostics nil)))
+                                        {:exit-code exit-code
+                                         :run-id run-id
+                                         :status :dry-run
+                                         :plans plans})
+                                      (execute-and-report-stage run-id opts bus config features
+                                                                all-pickles plans diagnostics
+                                                                allow-pending? report-opts)))))))))))))))))
       ;; Catch any uncaught exceptions → exit 3
       (catch Throwable t
         (let [exit-code 3
@@ -526,7 +631,7 @@
           {:exit-code exit-code
            :run-id run-id
            :status :crashed
-           :error error})))))
+           :error error}))))))
 
 (defn execute-with-crash!
   "Test helper: force a crash to test exit code 3."

@@ -1,6 +1,20 @@
-# SVO Demo Example
+# SVO Demo — Reference
 
-This example demonstrates ShiftLefter's Subject-Verb-Object (SVO) validation system.
+This is a **reference example**, not part of the numbered on-ramp (see
+[the examples index](../README.md)). It demonstrates ShiftLefter's
+Subject-Verb-Object (SVO) validation system, and specifically the
+**migration path from legacy plain-name steps to Shifted steps**: its
+feature file deliberately uses bare English names ("Alice", "Bob") with
+`(\w+)` subject captures — the *legacy* style — while its glossaries and
+config show the `:type/instance` model (`:user/alice`) that the on-ramp
+examples teach. If you're starting fresh, write `:type/instance` steps
+from day one (see [`02b`](../02b-browser-multi-actor/)); this example is
+for teams bringing an existing plain-name suite under validation.
+
+Note the `:svo` levels here are deliberately permissive (`:warn` for
+subjects and verbs) — that's the migration posture: surface unknowns
+without breaking the legacy suite, then ratchet to `:error` as the
+glossary fills in.
 
 ## What is SVO?
 
@@ -28,8 +42,10 @@ svo-demo/
 
 ## Running the Example
 
-**Note**: This is a reference example showing the file structure and SVO patterns.
-To run it, you would copy this directory to be your project root.
+**Note**: This is a reference example showing the file structure and SVO
+patterns — it is **not runnable in place**. To run it, copy this directory
+to be your project root. (Release zip installs `sl`; in a checkout of this
+repo substitute `bin/sl`.)
 
 For a real project, your directory would look like:
 

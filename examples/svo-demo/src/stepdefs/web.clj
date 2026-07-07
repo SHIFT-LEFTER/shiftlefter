@@ -16,6 +16,8 @@
    Key concepts:
    - :interface — which configured interface this step uses (e.g., :web)
    - :svo — subject/verb/object extraction with :$1, :$2 placeholders
+   - :frame — which argument shape of the verb this step uses; frames (and
+     their :args slots) are declared per-verb in the glossary (sl-hse)
    - Capture groups map to :$1, :$2, etc. in order
 
    Convention: ctx-first
@@ -51,12 +53,15 @@
 ;; Pattern: "{Subject} fills the {field} field with {value}"
 ;; Subject comes from first capture group (:$1)
 ;; Object is the field being filled (:$2)
+;; The :with frame of :fill takes one arg slot, :value (:$3)
 
 (defstep #"^(\w+) fills the (\w+) field with \"([^\"]+)\"$"
   {:interface :web
-   :svo {:subject :$1      ; First capture = subject (Alice, Bob, etc.)
+   :svo {:subject :$1       ; First capture = subject (Alice, Bob, etc.)
          :verb :fill        ; Action being performed
-         :object :$2}}      ; Second capture = what's being filled
+         :frame :with       ; "S fills O with VALUE"
+         :object :$2        ; Second capture = what's being filled
+         :args {:value :$3}}}
   [ctx subject field value]
   ;; In a real test, this would use a browser driver
   (println (str "[" subject "] Filling " field " with: " value))
@@ -69,6 +74,7 @@
   {:interface :web
    :svo {:subject :$1
          :verb :click
+         :frame :default    ; "S clicks O"
          :object :$2}}
   [ctx subject element]
   (println (str "[" subject "] Clicking: " element))
@@ -81,6 +87,7 @@
   {:interface :web
    :svo {:subject :$1
          :verb :see
+         :frame :visible    ; "S sees O"
          :object :$2}}
   [ctx subject element]
   (println (str "[" subject "] Verifying visible: " element))
@@ -90,7 +97,9 @@
   {:interface :web
    :svo {:subject :$1
          :verb :see
-         :object "message"}}
+         :frame :text       ; "S sees O with text TEXT"
+         :object "message"
+         :args {:text :$2}}}
   [ctx subject message]
   (println (str "[" subject "] Verifying message: " message))
   ctx)
@@ -99,6 +108,7 @@
   {:interface :web
    :svo {:subject :$1
          :verb :see
+         :frame :visible    ; "S sees O"
          :object :$2}}
   [ctx subject element]
   (println (str "[" subject "] Verifying visible: " element))
@@ -111,6 +121,7 @@
   {:interface :web
    :svo {:subject :$1
          :verb :navigate
+         :frame :to         ; "S navigates to O"
          :object :$2}}
   [ctx subject page]
   (println (str "[" subject "] Navigating to: " page))
@@ -127,6 +138,13 @@
 ;; 2. VERB VALIDATION
 ;;    Verbs like :fill, :click, :see are validated against the verb glossary
 ;;    for the interface type. Using :smash would fail validation.
+;;
+;; 2b. FRAME VALIDATION
+;;    Each verb declares a closed set of frames (argument shapes) in the
+;;    glossary; every shifted step must name one via :frame, and its :args
+;;    keys must match the frame's declared slots. :fill has one frame,
+;;    :with ("S fills O with VALUE"), so its step declares
+;;    :frame :with :args {:value :$3}. Omitting :frame fails validation.
 ;;
 ;; 3. INTERFACE vs TYPE
 ;;    The :interface in metadata refers to the NAME in config (:web here).

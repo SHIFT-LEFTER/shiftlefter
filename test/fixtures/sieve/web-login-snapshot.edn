@@ -1,0 +1,101 @@
+{:schema/version 1
+ :interface {:name :web :type :web}
+ :source {:kind :fixture
+          :url "https://example.test/login"
+          :fixture "test/fixtures/sieve/web-login-snapshot.edn"}
+ :capture {:captured-at "2026-06-16T12:00:00Z"
+           :mechanism :etaoin-sieve-js
+           :best-effort? true
+           :deterministic? false
+           :warnings []}
+ :environment {:browser "fixture"
+               :viewport {:w 1280 :h 720}
+               :locale "en-US"}
+ :project {:projection/id "proj-fixture"
+           :projection/version 1
+           :fingerprint "projection-fixture"
+           :source :working-tree
+           :status :ok}
+ :payload-schema :shiftlefter.sieve.web/evidence.v1
+ :payload {:html "<!doctype html><html><head><title>Login</title></head><body><main><form id=\"login\"><label for=\"email\">Email</label><input id=\"email\" name=\"email\" type=\"email\"><label for=\"password\">Password</label><input id=\"password\" name=\"password\" type=\"password\"><button id=\"submit\" type=\"submit\">Sign in</button></form></main></body></html>"
+           :url {:raw "https://example.test/login"
+                 :origin "https://example.test"
+                 :protocol "https"
+                 :hostname "example.test"
+                 :port nil
+                 :pathname "/login"
+                 :search nil
+                 :params {}
+                 :hash nil}
+           :title "Login"
+           :viewport {:w 1280 :h 720}
+           :inventory {:url {:raw "https://example.test/login"
+                             :origin "https://example.test"
+                             :protocol "https"
+                             :hostname "example.test"
+                             :port nil
+                             :pathname "/login"
+                             :search nil
+                             :params {}
+                             :hash nil}
+                       :title "Login"
+                       :viewport {:w 1280 :h 720}
+                       :window {:w 1280 :h 720}
+                       :elements [{:category "chrome"
+                                   :roles ["chrome"]
+                                   :confidence "certain"
+                                   :tag "main"
+                                   :elementType nil
+                                   :label "Email Password Sign in"
+                                   :locators {}
+                                   :state {:visible true}
+                                   :rect {:x 0 :y 0 :w 1280 :h 720}
+                                   :region nil
+                                   :form nil
+                                   :ariaRole nil}
+                                  {:category "typable"
+                                   :roles ["typable"]
+                                   :confidence "certain"
+                                   :tag "input"
+                                   :elementType "email"
+                                   :label "Email"
+                                   :locators {:id "email" :name "email"}
+                                   :state {:visible true :disabled false}
+                                   :rect {:x 24 :y 48 :w 240 :h 32}
+                                   :region "main"
+                                   :form "login"
+                                   :ariaRole nil}
+                                  {:category "typable"
+                                   :roles ["typable"]
+                                   :confidence "certain"
+                                   :tag "input"
+                                   :elementType "password"
+                                   :label "Password"
+                                   :locators {:id "password" :name "password"}
+                                   :state {:visible true :disabled false}
+                                   :rect {:x 24 :y 96 :w 240 :h 32}
+                                   :region "main"
+                                   :form "login"
+                                   :ariaRole nil}
+                                  {:category "clickable"
+                                   :roles ["clickable"]
+                                   :confidence "certain"
+                                   :tag "button"
+                                   :elementType "submit"
+                                   :label "Sign in"
+                                   :locators {:id "submit"}
+                                   :state {:visible true :disabled false}
+                                   :rect {:x 24 :y 144 :w 96 :h 36}
+                                   :region "main"
+                                   :form "login"
+                                   :ariaRole nil}]
+                       :forms [{:id "login" :elementRefs ["email" "password" "submit"]}]
+                       :regions {"main" {}}
+                       :iframes []
+                       :meta {:description nil :ogTitle nil :canonical nil}
+                       :storage {:localStorage [] :sessionStorage []}
+                       :console []
+                       :timestamp "2026-06-16T12:00:00Z"
+                       :cookies []
+                       :tabs 1}}
+ :warnings []}

@@ -8,8 +8,7 @@
 
    ```clojure
    {:chrome-path \"/custom/path/to/chrome\"
-    :chromedriver-path \"/custom/path/to/chromedriver\"
-    :default-stealth true}
+    :chromedriver-path \"/custom/path/to/chromedriver\"}
    ```
 
    ## Precedence
@@ -24,11 +23,11 @@
    ```clojure
    ;; Load user config
    (load-user-config)
-   ;; => {:chrome-path \"/custom/chrome\" :default-stealth true}
+   ;; => {:chrome-path \"/custom/chrome\"}
 
    ;; Merge with explicit opts (opts win)
-   (merge-with-user-config {:stealth false})
-   ;; => {:chrome-path \"/custom/chrome\" :stealth false}
+   (merge-with-user-config {:chrome-path \"/other/chrome\"})
+   ;; => {:chrome-path \"/other/chrome\"}
    ```"
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
@@ -70,7 +69,7 @@
    Example:
    ```clojure
    (load-user-config)
-   ;; => {:chrome-path \"/custom/chrome\" :default-stealth true}
+   ;; => {:chrome-path \"/custom/chrome\"}
 
    ;; File doesn't exist
    (load-user-config)
@@ -99,18 +98,6 @@
 ;; Config Merging
 ;; -----------------------------------------------------------------------------
 
-(defn- translate-user-keys
-  "Translate user config keys to opts keys.
-
-   User config uses different key names for clarity:
-   - :default-stealth -> :stealth (only if :stealth not in opts)"
-  [user-config opts]
-  (cond-> user-config
-    ;; Only apply default-stealth if :stealth not explicitly set
-    (and (contains? user-config :default-stealth)
-         (not (contains? opts :stealth)))
-    (assoc :stealth (:default-stealth user-config))))
-
 (defn merge-with-user-config
   "Merge explicit opts with user config.
 
@@ -119,24 +106,51 @@
    Relevant keys from user config:
    - :chrome-path — path to Chrome binary
    - :chromedriver-path — path to ChromeDriver binary
-   - :default-stealth — default value for :stealth option
 
    Example:
    ```clojure
-   ;; User config: {:chrome-path \"/custom/chrome\" :default-stealth true}
+   ;; User config: {:chrome-path \"/custom/chrome\"}
 
    (merge-with-user-config {})
-   ;; => {:chrome-path \"/custom/chrome\" :stealth true}
-
-   (merge-with-user-config {:stealth false})
-   ;; => {:chrome-path \"/custom/chrome\" :stealth false}
+   ;; => {:chrome-path \"/custom/chrome\"}
 
    (merge-with-user-config {:chrome-path \"/other/chrome\"})
-   ;; => {:chrome-path \"/other/chrome\" :stealth true}
+   ;; => {:chrome-path \"/other/chrome\"}
    ```"
   [opts]
   (let [user-config (load-user-config)]
     (if user-config
-      (let [translated (translate-user-keys user-config opts)]
-        (merge translated opts))
+      (merge user-config opts)
       opts)))
+
+;; -----------------------------------------------------------------------------
+;; ChromeDriver Resolution
+;; -----------------------------------------------------------------------------
+
+(defn resolve-chromedriver-path
+  "Resolve the ChromeDriver (WebDriver server) binary path.
+
+   Single source of truth for chromedriver discovery, shared by the fresh-spawn
+   adapter path (`adapters/etaoin` `create-browser`) and the costume
+   launch/attach path (`shiftlefter.costume`) so they cannot drift.
+
+   Precedence:
+   1. `:path-driver` in opts (highest — explicit override)
+   2. `:chromedriver-path` in `~/.shiftlefter/config.edn`
+   3. nil (caller falls through to PATH)
+
+   Parse errors in the user config are swallowed (→ nil → PATH), matching the
+   adapter's prior inline behavior.
+
+   Example:
+   ```clojure
+   (resolve-chromedriver-path {:path-driver \"/explicit/chromedriver\"})
+   ;; => \"/explicit/chromedriver\"
+
+   ;; config.edn {:chromedriver-path \"/cfg/chromedriver\"}, no opt
+   (resolve-chromedriver-path {})
+   ;; => \"/cfg/chromedriver\"
+   ```"
+  [opts]
+  (or (:path-driver opts)
+      (:chromedriver-path (:ok (load-user-config-safe)))))

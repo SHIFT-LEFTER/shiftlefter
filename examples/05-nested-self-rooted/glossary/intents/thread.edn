@@ -1,0 +1,8 @@
+;; Thread — one expanded post that quotes another post and carries comments.
+;; Same self-rooted Post component as the Feed. This region exercises the
+;; nearest-enclosing-instance rule (§8.1): Thread.post[*] is the top-level post
+;; only (not the quoted one), and Thread.post[1].author is unique.
+{:intent "Thread"
+ :elements {}
+ :root {:web {:css "[data-testid='thread']"}}
+ :collections {:post {:intent "Post" :cardinality :many}}}

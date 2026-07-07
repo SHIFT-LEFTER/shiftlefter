@@ -24,6 +24,7 @@
             [shiftlefter.gherkin.printer]
             [shiftlefter.gherkin.tokens]
             [shiftlefter.runner.setup]
+            [shiftlefter.sieve.contract]
             [shiftlefter.sms.protocol]))
 
 (defn shiftlefter-specs

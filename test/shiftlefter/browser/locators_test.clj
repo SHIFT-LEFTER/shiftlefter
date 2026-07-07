@@ -140,3 +140,23 @@
   (testing "invalid vector"
     (let [bad (loc/resolve-locator [:nope "#x"])]
       (is (= :browser/selector-invalid (-> bad :errors first :type))))))
+
+;; -----------------------------------------------------------------------------
+;; locator->css — CSS conversion for §8.1 boundary pruning (sl-h7h)
+;; -----------------------------------------------------------------------------
+
+(deftest locator->css-converts-css-expressible-forms
+  (testing "every CSS-expressible locator form converts to a selector string"
+    (is (= {:ok ".tweet"}                 (loc/locator->css {:css ".tweet"})))
+    (is (= {:ok "#main"}                  (loc/locator->css {:id "main"})))
+    (is (= {:ok "article"}                (loc/locator->css {:tag "article"})))
+    (is (= {:ok ".btn"}                   (loc/locator->css {:class "btn"})))
+    (is (= {:ok "[name='email']"}         (loc/locator->css {:name "email"})))
+    (is (= {:ok "[data-testid='post']"}   (loc/locator->css {:testid "post"})))))
+
+(deftest locator->css-rejects-non-css
+  (testing "XPath, strings, keywords, and unknown maps are loud errors"
+    (doseq [bad [{:xpath "//a"} "raw" :kw {} {:bogus "x"}]]
+      (is (= :browser/locator-not-css
+             (-> (loc/locator->css bad) :error :type))
+          (str "should reject " (pr-str bad))))))

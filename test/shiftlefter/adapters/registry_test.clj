@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [shiftlefter.adapters.registry :as registry]
             [shiftlefter.adapters.etaoin :as etaoin]
-            [shiftlefter.adapters.playwright :as playwright]))
+            [shiftlefter.adapters.playwright :as playwright]
+            [shiftlefter.browser.protocol :as bp]))
 
 ;; -----------------------------------------------------------------------------
 ;; get-adapter Tests
@@ -131,6 +132,57 @@
 ;; -----------------------------------------------------------------------------
 ;; Task 3.0.8 Acceptance Criteria
 ;; -----------------------------------------------------------------------------
+
+;; -----------------------------------------------------------------------------
+;; impl-key + check-extracted-impl Tests (sl-091)
+;; -----------------------------------------------------------------------------
+
+(def ^:private ibrowser-kw :shiftlefter.browser.protocol/IBrowser)
+
+(defn- fake-ibrowser
+  "An object that satisfies IBrowser (no method bodies needed for satisfies?)."
+  []
+  (reify bp/IBrowser))
+
+(deftest test-impl-key-accessor
+  (testing "browser adapters declare :impl-key :browser"
+    (is (= :browser (registry/impl-key :etaoin)))
+    (is (= :browser (registry/impl-key :playwright))))
+  (testing "SMS adapters declare no :impl-key"
+    (is (nil? (registry/impl-key :sms-mock)))
+    (is (nil? (registry/impl-key :sms-twilio))))
+  (testing "custom registry is honored"
+    (is (= :foo (registry/impl-key :a {:a {:impl-key :foo}})))
+    (is (nil? (registry/impl-key :a {:a {}})))))
+
+(deftest test-check-extracted-impl-satisfied
+  (testing "returns nil when the impl satisfies every declared protocol"
+    (let [reg {:webwrap {:impl-key :browser
+                         :provides [ibrowser-kw]}}]
+      (is (nil? (registry/check-extracted-impl :webwrap (fake-ibrowser) reg))))))
+
+(deftest test-check-extracted-impl-unsatisfied
+  (testing "returns the unsatisfied protocols when the impl is the wrong shape"
+    (let [reg {:webwrap {:impl-key :browser
+                         :provides [ibrowser-kw]}}
+          ;; A plain map is what the sl-091 bug produced — the wrapper, not
+          ;; the IBrowser inside it.
+          result (registry/check-extracted-impl :webwrap {:browser :nested} reg)]
+      (is (= [ibrowser-kw] result)))))
+
+(deftest test-check-extracted-impl-exempts-no-impl-key
+  (testing "adapters without :impl-key are exempt (SMS bundle path)"
+    ;; The bundle does not satisfy ISMS — only the nested :sms does — but
+    ;; without :impl-key the check must not run.
+    (let [reg {:sms {:provides [:shiftlefter.sms.protocol/ISMS]}}]
+      (is (nil? (registry/check-extracted-impl :sms {:sms :nested :from-number "x"} reg))))))
+
+(deftest test-check-extracted-impl-unresolvable-protocol
+  (testing "an unresolvable :provides keyword is reported as unsatisfied"
+    (let [reg {:webwrap {:impl-key :browser
+                         :provides [:no.such.ns/NopeProtocol]}}]
+      (is (= [:no.such.ns/NopeProtocol]
+             (registry/check-extracted-impl :webwrap (fake-ibrowser) reg))))))
 
 (deftest acceptance-adapter-registry-test
   (testing "Task 3.0.8 AC: get-adapter for known adapter"

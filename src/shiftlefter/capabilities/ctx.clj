@@ -12,6 +12,12 @@
 
    - `:impl` — the capability implementation (e.g., EtaoinBrowser)
    - `:mode` — `:ephemeral` (created per scenario) or `:persistent` (reused)
+   - `:cleanup-handle` — optional. The value cleanup passes to the adapter's
+     `:cleanup` fn, when it differs from `:impl`. Wrapping adapters (browser,
+     sl-091) expose the bare protocol impl to steps via `:impl` but need the
+     full factory result (carrying the driver) at teardown; that result lives
+     here. Absent when impl and handle coincide (e.g. SMS) — cleanup then
+     falls back to `:impl`.
 
    ## Interface Names
 

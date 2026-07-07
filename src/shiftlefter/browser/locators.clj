@@ -103,6 +103,39 @@
                                 :data {:token token
                                        :type (type token)}}]}))
 
+(defn locator->css
+  "Convert a single locator map to a plain CSS selector string.
+
+   Used by nearest-enclosing-instance pruning (§8.1, sl-h7h): the boundary
+   filter is `Element.closest(<css>)`, so every boundary selector — and the
+   candidate selector when pruning is active — must be expressible as CSS.
+
+   Accepts the inner locator map (NOT the `{:q …}` wrapper): `{:css …}`,
+   `{:id …}`, `{:tag …}`, `{:class …}`, `{:name …}`, `{:testid …}`.
+
+   Returns:
+   - `{:ok \"<css>\"}`            — convertible
+   - `{:error {:type :browser/locator-not-css …}}` — `:xpath`, a bare
+     string/keyword, or any non-CSS form (caller fails loud, never silently
+     mis-prunes)."
+  [m]
+  (if-not (map? m)
+    {:error {:type :browser/locator-not-css
+             :message (str "Locator is not a CSS-expressible map: " (pr-str m))
+             :data {:token m}}}
+    (let [m (expand-testid m)]   ;; :testid → {:css …} before dispatch
+      (cond
+        (:css m)   {:ok (:css m)}
+        (:id m)    {:ok (str "#" (:id m))}
+        (:tag m)   {:ok (:tag m)}
+        (:class m) {:ok (str "." (:class m))}
+        (:name m)  {:ok (str "[name='" (:name m) "']")}
+        :else
+        {:error {:type :browser/locator-not-css
+                 :message (str "Locator cannot be expressed as CSS (needed for "
+                               "boundary pruning): " (pr-str m))
+                 :data {:token m}}}))))
+
 (defn valid?
   "Returns true if the resolved locator is valid (has :q, no :errors)."
   [resolved]

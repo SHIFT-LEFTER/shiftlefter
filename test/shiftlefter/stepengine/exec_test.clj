@@ -1,7 +1,9 @@
 (ns shiftlefter.stepengine.exec-test
   (:require [clojure.test :refer [deftest is testing]]
             [shiftlefter.stepengine.exec :as exec]
+            [shiftlefter.browser.protocol :as bp]
             [shiftlefter.capabilities.ctx :as cap]
+            [shiftlefter.costume :as costume]
             [shiftlefter.runner.events :as events]
             [shiftlefter.sms.adapter-hooks :as sms-hooks]
             [shiftlefter.test-helpers.adapter-registry :as mock]))
@@ -1575,3 +1577,247 @@
       (is (= :passed (:status result)))
       (is (empty? @events)
           "Synthetic step's svo shouldn't trigger eager provisioning"))))
+
+;; -----------------------------------------------------------------------------
+;; Costume :wears Provisioning Tests (sl-rnm)
+;;
+;; A subject that :wears a costume attaches to that persistent authenticated
+;; session (connect-costume!) instead of fresh-spawning. Chrome is stubbed —
+;; these assert the provisioning *wiring*, the deterministic functional facts:
+;; attach-not-spawn, :persistent mode, and survival past scenario cleanup.
+;; (Real-browser / navigator.webdriver observation is the manual x-bookmarks
+;; consumer test, not asserted here.)
+;; -----------------------------------------------------------------------------
+
+(def ^:private fake-costume-browser
+  "Stand-in for a CostumeBrowser impl returned by connect-costume!."
+  {:type :costume-browser :session "costume-session" :costume :finance})
+
+(deftest test-wears-attaches-to-costume-not-fresh-spawn
+  (testing "Subject :wears a costume → provisioned via connect-costume!, not the adapter factory"
+    (let [connect-called (atom nil)
+          events (atom [])
+          ;; If the adapter factory ran (fresh spawn), @events would be non-empty.
+          registry (mock/registry {:web {:impl {:browser-type :spawned} :events events}})
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          captured-ctx (atom nil)
+          bound-step (make-bound-step-with-svo
+                       (fn [ctx] (reset! captured-ctx ctx) (assoc ctx :saw true))
+                       1 []
+                       {:subject :alice :verb :navigate :interface :web :wears :finance})
+          plan (make-plan [bound-step])]
+      (with-redefs [costume/connect-costume! (fn [name]
+                                               (reset! connect-called name)
+                                               {:status :connected :costume name
+                                                :port 9300 :pid 1 :browser fake-costume-browser})]
+        (let [result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                     :adapter-registry registry})
+              ctx (or @captured-ctx (:scenario-ctx result))]
+          (is (= :passed (:status result)))
+          (is (= :finance @connect-called) "connect-costume! called with the worn costume")
+          (is (empty? @events) "Adapter factory must NOT run — attach, not fresh spawn")
+          (is (= fake-costume-browser (cap/get-capability ctx :web :alice))
+              "Capability impl is the costume's browser"))))))
+
+(deftest test-wears-is-persistent-and-survives-cleanup
+  (testing "Costume-backed capability is :persistent and not torn down by cleanup"
+    (let [registry (mock/registry {:web {:impl {:browser-type :spawned}}})
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          captured-ctx (atom nil)
+          bound-step (make-bound-step-with-svo
+                       (fn [ctx] (reset! captured-ctx ctx) (assoc ctx :saw true))
+                       1 []
+                       {:subject :alice :verb :navigate :interface :web :wears :finance})
+          plan (make-plan [bound-step])]
+      (with-redefs [costume/connect-costume! (fn [name]
+                                               {:status :connected :costume name
+                                                :port 9300 :pid 1 :browser fake-costume-browser})]
+        (let [result (exec/execute-suite [plan] {:interfaces interfaces
+                                                 :adapter-registry registry})
+              ctx (or @captured-ctx (-> result :scenarios first :scenario-ctx))
+              cap-cleanup (-> result :scenarios first :capability-cleanup)]
+          (is (= :passed (:status result)))
+          ;; :persistent mode (criterion 2)
+          (is (seq (cap/persistent-capabilities ctx)) "Costume cap is persistent")
+          (is (empty? (cap/ephemeral-capabilities ctx)) "No ephemeral cap was created")
+          ;; survives cleanup (criterion 3) — never closed, only skipped
+          (is (empty? (:cleaned cap-cleanup)) "Persistent costume session was NOT closed")
+          (is (seq (:skipped cap-cleanup)) "Costume session was skipped by cleanup"))))))
+
+(deftest test-wears-connect-failure-fails-scenario-cleanly
+  (testing "A missing/locked costume surfaces a structured provisioning failure"
+    (let [registry (mock/registry {:web {:impl {:browser-type :spawned}}})
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          step-ran (atom false)
+          bound-step (make-bound-step-with-svo
+                       (fn [ctx] (reset! step-ran true) ctx)
+                       1 []
+                       {:subject :alice :verb :navigate :interface :web :wears :finance})
+          plan (make-plan [bound-step])]
+      (with-redefs [costume/connect-costume! (fn [_name]
+                                               {:error {:type :costume/not-found
+                                                        :message "no such costume"}})]
+        (let [result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                     :adapter-registry registry})]
+          (is (not= :passed (:status result)) "Scenario does not pass when the costume can't be attached")
+          (is (false? @step-ran) "Step does not run when provisioning fails"))))))
+
+;; -----------------------------------------------------------------------------
+;; One-wearer-per-costume enforcement (sl-s7t)
+;;
+;; Two subjects resolving to the same costume (e.g. a multi-instance type that
+;; :wears one costume, used by two actors) must NOT silently double-attach two
+;; WebDriver sessions to one Chrome. We fail cleanly (option b) instead.
+;; -----------------------------------------------------------------------------
+
+(deftest test-two-wearers-same-costume-fails-cleanly
+  (testing "A second subject wearing an already-worn costume fails, no double-attach"
+    (let [connect-calls (atom 0)
+          registry (mock/registry {:web {:impl {:browser-type :spawned}}})
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          alice-step (make-bound-step-with-svo
+                       (fn [ctx] ctx) 1 []
+                       {:subject :alice :verb :navigate :interface :web :wears :finance})
+          bob-step (make-bound-step-with-svo
+                     (fn [ctx] ctx) 1 []
+                     {:subject :bob :verb :navigate :interface :web :wears :finance})
+          plan (make-plan [alice-step bob-step])]
+      (with-redefs [costume/connect-costume! (fn [name]
+                                               (swap! connect-calls inc)
+                                               {:status :connected :costume name
+                                                :port 9300 :pid 1 :browser fake-costume-browser})]
+        (let [result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                     :adapter-registry registry})
+              err (->> result :steps (keep :error) first)]
+          (is (= :failed (:status result)) "Two wearers of one costume fails the scenario")
+          (is (= :svo/provisioning-failed (:type err)))
+          (is (= :costume/already-worn (:reason err)) "Tagged as the one-wearer violation")
+          (is (= :finance (:costume err)))
+          (is (= 1 @connect-calls)
+              "connect-costume! called once (alice) — bob never double-attaches"))))))
+
+(deftest test-two-wearers-same-costume-fails-fast-eager
+  (testing "Scoped-eager phase rejects the second wearer before any step runs"
+    (let [connect-calls (atom 0)
+          steps-ran (atom 0)
+          registry (mock/registry {:web {:impl {:browser-type :spawned}}})
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          alice-step (make-bound-step-with-svo
+                       (fn [ctx] (swap! steps-ran inc) ctx) 1 []
+                       {:subject :alice :verb :navigate :interface :web :wears :finance})
+          bob-step (make-bound-step-with-svo
+                     (fn [ctx] (swap! steps-ran inc) ctx) 1 []
+                     {:subject :bob :verb :navigate :interface :web :wears :finance})
+          plan (make-plan [alice-step bob-step])]
+      (with-redefs [costume/connect-costume! (fn [name]
+                                               (swap! connect-calls inc)
+                                               {:status :connected :costume name
+                                                :port 9300 :pid 1 :browser fake-costume-browser})]
+        (let [result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                     :adapter-registry registry
+                                                     :provisioning :eager})
+              err (->> result :steps (keep :error) first)]
+          (is (= :failed (:status result)))
+          (is (= :costume/already-worn (:reason err)))
+          (is (= 0 @steps-ran) "Eager fail-fast: no step runs when provisioning is rejected")
+          (is (= 1 @connect-calls) "Only the first wearer attaches"))))))
+
+(deftest test-distinct-costumes-two-subjects-both-attach
+  (testing "Two subjects wearing DIFFERENT costumes both provision (no false positive)"
+    (let [connected (atom #{})
+          registry (mock/registry {:web {:impl {:browser-type :spawned}}})
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          alice-step (make-bound-step-with-svo
+                       (fn [ctx] ctx) 1 []
+                       {:subject :alice :verb :navigate :interface :web :wears :finance})
+          bob-step (make-bound-step-with-svo
+                     (fn [ctx] ctx) 1 []
+                     {:subject :bob :verb :navigate :interface :web :wears :personal})
+          plan (make-plan [alice-step bob-step])]
+      (with-redefs [costume/connect-costume! (fn [name]
+                                               (swap! connected conj name)
+                                               {:status :connected :costume name
+                                                :port 9300 :pid 1
+                                                :browser (assoc fake-costume-browser :costume name)})]
+        (let [result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                     :adapter-registry registry})]
+          (is (= :passed (:status result)) "Distinct costumes do not trip the guard")
+          (is (= #{:finance :personal} @connected) "Both costumes attached"))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-091: wrapping-adapter impl/cleanup-handle decoupling
+;;
+;; A generic :web browser (no costume) goes through provision-capability. The
+;; browser factory wraps the IBrowser alongside its driver
+;; ({:browser <IBrowser> :etaoin-driver <driver>}); steps need the bare
+;; IBrowser while cleanup needs the driver. The `:impl-key` contract splits
+;; the two. These exercise the split end-to-end through the public seams —
+;; the path the live .feature examples drive (and which had never run green).
+;; -----------------------------------------------------------------------------
+
+(deftest test-impl-key-adapter-exposes-bare-impl
+  (testing "step sees the unwrapped IBrowser; the wrapper is stashed as :cleanup-handle"
+    (let [fake       (reify bp/IBrowser)
+          registry   (mock/registry
+                      {:webwrap {:impl-key :browser
+                                 :impl     {:browser fake :driver :fake-driver}
+                                 :provides [:shiftlefter.browser.protocol/IBrowser]}})
+          interfaces (mock/interfaces {:web {:adapter :webwrap}})
+          bound-step (make-bound-step-with-svo
+                      (fn [ctx]
+                        ;; The bug: this used to be the wrapper map, failing
+                        ;; the protocol dispatch in open-to!.
+                        (is (identical? fake (cap/get-capability ctx :web :alice)))
+                        (is (satisfies? bp/IBrowser (cap/get-capability ctx :web :alice)))
+                        ctx)
+                      1 []
+                      {:subject :alice :verb :navigate :interface :web})
+          plan       (make-plan [bound-step])
+          result     (exec/execute-scenario plan {} {:interfaces       interfaces
+                                                     :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is (= {:browser fake :driver :fake-driver}
+             (get-in (:scenario-ctx result) [:cap/web.alice :cleanup-handle]))
+          "full factory result retained for cleanup"))))
+
+(deftest test-impl-key-mismatch-fails-provisioning
+  (testing "a misconfigured :impl-key fails at provision time, not at the first step"
+    (let [registry   (mock/registry
+                      {:webwrap {:impl-key :missing  ;; key absent from the impl map
+                                 :impl     {:browser (reify bp/IBrowser)}
+                                 :provides [:shiftlefter.browser.protocol/IBrowser]}})
+          interfaces (mock/interfaces {:web {:adapter :webwrap}})
+          step-ran   (atom false)
+          bound-step (make-bound-step-with-svo
+                      (fn [ctx] (reset! step-ran true) ctx) 1 []
+                      {:subject :alice :verb :navigate :interface :web})
+          plan       (make-plan [bound-step])
+          result     (exec/execute-scenario plan {} {:interfaces       interfaces
+                                                     :adapter-registry registry})]
+      (is (= :failed (:status result)))
+      (is (false? @step-ran) "step never runs — provisioning fails first")
+      (let [err (-> result :steps first :error)]
+        (is (= :svo/provisioning-failed (:type err)))
+        (is (= :adapter/impl-protocol-mismatch (:reason err)))
+        (is (= [:shiftlefter.browser.protocol/IBrowser] (:missing-protocols err)))))))
+
+(deftest test-cleanup-receives-handle-not-impl
+  (testing "full cycle: provision unwraps, cleanup receives the wrapper (carrying the driver)"
+    (let [captured   (atom nil)
+          fake       (reify bp/IBrowser)
+          registry   (mock/registry
+                      {:webwrap {:impl-key :browser
+                                 :impl     {:browser fake :driver :fake-driver}
+                                 :provides [:shiftlefter.browser.protocol/IBrowser]
+                                 :cleanup  (fn [h] (reset! captured h) {:ok :closed})}})
+          interfaces (mock/interfaces {:web {:adapter :webwrap}})
+          bound-step (make-bound-step-with-svo
+                      (fn [ctx] ctx) 1 []
+                      {:subject :alice :verb :navigate :interface :web})
+          plan       (make-plan [bound-step])
+          result     (exec/execute-suite [plan] {:interfaces       interfaces
+                                                 :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is (= {:browser fake :driver :fake-driver} @captured)
+          "cleanup gets the driver-bearing wrapper")
+      (is (not (identical? fake @captured)) "not the bare impl"))))

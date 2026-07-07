@@ -11,6 +11,11 @@ reports/compliance/latest
 compliance/
 fuzz/
 target/
+# Flat-layout dev jar (sl-72e): a symlink into target/ + its per-machine AppCDS
+# archive, both built by `clj -T:build uberjar`. The wrapper itself (bin/sl,
+# bin/sl-dev) is checked in; these build outputs are not.
+bin/shiftlefter.jar
+bin/shiftlefter.jsa
 **/node_modules/
 
 # Project-local data (Asami graph, future SQLite exports)

@@ -1,72 +1,90 @@
-# SVO Validation System
+# SVO Validation
 
-Subject-Verb-Object (SVO) validation catches errors in your Gherkin steps early, at binding time rather than runtime.
-
-## Overview
-
-SVO validation adds optional type-checking to your step definitions:
+Subject–Verb–Object (SVO) validation catches mistakes in your Gherkin steps
+**at bind time** — before any browser launches or scenario runs. In Shifted
+mode, a step's metadata resolves it to a `(Subject, Verb, Object)` triple, and
+the framework checks that triple against your project vocabulary while it loads
+the suite.
 
 ```clojure
-;; Without SVO (legacy)
-(defstep #"^(\w+) clicks the (.+)$"
+;; Without SVO (plain step)
+(defstep #"^(\S+) clicks the (.+)$"
   [ctx subject element]
   ...)
 
 ;; With SVO validation
-(defstep #"^(\w+) clicks the (.+)$"
+(defstep #"^(\S+) clicks the (.+)$"
   {:interface :web
    :svo {:subject :$1 :verb :click :object :$2}}
   [ctx subject element]
   ...)
 ```
 
-The framework will:
-1. **Extract** subject/verb/object from captures at bind time
-2. **Validate** against glossaries (known subjects, known verbs)
-3. **Report** typos with suggestions ("Did you mean :user/alice?")
-4. **Auto-provision** capabilities when steps reference interfaces
+At suite load, the framework will:
+
+1. **Extract** subject / verb / object from the captures.
+2. **Validate** them against your glossaries (known subjects, known verbs, and —
+   when configured — known objects).
+3. **Report** typos with suggestions ("did you mean `:user/alice`?").
+4. **Auto-provision** the capability a step's interface needs.
+
+SVO metadata is **additive** — add it to one step definition without touching
+the rest.
 
 ---
 
-## Quick Start
+## Quick start
 
-### 1. Add glossaries to your project
+### 1. Lay out a glossary
+
+The default glossary path layout (see your `shiftlefter.edn`):
 
 ```
 my-project/
 ├── shiftlefter.edn
-├── config/
-│   └── glossaries/
-│       ├── subjects.edn
-│       └── verbs-web.edn
+├── glossary/
+│   ├── subjects.edn
+│   ├── verbs/
+│   │   └── web.edn          # project verbs for the :web interface type
+│   └── intents/             # object/intent regions (optional)
 └── steps/
 ```
 
-**subjects.edn:**
+**`glossary/subjects.edn`** — who can act:
+
 ```clojure
 {:subjects
- {:user  {:desc "Standard customer"
-          :instances [:alice :bob]}
+ {:user  {:desc "Standard customer" :instances [:alice :bob]}
   :admin {:desc "Administrative user"}
   :guest {:desc "Unauthenticated visitor"}}}
 ```
 
-Top-level keys are **types** (roles). Types with `:instances` group multiple session handles; types without are **singletons** used directly in steps. In Gherkin, use `:user/alice` to identify both the role and the actor.
+Top-level keys are **types** (roles). A type with `:instances` groups several
+session handles under one role — refer to them in Gherkin as `:user/alice`,
+`:user/bob`. A type without `:instances` is a **singleton**, used directly
+(`:guest`).
 
-**verbs-web.edn:**
+**`glossary/verbs/web.edn`** — project verbs that extend the built-in `:web`
+vocabulary. Each verb entry declares a `:desc` and a closed set of **frames**
+(the argument shapes the verb accepts); a verb with no extra arguments uses a
+single `:default` frame:
+
 ```clojure
 {:type :web
  :verbs
- {:login {:desc "Authenticate"}
-  :search {:desc "Execute search query"}}}
+ {:login  {:desc "Authenticate with credentials"
+           :frames {:default {:args [] :pattern "S logs in"}}}
+  :search {:desc "Run a search query"
+           :frames {:with {:args [:query] :pattern "S searches for QUERY"}}}}}
 ```
 
-### 2. Configure shiftlefter.edn
+### 2. Point `shiftlefter.edn` at the glossaries
 
 ```clojure
 {:glossaries
- {:subjects "config/glossaries/subjects.edn"
-  :verbs {:web "config/glossaries/verbs-web.edn"}}
+ {:subjects "glossary/subjects.edn"
+  :verbs    {:web "glossary/verbs/web.edn"}
+  :intents  "glossary/intents"}      ; optional — drives object validation
 
  :interfaces
  {:web {:type :web
@@ -74,29 +92,29 @@ Top-level keys are **types** (roles). Types with `:instances` group multiple ses
         :config {:headless true}}}
 
  :svo
- {:unknown-subject :warn    ; or :error
-  :unknown-verb :warn       ; or :error
+ {:unknown-subject :warn       ; :warn or :error
+  :unknown-verb    :warn       ; :warn or :error
+  :unknown-object  :off        ; :strict | :warn | :off
   :unknown-interface :error}}
 ```
 
-### 3. Add metadata to step definitions
+### 3. Annotate step definitions
 
 ```clojure
-(defstep #"^(\w+) clicks the (.+)$"
+(defstep #"^(\S+) clicks the (.+)$"
   {:interface :web
    :svo {:subject :$1 :verb :click :object :$2}}
   [ctx subject element]
-  (println (str subject " clicking " element))
-  (:scenario ctx))
+  ...)
 ```
 
-### 4. Run your features
+### 4. Run
 
 ```bash
 sl run features/ --step-paths steps/
 ```
 
-Unknown subjects or verbs are reported:
+Unknown subjects or verbs are reported before execution:
 
 ```
 SVO validation issues:
@@ -110,416 +128,271 @@ Unknown subject :user/alcie in step "When :user/alcie clicks the button"
 
 ## Concepts
 
+### The three roles, three homes
+
+| Role | Lives in | Vocabulary |
+|---|---|---|
+| **Subject** | `glossary/subjects.edn` | who acts (`:user/alice`, `:admin`) |
+| **Verb** | `glossary/verbs/<iface>.edn` (+ built-in defaults) | what they do (`:click`, `:fill`) |
+| **Object** | `glossary/intents/<region>.edn` (optional) | what they act on |
+
+**Interface is metadata on the verb, not a fourth role.** Every verb belongs to
+an interface type's verb bag; the bag is how vocabularies are swapped or
+extended.
+
 ### Interface NAME vs TYPE
 
-Two distinct concepts:
+- **NAME** — the key in your config (`:web`, `:customer-portal`, `:legacy-app`).
+- **TYPE** — the verb vocabulary (`:web`, `:sms`, …).
 
-- **NAME**: The key in your config (`:web`, `:customer-portal`, `:legacy-app`)
-- **TYPE**: The verb vocabulary (`:web`, `:api`, `:sms`, `:email`)
+Simple case: name `:web`, type `:web`. Advanced case — two interfaces sharing
+one vocabulary:
 
-Simple case: Interface name `:web` with type `:web` - they match.
-
-Advanced case: Two interfaces sharing the same verb vocabulary:
 ```clojure
 {:interfaces
  {:legacy-app {:type :web :adapter :etaoin :config {...}}
-  :new-app {:type :web :adapter :etaoin :config {...}}}}
+  :new-app    {:type :web :adapter :etaoin :config {...}}}}
 ```
 
-Both `:legacy-app` and `:new-app` use `:web` type verbs (click, fill, see, etc.).
+Both use `:web`-type verbs.
 
-### Placeholder Substitution
+### Placeholder substitution
 
-In the `:svo` map, use `:$1`, `:$2`, etc. to reference regex captures:
+In the `:svo` map, `:$1`, `:$2`, … reference regex capture groups:
 
 ```clojure
-(defstep #"^(\w+) fills the (\w+) field with \"([^\"]+)\"$"
+(defstep #"^(\S+) fills the (\w+) field with \"([^\"]+)\"$"
   {:interface :web
-   :svo {:subject :$1      ; First capture = subject
-         :verb :fill        ; Literal verb
-         :object :$2}}      ; Second capture = object
+   :svo {:subject :$1     ; first capture
+         :verb :fill       ; literal verb
+         :object :$2}}      ; second capture
   [ctx subject field value]
   ...)
 ```
 
-When step text "Alice fills the username field with \"test\"" matches:
-- `:$1` → "Alice" → normalized to `:alice`
-- `:$2` → "username"
-- Captures: `["Alice" "username" "test"]`
+For `Alice fills the username field with "test"`: `:$1` → `:alice`,
+`:$2` → `"username"`.
 
-### Subject Normalization
+### Subject normalization
 
-Subjects are normalized to keywords:
-- `"Alice"` → `:alice`
-- `"Admin"` → `:admin`
-- `"System Admin"` → `:system-admin`
+Subjects normalize to keywords: `"Alice"` → `:alice`, `"System Admin"` →
+`:system-admin`. The recommended Gherkin form is `:type/instance`
+(`:user/alice`), which makes the role explicit; both `:user/alice` and bare
+`:alice` route to the same session — the instance keyword is the session key.
 
-The recommended Gherkin form is `:type/instance` (e.g. `:user/alice`), which makes the actor's role explicit. Both `:user/alice` and bare `:alice` route to the same browser session — the instance keyword (`:alice`) is the session key.
+### Object validation against intent regions
 
-In verbose console output, `:user/alice opens the browser` displays as `[:user] alice opens the browser`.
+When you configure `:intents`, the **Object** is validated too. Intent regions
+(under `glossary/intents/`) name the things a subject can act on — and
+`:svo {:unknown-object …}` controls how strictly the object in a step is checked
+against them:
 
-### Legacy vs Shifted Steps
+- `:strict` — an object outside the loaded regions is a planning error.
+- `:warn` — log and continue.
+- `:off` — no object checking (the default).
 
-**Legacy steps** work unchanged:
-```clojure
-(defstep #"^the login page is loaded$"
-  [ctx]
-  ;; No SVO validation
-  ...)
-```
+This is what lets `Login.submit`-style intent references stand in for brittle
+selectors and still be verified before a run.
 
-**Shifted steps** include metadata:
-```clojure
-(defstep #"^(\w+) clicks the (.+)$"
-  {:interface :web
-   :svo {:subject :$1 :verb :click :object :$2}}
-  [ctx subject element]
-  ;; Subject/verb validated, capability auto-provisioned
-  ...)
-```
+### Step binding rules
 
-SVO metadata is additive — adding it to one step definition doesn't require adding it to all of them.
+How a step finds its definition — governed by whether it carries an interface
+annotation.
 
-### Step Binding Rules
-
-How a step in your feature file finds its definition. Two cases, governed by whether the step has an interface annotation.
-
-**Rule 1 — No annotation.** The step text is matched against *every* registered step definition across all interfaces. Exactly one stepdef must match:
-
-- 0 matches → `:undefined` (planning error)
-- 1 match → bound
-- 2+ matches → `:ambiguous` (planning error)
+**Rule 1 — no annotation.** The text is matched against *every* registered
+stepdef. Exactly one must match: 0 → `:undefined` (planning error), 1 → bound,
+2+ → `:ambiguous` (planning error).
 
 ```gherkin
 When :user/alice clicks the submit button
 ```
 
-Whichever stepdef matches wins, regardless of its `:interface` metadata.
-
-**Rule 2 — With `[:interface]` annotation.** The step text is prefixed with an explicit interface keyword, e.g. `[:sms]`. This narrows the candidate pool to stepdefs whose `:interface` metadata equals that keyword. Within that filtered set, the same 0/1/2+ rule applies.
+**Rule 2 — with `[:interface]` annotation.** A leading interface keyword narrows
+the candidate pool to stepdefs registered for that interface; the same 0/1/2+
+rule applies within it.
 
 ```gherkin
 Then [:sms] :user/alice receives a message containing '(\d{6})'
 ```
 
-Only stepdefs registered with `:interface :sms` are considered. It's a shorthand for "bind this step to something tagged `:sms`, not anything else." Stepdefs without `:interface` metadata (the legacy escape hatch) are excluded from annotated binding.
-
-The annotation is also an assertion: if `:sms` isn't configured under `:interfaces` in your `shiftlefter.edn`, you get `:annotation/unknown-interface` at planning time — catches typos and missing config early.
-
-**When you'd want each:**
-
-- Rule 1 is the default and right for most steps. Patterns are usually distinct enough that ambiguity doesn't arise.
-- Rule 2 is for the case where the *same* step vocabulary legitimately applies across multiple channels. A pattern like `(\S+) receives a message` can be registered under `:sms`, `:whatsapp`, and `:email`; the annotation picks which one.
-
-Annotations are a Shifted-mode feature. In vanilla mode `[:foo]` is treated as literal step text.
+The annotation is also an assertion: if `:sms` isn't configured under
+`:interfaces`, you get `:annotation/unknown-interface` at planning time —
+catching typos and missing config early. Use it when the *same* step vocabulary
+legitimately spans channels (e.g. `(\S+) receives a message` under `:sms`,
+`:whatsapp`, and `:email`). Annotations are a Shifted-mode feature; without
+Shifted's `:svo` configuration, `[:foo]` is just literal text.
 
 ---
 
-## Configuration Reference
+## Configuration reference
 
-### :glossaries
-
-Paths to glossary files:
+### `:glossaries`
 
 ```clojure
 {:glossaries
- {:subjects "config/glossaries/subjects.edn"
-  :verbs {:web "config/glossaries/verbs-web.edn"
-          :api "config/glossaries/verbs-api.edn"}}}
+ {:subjects "glossary/subjects.edn"
+  :verbs    {:web "glossary/verbs/web.edn"}   ; interface type → path
+  :intents  "glossary/intents"}}              ; path; drives object validation
 ```
 
-- `:subjects` — path to subject glossary
-- `:verbs` — map of interface-type to verb glossary path
-
-### :interfaces
-
-Interface definitions:
+### `:interfaces`
 
 ```clojure
 {:interfaces
- {:web {:type :web
-        :adapter :etaoin
-        :config {:headless true}}
-  :api {:type :api
-        :adapter :http
-        :config {:base-url "https://api.example.com"}}}}
+ {:web {:type :web :adapter :etaoin :config {:headless true}}}}
 ```
 
-Each interface requires:
-- `:type` — verb vocabulary (`:web`, `:api`, `:sms`, `:email`)
-- `:adapter` — capability provider (`:etaoin` for browsers)
-- `:config` — adapter-specific configuration
+Each interface declares a `:type` (verb vocabulary), an `:adapter` (capability
+provider, e.g. `:etaoin` for browsers), and adapter `:config`.
 
-### :svo
-
-Enforcement levels:
+### `:svo`
 
 ```clojure
 {:svo
- {:unknown-subject :warn      ; :warn or :error
-  :unknown-verb :warn         ; :warn or :error
-  :unknown-interface :error}} ; :warn or :error
+ {:unknown-subject :warn       ; :warn | :error
+  :unknown-verb    :warn       ; :warn | :error
+  :unknown-object  :off        ; :strict | :warn | :off
+  :unknown-interface :error}}  ; :warn | :error
 ```
 
-- `:warn` — log warning, continue execution
-- `:error` — fail at bind time (before execution)
+`:warn` logs and continues; `:error` fails at bind time, before execution.
 
 ---
 
-## Glossary File Formats
+## Glossary file formats
 
-### Subject Glossary
+### Subjects
 
 ```clojure
 {:subjects
- {;; Types with instances — use :type/instance in Gherkin
-  :user  {:desc "Standard application user"
-          :instances [:alice :bob]}
-  :admin {:desc "Administrative user"
-          :instances [:pat]}
-
-  ;; Singletons — types without :instances, used directly
-  :guest {:desc "Unauthenticated visitor"}
-
-  ;; Namespaced types — for categorization
-  :system/test-setup {:desc "Test harness for fixture creation"}}}
+ {:user  {:desc "Standard application user" :instances [:alice :bob]}
+  :admin {:desc "Administrative user" :instances [:pat]}
+  :guest {:desc "Unauthenticated visitor"}                 ; singleton
+  :system/test-setup {:desc "Test harness for fixtures"}}} ; namespaced, non-human
 ```
 
-**Types** are the top-level keys (`:user`, `:admin`, `:guest`, `:system/test-setup`). Each type has a `:desc` and optionally an `:instances` vector.
+Types with `:instances` group session handles (`:user/alice`, `:admin/pat`);
+singletons are used directly; namespaced keywords organize non-human actors.
 
-- **Types with `:instances`** — group multiple session handles under one role. In Gherkin, refer to them as `:user/alice`, `:user/bob`, `:admin/pat`.
-- **Singletons** — types without `:instances` (like `:guest`). Use the type keyword directly in Gherkin steps.
-- **Namespaced types** — Clojure namespaced keywords (`:system/test-setup`) are supported for organizing non-human actors.
+### Verbs
 
-The old flat format (each entry a standalone subject with no `:instances`) still works — each entry is treated as a singleton.
+A verb is an **interface-level** action. A verb entry requires `:desc` **and**
+`:frames` — a closed set of argument shapes; a verb with no extra arguments uses one
+`:default` frame:
 
-### Verb Glossary
-
-```clojure
-{:type :web    ; Which interface type these verbs extend
- :verbs
- {:login {:desc "Authenticate with credentials"}
-  :logout {:desc "End authenticated session"}
-  :search {:desc "Execute a search query"}
-  :filter {:desc "Apply filter criteria"}}}
-```
-
-**Project glossaries extend framework defaults.** ShiftLefter ships with default verbs for `:web`:
-
-```
-:click, :fill, :see, :navigate, :submit, :hover, :select,
-:check, :uncheck, :clear, :scroll, :wait, :type
-```
-
-Your glossary adds to these. To completely replace defaults:
 ```clojure
 {:type :web
- :override-defaults true
- :verbs {...}}
+ :verbs
+ {:upload {:desc "Attach a file to a file input"
+           :frames {:with-path {:args [:path] :pattern "S uploads PATH"}}}}}
 ```
+
+**You rarely add verbs.** Interface verbs are built in (`:click`, `:fill`, `:see`,
+`:navigate`, `:clear`, `:select`, `:scroll`, `:wait`, `:hover`, …); the authoritative
+current list — each verb with its frames and step patterns — is `sl agent-doc
+builtins`, regenerated from the framework's own glossaries so it never drifts (this
+page deliberately doesn't reproduce it). Two cautions before you add one:
+
+- A glossary verb only makes the validator *accept* the word — it does **not** create
+  behavior. A genuinely new interface verb (like `:upload` above) also needs a
+  `defstep` to run; that's adapter-author territory, not the normal path.
+- A **domain action** like "checks out" or "logs in" is *not* a verb. It's a
+  contraction of interface steps — a **macro**. See
+  [Add Domain Language](extending-vocabulary.md).
+
+Your verbs add to the defaults; `:override-defaults true` replaces them.
 
 ---
 
-## defstep Metadata Contract
-
-The metadata map is the second argument (optional):
+## `defstep` metadata contract
 
 ```clojure
 (defstep <pattern>
-  <metadata-map>  ; optional
+  <metadata-map>   ; optional
   <args-vector>
   <body>)
 ```
 
-### Required Keys
-
-None - metadata is entirely optional.
-
-### Optional Keys
+Metadata is entirely optional. Recognized keys:
 
 | Key | Type | Description |
-|-----|------|-------------|
-| `:interface` | keyword | Interface name from config |
-| `:svo` | map | Subject/verb/object extraction |
+|---|---|---|
+| `:interface` | keyword | interface name from config |
+| `:svo` | map | `{:subject … :verb … :object …}` extraction |
 
-### :svo Map
-
-```clojure
-{:svo {:subject :$1      ; keyword or placeholder
-       :verb :click       ; keyword (literal verb)
-       :object :$2}}      ; keyword, placeholder, or string
-```
-
-- `:subject` — usually a placeholder (`:$1`)
-- `:verb` — usually a literal keyword (`:click`, `:fill`)
-- `:object` — placeholder or literal string
-
-### Placeholder Index
-
-Placeholders are 1-indexed and correspond to regex capture groups:
-- `:$1` — first capture group
-- `:$2` — second capture group
-- etc.
+In the `:svo` map, `:subject` is usually a placeholder (`:$1`), `:verb` a literal
+keyword, and `:object` a placeholder or string.
 
 ---
 
-## Migration Guide
+## Migration guide
 
-### Step 1: Inventory Your Steps
+Adopt SVO incrementally:
 
-Find steps that follow SVO patterns:
-
-```clojure
-;; SVO pattern (good candidate)
-(defstep #"^(\w+) clicks the (.+)$" ...)  ; subject-verb-object
-
-;; Setup step (leave as legacy)
-(defstep #"^the database is seeded$" ...)  ; no subject
-```
-
-### Step 2: Create Glossaries
-
-Start with your actors:
-```clojure
-;; subjects.edn
-{:subjects
- {:user {:desc "Standard test user"
-         :instances [:alice :bob]}
-  :admin {:desc "Administrative user"}}}
-```
-
-Add domain-specific verbs:
-```clojure
-;; verbs-web.edn
-{:type :web
- :verbs
- {:checkout {:desc "Complete purchase flow"}
-  :apply-coupon {:desc "Apply discount code"}}}
-```
-
-### Step 3: Configure Enforcement
-
-Start permissive, tighten later:
-```clojure
-{:svo
- {:unknown-subject :warn
-  :unknown-verb :warn
-  :unknown-interface :error}}
-```
-
-### Step 4: Add Metadata Incrementally
-
-Convert one step at a time:
-
-```clojure
-;; Before
-(defstep #"^(\w+) clicks the (.+)$"
-  [ctx subject element]
-  ...)
-
-;; After
-(defstep #"^(\w+) clicks the (.+)$"
-  {:interface :web
-   :svo {:subject :$1 :verb :click :object :$2}}
-  [ctx subject element]
-  ...)
-```
-
-### Step 5: Fix Validation Warnings
-
-Run your tests:
-```bash
-sl run features/ --step-paths steps/
-```
-
-Fix reported issues:
-- Add missing subjects to glossary
-- Add missing verbs to glossary
-- Fix typos in feature files
-
-### Step 6: Tighten Enforcement
-
-Once clean, switch to `:error`:
-```clojure
-{:svo
- {:unknown-subject :error
-  :unknown-verb :error
-  :unknown-interface :error}}
-```
+1. **Inventory.** Find steps shaped subject-verb-object (`^(\S+) clicks the
+   (.+)$`); leave setup steps (`^the database is seeded$`) as plain steps.
+2. **Create glossaries.** Start with your actors in `glossary/subjects.edn`. Use the
+   built-in interface verbs as-is; turn recurring domain actions ("checks out") into
+   macros, not verbs (see [Add Domain Language](extending-vocabulary.md)).
+3. **Configure enforcement permissively** — `:warn` for subjects and verbs.
+4. **Annotate one step at a time.** Add the `:svo` map; nothing forces you to
+   convert the rest.
+5. **Fix what the validator reports** — missing subjects/verbs, typos.
+6. **Tighten** to `:error` once clean.
 
 ---
 
-## Auto-Provisioning
+## Auto-provisioning
 
-When a step declares an interface, the framework automatically provisions the capability:
+When a step declares an interface, the framework provisions the capability:
 
-```clojure
-(defstep #"^(\w+) clicks the (.+)$"
-  {:interface :web ...}  ; Declares need for :web interface
-  [ctx subject element]
-  ;; Browser is auto-created if not present
-  ...)
-```
+1. Check the subject's context for `:cap/web`.
+2. If absent, look up `:web` in `:interfaces`.
+3. Call the adapter factory (`:etaoin`) with the config.
+4. Store it as `:cap/web`.
+5. Execute the step.
 
-Provisioning flow:
-1. Check if subject's context has `:cap/web`
-2. If not, look up `:web` in interfaces config
-3. Call adapter factory (`:etaoin`) with config
-4. Store capability as `:cap/web` in context
-5. Execute step with capability available
-
-Capabilities are cleaned up at scenario end (ephemeral mode).
+Capabilities are cleaned up at scenario end — **ephemeral mode**, the default: a
+capability is provisioned for the scenario and closed when it ends. A subject that
+`:wears` a costume attaches to durable state instead of being provisioned ephemerally
+(see [COSTUMES.md](COSTUMES.md)).
 
 ---
 
-## Error Messages
-
-### Unknown Subject
-
-```
-Unknown subject :user/alcie in step "When :user/alcie clicks the button"
-       at features/login.feature:12
-       Known subjects: :user, :admin, :guest, :user/alice, :user/bob, :admin/pat
-       Did you mean: :user/alice?
-```
-
-### Unknown Verb
+## Error messages
 
 ```
 Unknown verb :smash in step "When Alice smashes the button"
        at features/login.feature:15
        Interface :web (type :web)
-       Known verbs for :web: :click, :fill, :see, :navigate, :submit
+       Known verbs for :web: :click, :fill, :see, :navigate, :clear, ...
+       Did you mean: ...?
 ```
-
-### Unknown Interface
 
 ```
 Unknown interface :foobar in step "When Alice clicks the button"
        at features/login.feature:18
-       Configured interfaces: :web, :api
+       Configured interfaces: :web
        Add to shiftlefter.edn: {:interfaces {:foobar {:type ... :adapter ...}}}
 ```
 
 ---
 
-## Example Project
+## Working examples
 
-See `examples/svo-demo/` for a complete working example with:
-- Configuration file
-- Subject and verb glossaries
-- Feature file with SVO patterns
-- Step definitions showing legacy vs shifted styles
+The `examples/` projects use the current `glossary/` layout end-to-end —
+`examples/04-sms-2fa` (subjects across web + SMS) and the nested-addressing
+examples `examples/05-nested-self-rooted` / `examples/06-nested-parent-anchored`
+(subjects plus intent regions) are good starting points.
 
 ---
 
 ## Events
 
-Steps with SVO metadata emit `:step/svoi` events:
+Steps with SVO metadata emit a `:step/svo` event:
 
 ```clojure
-{:type :step/svoi
- :ts "2026-01-10T..."
+{:type :step/svo
  :run-id "uuid"
  :payload {:subject :user/alice
            :verb :click

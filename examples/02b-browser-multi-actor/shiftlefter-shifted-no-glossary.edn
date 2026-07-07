@@ -1,4 +1,8 @@
+;; Teaching config — Shifted mode WITHOUT a glossary: :unknown-subject is
+;; a hard error but no subjects are declared, so every step is rejected at
+;; planning time. Demonstrates that the glossary is the source of truth.
+;; Run with: sl run -c shiftlefter-shifted-no-glossary.edn --dry-run features/
+
 {:interfaces {:web {:type :web
-                   :adapter :etaoin}}
- :svo {:unknown-subject :error
-       :unknown-verb :error}}
+                    :adapter :etaoin}}
+ :svo {:unknown-subject :error}}

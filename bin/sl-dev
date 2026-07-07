@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# ShiftLefter CLI against LIVE SOURCE (sl-72e) — the old "source mode", now its
+# own explicit entry point.
+#
+# `bin/sl` always runs the built jar; it never reflects un-built src/ edits. This
+# script is the opposite: it runs the CLI straight from `src/` via `clj -M:run`,
+# with no jar and no warm daemon, so your latest edits take effect immediately.
+#
+# Use it when you want to exercise the actual CLI wiring against source you just
+# changed without rebuilding the 42MB jar. (For poking at functions interactively,
+# reach for the REPL — `bin/repl-eval` — instead.)
+#
+#   bin/sl-dev run features/ --step-paths steps/
+#   bin/sl-dev fmt --check some.feature
+#
+# Requires the Clojure CLI (`clj`). Runs from anywhere: relative paths in your
+# arguments resolve against your shell's cwd (passed through as SL_USER_CWD),
+# while clj itself runs from the project root so it can find deps.edn.
+
+set -euo pipefail
+
+# Preserve the caller's cwd so the framework resolves relative feature/glossary
+# paths correctly even though we cd to the project root for clj's deps.edn.
+export SL_USER_CWD="$PWD"
+
+if ! command -v clj >/dev/null 2>&1; then
+    echo "Error: bin/sl-dev needs the Clojure CLI (clj), which was not found." >&2
+    echo "       Install: brew install clojure/tools/clojure" >&2
+    echo "       (Or build + run the jar instead: clj -T:build uberjar && bin/sl ...)" >&2
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+cd "$PROJECT_DIR"
+exec clj -M:run "$@"

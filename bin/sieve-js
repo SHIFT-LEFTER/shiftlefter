@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#
+# Hygiene gate for the SIEVE browser assets (sl-0lj). No build step, no bundler,
+# no TypeScript — the shell stays vanilla JS served straight from resources/.
+#
+#   node --check : syntax gate (ships with node, zero deps)
+#   prettier     : formatting, pinned via npx (no package.json / node_modules)
+#
+# Usage:
+#   bin/sieve-js          check syntax + formatting (the lint gate, next to bin/kondo)
+#   bin/sieve-js --write  reformat the files in place
+#
+set -euo pipefail
+
+PRETTIER="prettier@3.4.2"
+FILES=(resources/sieve.js resources/sieve/ui/app.js)
+
+cd "$(dirname "$0")/.."
+
+for f in "${FILES[@]}"; do
+  node --check "$f"
+done
+
+if [ "${1:-}" = "--write" ]; then
+  npx --yes "$PRETTIER" --write "${FILES[@]}"
+else
+  npx --yes "$PRETTIER" --check "${FILES[@]}"
+fi

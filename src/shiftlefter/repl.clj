@@ -54,11 +54,11 @@
    - `list-surfaces`   — list all marked surfaces
    - `reset-surfaces!` — clear all surface markings
 
-   ### Persistent Subjects (Chrome-owned sessions that survive JVM restarts)
-   - `init-persistent-subject!`    — create new persistent subject
-   - `connect-persistent-subject!` — reconnect to existing subject
-   - `destroy-persistent-subject!` — kill Chrome and delete profile
-   - `list-persistent-subjects`    — list all subjects with status
+   ### Costumes (Chrome-owned authenticated sessions that survive JVM restarts)
+   - `init-costume!`    — create new costume
+   - `connect-costume!` — reconnect to existing costume
+   - `destroy-costume!` — kill Chrome and delete costume
+   - `list-costumes`    — list all costumes with status
 
    ### Utilities
    - `steps`      — list registered step patterns
@@ -71,7 +71,7 @@
             [shiftlefter.runner.config :as config]
             [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.capabilities.ctx :as cap]
-            [shiftlefter.subjects :as subjects]
+            [shiftlefter.costume :as costume]
             [shiftlefter.webdriver.etaoin.session :as session]
             [shiftlefter.webdriver.session-store :as store]))
 
@@ -507,7 +507,7 @@
    - Non-surface contexts: browser session is closed
    - Surface contexts: browser session is detached and persisted
 
-   Note: Does NOT destroy persistent subjects. Use `destroy-persistent-subject!` for that.
+   Note: Does NOT destroy costumes. Use `destroy-costume!` for that.
 
    Useful when redefining steps in REPL."
   []
@@ -730,92 +730,91 @@
               (assoc result :session ctx-name :ctx new-ctx))))))))
 
 ;; -----------------------------------------------------------------------------
-;; Persistent Subjects (re-exports from shiftlefter.subjects)
+;; Costumes (re-exports from shiftlefter.costume)
 ;; -----------------------------------------------------------------------------
 
-(defn init-persistent-subject!
-  "Initialize a new persistent browser subject.
+(defn init-costume!
+  "Initialize a new costume (launch-only).
 
-   Creates a Chrome instance with its own profile that survives JVM restarts.
-   The browser auto-reconnects on session errors (e.g., after sleep/wake).
+   Launches a PRISTINE Chrome instance with its own profile for the human to log
+   into. It does NOT attach a WebDriver session — call `connect-costume!` after
+   logging in to attach and get a live browser.
 
    Options:
-   - `:stealth` — if true, use legacy browser options (default: false)
    - `:chrome-path` — explicit Chrome binary path (default: auto-detect)
 
    Returns:
-   - Success: `{:status :connected :subject <name> :port <int> :pid <long> :browser <PersistentBrowser>}`
-   - Error: `{:error {:type :subject/... ...}}`
+   - Success: `{:status :launched :costume <name> :port <int> :pid <long>}`
+   - Error: `{:error {:type :costume/... ...}}`
 
    Example:
    ```clojure
-   (init-persistent-subject! :finance {:stealth true})
-   ;; => {:status :connected :subject :finance :port 9222 ...}
+   (init-costume! :finance)
+   ;; => {:status :launched :costume :finance :port 9222 :pid 12345}
+   ;; Log in, then (connect-costume! :finance) to attach.
    ```
 
-   See `shiftlefter.subjects/init-persistent!` for full documentation."
-  ([subject-name]
-   (init-persistent-subject! subject-name {}))
-  ([subject-name opts]
-   (let [result (subjects/init-persistent! subject-name opts)]
-     (when (= :connected (:status result))
-       (swap! connected-subjects assoc subject-name {:browser (:browser result)}))
-     result)))
+   See `shiftlefter.costume/init-costume!` for full documentation."
+  ([costume-name]
+   (init-costume! costume-name {}))
+  ([costume-name opts]
+   ;; Launch-only: nothing to register in connected-subjects until connect-costume!.
+   (costume/init-costume! costume-name opts)))
 
-(defn connect-persistent-subject!
-  "Connect to an existing persistent subject.
+(defn connect-costume!
+  "Connect to an existing costume.
 
    Use this after JVM restart to reconnect to a Chrome instance that was
-   previously initialized with `init-persistent-subject!`.
+   previously initialized with `init-costume!`.
 
    If Chrome is still running, creates a new WebDriver session.
    If Chrome died, relaunches it automatically.
 
    Returns:
-   - Success: `{:status :connected :subject <name> :port <int> :pid <long> :browser <PersistentBrowser>}`
-   - Error: `{:error {:type :subject/... ...}}`
+   - Success: `{:status :connected :costume <name> :port <int> :pid <long> :browser <CostumeBrowser>}`
+   - Error: `{:error {:type :costume/... ...}}`
 
    Example:
    ```clojure
    ;; After JVM restart
-   (connect-persistent-subject! :finance)
-   ;; => {:status :connected :subject :finance :port 9222 ...}
+   (connect-costume! :finance)
+   ;; => {:status :connected :costume :finance :port 9222 ...}
    ```
 
-   See `shiftlefter.subjects/connect-persistent!` for full documentation."
-  [subject-name]
-  (let [result (subjects/connect-persistent! subject-name)]
+   See `shiftlefter.costume/connect-costume!` for full documentation."
+  [costume-name]
+  (let [result (costume/connect-costume! costume-name)]
     (when (= :connected (:status result))
-      (swap! connected-subjects assoc subject-name {:browser (:browser result)}))
+      (swap! connected-subjects assoc costume-name {:browser (:browser result)}))
     result))
 
-(defn destroy-persistent-subject!
-  "Destroy a persistent subject.
+(defn destroy-costume!
+  "Destroy a costume.
 
-   Kills the Chrome process and deletes the entire profile directory
+   Kills the Chrome process and deletes the entire costume directory
    (including Chrome user data like cookies, history, etc.).
 
    Returns:
-   - Success: `{:status :destroyed :subject <name>}`
-   - Error: `{:error {:type :subject/not-found ...}}`
+   - Success: `{:status :destroyed :costume <name>}`
+   - Error: `{:error {:type :costume/not-found ...}}`
 
    Example:
    ```clojure
-   (destroy-persistent-subject! :finance)
-   ;; => {:status :destroyed :subject :finance}
+   (destroy-costume! :finance)
+   ;; => {:status :destroyed :costume :finance}
    ```
 
-   See `shiftlefter.subjects/destroy-persistent!` for full documentation."
-  [subject-name]
-  (let [result (subjects/destroy-persistent! subject-name)]
+   See `shiftlefter.costume/destroy-costume!` for full documentation."
+  [costume-name]
+  (let [result (costume/destroy-costume! costume-name)]
     (when (= :destroyed (:status result))
-      (swap! connected-subjects dissoc subject-name))
+      (swap! connected-subjects dissoc costume-name))
     result))
 
-(defn list-persistent-subjects
-  "List all persistent subjects with their status.
+(defn list-costumes
+  "List all costumes with their status.
 
-   Returns a vector of subject info maps:
+   Returns a vector of costume info maps:
    ```clojure
    [{:name \"finance\"
      :status :alive      ; or :dead, :unknown
@@ -826,10 +825,10 @@
 
    Example:
    ```clojure
-   (list-persistent-subjects)
+   (list-costumes)
    ;; => [{:name \"finance\" :status :alive :port 9222 ...}]
    ```
 
-   See `shiftlefter.subjects/list-persistent` for full documentation."
+   See `shiftlefter.costume/list-costumes` for full documentation."
   []
-  (subjects/list-persistent))
+  (costume/list-costumes))

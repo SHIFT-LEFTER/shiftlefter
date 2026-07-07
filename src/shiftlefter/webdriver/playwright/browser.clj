@@ -36,7 +36,9 @@
    We pre-register a dialog listener on page creation that stores the latest
    dialog reference. accept-alert!/dismiss-alert!/get-alert-text operate on it."
   (:require [shiftlefter.browser.protocol :as bp]
-            [shiftlefter.webdriver.playwright.keys :as pw-keys]))
+            [shiftlefter.browser.target :as target]
+            [shiftlefter.webdriver.playwright.keys :as pw-keys]
+            [clojure.string :as str]))
 
 ;; -----------------------------------------------------------------------------
 ;; Lazy Imports — Playwright classes loaded at runtime only
@@ -79,6 +81,46 @@
                             {:locator locator})))))
 
 ;; -----------------------------------------------------------------------------
+;; Target dispatch helper
+;; -----------------------------------------------------------------------------
+
+(defn- ->loc
+  "Resolve a target to a Playwright Locator. Playwright ops are methods on a
+   Locator, so a handle ({:el <Locator>}) flows in directly and a query target
+   ({:q <query>}) becomes (.locator page sel) exactly as before — one normalizer
+   serves every element-taking op."
+  [page t]
+  (if (:el t)
+    (:el t)
+    (.locator page (resolve-playwright-selector t))))
+
+;; -----------------------------------------------------------------------------
+;; Nearest-enclosing-instance pruning (§8.1, sl-h7h)
+;; -----------------------------------------------------------------------------
+
+(def ^:private pw-keep-script
+  "Per-candidate §8.1 boundary check, run with the candidate as `element`.
+   arg: [scopeHandle-or-null, boundaryCss]. Keep when the nearest boundary
+   ancestor is absent, is the scope, or sits above the scope; prune one
+   strictly inside the scope. `parentElement` first so a candidate that is
+   itself a boundary never matches itself."
+  (str "(element, args) => {"
+       "  const scope = args[0] || document;"
+       "  const boundary = args[1];"
+       "  const p = element.parentElement;"
+       "  const b = p ? p.closest(boundary) : null;"
+       "  return b === null || b === scope || b.contains(scope);"
+       "}"))
+
+(defn- scope->element-handle
+  "The scope as a Playwright ElementHandle for passing into evaluate, or nil
+   for `:document` (the script falls back to document). A scope handle is a
+   Locator (from query-all); `.elementHandle` materializes it."
+  [scope]
+  (when (target/el-target? scope)
+    (.elementHandle (:el scope))))
+
+;; -----------------------------------------------------------------------------
 ;; Right-click helper — needs imported classes at runtime
 ;; -----------------------------------------------------------------------------
 
@@ -106,38 +148,38 @@
     this)
 
   (click! [this locator]
-    (.click (.locator page (resolve-playwright-selector locator)))
+    (.click (->loc page locator))
     this)
 
   (doubleclick! [this locator]
-    (.dblclick (.locator page (resolve-playwright-selector locator)))
+    (.dblclick (->loc page locator))
     this)
 
   (rightclick! [this locator]
-    (.click (.locator page (resolve-playwright-selector locator))
+    (.click (->loc page locator)
             (make-right-click-options))
     this)
 
   (move-to! [this locator]
-    (.hover (.locator page (resolve-playwright-selector locator)))
+    (.hover (->loc page locator))
     this)
 
   (drag-to! [this from-locator to-locator]
-    (.dragTo (.locator page (resolve-playwright-selector from-locator))
-             (.locator page (resolve-playwright-selector to-locator)))
+    (.dragTo (->loc page from-locator)
+             (->loc page to-locator))
     this)
 
   (fill! [this locator text]
-    (.fill (.locator page (resolve-playwright-selector locator)) ^String text)
+    (.fill (->loc page locator) ^String text)
     this)
 
   (element-count [_this locator]
-    (.count (.locator page (resolve-playwright-selector locator))))
+    (.count (->loc page locator)))
 
   ;; --- Query Operations ---
 
   (get-text [_this locator]
-    (.textContent (.locator page (resolve-playwright-selector locator))))
+    (.textContent (->loc page locator)))
 
   (get-url [_this]
     (.url page))
@@ -146,7 +188,7 @@
     (.title page))
 
   (visible? [_this locator]
-    (.isVisible (.locator page (resolve-playwright-selector locator))))
+    (.isVisible (->loc page locator)))
 
   ;; --- Navigation ---
 
@@ -165,7 +207,7 @@
   ;; --- Scrolling ---
 
   (scroll-to! [this locator]
-    (.scrollIntoViewIfNeeded (.locator page (resolve-playwright-selector locator)))
+    (.scrollIntoViewIfNeeded (->loc page locator))
     this)
 
   (scroll-to-position! [this position]
@@ -177,11 +219,11 @@
   ;; --- Form Operations ---
 
   (clear! [this locator]
-    (.clear (.locator page (resolve-playwright-selector locator)))
+    (.clear (->loc page locator))
     this)
 
   (select! [this locator text]
-    (.selectOption (.locator page (resolve-playwright-selector locator))
+    (.selectOption (->loc page locator)
                    ^String text)
     this)
 
@@ -193,14 +235,14 @@
   ;; --- Element Queries ---
 
   (get-attribute [_this locator attribute]
-    (.getAttribute (.locator page (resolve-playwright-selector locator))
+    (.getAttribute (->loc page locator)
                    ^String attribute))
 
   (get-value [_this locator]
-    (.inputValue (.locator page (resolve-playwright-selector locator))))
+    (.inputValue (->loc page locator)))
 
   (enabled? [_this locator]
-    (.isEnabled (.locator page (resolve-playwright-selector locator))))
+    (.isEnabled (->loc page locator)))
 
   ;; --- Alerts ---
   ;; Playwright uses event-driven dialogs. We store the last dialog
@@ -250,8 +292,7 @@
     ;; NOTE: This is a semantic mismatch — Playwright's frame model
     ;; differs from WebDriver's context-switching. For now, we use
     ;; the page's frame() method with the element handle.
-    (let [sel (resolve-playwright-selector locator)
-          frame-el (.elementHandle (.locator page sel))
+    (let [frame-el (.elementHandle (->loc page locator))
           frame (.contentFrame frame-el)]
       ;; Store current page's main frame for switch-to-main-frame!
       ;; We can't truly "switch" in Playwright, so we note the frame
@@ -260,7 +301,33 @@
 
   (switch-to-main-frame! [this]
     (reset! (:active-frame pw-context) nil)
-    this))
+    this)
+
+  ;; --- Element Handles & Scoped Find (0.4.6) ---
+
+  (query-all [_this scope locator]
+    (target/check-query-all-args! scope locator)
+    (let [sel  (resolve-playwright-selector locator)
+          base (if (target/el-target? scope)
+                 (.locator (:el scope) sel)   ;; scoped: parentLocator.locator(childSel)
+                 (.locator page sel))         ;; document
+          locs (.all base)]
+      (mapv (fn [l] {:el l}) locs)))
+
+  (query-all-pruned [this scope locator boundary-css]
+    (target/check-query-all-args! scope locator)
+    (let [all (bp/query-all this scope locator)]
+      (if (str/blank? boundary-css)
+        all
+        ;; Filter the candidate Locators by the §8.1 boundary check. One
+        ;; IBrowser call (acceptance #5); internally a closest() check per
+        ;; candidate — Playwright's value-returning evaluate can't round-trip
+        ;; element handles cleanly, and this keeps the result type-consistent
+        ;; with query-all (Locators). Per-hop round-trip optimization for this
+        ;; backend is sl-zi2, not here.
+        (let [scope-handle (scope->element-handle scope)
+              arg (java.util.Arrays/asList (object-array [scope-handle boundary-css]))]
+          (filterv (fn [{loc :el}] (.evaluate loc pw-keep-script arg)) all))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Factory

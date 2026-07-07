@@ -74,7 +74,9 @@
   (set-window-size! [this _ _]  this)
   (switch-to-next-window! [this] this)
   (switch-to-frame! [this _]    this)
-  (switch-to-main-frame! [this] this))
+  (switch-to-main-frame! [this] this)
+  (query-all [_this _scope _locator] [])
+  (query-all-pruned [_this _scope _locator _boundary] []))
 
 (defn- make-eventual-browser
   "Build a fake browser whose predicates flip after `n` polls.

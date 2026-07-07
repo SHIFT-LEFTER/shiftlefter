@@ -1,5 +1,6 @@
 (ns shiftlefter.webdriver.etaoin.session-test
   (:require [clojure.test :refer [deftest is testing]]
+            [etaoin.api :as eta]
             [shiftlefter.webdriver.etaoin.session :as sess]))
 
 ;; -----------------------------------------------------------------------------
@@ -139,22 +140,9 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest build-debugger-capabilities-test
-  (testing "builds capabilities with debuggerAddress only"
-    ;; Legacy browser options (redactedLegacySwitches, redactedLegacyExtension) are NOT included
-    ;; in connect capabilities — they're Chrome launch options handled by
-    ;; browser.chrome/build-chrome-args. ChromeDriver rejects them when connecting
-    ;; to an already-running Chrome.
+  (testing "builds capabilities with the debuggerAddress for the given port"
     (let [caps (sess/build-debugger-capabilities {:port 9222})]
-      (is (= "127.0.0.1:9222" (get-in caps [:goog:chromeOptions :debuggerAddress])))
-      (is (nil? (get-in caps [:goog:chromeOptions :redactedLegacySwitches])))
-      (is (nil? (get-in caps [:goog:chromeOptions :redactedLegacyExtension])))))
-
-  (testing "stealth option is ignored (handled at Chrome launch time)"
-    ;; Even if stealth is passed, it shouldn't affect connect capabilities
-    (let [caps (sess/build-debugger-capabilities {:port 9333 :stealth true})]
-      (is (= "127.0.0.1:9333" (get-in caps [:goog:chromeOptions :debuggerAddress])))
-      (is (nil? (get-in caps [:goog:chromeOptions :redactedLegacySwitches])))
-      (is (nil? (get-in caps [:goog:chromeOptions :redactedLegacyExtension]))))))
+      (is (= "127.0.0.1:9222" (get-in caps [:goog:chromeOptions :debuggerAddress]))))))
 
 ;; Integration test for connect-to-existing! requires Chrome already running
 ;; with --remote-debugging-port. This is harder to test automatically because
@@ -162,7 +150,26 @@
 
 (deftest connect-to-existing-error-test
   (testing "returns error when Chrome not running on port"
-    (let [result (sess/connect-to-existing! {:port 19999 :stealth false})]
+    (let [result (sess/connect-to-existing! {:port 19999})]
       (is (:error result))
       (is (= :webdriver/connect-failed (get-in result [:error :type])))
       (is (= 19999 (get-in result [:error :data :port]))))))
+
+;; -----------------------------------------------------------------------------
+;; :path-driver Passthrough (sl-sq4) — stub eta/chrome, inspect opts
+;; -----------------------------------------------------------------------------
+
+(deftest connect-to-existing-path-driver-test
+  (testing "threads :path-driver through to eta/chrome when supplied"
+    (let [captured (atom nil)]
+      (with-redefs [eta/chrome (fn [opts] (reset! captured opts) {:session "fake-sid"})]
+        (sess/connect-to-existing! {:port 9222 :path-driver "/cfg/chromedriver"}))
+      (is (= "/cfg/chromedriver" (:path-driver @captured)))
+      (is (= "127.0.0.1:9222"
+             (get-in @captured [:capabilities :goog:chromeOptions :debuggerAddress])))))
+
+  (testing "omits :path-driver when not supplied (PATH fallback)"
+    (let [captured (atom nil)]
+      (with-redefs [eta/chrome (fn [opts] (reset! captured opts) {:session "fake-sid"})]
+        (sess/connect-to-existing! {:port 9222}))
+      (is (not (contains? @captured :path-driver))))))

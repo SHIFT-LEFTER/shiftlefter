@@ -2,6 +2,14 @@
 
 ShiftLefter can parse, validate, and reformat any Cucumber-compatible Gherkin file. No configuration, no step definitions, no Clojure. Just point it at a `.feature` file.
 
+> **Running the commands:** the release zip installs `sl`; in a checkout of
+> this repo substitute `bin/sl`. Mode doesn't apply here — `sl fmt` works on
+> any Gherkin file with no config at all (see [the examples index](../README.md)
+> for the Vanilla/Shifted story).
+
+This directory contains the three files used below: `login.feature` (clean),
+`messy.feature` (bad indentation), `broken.feature` (structurally invalid).
+
 ## Validate
 
 Start with any `.feature` file — one you already have, or create one:
@@ -30,14 +38,14 @@ sl fmt --check login.feature
 # => Checking login.feature... OK
 ```
 
-Exit code 0 means valid, 1 means something needs attention. Point it at a directory to check everything at once:
+Exit code 0 means valid, 1 means something needs attention. Point it at a directory to check everything at once — from this directory:
 
 ```bash
-sl fmt --check features/
-# => 2 files checked: 1 valid, 1 invalid
+sl fmt --check .
+# => checks login.feature, messy.feature, broken.feature in one pass
 ```
 
-This is enough for a CI gate — add `sl fmt --check features/` to your pipeline and formatting drift stops.
+This is enough for a CI gate — add `sl fmt --check <your feature dir>` to your pipeline and formatting drift stops.
 
 Validation also catches structural errors. Steps without a Scenario, missing keywords, broken nesting — the parser rejects them with line numbers:
 

@@ -1,3 +1,94 @@
+# Changelog: 0.5.0
+
+**Release Date:** 2026-07-07
+
+---
+
+**ShiftLefter 0.5.0 is the public launch: the core surface — a typed behavioral vocabulary driving real multi-actor browser sessions — is locked and ready to build on, and the whole project now treats an AI coding agent as a first-class author.**
+
+v0.4.5 proved the multi-interface promise (web + SMS in one scenario). v0.5.0 pins the foundation those proofs stand on: a stability contract for the core, an agent front door, deterministic project discovery, and a formatter you can trust as a CI gate. Agents write good E2E tests against this surface today; the traceability graph that maps them to requirements and use cases builds upward from here.
+
+---
+
+## What's New
+
+### Agent-First Front Door
+
+`sl orient` (replacing `sl agent-prompt`) is the one command an agent — or a human — runs first in any ShiftLefter project. It states which mode the project is in (**Shifted** with a validated vocabulary, or **Vanilla** plain Gherkin), points at the key artifacts, and suggests next steps. `sl orient --edn` dumps the full machine-readable project projection — accepted working-tree truth an agent can consume directly, including validation commands phrased for the *consumer's* environment, not ours.
+
+The doctrine now travels with the jar: `sl agent-doc` serves topic guides (locator strategy, SIEVE doctrine, orientation) from inside the packaged release, and the built-in step vocabulary reference is *generated* from the actual registered steps, so it cannot drift from the code. A one-line installer drops a runnable `sl` into `./sl/` and prints the `AGENTS.md` breadcrumb that tells a coding agent the surface exists.
+
+### Deterministic Project Context
+
+Project root and config discovery is now a single, deterministic resolution used everywhere — CLI, daemon, and examples resolve paths identically. The warm-path daemon wrapper that makes repeat `sl` calls fast is now the wrapper actually packaged in the release, and config-less directories no longer suffer a 10-second stall, a cold fallback, and a leaked background daemon.
+
+### Two Modes, Stated Plainly
+
+**Vanilla** mode (plain Gherkin, no vocabulary) is now genuinely reachable — previously the default config injected a glossary key and made every project look Shifted. `sl orient` names the mode explicitly, and planning-time validation checks exactly what the runner will run — no more validating steps the current mode ignores.
+
+### A Formatter You Can Gate CI On
+
+`sl fmt --check` / `--write` is advertised as a CI gate, so 0.5.0 makes it trustworthy:
+
+- **Formatting is idempotent** — `fmt(fmt(x)) == fmt(x)` is now a property test in the generative suite, not an assumption. Multi-line descriptions previously drifted two spaces per pass and could never satisfy `--check`; they now normalize to a fixed column while preserving intentional relative indentation.
+- **Descriptions are never deleted** — Scenario, Background, and Examples descriptions are emitted in canonical output (they were previously dropped), with a preservation property test guarding all positions.
+- **Comments are never silently destroyed** — canonical formatting does not yet re-emit interior comments, so `--write` now *refuses* to reformat a file where comments would be lost, names the exact lines, and leaves the file untouched. `--check` reports such files as a third state — `CONTAINS COMMENTS` — distinct from OK and NEEDS FORMATTING, exiting 0 so a CI gate never goes red on a file `--write` won't fix. Full comment preservation is on the roadmap.
+
+### Sharper Diagnostics
+
+- Planning diagnostics (step-definition/glossary mismatches) now appear in **both** the console and EDN reporters — previously they were invisible in both.
+- `sl <unknown-command>` is now a proper CLI usage error: non-zero exit (was: exit 0 with output on stdout).
+- Provisioning rejects a second wearer of the same costume up front, instead of failing mysteriously mid-run.
+- Browser step retry logic recognizes more Chrome error variants and waits out post-navigation races.
+
+### Docs for Humans and Agents
+
+The public docs got a positioning-and-honesty pass, validated by blind cold-reads against a first-day-adopter persona:
+
+- [Would ShiftLefter work for my project?](docs/FIT.md) — a practical fit check you can hand to your agent.
+- [Why it's built this way](docs/PHILOSOPHY.md) — the design-philosophy read behind the typed-vocabulary idea.
+- The locator-strategy doctrine — why intent references beat brittle selectors — published for end users, with a slim agent-facing cut in `sl agent-doc`.
+- Reference pages for the glossary, SVO validation, and costumes, plus a tutorial on-ramp through the numbered `examples/`.
+
+### Agent Evaluation Corpus
+
+`evals/` ships two self-contained agent evaluation tasks — a cross-interface authoring task (browser + SMS) and a multi-user session-isolation repair task — each with a start state, a solution, and a verifier. The 0.5 acceptance drive ran an agent through the real dogfood loop (N=3, all green through the built jar).
+
+### Preview: SIEVE
+
+The SIEVE browser-inspection server — live perception of a running page, two-observation reconciliation, semantic diffing — ships in the codebase as a **dev/REPL preview**: invocable from the REPL, not yet wired to the CLI. Its doctrine (`sl agent-doc sieve`) ships now, backed by the acceptance-drive evidence.
+
+## Breaking Changes
+
+- `sl agent-prompt` is now `sl orient` (same front-door role, richer output).
+- `sl <unknown-command>` exits non-zero (was 0).
+- `sl fmt` EDN output gains per-file `:comments` and summary `:with-comments` / `:skipped-comments` keys; comment-bearing files report the new `CONTAINS COMMENTS` state instead of NEEDS FORMATTING.
+
+## Stats
+
+```
+1595 tests, 5069 assertions, 0 failures
+Cucumber compliance: 46/46 good, 11/11 bad (100%)
+```
+
+## Installation
+
+**One-line installer (recommended):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash
+export PATH="$PWD/sl:$PATH"
+sl --version
+```
+
+**Manual:** download `shiftlefter-v0.5.0.zip` from releases, unzip, add to PATH. Java 11+ is the only requirement — no Clojure toolchain needed.
+
+## Links
+
+- [README](https://github.com/SHIFT-LEFTER/shiftlefter/blob/v0.5.0/README.md)
+- [Fit check — would ShiftLefter work for my project?](https://github.com/SHIFT-LEFTER/shiftlefter/blob/v0.5.0/docs/FIT.md)
+- [Why it's built this way](https://github.com/SHIFT-LEFTER/shiftlefter/blob/v0.5.0/docs/PHILOSOPHY.md)
+
 # Changelog: 0.4.5
 
 **Release Date:** 2026-06-05
@@ -508,8 +599,6 @@ Multi-actor scenarios use separate browser sessions per subject.
 ### Persistent Browser Sessions
 
 Browsers survive JVM restarts and macOS sleep/wake cycles. Subject profiles stored in `~/.shiftlefter/subjects/` enable exploratory testing without session loss.
-
-Browser session persistence available for repeatable local testing.
 
 ---
 

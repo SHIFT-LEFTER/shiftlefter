@@ -110,25 +110,42 @@
       (assoc :arity {:expected (:expected (:binding bound-step))
                      :actual (:actual (:binding bound-step))}))))
 
+(def ^:private wrapper-error-types
+  "Error types under :diagnostics :errors whose payload is already emitted
+   under a dedicated key (:stepdef-issues / :suite-lint-issues) — excluded
+   from :errors to avoid duplication."
+  #{:stepdef/glossary-mismatch :suite-lint/failed})
+
 (defn- extract-planning-diagnostics
   "Extract planning diagnostics for EDN output (exit code 2).
-   Includes binding issues, SVO issues, and suite-load lint issues."
+   Includes binding issues, SVO issues, suite-load lint issues, stepdef
+   glossary issues, annotation/macro errors, and generic planning errors."
   [diagnostics]
   (when diagnostics
     (let [{:keys [undefined ambiguous invalid-arity svo-issues
-                  suite-lint-issues counts]} diagnostics
+                  suite-lint-issues stepdef-issues annotation-errors
+                  macro-errors errors counts]} diagnostics
           binding-issues (concat
                           (map #(extract-planning-issue % :undefined) undefined)
                           (map #(extract-planning-issue % :ambiguous) ambiguous)
-                          (map #(extract-planning-issue % :invalid-arity) invalid-arity))]
+                          (map #(extract-planning-issue % :invalid-arity) invalid-arity))
+          other-errors (->> errors
+                            (remove #(wrapper-error-types (:type %)))
+                            (mapv serialize-error))]
       (cond-> {:issues (vec binding-issues)
                :counts counts}
         (seq svo-issues)        (assoc :svo-issues svo-issues)
-        (seq suite-lint-issues) (assoc :suite-lint-issues suite-lint-issues)))))
+        (seq suite-lint-issues) (assoc :suite-lint-issues suite-lint-issues)
+        (seq stepdef-issues)    (assoc :stepdef-issues (vec stepdef-issues))
+        (seq annotation-errors) (assoc :annotation-errors (vec annotation-errors))
+        (seq macro-errors)      (assoc :macro-errors (vec macro-errors))
+        (seq other-errors)      (assoc :errors other-errors)))))
 
-(defn- extract-execution-diagnostics
-  "Extract diagnostics for EDN output on successful execution (exit code 0/1).
-   Only includes SVO issues (warnings that didn't block execution).
+(defn execution-diagnostics
+  "Extract diagnostics for EDN output on non-blocked runs (exit code 0/1
+   and dry-run success). Only includes SVO issues (warnings that didn't
+   block execution). Public so runner core can attach diagnostics to the
+   dry-run summaries it builds inline (sl-qk8l).
    Returns nil if no diagnostics to report."
   [diagnostics]
   (when diagnostics
@@ -163,7 +180,7 @@
       ;; Success or failure - include counts, failures, and diagnostics if present
       (0 1) (let [scenarios (:scenarios result)
                   step-count (reduce + (map #(count (:steps %)) scenarios))
-                  exec-diagnostics (extract-execution-diagnostics (:diagnostics opts))]
+                  exec-diagnostics (execution-diagnostics (:diagnostics opts))]
               (cond-> (assoc base
                              :counts (assoc (:counts result)
                                             :scenarios (count scenarios)

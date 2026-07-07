@@ -116,10 +116,6 @@
    Options:
    - :port — Chrome debug port (required)
 
-   Note: Legacy browser options (redactedLegacySwitches, redactedLegacyExtension) are NOT
-   included here — they're Chrome launch options, not WebDriver connect options.
-   Stealth is applied when Chrome is launched (see browser.chrome/build-chrome-args).
-
    Returns capabilities map suitable for Etaoin."
   [{:keys [port]}]
   (let [debugger-address (str "127.0.0.1:" port)]
@@ -134,7 +130,9 @@
 
    Options:
    - :port — Chrome debug port (required)
-   - :stealth — if true, add anti-automation detection flags (default: false)
+   - :path-driver — explicit ChromeDriver binary path (optional). When provided,
+     Etaoin uses it instead of a PATH-resolved chromedriver. Low-level passthrough;
+     callers resolve the path (e.g. via config.user/resolve-chromedriver-path).
 
    Returns:
    - Success: {:ok driver :browser EtaoinBrowser :etaoin-driver raw-driver}
@@ -143,20 +141,21 @@
    Examples:
    ```clojure
    ;; Chrome already running on port 9222
-   (connect-to-existing! {:port 9222 :stealth true})
+   (connect-to-existing! {:port 9222})
    ;; => {:ok {...} :browser #EtaoinBrowser{...} :etaoin-driver {...}}
    ```"
-  [{:keys [port stealth] :as opts}]
+  [{:keys [port path-driver] :as opts}]
   (try
     (let [capabilities (build-debugger-capabilities opts)
-          ;; Etaoin chrome with capabilities - it will connect via debuggerAddress
-          eta-driver (eta/chrome {:capabilities capabilities})
+          ;; Etaoin chrome with capabilities - it will connect via debuggerAddress.
+          ;; Thread :path-driver so attach uses the configured chromedriver, not PATH.
+          eta-driver (eta/chrome (cond-> {:capabilities capabilities}
+                                   path-driver (assoc :path-driver path-driver)))
           session-id (:session eta-driver)
           ;; Build our driver map
           driver {:type :chrome
                   :session session-id
                   :debug-port port
-                  :stealth stealth
                   :connected-via :debugger-address}
           ;; Create EtaoinBrowser for protocol operations
           etaoin-browser (browser/make-etaoin-browser eta-driver)]
@@ -166,7 +165,7 @@
     (catch Exception e
       {:error {:type :webdriver/connect-failed
                :message (str "Failed to connect to Chrome on port " port ": " (ex-message e))
-               :data {:port port :stealth stealth}}})))
+               :data {:port port}}})))
 
 (defn close-session!
   "Close/delete the remote WebDriver session.

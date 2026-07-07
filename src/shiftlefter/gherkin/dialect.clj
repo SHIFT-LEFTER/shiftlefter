@@ -87,7 +87,7 @@
 (defn match-step-keyword
   "Match step keywords (Given/When/Then/And/But/*).
    Returns {:keyword :given :matched \"Soit \" :text \"the rest\"} or nil.
-   Step text is trimmed of trailing whitespace (Gherkin semantic behavior).
+   Step text is trimmed of surrounding whitespace (Gherkin semantic behavior).
    Star keywords return :star (not the canonical keyword they matched against)."
   [text dialect]
   (let [step-keywords #{:given :when :then :and :but}]
@@ -98,8 +98,10 @@
               (let [actual-keyword (if (str/starts-with? prefix "*") :star canonical)]
                 {:keyword actual-keyword
                  :matched prefix
-                 ;; Trim trailing whitespace - Cucumber does this semantically
-                 :text (str/trimr (subs text (count prefix)))})))
+                 ;; Trim surrounding whitespace - Cucumber strips both sides
+                 ;; semantically, so aligned (multi-space) Gherkin keeps the
+                 ;; same step text as single-spaced.
+                 :text (str/trim (subs text (count prefix)))})))
           dialect)))
 
 (defn match-block-keyword

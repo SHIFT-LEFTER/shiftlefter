@@ -47,7 +47,7 @@
     (let [original-home (System/getProperty "user.home")]
       (try
         (System/setProperty "user.home" "/nonexistent/path/that/does/not/exist")
-        (let [opts {:stealth true :chrome-path "/custom/chrome"}]
+        (let [opts {:chrome-path "/custom/chrome"}]
           (is (= opts (user-config/merge-with-user-config opts))))
         (finally
           (System/setProperty "user.home" original-home)))))
@@ -73,51 +73,71 @@
       (try
         ;; Create config directory and file
         (fs/create-dirs config-dir)
-        (spit config-path "{:chrome-path \"/user/chrome\" :default-stealth true}")
+        (spit config-path "{:chrome-path \"/user/chrome\"}")
         (System/setProperty "user.home" temp-dir)
 
         ;; Test: user config values are applied
         (let [result (user-config/merge-with-user-config {})]
-          (is (= "/user/chrome" (:chrome-path result)))
-          (is (true? (:stealth result))))
-
-        ;; Test: explicit opts override user config
-        (let [result (user-config/merge-with-user-config {:stealth false})]
-          (is (= "/user/chrome" (:chrome-path result)))
-          (is (false? (:stealth result))))
+          (is (= "/user/chrome" (:chrome-path result))))
 
         ;; Test: explicit chrome-path overrides user config
         (let [result (user-config/merge-with-user-config {:chrome-path "/explicit/chrome"})]
-          (is (= "/explicit/chrome" (:chrome-path result)))
-          (is (true? (:stealth result))))
+          (is (= "/explicit/chrome" (:chrome-path result))))
 
         (finally
           (System/setProperty "user.home" original-home)
           (fs/delete-tree temp-dir))))))
 
-(deftest translate-default-stealth-test
-  (testing "default-stealth only applies when :stealth not in opts"
+;; -----------------------------------------------------------------------------
+;; ChromeDriver Resolution Tests (sl-sq4)
+;; -----------------------------------------------------------------------------
+
+(deftest resolve-chromedriver-path-test
+  (testing "Explicit :path-driver opt wins (no config needed)"
+    (is (= "/explicit/chromedriver"
+           (user-config/resolve-chromedriver-path {:path-driver "/explicit/chromedriver"}))))
+
+  (testing "Returns nil when no opt and no config file"
+    (let [original-home (System/getProperty "user.home")]
+      (try
+        (System/setProperty "user.home" "/nonexistent/path/that/does/not/exist")
+        (is (nil? (user-config/resolve-chromedriver-path {})))
+        (finally
+          (System/setProperty "user.home" original-home))))))
+
+(deftest resolve-chromedriver-path-config-test
+  (let [temp-dir (str (fs/create-temp-dir {:prefix "shiftlefter-test-"}))
+        config-dir (str temp-dir "/.shiftlefter")
+        config-path (str config-dir "/config.edn")
+        original-home (System/getProperty "user.home")]
+    (try
+      (fs/create-dirs config-dir)
+      (spit config-path "{:chromedriver-path \"/cfg/chromedriver\"}")
+      (System/setProperty "user.home" temp-dir)
+
+      (testing "Falls back to config.edn :chromedriver-path when no opt"
+        (is (= "/cfg/chromedriver"
+               (user-config/resolve-chromedriver-path {}))))
+
+      (testing "Explicit :path-driver opt overrides config.edn"
+        (is (= "/explicit/chromedriver"
+               (user-config/resolve-chromedriver-path {:path-driver "/explicit/chromedriver"}))))
+
+      (finally
+        (System/setProperty "user.home" original-home)
+        (fs/delete-tree temp-dir)))))
+
+(deftest resolve-chromedriver-path-malformed-config-test
+  (testing "Swallows malformed EDN (parse error) -> nil -> PATH fallback"
     (let [temp-dir (str (fs/create-temp-dir {:prefix "shiftlefter-test-"}))
           config-dir (str temp-dir "/.shiftlefter")
           config-path (str config-dir "/config.edn")
           original-home (System/getProperty "user.home")]
       (try
         (fs/create-dirs config-dir)
-        (spit config-path "{:default-stealth true}")
+        (spit config-path "{:chromedriver-path }}}broken")
         (System/setProperty "user.home" temp-dir)
-
-        ;; Test: default-stealth becomes :stealth when opts empty
-        (let [result (user-config/merge-with-user-config {})]
-          (is (true? (:stealth result))))
-
-        ;; Test: explicit :stealth false overrides default-stealth
-        (let [result (user-config/merge-with-user-config {:stealth false})]
-          (is (false? (:stealth result))))
-
-        ;; Test: explicit :stealth true is preserved
-        (let [result (user-config/merge-with-user-config {:stealth true})]
-          (is (true? (:stealth result))))
-
+        (is (nil? (user-config/resolve-chromedriver-path {})))
         (finally
           (System/setProperty "user.home" original-home)
           (fs/delete-tree temp-dir))))))

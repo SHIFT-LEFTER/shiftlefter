@@ -1,5 +1,4 @@
 Feature: Two-factor password reset via SMS
-
   One scenario, two interfaces, no glue: a real browser drives the
   reset flow; the second factor arrives by SMS and ShiftLefter reads
   it back. The fixture server and the SMS mock share one in-memory
@@ -10,8 +9,7 @@ Feature: Two-factor password reset via SMS
     And :user/alice fills {:id "email"} with 'alice@example.com'
     And :user/alice clicks {:css "button[type=\"submit\"]"}
     Then :user/alice should see 'Enter Verification Code'
-
-    When [:sms] :user/alice receives an SMS to '+15550001111' within the last 1 minute matching /verification code is: (\d{6})/
+    When [:sms] :user/alice receives an SMS to '+15550001111' matching /verification code is: (\d{6})/
     And :user/alice fills {:id "code"} with the SMS code
     And :user/alice clicks {:css "button[type=\"submit\"]"}
     Then :user/alice should see 'Code verified for alice'

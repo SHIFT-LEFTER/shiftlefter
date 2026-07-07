@@ -43,7 +43,7 @@
 ;; Specs — SVO Validation Issue Shapes
 ;; -----------------------------------------------------------------------------
 
-(s/def ::type #{:svo/unknown-subject :svo/unknown-verb
+(s/def ::type #{:svo/missing-subject :svo/unknown-subject :svo/unknown-verb
                 :svo/unknown-interface :svo/provisioning-failed
                 :svo/unknown-object :svo/raw-locator-disallowed})
 (s/def ::subject keyword?)
@@ -128,11 +128,14 @@
 
 (defn- validate-subject
   "Validate subject against glossary.
-   Uses all-subject-forms for Levenshtein suggestions (includes qualified
-   instance forms like :user/alice alongside type keys).
+   Uses all-subject-forms for the :known hint and Levenshtein suggestions —
+   resolvable forms only: qualified instances like :user/alice plus singleton
+   type keys; bare types-with-instances are excluded (sl-6e7p).
    Returns issue map or nil if valid."
   [glossary subject]
-  (when subject
+  (if (nil? subject)
+    {:type :svo/missing-subject
+     :message "SVO step resolved without a subject"}
     (when-not (glossary/known-subject? glossary subject)
       (let [all-forms (glossary/all-subject-forms glossary)
             suggestion (suggest-similar subject all-forms 2)]
@@ -174,6 +177,17 @@
   (and (string? object-str)
        (str/starts-with? object-str "{")))
 
+(defn- object-kind
+  "Look up the accepted value kind of the O slot for the SVO's verb frame.
+
+   Frames may declare :object-kind in the verb glossary (sl-rlxa);
+   absent (or no frame on the SVO) defaults to :intent — the object is
+   an intent reference. :location slots accept literal URLs."
+  [glossary interface-type {:keys [verb frame]}]
+  (or (when (and interface-type verb frame)
+        (get-in glossary [:verbs interface-type verb :frames frame :object-kind]))
+      :intent))
+
 (defn- validate-object
   "Validate object (locator) against intent glossary.
 
@@ -182,9 +196,15 @@
    - :warn — unknown intents warn (raw locators allowed)
    - :off — no validation
 
+   Slots whose frame declares :object-kind :location accept literal
+   values (URLs) and are never validated as intent references (sl-rlxa) —
+   named-location resolution lands additively in sl-3jr4.
+
    Returns issue map or nil if valid."
-  [object-str interface enforcement]
-  (when (and object-str (string? object-str) (not= enforcement :off))
+  [object-str interface enforcement kind]
+  (when (and object-str (string? object-str)
+             (not= enforcement :off)
+             (not= kind :location))
     (cond
       ;; Raw locator check (strict mode only)
       (and (= enforcement :strict) (raw-locator? object-str))
@@ -192,7 +212,7 @@
        :object object-str
        :message "Raw locators are not allowed in strict mode. Use intent references instead."}
 
-      ;; Intent reference check
+      ;; Intent reference check — supports flat AND nested (multi-segment) refs.
       (not (raw-locator? object-str))
       (let [parse-result (intent-resolve/parse-intent-ref object-str)]
         (if (:error parse-result)
@@ -200,15 +220,18 @@
           {:type :svo/unknown-object
            :object object-str
            :message (-> parse-result :error :message)}
-          ;; Valid syntax, check if intent exists
+          ;; Valid syntax — statically walk the path against the schema (no browser):
+          ;; intent known -> each non-last name is a collection -> last is a
+          ;; collection or an element with a binding for this interface.
           (try
             (let [intents (intent-state/get-intents)
-                  resolve-result (intent-resolve/resolve-intent-ref intents (:ok parse-result) interface)]
-              (when (:error resolve-result)
+                  path-error (intent-resolve/validate-path-static
+                              intents (:ok parse-result) interface)]
+              (when path-error
                 {:type :svo/unknown-object
                  :object object-str
                  :interface interface
-                 :message (-> resolve-result :error :message)}))
+                 :message (:message path-error)}))
             (catch Exception _
               ;; If intents not loaded yet, skip validation
               nil))))
@@ -257,8 +280,10 @@
                         (when interface-type
                           (validate-verb glossary interface-type verb))
                         (validate-interface interfaces interface)
-                        ;; Validate object/locator (when enforcement is not :off)
-                        (validate-object object interface object-enforcement)])]
+                        ;; Validate object/locator (when enforcement is not :off
+                        ;; and the frame's O slot expects an intent reference)
+                        (validate-object object interface object-enforcement
+                                         (object-kind glossary interface-type svo))])]
      {:valid? (empty? issues)
       :issues (vec issues)})))
 
@@ -436,6 +461,16 @@
          (when suggestion
            (str "\n       " (format-suggestion suggestion))))))
 
+(defn format-missing-subject
+  "Format an :svo/missing-subject issue as a human-readable error message."
+  [issue]
+  (let [{:keys [message location]} issue
+        {:keys [step-text uri line]} location]
+    (str (or message "SVO step resolved without a subject")
+         (when step-text (str " in step \"" step-text "\""))
+         (when (and uri line) (str "\n       at " uri ":" line))
+         "\n       The step definition's declared subject capture resolved to nil.")))
+
 (defn format-unknown-verb
   "Format an :svo/unknown-verb issue as a human-readable error message.
 
@@ -538,6 +573,7 @@
   "Format any SVO issue by dispatching on :type.
 
    Supported types:
+   - :svo/missing-subject
    - :svo/unknown-subject
    - :svo/unknown-verb
    - :svo/unknown-interface
@@ -548,6 +584,7 @@
    Returns formatted string or generic fallback for unknown types."
   [issue]
   (case (:type issue)
+    :svo/missing-subject (format-missing-subject issue)
     :svo/unknown-subject (format-unknown-subject issue)
     :svo/unknown-verb (format-unknown-verb issue)
     :svo/unknown-interface (format-unknown-interface issue)

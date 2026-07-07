@@ -89,12 +89,15 @@
    file present), there is no project root and therefore no setup.clj.
 
    Returns absolute path string or nil."
-  [config-path]
-  (when config-path
-    (let [base   (or (some-> config-path fs/parent str) ".")
-          setup  (str (fs/path base "setup.clj"))]
-      (when (fs/exists? setup)
-        (str (fs/absolutize setup))))))
+  [config-or-path]
+  (let [config-path (if (map? config-or-path)
+                      (:config-path config-or-path)
+                      config-or-path)]
+    (when config-path
+      (let [base   (or (some-> config-path fs/parent str) ".")
+            setup  (str (fs/path base "setup.clj"))]
+        (when (fs/exists? setup)
+          (str (fs/real-path setup)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Loader

@@ -1,0 +1,5 @@
+;; Rating — a nested region inside a ProductCard. No :root; the card's
+;; :rating collection supplies the :selector. Demonstrates nested descent:
+;; Dashboard.featured[1].rating.stars.
+{:intent "Rating"
+ :elements {:stars {:bindings {:web {:css ".stars"}}}}}

@@ -184,17 +184,23 @@
 (defn fmt-check
   "Check if string is already in canonical format.
 
-   Returns {:status :ok/:error ...}
+   Returns {:status :ok/:comments/:error ...}
    - On success (already canonical): {:status :ok}
+   - Contains comments canonical formatting would drop (sl-q2uj guard —
+     reported as its own state, distinct from OK and NEEDS FORMATTING,
+     so CI gates never go red on a file --write refuses to fix):
+     {:status :comments :comments [{:line N :text \"# ...\"} ...]}
    - On parse error: {:status :error :reason :parse-errors :details [...]}
    - On needs formatting: {:status :error :reason :needs-formatting}"
   [s]
   (try
-    (let [canonical (printer/canonical s)]
-      (if (= s canonical)
-        {:status :ok}
-        {:status :error
-         :reason :needs-formatting}))
+    (let [canonical (printer/canonical s)
+          lost (printer/lost-comments s)]
+      (cond
+        (seq lost) {:status :comments :comments lost}
+        (= s canonical) {:status :ok}
+        :else {:status :error
+               :reason :needs-formatting}))
     (catch clojure.lang.ExceptionInfo e
       (let [data (ex-data e)]
         (if (:errors data)
@@ -216,10 +222,17 @@
    - Normalizes indentation (2 spaces)
    - Normalizes line endings to LF
    - Normalizes tag spacing to single space
-   - Supports all Gherkin constructs including Rule: blocks"
+   - Supports all Gherkin constructs including Rule: blocks
+
+   When the output would drop interior comments (canonical formatting is
+   not yet comment-safe, sl-q2uj), the :ok result carries
+   :lost-comments [{:line N :text \"# ...\"} ...] so callers can refuse
+   destructive writes."
   [s]
   (try
-    {:status :ok :output (printer/canonical s)}
+    (let [lost (printer/lost-comments s)]
+      (cond-> {:status :ok :output (printer/canonical s)}
+        (seq lost) (assoc :lost-comments lost)))
     (catch clojure.lang.ExceptionInfo e
       (let [data (ex-data e)]
         (if (:errors data)

@@ -1,187 +1,141 @@
-# Browser Testing Quick Start
+# Add Your First Browser Behavior
 
-ShiftLefter supports browser automation via WebDriver (Etaoin backend).
+Drive a real browser from a Gherkin feature with **zero custom code** — just
+built-in steps. This is the fastest way to see ShiftLefter work.
 
 ## Prerequisites
 
-1. **Chrome browser** installed
-2. **ChromeDriver** matching your Chrome version
+- **Java 11+** and the `sl` CLI on your PATH (see the [install guide](../README.md#install)).
+- **Chrome** installed, and a matching **ChromeDriver** — on your `PATH`, or pointed
+  to by `:chromedriver-path` in your config (it doesn't have to be on `PATH`).
+  `brew install chromedriver` on macOS puts it on `PATH`; keep its major version in
+  step with Chrome.
 
-### Install ChromeDriver (macOS)
+## 1. A feature file
+
+`features/login.feature`:
+
+```gherkin
+Feature: Login
+
+  Scenario: A user logs in
+    When :user/alice opens the browser to 'https://the-internet.herokuapp.com/login'
+    And :user/alice fills {:id "username"} with 'tomsmith'
+    And :user/alice fills {:id "password"} with 'SuperSecretPassword!'
+    And :user/alice clicks {:css "button[type='submit']"}
+    Then :user/alice should see 'You logged into a secure area!'
+```
+
+Steps are **subject-first**: `:user/alice` names both the actor type (`:user`)
+and the session (`:alice`). No "I" — every browser step has an explicit actor.
+
+## 2. Configure the `:web` interface
+
+`shiftlefter.edn`:
+
+```clojure
+{:interfaces {:web {:type :web :adapter :etaoin}}}
+```
+
+That's the whole config for the default WebDriver backend. (To use Playwright
+instead, see [CAPABILITIES.md](CAPABILITIES.md#browser-backend-configuration).)
+
+## 3. Run it
 
 ```bash
-brew install chromedriver
+sl run features/
 ```
 
-### Start ChromeDriver
+Chrome opens, fills the form, and the scenario passes. To check that everything
+*binds* without launching a browser, add `--dry-run`.
 
-```bash
-chromedriver --port=9515
+(No `--step-paths` here: it's only needed when you have your own custom step
+definitions. With built-in steps alone, there's no `steps/` directory to point at.)
+
+## Built-in browser steps
+
+No code required — these ship with ShiftLefter:
+
+```gherkin
+# navigation
+:user/alice opens the browser to '<url>'
+
+# actions
+:user/alice clicks {<locator>}
+:user/alice double-clicks {<locator>}
+:user/alice right-clicks {<locator>}
+:user/alice moves to {<locator>}
+:user/alice drags {<from>} to {<to>}
+:user/alice fills {<locator>} with '<text>'
+:user/alice presses '<key>'
+
+# verification
+:user/alice should see '<text>'
+:user/alice should see {<locator>}
+:user/alice should not see {<locator>}
+:user/alice should be on '<url>'
+
+# timing
+:user/alice waits <N> seconds
+:user/alice waits for {<locator>}
+:user/alice waits for {<locator>} to show '<text>'
 ```
 
-Keep this running in a separate terminal.
+The current built-in set, with each verb's frames, is `sl agent-doc builtins`.
 
-## REPL Workflow
+### Locators
 
-The recommended way to develop browser tests is via the REPL.
+Locators are EDN maps in the step text:
 
-### 1. Start a REPL
-
-```bash
-clj -M:dev
-```
-
-### 2. Load browser stepdefs
-
-```clojure
-(require '[shiftlefter.repl :as repl])
-(require '[shiftlefter.stepdefs.browser])
-(require '[shiftlefter.capabilities.ctx :as cap])
-(require '[shiftlefter.webdriver.etaoin.session :as session])
-```
-
-### 3. Create a browser session
-
-```clojure
-;; Create driver pointing to chromedriver
-(def driver (session/make-driver "http://127.0.0.1:9515"))
-
-;; Create a session (opens browser window)
-(def result (session/create-session! driver))
-
-;; result contains:
-;;   :ok           - driver map with session attached
-;;   :browser      - EtaoinBrowser implementing IBrowser protocol
-;;   :etaoin-driver - raw Etaoin driver for advanced use
-
-(def my-browser (:browser result))
-```
-
-### 4. Attach browser to a named context
-
-```clojure
-;; Clear any previous state
-(repl/clear!)
-
-;; Attach the browser to :alice context (subject-keyed under :cap/web.alice)
-(repl/set-ctx! :alice (cap/assoc-capability {} :web my-browser :ephemeral :alice))
-```
-
-### 5. Run steps interactively
-
-```clojure
-;; Navigate (repl/as prepends :alice automatically)
-(repl/as :alice "opens the browser to 'https://example.com'")
-
-;; Click
-(repl/as :alice "clicks {:css \"a\"}")
-
-;; Verify element visible
-(repl/as :alice "should see {:css \"h1\"}")
-```
-
-### 6. Use Surfaces for persistent sessions
-
-```clojure
-;; Mark a context as a surface (session persists across resets)
-(repl/mark-surface! :alice)
-
-;; Now when you call reset-ctxs!, the browser stays open
-(repl/reset-ctxs!)
-
-;; Session is saved to .shiftlefter/alice.edn
-;; Next time you start, you can reattach to the existing session
-```
-
-### 7. Clean up
-
-```clojure
-;; Close the session (pass the driver, not browser)
-(session/close-session! (:ok result))
-
-;; Or clear everything (closes non-surface sessions)
-(repl/clear!)
-```
-
-## Locator Syntax
-
-Locators use EDN syntax in step text:
-
-| Syntax | Example |
-|--------|---------|
-| CSS | `{:css "#login"}` or `[:css "#login"]` |
+| Kind | Example |
+|---|---|
+| CSS | `{:css "button[type='submit']"}` |
 | XPath | `{:xpath "//button"}` |
-| ID | `{:id "submit"}` |
+| ID | `{:id "username"}` |
 | Name | `{:name "email"}` |
 | Class | `{:class "btn-primary"}` |
 | Tag | `{:tag "button"}` |
 
-## Available Steps
+These aren't equally durable — a `data-testid` or accessible role survives
+refactors that break a class or positional XPath. [Choosing web locators](LOCATORS.md)
+covers which to prefer and why.
 
-All built-in browser steps require a subject (`:user`, `:alice`, etc.):
+Once you're past selectors, you can name elements semantically with **intent
+references** (`Login.submit`) defined in `glossary/intents/` — see
+[SVO.md](SVO.md#object-validation-against-intent-regions).
+
+## Multiple actors
+
+Add a second actor and ShiftLefter provisions an **independent, isolated browser
+session** for them automatically — same config:
 
 ```gherkin
-# Navigation
-:user opens the browser to '<url>'
-
-# Actions
-:user clicks {<locator>}
-:user double-clicks {<locator>}
-:user right-clicks {<locator>}
-:user moves to {<locator>}
-:user drags {<from-locator>} to {<to-locator>}
-:user fills {<locator>} with '<text>'
-
-# Verification
-:user should see '<text>'
-:user should see the title '<text>'
-:user should be on '<url>'
-:user should see {<locator>}
-:user should not see {<locator>}
-:user should see <N> {<locator>} elements
+    And :user/bob opens the browser to 'https://the-internet.herokuapp.com/login'
+    And :user/bob clicks {:css "button[type='submit']"}
 ```
 
-## CLI Usage
+`:user/alice` and `:user/bob` get separate cookies and state. The session key is
+the instance (`:alice`, `:bob`); the type (`:user`) is for glossary organization.
 
-Run a feature file with browser steps:
+## Catching mistakes before the browser opens
 
-```bash
-# Ensure chromedriver is running on port 9515
-./bin/sl run test/fixtures/features/browser_smoke.feature
-```
+Point ShiftLefter at a glossary and it validates actors, verbs, and objects at
+bind time — before a single browser launches. A typo'd `:user/bbo`, or `clicks`
+on an interface that doesn't define it, fails immediately with a "did you mean?"
+suggestion. See [SVO.md](SVO.md) for the validation model and
+[the multi-actor example](https://github.com/SHIFT-LEFTER/shiftlefter/tree/main/examples/02b-browser-multi-actor).
 
-Note: CLI mode is safe-by-default. Browser sessions are closed after each scenario.
+## Authenticated and long-running sessions
 
-## Configuration
-
-Configure WebDriver endpoint in your config:
-
-```clojure
-;; shiftlefter.edn
-{:webdriver {:host "127.0.0.1"
-             :port 9515}}
-
-;; Or direct URL
-{:webdriver-url "http://127.0.0.1:9515"}
-```
+For a browser that stays logged in across runs — your real account, a session you
+set up once — use a **costume**: `sl costume init <name>`, then bind it to a
+subject with `{:wears <name>}`. See [COSTUMES.md](COSTUMES.md).
 
 ## Troubleshooting
 
-### "No browser configured in context"
-
-The step is running but no browser session exists in the context. Ensure you've created a session and attached it to the context.
-
-### "session not created" from ChromeDriver
-
-- Check ChromeDriver version matches Chrome version
-- Ensure ChromeDriver is running (`chromedriver --port=9515`)
-- Check no other process is using port 9515
-
-### Session dies unexpectedly
-
-If you're using surfaces and the session dies (Chrome closed manually, ChromeDriver restarted), the next operation will return `:webdriver/session-dead`. Clear and recreate:
-
-```clojure
-(repl/clear!)
-;; Recreate session as above
-```
+- **`session not created` from ChromeDriver** — ChromeDriver and Chrome versions
+  must match; make sure ChromeDriver is running/​on PATH and the port is free.
+- **Nothing happens / no browser** — confirm Chrome and ChromeDriver are
+  installed and on PATH; run with `-v` for verbose diagnostics.
+- **A step won't bind** — run with `--dry-run` to see binding diagnostics without
+  launching anything.

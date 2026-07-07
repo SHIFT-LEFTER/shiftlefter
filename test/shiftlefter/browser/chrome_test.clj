@@ -151,24 +151,13 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest build-chrome-args-test
-  (testing "basic args without stealth"
+  (testing "basic args"
     (let [args (chrome/build-chrome-args {:port 9222
                                           :user-data-dir "/tmp/profile"})]
       (is (= ["--remote-debugging-port=9222"
               "--user-data-dir=/tmp/profile"
               "--no-first-run"
               "--no-default-browser-check"]
-             args))))
-
-  (testing "args with stealth enabled"
-    (let [args (chrome/build-chrome-args {:port 9222
-                                          :user-data-dir "/tmp/profile"
-                                          :stealth true})]
-      (is (= ["--remote-debugging-port=9222"
-              "--user-data-dir=/tmp/profile"
-              "--no-first-run"
-              "--no-default-browser-check"
-              "--disable-blink-features=LegacyBrowserOptionRedacted"]
              args)))))
 
 (deftest launch-chrome-not-found-test

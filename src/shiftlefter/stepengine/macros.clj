@@ -36,8 +36,11 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- resolve-path
-  "Resolve a path relative to CWD.
-   Returns the resolved path string."
+  "Absolutize a registry path as a last-mile loader convenience.
+
+   Runner/config callers resolve config-declared registry paths against the
+   project context's :config-root before calling load-registries. Direct callers
+   that pass relative paths get CWD-based absolutization here."
   [path]
   (str (fs/absolutize path)))
 
@@ -74,7 +77,8 @@
 (defn load-registries
   "Load macro registries from a list of INI file paths.
 
-   Paths are resolved relative to CWD. Files are loaded in order.
+   Runner/config callers should pass paths already resolved against :config-root.
+   Direct relative paths are absolutized against CWD. Files are loaded in order.
    Duplicate macro keys across any files result in a :macro/duplicate-key error.
 
    Parameters:

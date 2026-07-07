@@ -212,6 +212,74 @@
       (is (= :svo/unknown-subject (-> summary :planning :svo-issues first :type)))
       (is (= :alcie (-> summary :planning :svo-issues first :subject))))))
 
+(deftest test-stepdef-issues-in-exit-2
+  (testing "Exit 2 includes stepdef glossary issues; wrapper error not duplicated (sl-b49d)"
+    (let [stepdef-issue {:type :stepdef/unknown-frame
+                         :stepdef-id "sd-1"
+                         :source {:file "steps.clj" :line 12}
+                         :interface :web
+                         :verb :click
+                         :frame :nope
+                         :message "Step at steps.clj:12 uses unknown frame :nope on verb :web/click; known frames: :on"}
+          diagnostics {:undefined []
+                       :ambiguous []
+                       :invalid-arity []
+                       :svo-issues []
+                       :stepdef-issues [stepdef-issue]
+                       :errors [{:type :stepdef/glossary-mismatch
+                                 :issues [stepdef-issue]
+                                 :message "Found 1 stepdef(s) inconsistent with the glossary"}]
+                       :counts {:undefined-count 0
+                                :ambiguous-count 0
+                                :invalid-arity-count 0
+                                :svo-issue-count 0
+                                :stepdef-issue-count 1
+                                :total-issues 1}}
+          summary (report-edn/build-summary "run" 2 nil {:diagnostics diagnostics})]
+      (is (= 2 (:run/exit-code summary)))
+      (is (= 1 (count (-> summary :planning :stepdef-issues))))
+      (is (= :stepdef/unknown-frame (-> summary :planning :stepdef-issues first :type)))
+      (is (str/includes? (-> summary :planning :stepdef-issues first :message)
+                         "steps.clj:12"))
+      (is (= 1 (-> summary :planning :counts :stepdef-issue-count)))
+      ;; The wrapper error is excluded from :errors (payload already
+      ;; under :stepdef-issues)
+      (is (nil? (-> summary :planning :errors))))))
+
+(deftest test-generic-errors-in-exit-2
+  (testing "Exit 2 includes generic planning errors (e.g. glossary load failure)"
+    (let [diagnostics {:undefined []
+                       :ambiguous []
+                       :invalid-arity []
+                       :svo-issues []
+                       :errors [{:type :svo/missing-glossaries-config
+                                 :message "Shifted mode requires :glossaries config"}]
+                       :counts {:total-issues 0}}
+          summary (report-edn/build-summary "run" 2 nil {:diagnostics diagnostics})]
+      (is (= 1 (count (-> summary :planning :errors))))
+      (is (= :svo/missing-glossaries-config (-> summary :planning :errors first :type)))
+      (is (= "Shifted mode requires :glossaries config"
+             (-> summary :planning :errors first :message)))
+      ;; EDN-safe: round-trips through pr-str/read-string
+      (is (= summary (read-string (pr-str summary)))))))
+
+(deftest test-annotation-and-macro-errors-in-exit-2
+  (testing "Exit 2 includes annotation and macro errors"
+    (let [diagnostics {:undefined []
+                       :ambiguous []
+                       :invalid-arity []
+                       :svo-issues []
+                       :annotation-errors [{:type :annotation/unknown-interface
+                                            :message "Step declares interface :foo"}]
+                       :macro-errors [{:type :macro/undefined
+                                       :message "Undefined macro: 'login +'"}]
+                       :counts {:total-issues 0}}
+          summary (report-edn/build-summary "run" 2 nil {:diagnostics diagnostics})]
+      (is (= :annotation/unknown-interface
+             (-> summary :planning :annotation-errors first :type)))
+      (is (= :macro/undefined
+             (-> summary :planning :macro-errors first :type))))))
+
 (deftest test-svo-issues-in-exit-0
   (testing "Exit 0 (passed) includes :diagnostics key when SVO issues present"
     (let [result {:scenarios [{:status :passed :steps [{:status :passed}]}]

@@ -1,0 +1,13 @@
+;; ProductCard — the reused component (design §7.3, parent-anchored).
+;;
+;; No :root: the card's CONTAINER markup differs by section (.fbt-item /
+;; .recs-card / .s-result-item), so the card cannot self-locate. Each parent
+;; collection supplies the :selector (see dashboard.edn). The card's INNER
+;; selectors (.title, .price) are identical everywhere — only the wrapper
+;; varies, and only the parent knows it.
+{:intent "ProductCard"
+ :elements {:title {:bindings {:web {:css ".title"}}}
+            :price {:bindings {:web {:css ".price"}}}}
+ :collections {:rating {:intent "Rating"
+                        :selector {:web {:css ".rating"}}
+                        :count {:max 1}}}}

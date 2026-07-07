@@ -118,7 +118,15 @@
     this)
   (switch-to-main-frame! [this]
     (swap! calls-atom conj [:switch-to-main-frame!])
-    this))
+    this)
+
+  (query-all [_ scope locator]
+    (swap! calls-atom conj [:query-all scope locator])
+    [])
+
+  (query-all-pruned [_ scope locator boundary-css]
+    (swap! calls-atom conj [:query-all-pruned scope locator boundary-css])
+    []))
 
 (defn make-fake-browser []
   (->FakeBrowser (atom [])))

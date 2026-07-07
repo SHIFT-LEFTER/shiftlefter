@@ -33,7 +33,11 @@
    - {:action :close-failed :interface <name> :error <msg>} on failure
    - {:action :skipped :interface <name> :reason <msg>} if can't clean up"
   [cap-name capability-entry interfaces registry]
-  (let [impl (:impl capability-entry)
+  (let [;; Cleanup receives the handle, not the step-facing impl: wrapping
+        ;; adapters (browser, sl-091) store a separate :cleanup-handle holding
+        ;; the driver the :cleanup fn needs; non-wrapping adapters have none, so
+        ;; fall back to :impl.
+        handle (or (:cleanup-handle capability-entry) (:impl capability-entry))
         ;; Parse subject-keyed names: :web.alice → {:interface :web :subject :alice}
         {:keys [interface]} (cap/parse-capability-name cap-name)
         interface-config (get interfaces interface)]
@@ -52,7 +56,7 @@
            :interface cap-name
            :reason (str "Unknown adapter: " adapter-name)}
           (try
-            ((:cleanup adapter) impl)
+            ((:cleanup adapter) handle)
             {:action :closed
              :interface cap-name
              :adapter adapter-name}

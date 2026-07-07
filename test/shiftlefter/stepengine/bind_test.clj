@@ -475,6 +475,53 @@
       ;; Has location info
       (is (some? (-> result :diagnostics :svo-issues first :location))))))
 
+(deftest test-bind-suite-svo-missing-subject-error
+  (testing "optional subject capture resolving to nil emits missing-subject and blocks"
+    (registry/register! #"(?:(\w+) )?clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [step (make-step "clicks the button" [] {:line 12 :column 3})
+          pickle (make-pickle "test" [step] "features/missing-subject.feature")
+          glossary {:subjects {:alice {}}
+                    :verbs {:web {:click {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :error
+                      :unknown-verb :error
+                      :unknown-interface :error}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
+          bound-step (-> result :plans first :plan/steps first)
+          issue (-> result :diagnostics :svo-issues first)]
+      (is (= [nil "the button"] (-> bound-step :binding :captures)))
+      (is (nil? (-> bound-step :binding :svo :subject)))
+      (is (= :svo/missing-subject (:type issue)))
+      (is (= :error (:severity issue)))
+      (is (= "clicks the button" (-> issue :location :step-text)))
+      (is (not (:runnable? result))))))
+
+(deftest test-bind-suite-svo-missing-subject-warn
+  (testing "optional subject capture resolving to nil honors warn severity"
+    (registry/register! #"(?:(\w+) )?clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "test" ["clicks the button"])
+          glossary {:subjects {:alice {}}
+                    :verbs {:web {:click {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :warn}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
+          issue (-> result :diagnostics :svo-issues first)]
+      (is (:runnable? result))
+      (is (= :svo/missing-subject (:type issue)))
+      (is (= :warn (:severity issue))))))
+
 (deftest test-bind-suite-svo-unknown-verb-error
   (testing "bind-suite with unknown verb (error) is NOT runnable"
     (registry/register! #"(.+) smashes (.+)"
@@ -633,7 +680,34 @@
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
       ;; Two steps with unknown subjects
       (is (= 2 (count (-> result :diagnostics :svo-issues))))
-      (is (= 2 (-> result :diagnostics :counts :svo-issue-count))))))
+      (is (= 2 (-> result :diagnostics :counts :svo-issue-count)))
+      ;; sl-89ii: totals include the SVO family — but warn-level issues
+      ;; still don't block
+      (is (= 2 (-> result :diagnostics :counts :total-issues)))
+      (is (:runnable? result)))))
+
+(deftest test-total-issues-sums-all-families
+  (testing "sl-89ii: :total-issues = binding issues + SVO issues"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "test" ["BadUser clicks the button"
+                                      "this step has no definition"])
+          glossary {:subjects {:alice {}}
+                    :verbs {:web {:click {}}}}
+          interfaces {:web {:type :web :adapter :etaoin}}
+          opts {:glossary glossary
+                :interfaces interfaces
+                :svo {:unknown-subject :warn}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
+          counts (-> result :diagnostics :counts)]
+      (is (= 1 (:undefined-count counts)))
+      (is (= 1 (:svo-issue-count counts)))
+      (is (= 2 (:total-issues counts)))
+      ;; The undefined step blocks; the warn does not add to blocking
+      (is (not (:runnable? result))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Task 3.0.7 Acceptance Criteria

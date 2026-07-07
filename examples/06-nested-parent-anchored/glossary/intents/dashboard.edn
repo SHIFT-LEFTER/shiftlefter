@@ -1,0 +1,10 @@
+;; Dashboard — document-scoped (no :root). The SAME ProductCard appears under
+;; three different wrappers; each collection supplies its own :selector. This
+;; is what parent-anchoring expresses and self-rooting cannot (§7.4): one
+;; component, three container markups.
+{:intent "Dashboard"
+ :elements {}
+ :collections
+ {:featured {:intent "ProductCard" :selector {:web {:css ".featured .fbt-item"}}    :cardinality :many}
+  :sidebar  {:intent "ProductCard" :selector {:web {:css ".sidebar .recs-card"}}    :cardinality :many}
+  :results  {:intent "ProductCard" :selector {:web {:css ".results .s-result-item"}} :cardinality :many}}}
