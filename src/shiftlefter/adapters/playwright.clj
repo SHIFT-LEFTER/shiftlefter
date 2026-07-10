@@ -75,7 +75,10 @@
 (defn close-browser
   "Close the Playwright browser and release resources.
 
-   Takes the capability map returned by `create-browser`.
+   Takes the UNWRAPPED capability map — the value under `:ok` in
+   `create-browser`'s return, NOT the wrapped `{:ok {...}}` result itself.
+   A capability without `:browser` is an error, not a silent success —
+   same wrong-shape hardening as the etaoin adapter (sl-9vag).
 
    Returns:
    - Success: {:ok :closed}
@@ -83,17 +86,22 @@
 
    Examples:
    ```clojure
-   (close-browser {:browser pw-browser})
+   (close-browser (:ok (create-browser {:headless true})))
    ;; => {:ok :closed}
    ```"
   [capability]
-  (try
-    (require 'shiftlefter.webdriver.playwright.browser)
-    (let [close-fn (resolve 'shiftlefter.webdriver.playwright.browser/close-playwright-browser)]
-      (when-let [browser (:browser capability)]
-        (close-fn browser))
-      {:ok :closed})
-    (catch Exception e
-      {:error {:type :adapter/cleanup-failed
-               :adapter :playwright
-               :message (ex-message e)}})))
+  (if-let [browser (:browser capability)]
+    (try
+      (require 'shiftlefter.webdriver.playwright.browser)
+      (let [close-fn (resolve 'shiftlefter.webdriver.playwright.browser/close-playwright-browser)]
+        (close-fn browser)
+        {:ok :closed})
+      (catch Exception e
+        {:error {:type :adapter/cleanup-failed
+                 :adapter :playwright
+                 :message (ex-message e)}}))
+    {:error {:type :adapter/cleanup-failed
+             :adapter :playwright
+             :message (str "No :browser in capability — nothing was closed. "
+                           "Pass the unwrapped map (the value under :ok of "
+                           "create-browser's return), not the wrapped {:ok {...}} result.")}}))

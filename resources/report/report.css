@@ -1,0 +1,360 @@
+/* ShiftLefter HTML run report (sl-muq9).
+ *
+ * Tasteful-utilitarian v1; a future branding pass swaps this file wholesale
+ * (the renderer emits semantic classes only — no inline styles).
+ * All color/spacing decisions live in the custom properties below, so a
+ * restyle is a variable swap, not a selector rewrite. Class vocabulary:
+ *   .run-header .run-status .run-meta .run-selection .run-counts .controls
+ *   .feature .feature-name .feature-path
+ *   .scenario .scenario-name .tags .tag .duration
+ *   .steps .step .step-status .step-text .macro-marker .error-detail
+ *   .diagnostics .run-footer
+ * Status modifiers: .st-passed .st-failed .st-error .st-pending .st-skipped
+ * State: body.failures-only, .scenario.red, .feature.has-red
+ */
+
+:root {
+  --bg: #ffffff;
+  --fg: #1a1d21;
+  --fg-muted: #6b7280;
+  --surface: #f6f7f9;
+  --border: #e2e5e9;
+  --passed: #1a7f37;
+  --failed: #c93c37;
+  --error: #a13ac9;
+  --pending: #b58a1e;
+  --skipped: #6b7280;
+  --chip-bg: #eef1f4;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c;
+    --fg: #e6e8eb;
+    --fg-muted: #9aa2ad;
+    --surface: #1f2228;
+    --border: #33373e;
+    --passed: #4bc26b;
+    --failed: #ef6a64;
+    --error: #c579e0;
+    --pending: #d9ae4a;
+    --skipped: #9aa2ad;
+    --chip-bg: #2a2e35;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0 auto;
+  max-width: 64rem;
+  padding: 1.5rem 1.25rem 3rem;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  line-height: 1.45;
+}
+
+.noscript-note {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+/* ---- run header ---------------------------------------------------- */
+
+.run-header h1 {
+  font-size: 1.35rem;
+  margin: 0 0 0.25rem;
+}
+
+.run-status {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  vertical-align: middle;
+  color: var(--bg);
+}
+
+.run-status.st-passed {
+  background: var(--passed);
+}
+
+.run-status.st-failed {
+  background: var(--failed);
+}
+
+.run-meta,
+.run-selection {
+  margin: 0.15rem 0;
+  color: var(--fg-muted);
+  font-size: 0.85rem;
+}
+
+.run-selection {
+  font-weight: 600;
+}
+
+.run-counts {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0;
+  margin: 0.75rem 0;
+}
+
+.run-counts .count {
+  padding: 0.15rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.count.st-passed {
+  color: var(--passed);
+}
+
+.count.st-failed,
+.count.st-error {
+  color: var(--failed);
+}
+
+.count.st-pending {
+  color: var(--pending);
+}
+
+.count.st-skipped {
+  color: var(--skipped);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0 1.25rem;
+  font-size: 0.85rem;
+}
+
+.controls button {
+  padding: 0.25rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.controls button:hover {
+  border-color: var(--fg-muted);
+}
+
+/* ---- features & scenarios ------------------------------------------ */
+
+.feature {
+  margin: 1.5rem 0;
+}
+
+.feature-name {
+  font-size: 1.05rem;
+  margin: 0 0 0.1rem;
+}
+
+.feature-path {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+
+.scenario {
+  margin: 0.5rem 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.scenario > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.45rem 0.75rem;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.scenario .status-word {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  min-width: 4.2em;
+}
+
+.status-word.st-passed {
+  color: var(--passed);
+}
+
+.status-word.st-failed {
+  color: var(--failed);
+}
+
+.status-word.st-error {
+  color: var(--error);
+}
+
+.status-word.st-pending {
+  color: var(--pending);
+}
+
+.status-word.st-skipped {
+  color: var(--skipped);
+}
+
+.scenario-name {
+  flex: 1;
+}
+
+.tags {
+  display: inline-flex;
+  gap: 0.3rem;
+}
+
+.tag {
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  background: var(--chip-bg);
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+
+.duration {
+  color: var(--fg-muted);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- step transcript ------------------------------------------------ */
+
+.steps {
+  list-style: none;
+  margin: 0;
+  padding: 0.4rem 0.75rem 0.6rem;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.step {
+  display: flex;
+  flex-wrap: wrap; /* error-detail breaks onto its own full-width row */
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.1rem 0;
+}
+
+.step .step-status {
+  min-width: 4.2em;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.step.st-passed .step-status {
+  color: var(--passed);
+}
+
+.step.st-failed .step-status {
+  color: var(--failed);
+}
+
+.step.st-error .step-status {
+  color: var(--error);
+}
+
+.step.st-pending .step-status {
+  color: var(--pending);
+}
+
+.step.st-skipped .step-status,
+.step.st-skipped .step-text {
+  color: var(--skipped);
+}
+
+.step-text {
+  flex: 1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.macro-marker {
+  color: var(--fg-muted);
+}
+
+.error-detail {
+  flex-basis: 100%;
+  margin: 0.35rem 0 0.35rem 4.7em;
+  padding: 0.5rem 0.65rem;
+  border-left: 3px solid var(--failed);
+  background: var(--bg);
+  border-radius: 0 4px 4px 0;
+}
+
+.error-detail .error-type {
+  font-weight: 700;
+  font-size: 0.75rem;
+  margin-bottom: 0.2rem;
+}
+
+.error-detail pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+}
+
+/* ---- diagnostics & footer ------------------------------------------- */
+
+.diagnostics {
+  margin: 2rem 0 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--pending);
+  border-radius: 6px;
+}
+
+.diagnostics h2 {
+  font-size: 0.95rem;
+  margin: 0 0 0.4rem;
+}
+
+.diagnostics ul {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 0.85rem;
+}
+
+.run-footer {
+  margin-top: 2.5rem;
+  color: var(--fg-muted);
+  font-size: 0.75rem;
+}
+
+/* ---- failures-only state -------------------------------------------- */
+
+body.failures-only .scenario:not(.red) {
+  display: none;
+}
+
+body.failures-only .feature:not(.has-red) {
+  display: none;
+}

@@ -1,0 +1,4 @@
+EXIT 0
+--- STDOUT ---
+{:run/id "UUID", :run/exit-code 0, :run/status :passed, :counts {:passed 1, :failed 0, :pending 0, :skipped 0, :scenarios 1, :steps 3}}
+--- STDERR ---

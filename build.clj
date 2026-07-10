@@ -5,14 +5,14 @@
      clj -T:build uberjar                        ; Build standalone JAR
      clj -T:build jar                            ; Alias for uberjar
      clj -T:build docs                           ; Generate API docs
-     clj -T:build release-zip :version '\"0.5.0\"' ; Build release distribution zip
+     clj -T:build release-zip :version '\"X.Y.Z\"' ; Build release distribution zip
      clj -T:build clean                          ; Remove build artifacts"
   (:require [clojure.tools.build.api :as b]
             [clojure.java.io :as io]
             [clojure.java.shell :as shell]))
 
 (def lib 'com.shiftlefter/shiftlefter)
-(def version "0.5.0")
+(def version "0.5.1")
 (def class-dir "target/classes")
 (def uber-file "target/shiftlefter.jar")
 (def logback-version "1.5.16")
@@ -180,16 +180,16 @@
 (defn release-zip
   "Build release distribution zip containing sl script and versioned JAR.
 
-   Usage: clj -T:build release-zip :version '\"0.5.0\"'
+   Usage: clj -T:build release-zip :version '\"X.Y.Z\"'
 
-   Creates: target/shiftlefter-v0.5.0.zip containing:
-     shiftlefter-v0.5.0/
+   Creates: target/shiftlefter-vX.Y.Z.zip containing:
+     shiftlefter-vX.Y.Z/
        sl
-       shiftlefter-v0.5.0.jar
+       shiftlefter-vX.Y.Z.jar
        agents-breadcrumb.md"
   [{:keys [version]}]
   (when-not version
-    (throw (ex-info "Version required. Usage: clj -T:build release-zip :version '\"0.5.0\"'" {})))
+    (throw (ex-info "Version required. Usage: clj -T:build release-zip :version '\"X.Y.Z\"'" {})))
 
   ;; Build the uberjar first
   (uberjar nil)

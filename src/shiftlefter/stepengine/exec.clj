@@ -44,10 +44,14 @@
 (s/def ::steps (s/coll-of map?))
 (s/def ::plan map?)
 (s/def ::scenario-ctx map?)
+;; Wall-clock duration in milliseconds (D5, sl-40to). Per-step on regular
+;; steps; per-scenario on the suite-execution choke point; summed onto macro
+;; wrappers. Absent on skipped/synthetic steps and REPL-path scenarios.
+(s/def ::duration-ms (s/and number? (complement neg?)))
 
 (s/def ::scenario-exec-result
   (s/keys :req-un [::status ::steps]
-          :opt-un [::plan ::scenario-ctx]))
+          :opt-un [::plan ::scenario-ctx ::duration-ms]))
 
 ;; execute-suite result — keys are :scenarios, :counts, :status
 (s/def ::passed nat-int?)

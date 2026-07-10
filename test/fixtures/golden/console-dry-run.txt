@@ -1,0 +1,4 @@
+EXIT 0
+--- STDOUT ---
+--- STDERR ---
+1 scenario(s) bound successfully (dry run)

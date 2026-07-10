@@ -1,0 +1,8 @@
+EXIT 2
+--- STDOUT ---
+--- STDERR ---
+
+Undefined steps:
+  - I do something undefined (ROOT/test/fixtures/features/undefined.feature:5:5)
+
+1 binding issue(s) found. Cannot execute.

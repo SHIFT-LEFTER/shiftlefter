@@ -309,11 +309,15 @@
 ;; strategies. REPL paths (no `:provisioning` opt) bypass this phase.
 ;; -----------------------------------------------------------------------------
 
-(defn- collect-provisioning-targets
+(defn collect-provisioning-targets
   "Walk plan's bound steps and return a deduplicated vector of SVO
    targets `[{:interface :web :subject :alice} ...]`, in first-seen
    order. Steps with no `:svo` or no `:interface`, and synthetic macro
-   wrappers, are skipped."
+   wrappers, are skipped.
+
+   Public since sl-q9wp: the scheduling gate (runner/schedule.clj) inspects
+   the same targets to auto-serialize costume-provisioning and shared-impl
+   plans — one walk, two consumers, identical semantics."
   [plan]
   (let [seen   (volatile! #{})
         result (volatile! (transient []))]

@@ -1,0 +1,24 @@
+EXIT 1
+--- STDOUT ---
+--- STDERR ---
+PASSED Basic passing scenario
+  ✓ I have 5 items in my cart
+  ✓ I add 3 more items
+  ✓ I should have 8 items total
+
+FAILED Step throws exception
+  ✓ I have 5 items in my cart
+  ✗ I trigger an error — Intentional test error
+  - I should have 5 items total
+
+
+Failures:
+
+Scenario: Step throws exception
+  1) I trigger an error
+     at ROOT/test/fixtures/steps/basic_steps.clj:25
+     Error: Intentional test error
+     Data: {:reason :test}
+
+
+2 scenario(s): 1 passed, 1 failed

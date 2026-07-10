@@ -22,22 +22,29 @@
    ```clojure
    (prn-summary {:run/id \"abc\" :run/exit-code 0 :counts {...}})
    ;; Prints EDN map to stdout
-   ```")
+   ```"
+  (:require [shiftlefter.runner.reporter :as reporter]))
 
 ;; -----------------------------------------------------------------------------
 ;; Error Serialization
 ;; -----------------------------------------------------------------------------
 
 (defn- serialize-error
-  "Serialize an error map, ensuring no Throwable objects.
-   Converts any remaining Throwable to a map representation."
+  "Project an error map onto the EDN output shape.
+
+   This is a KEY PROJECTION, not an identity: planning and crash errors reach
+   it un-enveloped and carry extra keys that must not leak into `--edn`.
+
+   `:value` is passed through verbatim — `reporter/error-envelope` already
+   `pr-str`'d it exactly once at the envelope seam (sl-21z R2). Re-encoding
+   here would double-quote it."
   [error]
   (when error
     (cond-> {:type (:type error)
              :message (:message error)}
       (:exception-class error) (assoc :exception-class (:exception-class error))
       (:data error) (assoc :data (:data error))
-      (:value error) (assoc :value (pr-str (:value error))))))
+      (:value error) (assoc :value (:value error)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Failure Extraction
@@ -216,3 +223,37 @@
    Convenience function that combines build-summary and prn-summary."
   [run-id exit-code result opts]
   (prn-summary (build-summary run-id exit-code result opts)))
+
+;; -----------------------------------------------------------------------------
+;; Reporter (sl-21z)
+;; -----------------------------------------------------------------------------
+
+(defrecord EdnReporter [state]
+  reporter/Reporter
+  (on-run-start [_this _run-ctx] nil)
+
+  (on-scenario-complete [_this scenario-result]
+    ;; Accumulating: the EDN summary is a single map `prn`'d at run end, so
+    ;; scenarios are collected in plan order and rendered together.
+    (swap! state update :scenarios conj scenario-result)
+    nil)
+
+  (on-diagnostics [_this diagnostics]
+    (swap! state assoc :diagnostics diagnostics)
+    nil)
+
+  (on-run-end [_this run-summary]
+    ;; `build-summary` reads only :scenarios and :counts off the result map,
+    ;; so the accumulated envelopes stand in for the raw exec-result.
+    (prn-summary
+     (build-summary (:run-id run-summary)
+                    (:exit-code run-summary)
+                    {:scenarios (:scenarios @state)
+                     :counts (:counts run-summary)}
+                    {:diagnostics (:diagnostics @state)}))
+    nil))
+
+(defn make-reporter
+  "Construct an EdnReporter."
+  []
+  (->EdnReporter (atom {:scenarios [] :diagnostics nil})))

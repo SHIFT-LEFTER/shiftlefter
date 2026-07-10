@@ -1,3 +1,91 @@
+# Changelog: 0.5.1
+
+**Release Date:** 2026-07-10
+
+---
+
+**ShiftLefter 0.5.1 makes `sl run` a first-class citizen of your CI pipeline: JUnit XML your CI ingests natively, tag-based subset selection, live per-scenario output, parallel execution, and a self-contained HTML report — one release, one theme.**
+
+v0.5.0 locked the core surface and launched publicly. v0.5.1 is about everything *around* the run that a pipeline needs: machine-readable results, picking the subset that matters, seeing progress as it happens, and honest wall-clock speed.
+
+---
+
+## What's New
+
+### JUnit XML for CI
+
+`sl run --junit-xml PATH` (config mirror `[:runner :report :junit-xml]`; the flag wins) writes a CI-ingestible JUnit XML report alongside the console/EDN output — verified live against GitLab's `artifacts:reports:junit` ingest. Test-case identity is stable across runs, failures are attributed through macro expansion to the step that actually failed, and per-scenario and per-step durations are captured.
+
+Two behaviors to know (full detail in [ERRATA E009](ERRATA.md)):
+
+- The XML contains a `<failure>`/`<error>` **iff** the run's exit code is nonzero — the report never contradicts the exit code.
+- A planning error (exit 2) writes **no** file at all. Gate CI on the process exit code, not on the report's presence.
+
+### Tag-Subset Selection
+
+`sl run --tags TAGS` / `--skip-tags TAGS` runs a tagged subset of the suite: comma-separated, repeatable, `@` optional; include is OR, exclude wins; feature/Rule/Examples-block tags inherit per the Gherkin spec.
+
+Filtering happens at **planning time** — deselected scenarios are never bound, and counts, JUnit, and EDN output reflect only the selection. `--dry-run` with a filter previews it: the console appends `; M filtered out by tags`, and the EDN gains an additive `:filtered-out` key. No filter = behavior unchanged.
+
+### Live Per-Scenario Output
+
+`sl run` now prints each scenario's result as it finishes, instead of staying silent until the whole suite completes. Same lines, same order — you just see them while the run is still going.
+
+### Parallel Scenario Execution
+
+`sl run --max-parallel N` (config mirror `[:runner :max-parallel]`; the flag wins; default 1 = sequential) runs scenarios on a bounded pool. Report output is identical in content **and order** to a sequential run at any N.
+
+- `@serial` marks a scenario as **exclusive**: it runs alone, after the pool drains. It is an exclusivity mechanism, not an ordering one; a feature-level `@serial` marks each scenario individually, not the feature as an atomic block.
+- Scenarios that wear costumes or touch a shared-impl interface auto-serialize the same way, with a notice line saying so.
+
+### Self-Contained HTML Report
+
+`sl run --html PATH` (config mirror `[:runner :report :html]`; the flag wins) writes a single-file HTML run report: works from a double-click, no network requests. Failures come expanded by default, with step-by-step transcripts, durations, tag chips, and dark/light rendering.
+
+The report embeds its own run data as a machine-readable EDN island (`<script type="application/edn">`) — agents read the data, humans read the page, one artifact. Runs with thousands of scenarios build a big DOM and will scroll sluggishly.
+
+### CLI Polish & Fixes
+
+- `sl --help` now lists the daemon subcommands and `repl --clj` (previously undocumented in the help text).
+- `sl verify` outside a ShiftLefter framework checkout now exits 2 with a notice (was: exit 0 — a consumer CI script could silently pass). Use `sl orient` and `--dry-run` to validate a project.
+- `close-browser` handed a wrong-shape capability now returns a structured error instead of silently claiming `:closed` (both browser adapters).
+
+### Internal
+
+- Two-plane reporting architecture: a synchronous `Reporter` protocol for user output, an observer event bus for everything else — the groundwork the features above stand on. A throwing reporter fails the run immediately.
+- Run-event envelopes gain `:scenario/id` and `:seq`; the observer bus is `offer!`-based (a slow observer can never stall or crash a run; drops are counted and logged) and drains on close, so accepted events are always delivered — killing a long-standing race that dropped each run's final events.
+- A generated runner-mechanics corpus (seeded generator + JUnit-vs-manifest verifier) now exercises tags × parallel acceptance, and generative round-trip properties lock the envelope purity contract.
+
+## Behavior Changes
+
+- `sl verify` in a directory that isn't a ShiftLefter framework checkout exits 2 (was 0). A CI step that relied on the old silent green must switch to `sl orient` / `sl run --dry-run`.
+- `sl run` console output now appears per-scenario during the run (content and order unchanged).
+
+## Stats
+
+```
+1710 tests, 5593 assertions, 0 failures
+Cucumber compliance: 46/46 good, 11/11 bad (100%)
+```
+
+## Installation
+
+**One-line installer (recommended):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash
+export PATH="$PWD/sl:$PATH"
+sl --version
+```
+
+**Manual:** download `shiftlefter-v0.5.1.zip` from releases, unzip, add to PATH. Java 11+ is the only requirement — no Clojure toolchain needed.
+
+## Links
+
+- [README](https://github.com/SHIFT-LEFTER/shiftlefter/blob/v0.5.1/README.md)
+- [Fit check — would ShiftLefter work for my project?](https://github.com/SHIFT-LEFTER/shiftlefter/blob/v0.5.1/docs/FIT.md)
+- [Why it's built this way](https://github.com/SHIFT-LEFTER/shiftlefter/blob/v0.5.1/docs/PHILOSOPHY.md)
+
 # Changelog: 0.5.0
 
 **Release Date:** 2026-07-07

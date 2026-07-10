@@ -430,6 +430,18 @@
     (is (nil? (config/get-glossary-config {:parser {:dialect "en"}})))))
 
 ;; -----------------------------------------------------------------------------
+;; Max-parallel accessor (sl-q9wp)
+;; -----------------------------------------------------------------------------
+
+(deftest test-max-parallel-accessor
+  (testing "reads [:runner :max-parallel]"
+    (is (= 6 (config/max-parallel {:runner {:max-parallel 6}}))))
+  (testing "defaults to 1 (sequential) when absent"
+    (is (= 1 (config/max-parallel {})))
+    (is (= 1 (config/max-parallel {:runner {:step-paths ["steps/"]
+                                            :allow-pending? false}})))))
+
+;; -----------------------------------------------------------------------------
 ;; Interface Config Accessor Tests
 ;; -----------------------------------------------------------------------------
 

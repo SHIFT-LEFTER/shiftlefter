@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="demo" tests="1" failures="0" errors="1" skipped="0" time="0.012"><testsuite name="Feature: Macro Happy Path" tests="1" failures="0" errors="1" skipped="0" time="0.012" timestamp="2026-07-09T03:00:00" hostname="testhost"><properties><property name="shiftlefter.version" value="0.5.1"/><property name="mode" value="shifted"/></properties><testcase name="User logs in with macro" classname="Macro Happy Path" file="test/fixtures/features/macro_happy.feature" line="2" time="0.012"><error type="clojure.lang.ExceptionInfo" message="I enter password &quot;secret123&quot; -- button missing [via macro 'login as alice' called at feature line 3, step 3/5: I enter password &quot;secret123&quot;]"/><system-out><![CDATA[Given login as alice + [failed] (0.000s)
++ [login as alice 1/5] Given I visit the login page [passed] (0.001s)
++ [login as alice 2/5] When I enter username "alice" [passed] (0.002s)
++ [login as alice 3/5] And I enter password "secret123" [failed] (0.003s)
++ [login as alice 4/5] Then I click the login button [skipped] (0.004s)
++ [login as alice 5/5] Then I should see the welcome message [skipped] (0.005s)
+Then I should see the dashboard [skipped] (0.006s)]]></system-out></testcase></testsuite></testsuites>

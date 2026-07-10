@@ -105,7 +105,10 @@
    Event payload includes:
    - :subject, :verb, :object, :interface from SVO
    - :interface-type looked up from interfaces config
-   - :step-text, :location from step"
+   - :step-text, :location from step
+
+   The envelope carries :scenario/id (threaded via opts by execute-scenario,
+   sl-q9wp R4) so parallel emit stays correlatable per scenario."
   [bound-step opts]
   (let [svo (get-in bound-step [:binding :svo])
         bus (:bus opts)
@@ -121,8 +124,10 @@
                      :interface interface-name
                      :interface-type interface-type
                      :step-text (:step/text step)
-                     :location (select-keys (:step/location step) [:uri :line])}]
-        (events/publish! bus (events/make-event :step/svo run-id payload))))))
+                     :location (select-keys (:step/location step) [:uri :line])}
+            extras (when-let [sid (:scenario-id opts)]
+                     {:scenario/id sid})]
+        (events/publish! bus (events/make-event :step/svo run-id payload extras))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Synthetic Step Handling (wrapper-only helpers; the base `synthetic-step?`
@@ -172,7 +177,9 @@
                   children (subvec results-vec (inc i) (min n (+ i 1 child-count)))
                   child-statuses (map :status children)
                   rolled-status (rollup-status child-statuses)
-                  updated-wrapper (assoc result :status rolled-status)]
+                  child-duration (reduce + 0.0 (keep :duration-ms children))
+                  updated-wrapper (assoc result :status rolled-status
+                                         :duration-ms child-duration)]
               (recur (inc i) (conj output updated-wrapper)))))))))
 
 (defn- classify-and-execute-step
@@ -212,11 +219,14 @@
           (emit-svo-event! bound-step opts)
           (let [provisioned-ctx (:ok provision-result)
                 ctx {:step (:step bound-step) :scenario provisioned-ctx}
+                start-ns (System/nanoTime)
                 result (invoke-step (:binding bound-step)
                                     (-> bound-step :binding :captures)
-                                    ctx)]
-            {:step-result (prov/make-step-result bound-step (:status result)
-                                                 (:scenario result) (:error result))
+                                    ctx)
+                duration-ms (/ (- (System/nanoTime) start-ns) 1e6)]
+            {:step-result (assoc (prov/make-step-result bound-step (:status result)
+                                                        (:scenario result) (:error result))
+                                 :duration-ms duration-ms)
              :scenario-ctx (:scenario result)
              :status (:status result)}))))))
 
@@ -270,7 +280,9 @@
      ;; (interface, subject) the bound steps will touch before the first
      ;; step runs. Lazy ensure-capability calls inside the loop no-op
      ;; afterwards. Bare callers (REPL) get :lazy by default.
-     (let [interfaces (:interfaces opts)
+     (let [opts       (assoc opts :scenario-id
+                             (get-in plan [:plan/pickle :pickle/id]))
+           interfaces (:interfaces opts)
            registry   (:adapter-registry opts)
            eager?     (and (= :eager (:provisioning opts)) interfaces)
            eager-result (if eager?

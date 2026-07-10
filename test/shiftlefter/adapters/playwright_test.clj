@@ -34,6 +34,13 @@
     (testing "skipped - no SHIFTLEFTER_LIVE_PLAYWRIGHT=1"
       (is true))))
 
+(deftest test-close-browser-rejects-a-browserless-capability
+  (testing "wrong shape (e.g. the wrapped {:ok {...}} map) is an error, not silent green (sl-9vag)"
+    (doseq [bad-shape [{:ok {:browser :fake}} {} nil]]
+      (let [result (playwright/close-browser bad-shape)]
+        (is (= :adapter/cleanup-failed (-> result :error :type))
+            (str "shape: " (pr-str bad-shape)))))))
+
 ;; =============================================================================
 ;; Integration Tests (require live Playwright browser)
 ;; =============================================================================

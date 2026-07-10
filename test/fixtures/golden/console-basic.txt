@@ -1,0 +1,6 @@
+EXIT 0
+--- STDOUT ---
+--- STDERR ---
+PASSED Basic passing scenario
+
+1 scenario(s): 1 passed

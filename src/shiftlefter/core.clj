@@ -17,6 +17,7 @@
    [shiftlefter.orient :as orient]
    [shiftlefter.project-context :as project-context]
    [shiftlefter.runner.core :as runner]
+   [shiftlefter.runner.tag-disposition :as tagd]
    [shiftlefter.version :as version])
   (:gen-class))
 
@@ -50,7 +51,18 @@
    [nil "--step-paths PATHS" "Step definition paths (comma-separated)"
     :parse-fn #(str/split % #",")]
    ["-c" "--config FILE" "Config file path (default: shiftlefter.edn)"]
+   [nil "--tags TAGS" "Run only scenarios with any of these tags (comma-separated; repeatable; '@' optional)"
+    :parse-fn tagd/parse-tag-list
+    :validate [tagd/valid-tag-set? "must be one or more non-empty tags without whitespace"]
+    :assoc-fn (fn [m k v] (update m k (fnil into #{}) v))]
+   [nil "--skip-tags TAGS" "Skip scenarios with any of these tags (comma-separated; repeatable; exclude wins over --tags)"
+    :parse-fn tagd/parse-tag-list
+    :validate [tagd/valid-tag-set? "must be one or more non-empty tags without whitespace"]
+    :assoc-fn (fn [m k v] (update m k (fnil into #{}) v))]
    [nil "--dry-run" "Bind steps without executing (verify binding only)"]
+   [nil "--max-parallel N" "Run up to N scenarios concurrently (default 1; @serial and auto-serialized scenarios run alone)"
+    :parse-fn #(Integer/parseInt %)
+    :validate [pos-int? "must be a positive integer"]]
    ["-s" "--seed SEED" "Random seed for fuzz"
     :parse-fn #(Long/parseLong %)]
    ["-t" "--trials N" "Number of fuzz trials"
@@ -78,6 +90,8 @@
    [nil "--ci" "CI mode: run full test suite (kaocha, compliance, fuzz smoke)"]
    [nil "--fuzzed" "Check fuzz artifact integrity (slow with many artifacts)"]
    [nil "--edn" "Output in EDN format (machine-readable)"]
+   [nil "--junit-xml PATH" "Write JUnit XML results to PATH (see ERRATA E009)"]
+   [nil "--html PATH" "Write a self-contained HTML run report to PATH"]
    [nil "--list" "List available items for commands that support listing"]
    [nil "--no-color" "Disable ANSI color output"]
    [nil "--mode MODE" "ddmin mode: parse, pickles, lex, or auto"]
@@ -96,6 +110,15 @@
 (defn- normalize-cli-options [opts]
   (cond-> opts
     (:config opts) (assoc :config-path (:config opts))))
+
+(defn- tag-filter-opt
+  "Build the :tag-filter execute! opt from parsed --tags/--skip-tags sets,
+   or nil when neither flag was given (sl-i608)."
+  [opts]
+  (when (or (seq (:tags opts)) (seq (:skip-tags opts)))
+    (cond-> {}
+      (seq (:tags opts)) (assoc :include (:tags opts))
+      (seq (:skip-tags opts)) (assoc :exclude (:skip-tags opts)))))
 
 (defn run-cmd
   "Run Gherkin scenarios.
@@ -117,6 +140,10 @@
                                           :verbose (:verbose opts)
                                           :no-color (:no-color opts)}
                                    (:step-paths opts) (assoc :step-paths (:step-paths opts))
+                                   (:junit-xml opts) (assoc :junit-xml (:junit-xml opts))
+                                   (:html opts) (assoc :html (:html opts))
+                                   (:max-parallel opts) (assoc :max-parallel (:max-parallel opts))
+                                   (tag-filter-opt opts) (assoc :tag-filter (tag-filter-opt opts))
                                    (:config-path opts) (assoc :config-path (:config-path opts))))]
      (:exit-code result))))
 
@@ -626,18 +653,23 @@
 
 (defn verify-cmd
   "Verify command: run validator and optionally CI checks.
-   Returns exit code 0 for success/skip, 1 for failures, 2 for verify errors."
+   Returns exit code 0 for success, 1 for failures, 2 for verify errors or
+   :skip (not in the framework repo — verify is a framework-dev tool; the
+   un-runnable-invocation code, so scripting `sl verify` into a consumer
+   project's CI can never pass silently, sl-5b18). In human mode the skip
+   notice goes to stderr; --edn keeps the EDN result on stdout either way."
   [{:keys [ci fuzzed edn]}]
   (try
     (let [result (verify/run-checks {:ci ci :fuzzed fuzzed})]
       (if edn
         (println (verify/format-edn result))
         (if (= :skip (:status result))
-          (println (:message result))
+          (binding [*out* *err*]
+            (println (:message result)))
           (verify/print-human result)))
       (case (:status result)
         :ok 0
-        :skip 0
+        :skip 2
         :fail 1))
     (catch Exception e
       (if edn
@@ -834,21 +866,27 @@
       (:help options)
       (do
         (println "Usage:
-  sl run <path> [<path2> ...] [--step-paths p1,p2] [-c FILE|--config FILE] [--dry-run] [--edn] [-v]
+  sl run <path> [<path2> ...] [--step-paths p1,p2] [-c FILE|--config FILE] [--tags t1,t2] [--skip-tags t1,t2] [--max-parallel N] [--dry-run] [--edn] [--junit-xml PATH] [--html PATH] [-v]
+        (--junit-xml writes a CI-ingestible report; no file on planning error — see ERRATA E009)
+        (--html writes a self-contained HTML run report; open it in any browser, no server needed)
+        (--max-parallel N runs up to N scenarios concurrently; @serial-tagged and auto-serialized scenarios run alone)
   sl fmt --check <path> [<path2> ...]   (validate files/directories)
   sl fmt --write <path> [<path2> ...]   (format in place)
   sl fmt --canonical <path>             (format to stdout)
-  sl repl [--nrepl] [--port PORT]       (interactive REPL or nREPL server)
+  sl repl [--nrepl] [--port PORT] [--clj]   (interactive REPL or nREPL server; --clj merges your deps.edn)
   sl agent-doc [topic]                  (print packaged agent doctrine)
   sl agent-doc --list                   (list packaged agent doctrine topics)
   sl orient [--edn] [-c FILE]           (project orientation; --edn dumps the full projection)
   sl gherkin fuzz [--preset smoke|quick|nightly] [--seed N] [--trials N] [-v]
   sl gherkin fuzz --mutation [--sources generated|corpus|both] [--timeout-ms N]
   sl gherkin ddmin <path> [--mode parse|pickles|lex|auto] [--strategy structured|raw-lines]
-  sl verify [--ci] [--fuzzed] [--edn]   (validator checks, optionally full CI)
+  sl verify [--ci] [--fuzzed] [--edn]   (validator checks, optionally full CI; framework-dev tool — exits 2 outside the framework repo)
   sl costume init <name> [--chrome-path PATH]   (launch a costume for one-time login)
   sl costume list                               (list costumes + status)
   sl costume destroy <name>                     (remove a costume)
+  sl daemon serve [--idle-timeout-min N]        (start the warm-path daemon; normally auto-spawned)
+  sl daemon status                              (show this project's daemon)
+  sl daemon stop                                (stop this project's daemon)
   sl --version                                  (print version)")
         0)
 

@@ -100,14 +100,20 @@
 
 (deftest gen-tags-produces-optional-tag-line
   (testing "gen-tags produces nil or a line of space-separated tags"
-    (let [samples (gen/sample fuzz/gen-tags 50)]
+    (let [samples (gen/sample fuzz/gen-tags 50)
+          tag-lines (remove nil? samples)]
       ;; Should have mix of nil and tag lines
       (is (some nil? samples))
       (is (some string? samples))
-      ;; Non-nil samples should be valid tag lines
-      (doseq [s (remove nil? samples)]
-        (is (str/ends-with? s "\n"))
-        (is (every? #(str/starts-with? % "@") (str/split (str/trim s) #"\s+")))))))
+      ;; Non-nil samples should be valid tag lines. One assertion per
+      ;; property, not per sample: gen/sample is unseeded, so per-sample
+      ;; assertions made the suite's assertion count vary run-to-run
+      ;; (sl-wwuq — this test was the sole source of the variance).
+      (is (every? #(str/ends-with? % "\n") tag-lines))
+      (is (every? (fn [s]
+                    (every? #(str/starts-with? % "@")
+                            (str/split (str/trim s) #"\s+")))
+                  tag-lines)))))
 
 (deftest gen-table-row-produces-valid-rows
   (testing "gen-table-row produces pipe-delimited rows"

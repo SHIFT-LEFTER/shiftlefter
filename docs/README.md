@@ -27,7 +27,7 @@ for a commercial Cucumber/Selenium suite.
 
 - Multi-actor browser driving — multiple independent sessions with real isolation.
 - The typed SVO/glossary discipline — your vocabulary, validated before execution.
-- The `sl` CLI — run, format, dry-run, diagnose.
+- The `sl` CLI — run, format, dry-run, diagnose; CI-ready output (JUnit XML, HTML, EDN), tag filtering, parallel scenarios.
 
 **Preview — works, expect change**
 
@@ -38,12 +38,11 @@ for a commercial Cucumber/Selenium suite.
 
 **Not here yet — roadmap**
 
-- xUnit / HTML / JSON reporting (today: console + structured EDN).
 - Test fixtures and hooks as first-class features.
 - Brownfield migration of an existing suite.
 - The traceability graph — the destination.
 
-If your team needs xUnit reporting, fixtures, and hooks *today*, it isn't ready
+If your team needs first-class fixtures and hooks *today*, it isn't ready
 for you yet — check back. If you're starting something new and the discipline
 appeals, you're exactly who it's for.
 

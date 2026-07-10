@@ -56,8 +56,22 @@
 ;; or :lazy (legacy, provision on first step that needs it). Opt-out
 ;; exists for the rare test pattern that benefits from lazy short-circuit.
 (s/def ::provisioning #{:eager :lazy})
+;; Reporter output config (sl-40to). [:runner :report :junit-xml] is the
+;; config mirror for the --junit-xml flag; a nil/absent value = off. The flag
+;; wins when both are present (resolved in runner/core resolve-junit-path).
+(s/def ::junit-xml (s/nilable string?))
+;; [:runner :report :html] is the config mirror for the --html flag (sl-muq9);
+;; same rules as :junit-xml — nil/absent = off, flag wins.
+(s/def ::html (s/nilable string?))
+(s/def ::report (s/keys :opt-un [::junit-xml ::html]))
+;; sl-q9wp: scenario parallelism bound. [:runner :max-parallel] is the config
+;; mirror for the --max-parallel flag; absent/1 = today's sequential
+;; execution. The flag wins when both are present (resolved in runner/core
+;; resolve-max-parallel).
+(s/def ::max-parallel pos-int?)
 (s/def ::runner (s/keys :req-un [::step-paths ::allow-pending?]
-                        :opt-un [::macros ::provisioning]))
+                        :opt-un [::macros ::provisioning ::report
+                                 ::max-parallel]))
 
 ;; Interface sub-config
 (s/def ::type keyword?)
@@ -298,6 +312,27 @@
    phase in `stepengine.exec/execute-scenario`. See sl-aa5."
   [config]
   (get-in config [:runner :provisioning] :eager))
+
+(defn junit-xml-path
+  "Return the config-declared JUnit-XML output path, or nil (off). Config
+   mirror for --junit-xml (sl-40to); the flag wins when both are set. Paths
+   here are resolved against :config-root by resolve-config-declared-paths."
+  [config]
+  (get-in config [:runner :report :junit-xml]))
+
+(defn html-path
+  "Return the config-declared HTML report output path, or nil (off). Config
+   mirror for --html (sl-muq9); the flag wins when both are set. Paths here
+   are resolved against :config-root by resolve-config-declared-paths."
+  [config]
+  (get-in config [:runner :report :html]))
+
+(defn max-parallel
+  "Return the config-declared scenario parallelism bound, default 1
+   (sequential). Config mirror for --max-parallel (sl-q9wp); the flag wins
+   when both are set (runner/core resolve-max-parallel)."
+  [config]
+  (get-in config [:runner :max-parallel] 1))
 
 (defn get-macro-registry-paths
   "Get macro registry paths from config."

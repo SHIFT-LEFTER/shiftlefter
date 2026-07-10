@@ -1,0 +1,10 @@
+EXIT 1
+--- STDOUT ---
+--- STDERR ---
+PENDING Step returns pending
+  ✓ I have 5 items in my cart
+  ? I return pending
+  - I should have 5 items total
+
+
+1 scenario(s): 1 pending

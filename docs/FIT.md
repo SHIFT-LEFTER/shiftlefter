@@ -74,10 +74,9 @@ built on. The discipline you put in early is what you'd be glad you have when it
 
 **Wait for a later release if, *today*, you need:**
 
-- **xUnit / HTML / JSON report artifacts** for a CI dashboard — output is console +
-  structured EDN for now.
-- **First-class fixtures, hooks, or `@tag` filtering** — not built yet (there's a
-  Clojure escape hatch for test-data setup, but it isn't first-class).
+- **First-class fixtures or hooks** — not built yet (there's a Clojure escape
+  hatch for test-data setup, but it isn't first-class). Tag filtering
+  (`--tags` / `--skip-tags`) *is* built.
 - **To migrate an existing suite as-is** — your `.feature` files parse unchanged, but
   an existing Java/JavaScript/Ruby step library doesn't transfer. See
   [Bring Existing Gherkin (Preview)](adoption.md).
@@ -98,8 +97,8 @@ the upside and the gaps.
 | 2 | **New vs. existing** | Authoring new behavior. | Porting a production Cucumber/Selenium suite as-is → step code won't transfer. |
 | 3 | **Who maintains tests** | Agents (esp. multiple models) + humans sharing one vocabulary. | A team that needs everything in their host language with zero Clojure. |
 | 4 | **Scenario shape** | Multiple actors, or web + SMS together. | Single linear single-actor flows (works, just less upside). |
-| 5 | **Reporting** | Console + machine-readable EDN is enough. | Need xUnit/HTML/JSON artifacts today. |
-| 6 | **Fixtures/hooks** | Test data set up in a step; no hook/tag dependence yet. | Need first-class fixtures, hooks, or tag selection now. |
+| 5 | **Reporting** | Console, machine-readable EDN, CI-ingestible JUnit XML (`--junit-xml`), or a self-contained HTML report (`--html`). | Need JSON or a custom report format today. |
+| 6 | **Fixtures/hooks** | Test data set up in a step; tag selection (`--tags`/`--skip-tags`) covers subset runs. | Need first-class fixtures or hooks now. |
 
 **Verdict:** strong on 1–4 → **strong fit**. A gap on 5 or 6 but yes on 1–2 →
 **workable, with a known edge**. A "no" on 1 or 2 → **not yet for this project** —

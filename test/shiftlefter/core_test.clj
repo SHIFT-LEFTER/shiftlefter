@@ -7,8 +7,10 @@
    [clojure.tools.cli :refer [parse-opts]]
    [shiftlefter.core :as core]
    [shiftlefter.costume :as costume]
+   [shiftlefter.gherkin.verify :as verify]
    [shiftlefter.paths :as paths]
    [shiftlefter.project-context :as project-context]
+   [shiftlefter.runner.core :as runner]
    [shiftlefter.version :as version])
   (:import
    [java.net Socket]))
@@ -277,6 +279,20 @@
       (is (:verbose (:options parsed))
           "valid flags should still parse"))))
 
+(deftest test-max-parallel-flag
+  ;; sl-q9wp DP4: --max-parallel N, malformed values ride the usage-error path.
+  (testing "valid value parses to a positive int"
+    (let [parsed (parse-opts ["--max-parallel" "4" "file.feature"] core/cli-options)]
+      (is (empty? (:errors parsed)))
+      (is (= 4 (get-in parsed [:options :max-parallel])))))
+  (testing "absent flag leaves the option unset (config/default decides)"
+    (let [parsed (parse-opts ["file.feature"] core/cli-options)]
+      (is (nil? (get-in parsed [:options :max-parallel])))))
+  (testing "zero, negative, and non-numeric values are usage errors"
+    (doseq [bad ["0" "-2" "three" "2.5"]]
+      (let [parsed (parse-opts ["--max-parallel" bad "file.feature"] core/cli-options)]
+        (is (seq (:errors parsed)) (str "--max-parallel " bad))))))
+
 (deftest test-valid-flags-no-errors
   (testing "Known run flags produce no errors"
     (let [parsed (parse-opts ["--dry-run" "--verbose" "--edn" "file.feature"] core/cli-options)]
@@ -328,11 +344,45 @@
   (testing "--mode flag is recognized"
     (let [parsed (parse-opts ["--mode" "parse" "file.feature"] core/cli-options)]
       (is (empty? (:errors parsed)))
-      (is (= "parse" (:mode (:options parsed)))))))
+      (is (= "parse" (:mode (:options parsed))))))
+
+  (testing "--tags parses to a normalized tag set (sl-i608)"
+    (let [parsed (parse-opts ["--tags" "smoke,@wip" "file.feature"] core/cli-options)]
+      (is (empty? (:errors parsed)))
+      (is (= #{"@smoke" "@wip"} (:tags (:options parsed))))))
+
+  (testing "--skip-tags parses to a normalized tag set"
+    (let [parsed (parse-opts ["--skip-tags" "@broken" "file.feature"] core/cli-options)]
+      (is (empty? (:errors parsed)))
+      (is (= #{"@broken"} (:skip-tags (:options parsed))))))
+
+  (testing "repeated --tags union"
+    (let [parsed (parse-opts ["--tags" "a" "--tags" "b,c" "file.feature"] core/cli-options)]
+      (is (empty? (:errors parsed)))
+      (is (= #{"@a" "@b" "@c"} (:tags (:options parsed))))))
+
+  (testing "malformed --tags values produce errors"
+    (doseq [bad ["" " , " "has space"]]
+      (let [parsed (parse-opts ["--tags" bad "file.feature"] core/cli-options)]
+        (is (seq (:errors parsed))
+            (str "--tags " (pr-str bad) " should be rejected"))))))
 
 ;; -----------------------------------------------------------------------------
 ;; CLI→runner integration tests (Step 3)
 ;; -----------------------------------------------------------------------------
+
+(deftest test-run-cmd-tag-filter-opt
+  (testing "--tags/--skip-tags compose into the :tag-filter execute! opt (sl-i608)"
+    (let [captured (atom nil)]
+      (with-redefs [runner/execute!
+                    (fn [opts] (reset! captured opts) {:exit-code 0})]
+        (core/run-cmd ["file.feature"] {:tags #{"@fast"} :skip-tags #{"@wip"}})
+        (is (= {:include #{"@fast"} :exclude #{"@wip"}} (:tag-filter @captured)))
+        (core/run-cmd ["file.feature"] {:tags #{"@fast"}})
+        (is (= {:include #{"@fast"}} (:tag-filter @captured)))
+        (core/run-cmd ["file.feature"] {})
+        (is (nil? (:tag-filter @captured))
+            "no flags => no :tag-filter key at all")))))
 
 (deftest test-run-cmd-dry-run
   (testing "--dry-run reaches runner and returns without executing"
@@ -488,7 +538,27 @@
                  (core/dispatch ["run" "--dry-run" "--edn"
                                  "examples/01-validate-and-format/login.feature"]))]
       ;; 0 (all bound) or 2 (undefined steps) — never the crash code 3.
-      (is (contains? #{0 2} code)))))
+      (is (contains? #{0 2} code))))
+
+  (testing "verify outside the framework repo exits 2, notice on *err* (sl-5b18)"
+    ;; Was a silent green: :skip mapped to exit 0 with the notice on stdout,
+    ;; so scripting `sl verify` into a consumer project's CI always passed.
+    (let [skip-result {:status :skip
+                       :message "Not in ShiftLefter project directory. sl verify is a development tool."
+                       :checks [] :failures []
+                       :summary {:total 0 :passed 0 :failed 0}}]
+      (with-redefs [verify/run-checks (constantly skip-result)]
+        (let [out  (java.io.StringWriter.)
+              err  (java.io.StringWriter.)
+              code (binding [*out* out *err* err] (core/dispatch ["verify"]))]
+          (is (= 2 code) "skip is the un-runnable-invocation code, not success")
+          (is (= "" (str out)) "stdout stays clean in human mode")
+          (is (str/includes? (str err) "development tool")))
+        (testing "--edn keeps the EDN result on stdout, still exits 2"
+          (let [out  (java.io.StringWriter.)
+                code (binding [*out* out] (core/dispatch ["verify" "--edn"]))]
+            (is (= 2 code))
+            (is (str/includes? (str out) ":skip"))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Audit completeness test (Step 6)

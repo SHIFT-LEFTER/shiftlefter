@@ -89,9 +89,10 @@ fails just because the warm path was unavailable.
 ## Output note (current limitation)
 
 Warm output is **captured and delivered when the command finishes**, not streamed
-live. For `sl run` this is identical to cold (the runner already prints its report
-after the suite completes). The only place you'd notice is a long `gherkin fuzz`,
-whose per-trial progress appears at the end warm. Live streaming is planned;
+live. A cold `sl run` prints each scenario's result as it finishes; a warm run
+prints the same lines, in the same order, but all at once at the end. You'd also
+notice on a long `gherkin fuzz`, whose per-trial progress appears at the end
+warm. Live streaming is planned;
 it's blocked on a bug in the bundled nREPL's output stream, not on the daemon
 design.
 

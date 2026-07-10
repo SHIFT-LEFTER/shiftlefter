@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Hygiene gate for the SIEVE browser assets (sl-0lj). No build step, no bundler,
-# no TypeScript — the shell stays vanilla JS served straight from resources/.
+# Hygiene gate for the repo's browser JS assets (sl-0lj; report renderer added
+# by sl-muq9). No build step, no bundler, no TypeScript — everything stays
+# vanilla JS served/inlined straight from resources/.
 #
 #   node --check : syntax gate (ships with node, zero deps)
 #   prettier     : formatting, pinned via npx (no package.json / node_modules)
@@ -13,7 +14,7 @@
 set -euo pipefail
 
 PRETTIER="prettier@3.4.2"
-FILES=(resources/sieve.js resources/sieve/ui/app.js)
+FILES=(resources/sieve.js resources/sieve/ui/app.js resources/report/report.js)
 
 cd "$(dirname "$0")/.."
 

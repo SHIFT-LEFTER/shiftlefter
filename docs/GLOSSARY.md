@@ -31,7 +31,7 @@ parser is 100% Gherkin-compatible, so these mean what they mean upstream.
 | **Examples** | Value table driving Scenario Outline substitution. |
 | **Rule** | Keyword grouping scenarios under one business rule. |
 | **Scenario Outline** | Parameterized scenario template; N examples → N scenarios. |
-| **Tag** | Metadata marker (`@wip`, `@slow`). Parsed and preserved; tag-based *filtering / selection* isn't built yet. |
+| **Tag** | Metadata marker (`@wip`, `@slow`). Parsed and preserved; `sl run --tags` / `--skip-tags` selects a tagged subset at planning time. `@serial` marks a scenario as exclusive under parallel runs. |
 
 ## Modes
 

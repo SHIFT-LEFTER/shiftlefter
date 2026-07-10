@@ -97,6 +97,9 @@
 ;; Final pickle shape (output of scenario-plan->pickles)
 (s/def :pickle/id uuid?)
 (s/def :pickle/name string?)
+;; Feature name (sl-40to): local extension for reporter grouping (JUnit
+;; testsuite@name / testcase@classname). Nilable — an anonymous feature has none.
+(s/def :pickle/feature-name (s/nilable string?))
 (s/def :pickle/template-name (s/nilable string?))
 (s/def :pickle/row-index (s/nilable nat-int?))
 (s/def :pickle/row-values (s/nilable map?))
@@ -110,8 +113,8 @@
 (s/def ::pickle
   (s/keys :req [:pickle/id :pickle/name :pickle/source-file
                 :pickle/location :pickle/tags :pickle/steps]
-          :opt [:pickle/template-name :pickle/row-index :pickle/row-values
-                :pickle/scenario-location :pickle/row-location]))
+          :opt [:pickle/feature-name :pickle/template-name :pickle/row-index
+                :pickle/row-values :pickle/scenario-location :pickle/row-location]))
 
 (s/def ::pickles (s/coll-of ::pickle))
 
@@ -306,7 +309,7 @@
    - :pickle/template-name — scenario name before substitution
    - :pickle/row-index — 0-based index within the Examples block
    - :pickle/row-values — header→value map for the row"
-  [scenario-plan feature-tags source-file]
+  [scenario-plan feature-tags source-file feature-name]
   (let [rule-tags (:rule-tags scenario-plan)
         scenario-tags (:tags scenario-plan)
         template-name (:name scenario-plan)]  ;; Store before substitution
@@ -326,6 +329,7 @@
                                        row-location (:location table-row)]
                                    {:pickle/id (java.util.UUID/randomUUID)
                                     :pickle/name (replace-placeholders template-name row-map)
+                                    :pickle/feature-name feature-name   ;; sl-40to: reporter grouping
                                     :pickle/template-name template-name  ;; Outline provenance
                                     :pickle/row-index row-idx            ;; 0-based
                                     :pickle/row-values row-map           ;; {header-string -> cell-string}
@@ -342,6 +346,7 @@
                                  (let [row-map (zipmap header row-values)]
                                    {:pickle/id (java.util.UUID/randomUUID)
                                     :pickle/name (replace-placeholders template-name row-map)
+                                    :pickle/feature-name feature-name   ;; sl-40to: reporter grouping
                                     :pickle/template-name template-name  ;; Outline provenance
                                     :pickle/row-index row-idx            ;; 0-based
                                     :pickle/row-values row-map           ;; {header-string -> cell-string}
@@ -359,11 +364,11 @@
   "Convert a scenario-plan to pickle(s). Outlines expand to multiple pickles.
    Scenario Outlines without Examples are treated as regular scenarios.
    Tag order: feature → rule → scenario (with deduplication)."
-  [scenario-plan feature-tags source-file]
+  [scenario-plan feature-tags source-file feature-name]
   (if (and (= (:type scenario-plan) :scenario-outline)
            (seq (:examples scenario-plan)))
     ;; Outline with examples: expand to multiple pickles
-    (expand-outline-examples scenario-plan feature-tags source-file)
+    (expand-outline-examples scenario-plan feature-tags source-file feature-name)
     ;; Regular scenario OR outline without examples: single pickle
     ;; Outline provenance fields are nil for non-outline scenarios
     (let [rule-tags (:rule-tags scenario-plan)
@@ -371,6 +376,7 @@
           all-tags (dedupe-tags (vec (concat feature-tags rule-tags scenario-tags)))]
       [{:pickle/id (java.util.UUID/randomUUID)
         :pickle/name (:name scenario-plan)
+        :pickle/feature-name feature-name   ;; sl-40to: reporter grouping
         :pickle/template-name nil      ;; Not an outline
         :pickle/row-index nil          ;; Not an outline
         :pickle/row-values nil         ;; Not an outline
@@ -392,7 +398,8 @@
   [pickle-plan]
   (let [source-file (:source-file pickle-plan)]
     {:pickles (mapcat (fn [feature-plan]
-                        (mapcat #(scenario-plan->pickles % (:tags feature-plan) source-file)
+                        (mapcat #(scenario-plan->pickles % (:tags feature-plan)
+                                                         source-file (:name feature-plan))
                                 (:scenarios feature-plan)))
                       (:features pickle-plan))
      :errors []}))

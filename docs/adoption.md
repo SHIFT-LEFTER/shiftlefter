@@ -11,8 +11,9 @@ Gherkin test files), so your `.feature` *files* parse unchanged — you can poin
 
 What does **not** come over: your step definitions. ShiftLefter runs built-in
 steps (browser, SMS) or step definitions written in Clojure — not an existing
-Java/JavaScript/Ruby step library. And the table stakes a commercial suite leans
-on — xUnit/HTML reporting, test fixtures, hooks, tag filtering — aren't here yet
+Java/JavaScript/Ruby step library. Some of the table stakes a commercial suite
+leans on are now in place — JUnit XML and HTML reporting, tag filtering — but
+test fixtures and hooks as first-class features aren't here yet
 (see [What 0.5 is](README.md#what-05-is-and-isnt)).
 
 So:

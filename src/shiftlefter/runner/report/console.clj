@@ -18,6 +18,7 @@
    - `NO_COLOR` env var set
    - Not a TTY (future enhancement)"
   (:require [clojure.string :as str]
+            [shiftlefter.runner.reporter :as reporter]
             [shiftlefter.svo.validate :as validate]))
 
 ;; -----------------------------------------------------------------------------
@@ -437,3 +438,42 @@
                       (colorize (str skipped " skipped") :cyan use-color?))))
       (when-let [duration (:duration-ms opts)]
         (println (colorize (format "Completed in %.2fs" (/ duration 1000.0)) :gray use-color?))))))
+
+;; -----------------------------------------------------------------------------
+;; Reporter (sl-21z)
+;; -----------------------------------------------------------------------------
+
+(defrecord ConsoleReporter [opts state]
+  reporter/Reporter
+  (on-run-start [_this _run-ctx]
+    ;; Nothing is printed at run start today.
+    nil)
+
+  (on-scenario-complete [_this scenario-result]
+    ;; Accumulated for the end-of-run failure section, AND printed now (sl-dgk):
+    ;; the status line lands as each scenario finishes, so a long e2e suite shows
+    ;; live progress instead of silence-then-flood. `print-scenario!` prints just
+    ;; the status+name line in non-verbose mode and adds the per-step breakdown
+    ;; under :verbose — so verbose output is byte-identical to the pre-dgk
+    ;; post-hoc pass; only non-verbose gains the per-scenario line.
+    (swap! state update :scenarios conj scenario-result)
+    (print-scenario! scenario-result opts)
+    nil)
+
+  (on-diagnostics [_this diagnostics]
+    ;; STASHED, not printed: warn-level SVO issues appear AFTER the summary,
+    ;; so they cannot be rendered at call time without reordering output.
+    (swap! state assoc :diagnostics diagnostics)
+    nil)
+
+  (on-run-end [_this run-summary]
+    (print-failures! (:scenarios @state) opts)
+    (print-summary! run-summary opts)
+    (print-warnings! (:diagnostics @state) opts)
+    nil))
+
+(defn make-reporter
+  "Construct a ConsoleReporter. `opts` is the report-opts map
+   ({:verbose :no-color})."
+  [opts]
+  (->ConsoleReporter opts (atom {:scenarios [] :diagnostics nil})))

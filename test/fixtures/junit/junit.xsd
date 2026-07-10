@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  JUnit XML schema — common consumer subset (sl-40to).
+
+  JUnit XML has no single official spec; this schema encodes the de-facto
+  subset documented by testmoapp/junitxml and llg.cubic.org that GitLab,
+  GitHub, and Jenkins all ingest. It is deliberately permissive on counts
+  (unsignedInt) and lenient on element order within a testcase (skipped |
+  error | failure, then system-out). The ShiftLefter JUnit reporter targets
+  exactly this subset — see ERRATA E009.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           elementFormDefault="qualified">
+
+  <xs:element name="testsuites" type="testsuitesType"/>
+  <xs:element name="testsuite" type="testsuiteType"/>
+
+  <xs:complexType name="testsuitesType">
+    <xs:sequence>
+      <xs:element name="testsuite" type="testsuiteType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="name" type="xs:string" use="optional"/>
+    <xs:attribute name="tests" type="xs:unsignedInt" use="optional"/>
+    <xs:attribute name="failures" type="xs:unsignedInt" use="optional"/>
+    <xs:attribute name="errors" type="xs:unsignedInt" use="optional"/>
+    <xs:attribute name="skipped" type="xs:unsignedInt" use="optional"/>
+    <xs:attribute name="time" type="xs:decimal" use="optional"/>
+  </xs:complexType>
+
+  <xs:complexType name="testsuiteType">
+    <xs:sequence>
+      <xs:element name="properties" type="propertiesType" minOccurs="0"/>
+      <xs:element name="testcase" type="testcaseType" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="system-out" type="xs:string" minOccurs="0"/>
+      <xs:element name="system-err" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="tests" type="xs:unsignedInt" use="optional"/>
+    <xs:attribute name="failures" type="xs:unsignedInt" use="optional"/>
+    <xs:attribute name="errors" type="xs:unsignedInt" use="optional"/>
+    <xs:attribute name="skipped" type="xs:unsignedInt" use="optional"/>
+    <xs:attribute name="time" type="xs:decimal" use="optional"/>
+    <xs:attribute name="timestamp" type="xs:dateTime" use="optional"/>
+    <xs:attribute name="hostname" type="xs:string" use="optional"/>
+    <xs:attribute name="id" type="xs:string" use="optional"/>
+    <xs:attribute name="package" type="xs:string" use="optional"/>
+  </xs:complexType>
+
+  <xs:complexType name="propertiesType">
+    <xs:sequence>
+      <xs:element name="property" type="propertyType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="propertyType">
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="value" type="xs:string" use="required"/>
+  </xs:complexType>
+
+  <xs:complexType name="testcaseType">
+    <xs:sequence>
+      <xs:choice minOccurs="0">
+        <xs:element name="skipped" type="skippedType"/>
+        <xs:element name="error" type="failureType"/>
+        <xs:element name="failure" type="failureType"/>
+      </xs:choice>
+      <xs:element name="system-out" type="xs:string" minOccurs="0"/>
+      <xs:element name="system-err" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="classname" type="xs:string" use="optional"/>
+    <xs:attribute name="file" type="xs:string" use="optional"/>
+    <xs:attribute name="line" type="xs:unsignedInt" use="optional"/>
+    <xs:attribute name="time" type="xs:decimal" use="optional"/>
+    <xs:attribute name="assertions" type="xs:unsignedInt" use="optional"/>
+  </xs:complexType>
+
+  <xs:complexType name="skippedType">
+    <xs:simpleContent>
+      <xs:extension base="xs:string">
+        <xs:attribute name="message" type="xs:string" use="optional"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+
+  <xs:complexType name="failureType">
+    <xs:simpleContent>
+      <xs:extension base="xs:string">
+        <xs:attribute name="message" type="xs:string" use="optional"/>
+        <xs:attribute name="type" type="xs:string" use="optional"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+
+</xs:schema>

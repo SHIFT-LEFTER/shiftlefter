@@ -4,7 +4,7 @@
 
 An agent can write you a passing browser test in one shot today. That's not the hard part anymore. The hard part is the **second** shot, and the tenth: each regeneration re-derives your app from scratch — its own selectors, its own names, its own idea of who "the user" is — and the suite drifts faster the more agents (and models) touch it. ShiftLefter gives that loop something stable to stand on: a typed vocabulary you define once, shared by every agent and every human on the team, and validated before anything runs. ([The full problem statement and fit check →](docs/FIT.md))
 
-## Status: v0.5.0
+## Status: v0.5.1
 
 ShiftLefter is an early, openly-scoped foundation for driving real software behavior from Gherkin — multiple users, multiple interfaces, all checked before anything runs. The core — driving a browser with multiple independent actors over a typed glossary you control — is solid and meant to be built on. The surrounding test-suite machinery and the traceability graph are on the way.
 
@@ -29,7 +29,7 @@ ShiftLefter runs in two modes. **Vanilla** is a plain Gherkin runner — parse, 
 
 - Multi-actor browser driving — multiple independent sessions with real isolation.
 - The typed SVO/glossary discipline — your vocabulary, validated before execution.
-- The `sl` CLI — run, format, dry-run, diagnose.
+- The `sl` CLI — run, format, dry-run, diagnose; CI-ready output (JUnit XML, HTML, EDN), tag filtering, parallel scenarios.
 - Gherkin parsing & lossless formatting — Cucumber-compliant (46/46 official test files).
 
 **Preview — works, expect change before 1.0**
@@ -40,7 +40,6 @@ ShiftLefter runs in two modes. **Vanilla** is a plain Gherkin runner — parse, 
 
 **Not here yet — roadmap**
 
-- xUnit / HTML / JSON reporting (today: console + structured EDN).
 - Test fixtures and hooks as first-class features.
 - Brownfield migration of an existing suite.
 - The traceability graph — the destination: executable traceability, use-case ↔ feature mapping & generation, and observation lineage from real-world requirements through to running tests.
@@ -61,8 +60,8 @@ agent on-ramp breadcrumb (see below):
 curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash
 
 # Or from a locally built release-zip (dev / pre-release):
-clj -T:build release-zip :version '"0.5.0"'
-release/install.sh --zip target/shiftlefter-v0.5.0.zip
+clj -T:build release-zip :version '"0.5.1"'
+release/install.sh --zip target/shiftlefter-v0.5.1.zip
 
 export PATH="$PWD/sl:$PATH"
 ```
@@ -151,6 +150,9 @@ sl run features/login.feature features/checkout.feature --step-paths steps/
 # Dry-run (verify bindings without executing)
 sl run features/ --step-paths steps/ --dry-run
 
+# Run only the @smoke subset
+sl run features/ --step-paths steps/ --tags @smoke
+
 # Machine-readable EDN output
 sl run features/ --step-paths steps/ --edn
 
@@ -165,7 +167,12 @@ sl run features/ --step-paths steps/ -v
 | `--step-paths p1,p2` | `:runner {:step-paths [...]}` | Comma-separated paths to step definition directories |
 | `-c, --config FILE` | — | Path to config file (default: `shiftlefter.edn` in current directory) |
 | `--dry-run` | — | Bind steps but don't execute (verify all steps have definitions) |
+| `--tags TAGS` | — | Run only scenarios carrying any of these tags (comma-separated, repeatable; `@` optional). Filtering happens at planning time — deselected scenarios are never bound, and counts/reports cover only the selection. |
+| `--skip-tags TAGS` | — | Skip scenarios carrying any of these tags (same syntax; exclude wins over `--tags`) |
+| `--max-parallel N` | `:runner {:max-parallel N}` | Run up to N scenarios concurrently (default 1 = sequential). Results and console output are identical to a sequential run. `@serial`, costume-wearing, and shared-interface scenarios run alone. |
 | `--edn` | — | Output results as EDN to stdout |
+| `--junit-xml PATH` | `:runner {:report {:junit-xml "..."}}` | Write a CI-ingestible JUnit XML report (alongside console/EDN; flag wins over config). A planning error (exit 2) writes **no** file — gate CI on the exit code. See [ERRATA E009](ERRATA.md). |
+| `--html PATH` | `:runner {:report {:html "..."}}` | Write a self-contained HTML run report (one file, works offline via double-click; flag wins over config). Embeds the full run data as a readable EDN island alongside the rendered view. |
 | `-v, --verbose` | — | Show each step as it executes |
 | `--version` | — | Print ShiftLefter version |
 

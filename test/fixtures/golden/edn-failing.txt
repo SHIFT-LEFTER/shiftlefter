@@ -1,0 +1,4 @@
+EXIT 1
+--- STDOUT ---
+{:run/id "UUID", :run/exit-code 1, :run/status :failed, :counts {:passed 0, :failed 1, :pending 0, :skipped 0, :scenarios 1, :steps 3}, :failures [{:step/text "I trigger an error", :step/id #uuid "UUID", :scenario/name "Step throws exception", :scenario/id #uuid "UUID", :location {:ns fixtures.steps.basic-steps, :file "ROOT/test/fixtures/steps/basic_steps.clj", :line 25}, :error {:type :step/exception, :message "Intentional test error", :exception-class "clojure.lang.ExceptionInfo", :data {:reason :test}}}]}
+--- STDERR ---

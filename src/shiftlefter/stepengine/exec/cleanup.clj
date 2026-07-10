@@ -8,8 +8,10 @@
    `execute-suite` from this ns."
   (:require [shiftlefter.adapters.registry :as registry]
             [shiftlefter.capabilities.ctx :as cap]
+            [shiftlefter.stepengine.exec.provisioning :as prov]
             [shiftlefter.stepengine.exec.step-loop :as step-loop])
-  (:import (java.util IdentityHashMap)))
+  (:import (java.util IdentityHashMap)
+           (java.util.concurrent ExecutorService Executors LinkedBlockingQueue)))
 
 ;; -----------------------------------------------------------------------------
 ;; Capability Cleanup
@@ -120,12 +122,83 @@
 
    Returns scenario result with `:capability-cleanup` populated."
   [plan opts]
-  (let [result      (step-loop/execute-scenario plan {} opts)
+  (let [start-ns    (System/nanoTime)
+        result      (step-loop/execute-scenario plan {} opts)
+        duration-ms (/ (- (System/nanoTime) start-ns) 1e6)
         scenario-ctx (:scenario-ctx result)
         interfaces  (:interfaces opts)
         registry    (:adapter-registry opts)
         cap-cleanup (cleanup-ephemeral-capabilities! scenario-ctx interfaces registry)]
-    (assoc result :capability-cleanup cap-cleanup)))
+    (assoc result :capability-cleanup cap-cleanup :duration-ms duration-ms)))
+
+(defn- execute-plans-parallel
+  "The N>1 scheduler (sl-q9wp). Two phases:
+
+   1. POOL — every plan without `{:plan/schedule {:serial? true}}` runs on a
+      fixed pool of `n` platform threads (browser scenarios are blocking IO;
+      n is a resource bound). Tasks are `bound-fn*`-wrapped so workers convey
+      the coordinator's dynamic bindings — the warm daemon's *out*/*err*
+      capture is thread-local, and a raw executor thread would print to the
+      JVM default streams instead of the client (R6).
+   2. SERIAL — after the pool FULLY drains, serial plans run one at a time in
+      plan order, inline on the coordinator (one lane; @serial = exclusivity,
+      nothing more).
+
+   `:on-scenario-complete` fires on the COORDINATOR thread at ACTUAL
+   completion order in both phases (invariant 1 for both planes); workers
+   only hand completed results back over a queue. The runner's plan-order
+   release buffer (sl-dgk seam) reorders the report plane; the bus keeps
+   actual order + :seq.
+
+   A Throwable escaping a pool task would otherwise swallow its completion
+   and hang the coordinator's countdown — execute-scenario-with-cleanup
+   already catches step-level throws, so an escape here is a harness-level
+   crash for that scenario and is converted to a failed result (first step
+   bears the error, matching the eager-provisioning failure shape).
+
+   Returns the results vector in PLAN order."
+  [plans opts n]
+  (let [on-complete  (:on-scenario-complete opts)
+        indexed      (map-indexed vector plans)
+        serial?      (fn [[_idx plan]]
+                       (true? (get-in plan [:plan/schedule :serial?])))
+        serial-plans (filter serial? indexed)
+        pool-plans   (remove serial? indexed)
+        completions  (LinkedBlockingQueue.)
+        executor     (Executors/newFixedThreadPool n)]
+    (try
+      (doseq [[idx plan] pool-plans]
+        (let [task (bound-fn* ; conveyance: the sl-aa5 future pattern (R6)
+                    (fn []
+                      (let [result
+                            (try
+                              (execute-scenario-with-cleanup plan opts)
+                              (catch Throwable t
+                                (prov/eager-failure-result
+                                 plan
+                                 {:type :scenario/harness-crash
+                                  :message (str "Escaped scenario execution: "
+                                                (ex-message t))
+                                  :exception-class (.getName (class t))})))]
+                        (.put completions [idx result]))))]
+          (.submit ^ExecutorService executor ^Runnable task)))
+      (let [pool-results
+            (loop [acc {} remaining (count pool-plans)]
+              (if (zero? remaining)
+                acc
+                (let [[idx result] (.take completions)]
+                  (when on-complete (on-complete result))
+                  (recur (assoc acc idx result) (dec remaining)))))
+            all-results
+            (reduce (fn [acc [idx plan]]
+                      (let [result (execute-scenario-with-cleanup plan opts)]
+                        (when on-complete (on-complete result))
+                        (assoc acc idx result)))
+                    pool-results
+                    serial-plans)]
+        (mapv all-results (range (count plans))))
+      (finally
+        (.shutdown executor)))))
 
 (defn execute-suite
   "Execute all scenarios in a suite.
@@ -136,11 +209,26 @@
      - :interfaces       — interface config
      - :adapter-registry — optional custom adapter registry (see execute-scenario)
      - :bus, :run-id     — event publishing
+     - :max-parallel     — pos-int, default 1 (sl-q9wp). 1 = today's
+       sequential path, verbatim. N>1 fans non-serial scenarios onto a fixed
+       pool of N platform threads; plans carrying
+       `{:plan/schedule {:serial? true}}` run one at a time, in plan order,
+       after the pool fully drains (see execute-plans-parallel).
+     - :on-scenario-complete — optional 1-arg fn, called with each raw scenario
+       result as that scenario ACTUALLY completes (sl-21z), always on the
+       COORDINATOR thread — under :max-parallel > 1 that means actual
+       completion order, not plan order. The engine stays reporter-ignorant:
+       this is a plain callback, and the runner uses it to publish
+       `:scenario/finished` on the observe plane. User-facing reporters
+       are NOT driven from here — they run live but in plan order (sl-dgk
+       puts report dispatch behind the runner's plan-order release buffer).
 
    Returns:
    - {:scenarios [{:status ... :plan ... :steps ... :capability-cleanup ...} ...]
       :counts {:passed N :failed N :pending N :skipped N}
       :status :passed|:failed}
+
+   `:scenarios` is in PLAN order at every :max-parallel.
 
    Semantics:
    - Each scenario starts with fresh ctx ({})
@@ -151,7 +239,18 @@
    - Persistent capabilities survive across scenarios"
   ([plans] (execute-suite plans {}))
   ([plans opts]
-   (let [results (mapv #(execute-scenario-with-cleanup % opts) plans)
+   (let [max-parallel (or (:max-parallel opts) 1)
+         results
+         (if (> max-parallel 1)
+           (execute-plans-parallel plans opts max-parallel)
+           ;; Sequential path — unchanged (sl-q9wp acceptance 1: N=1 is
+           ;; byte-identical to before by construction).
+           (let [on-complete (:on-scenario-complete opts)
+                 run-one (fn [plan]
+                           (let [result (execute-scenario-with-cleanup plan opts)]
+                             (when on-complete (on-complete result))
+                             result))]
+             (mapv run-one plans)))
          counts (frequencies (map :status results))
          suite-passed? (every? #(= :passed (:status %)) results)]
      {:scenarios results

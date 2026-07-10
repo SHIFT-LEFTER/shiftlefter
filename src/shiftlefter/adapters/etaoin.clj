@@ -73,7 +73,12 @@
 (defn close-browser
   "Close the browser and release resources.
 
-   Takes the capability map returned by `create-browser`.
+   Takes the UNWRAPPED capability map — the value under `:ok` in
+   `create-browser`'s return, NOT the wrapped `{:ok {...}}` result itself.
+   Passing the wrapped map is an error: a capability without `:etaoin-driver`
+   means nothing gets quit, so returning success would silently leak the
+   chromedriver + Chrome process tree (sl-9vag; orphans reparent to PID 1 and
+   live forever — killing chromedriver does NOT reap its Chrome children).
 
    Returns:
    - Success: {:ok :closed}
@@ -81,15 +86,23 @@
 
    Examples:
    ```clojure
-   (close-browser {:browser b :etaoin-driver d})
+   (close-browser (:ok (create-browser {:headless true})))
    ;; => {:ok :closed}
+
+   (close-browser (create-browser {:headless true}))   ; wrapped — WRONG
+   ;; => {:error {:type :adapter/cleanup-failed ...}}
    ```"
   [capability]
-  (try
-    (when-let [eta-driver (:etaoin-driver capability)]
-      (eta/quit eta-driver))
-    {:ok :closed}
-    (catch Exception e
-      {:error {:type :adapter/cleanup-failed
-               :adapter :etaoin
-               :message (ex-message e)}})))
+  (if-let [eta-driver (:etaoin-driver capability)]
+    (try
+      (eta/quit eta-driver)
+      {:ok :closed}
+      (catch Exception e
+        {:error {:type :adapter/cleanup-failed
+                 :adapter :etaoin
+                 :message (ex-message e)}}))
+    {:error {:type :adapter/cleanup-failed
+             :adapter :etaoin
+             :message (str "No :etaoin-driver in capability — nothing was closed. "
+                           "Pass the unwrapped map (the value under :ok of "
+                           "create-browser's return), not the wrapped {:ok {...}} result.")}}))

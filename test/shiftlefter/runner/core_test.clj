@@ -345,3 +345,177 @@
           (is (= :dry-run (:status result))))
         (finally
           (fs/delete-tree project))))))
+
+;; -----------------------------------------------------------------------------
+;; Tag filtering (sl-i608) — planning-time subset selection
+;; -----------------------------------------------------------------------------
+
+(def tagged-feature "test/fixtures/features/tagged.feature")
+
+(defn- run-tagged
+  "Run the tagged fixture with an optional :tag-filter; returns the result map."
+  [tag-filter & {:keys [dry-run]}]
+  (runner/execute! (cond-> {:paths [tagged-feature]
+                            :step-paths [step-path]}
+                     tag-filter (assoc :tag-filter tag-filter)
+                     dry-run (assoc :dry-run true))))
+
+(deftest test-tag-filter-include
+  (testing "include filter executes only matching scenarios (OR within set)"
+    (let [result (run-tagged {:include #{"@fast"}})]
+      (is (= 0 (:exit-code result)))
+      (is (= {:passed 2 :failed 0 :pending 0 :skipped 0} (:counts result))
+          "only @fast and @fast @wip; filtered-out are not passed or skipped"))))
+
+(deftest test-tag-filter-exclude
+  (testing "exclude filter skips matching scenarios"
+    (let [result (run-tagged {:exclude #{"@wip"}})]
+      (is (= 0 (:exit-code result)))
+      (is (= 4 (get-in result [:counts :passed]))))))
+
+(deftest test-tag-filter-exclude-wins
+  (testing "composed include+exclude: exclude wins"
+    (let [result (run-tagged {:include #{"@fast"} :exclude #{"@wip"}})]
+      (is (= 0 (:exit-code result)))
+      (is (= 1 (get-in result [:counts :passed]))))))
+
+(deftest test-tag-filter-feature-inheritance
+  (testing "feature-level tag inherits to every scenario (Gherkin semantics)"
+    (let [result (run-tagged {:include #{"@suite"}})]
+      (is (= 5 (get-in result [:counts :passed]))
+          "all scenarios, including the one under the Rule, carry @suite"))))
+
+(deftest test-tag-filter-rule-inheritance
+  (testing "Rule-level tag inherits to its scenarios (addendum 2a)"
+    (let [result (run-tagged {:include #{"@ruled"}})]
+      (is (= 1 (get-in result [:counts :passed]))))))
+
+(deftest test-tag-filter-absent-is-identity
+  (testing "no :tag-filter => counts identical to an unfiltered run"
+    (let [unfiltered (run-tagged nil)]
+      (is (= 0 (:exit-code unfiltered)))
+      (is (= {:passed 5 :failed 0 :pending 0 :skipped 0} (:counts unfiltered))))))
+
+(deftest test-tag-filter-zero-selected
+  (testing "over-narrow filter selects nothing: exit 0, zero counts"
+    (let [result (run-tagged {:include #{"@nope"}})]
+      (is (= 0 (:exit-code result)))
+      (is (= :passed (:status result)))
+      (is (= {:passed 0 :failed 0 :pending 0 :skipped 0} (:counts result))))))
+
+(deftest test-tag-filter-invalid-shape
+  (testing "invalid :tag-filter at the execute! boundary is a planning error"
+    (let [result (run-tagged {:include #{"no-at-prefix"}})]
+      (is (= 2 (:exit-code result)))
+      (is (= :planning-failed (:status result))))
+    (let [result (run-tagged {:include ["@vector-not-set"]})]
+      (is (= 2 (:exit-code result))))))
+
+(deftest test-tag-filter-excludes-unbindable-scenario
+  (testing "a filtered-out scenario with an undefined step never fails planning
+            (filter-before-binding doctrine, mini @broken case)"
+    (let [tmp-dir (str (fs/create-temp-dir))
+          feature (str (fs/path tmp-dir "quarantine.feature"))]
+      (try
+        (spit feature (str "Feature: Quarantine\n\n"
+                           "  Scenario: Healthy\n"
+                           "    Given I have 1 items in my cart\n\n"
+                           "  @broken\n"
+                           "  Scenario: Unbindable\n"
+                           "    Given this step is defined nowhere at all\n"))
+        (let [unfiltered (runner/execute! {:paths [feature]
+                                           :step-paths [step-path]})
+              filtered (runner/execute! {:paths [feature]
+                                         :step-paths [step-path]
+                                         :tag-filter {:exclude #{"@broken"}}})]
+          (is (= 2 (:exit-code unfiltered)) "without a filter the suite can't plan")
+          (is (= 0 (:exit-code filtered)) "excluded scenario is never bound")
+          (is (= 1 (get-in filtered [:counts :passed]))))
+        (finally
+          (fs/delete-tree tmp-dir))))))
+
+;; -----------------------------------------------------------------------------
+;; Parallel execution surface (sl-q9wp)
+;; -----------------------------------------------------------------------------
+
+(deftest test-max-parallel-suite-equivalence
+  (testing ":max-parallel N>1 yields counts/exit identical to a sequential run"
+    (let [sequential (run-tagged nil)
+          parallel (runner/execute! {:paths [tagged-feature]
+                                     :step-paths [step-path]
+                                     :max-parallel 4})]
+      (is (= 0 (:exit-code parallel)))
+      (is (= (:counts sequential) (:counts parallel)))
+      (is (= (:status sequential) (:status parallel))))))
+
+(deftest test-auto-serial-notice-line
+  ;; sl-q9wp DP1: 'N scenario(s) auto-serialized: X costume, Y shared-impl' —
+  ;; stderr, i608 notice pattern, suppressed in EDN + dry-run; @serial (:tag)
+  ;; is user intent and is not counted.
+  (let [notice! #'runner/print-auto-serial-notice!
+        plans [{:plan/schedule {:serial? true :reason :costume}}
+               {:plan/schedule {:serial? true :reason :costume}}
+               {:plan/schedule {:serial? true :reason :shared-impl}}
+               {:plan/schedule {:serial? true :reason :tag}}
+               {}]
+        capture (fn [opts ps]
+                  (let [sw (java.io.StringWriter.)]
+                    (binding [*err* sw] (notice! opts ps))
+                    (str sw)))]
+    (is (= "3 scenario(s) auto-serialized: 2 costume, 1 shared-impl\n"
+           (capture {} plans)))
+    (is (= "" (capture {:edn true} plans)) "suppressed in EDN mode")
+    (is (= "" (capture {:dry-run true} plans)) "suppressed in dry-run")
+    (is (= "" (capture {} [{:plan/schedule {:serial? true :reason :tag}} {}]))
+        "no auto gates fired, no line")))
+
+(deftest test-max-parallel-invalid-boundary
+  (testing "malformed :max-parallel at the execute! boundary is a planning error"
+    (doseq [bad [0 -1 "4" 2.5]]
+      (let [result (runner/execute! {:paths [tagged-feature]
+                                     :step-paths [step-path]
+                                     :max-parallel bad})]
+        (is (= 2 (:exit-code result)) (pr-str bad))
+        (is (= :planning-failed (:status result)) (pr-str bad))))))
+
+;; -----------------------------------------------------------------------------
+;; Tag filtering × dry-run: the selection preview (addendum 3)
+;; -----------------------------------------------------------------------------
+
+(deftest test-tag-filter-dry-run-preview
+  (testing "dry-run previews the selected subset in the result"
+    (let [result (run-tagged {:include #{"@fast"}} :dry-run true)]
+      (is (= 0 (:exit-code result)))
+      (is (= 2 (count (:plans result))))))
+  (testing "dry-run console line carries both counts when a filter is active"
+    (let [err (java.io.StringWriter.)
+          _ (binding [*err* err] (run-tagged {:include #{"@fast"}} :dry-run true))
+          line (str err)]
+      (is (str/includes? line "2 scenario(s) bound successfully (dry run; 3 filtered out by tags)")
+          (str "got: " line))))
+  (testing "dry-run console line is byte-identical to today without a filter"
+    (let [err (java.io.StringWriter.)
+          _ (binding [*err* err] (run-tagged nil :dry-run true))
+          line (str err)]
+      (is (str/includes? line "5 scenario(s) bound successfully (dry run)")
+          (str "got: " line))
+      (is (not (str/includes? line "filtered out"))))))
+
+(deftest test-tag-filter-dry-run-edn-preview
+  (testing "EDN dry-run summary carries additive :filtered-out only with a filter"
+    (let [filtered (let [out (with-out-str
+                               (runner/execute! {:paths [tagged-feature]
+                                                 :step-paths [step-path]
+                                                 :dry-run true :edn true
+                                                 :tag-filter {:include #{"@fast"}}}))]
+                     (edn/read-string out))
+          plain (let [out (with-out-str
+                            (runner/execute! {:paths [tagged-feature]
+                                              :step-paths [step-path]
+                                              :dry-run true :edn true}))]
+                  (edn/read-string out))]
+      (is (= 2 (get-in filtered [:counts :scenarios])))
+      (is (= 3 (:filtered-out filtered)))
+      (is (= 5 (get-in plain [:counts :scenarios])))
+      (is (not (contains? plain :filtered-out))
+          "no filter => summary shape unchanged"))))

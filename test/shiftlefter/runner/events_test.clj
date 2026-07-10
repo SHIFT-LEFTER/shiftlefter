@@ -1,5 +1,8 @@
 (ns shiftlefter.runner.events-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.spec.alpha :as s]
+            [clojure.test :refer [deftest is testing]]
+            [clojure.tools.logging :as log]
+            [clojure.tools.logging.impl :as log-impl]
             [shiftlefter.runner.events :as events]))
 
 ;; -----------------------------------------------------------------------------
@@ -138,3 +141,131 @@
           token (events/subscribe! bus (fn [_]))]
       (is (uuid? token) "Token should be a UUID")
       (events/bus-close! bus))))
+
+;; -----------------------------------------------------------------------------
+;; sl-q9wp: :seq stamping, offer!-based publish, dropped-events counter
+;; -----------------------------------------------------------------------------
+
+(deftest test-publish-stamps-monotonic-seq
+  (testing "publish! stamps a per-run monotonic :seq on every event"
+    (let [bus (events/make-memory-bus)
+          got (atom [])
+          _sub (events/subscribe! bus (fn [e] (swap! got conj e)))]
+      (dotimes [n 5]
+        (events/publish! bus (events/make-event :test/seq "run-seq" {:n n})))
+      (Thread/sleep 30)
+      (is (= 5 (count @got)))
+      (is (= [0 1 2 3 4] (mapv :seq @got))
+          "Seq should be monotonic from 0 in publish order")
+      (is (every? #(s/valid? ::events/event-envelope %) @got)
+          "Stamped events still satisfy the envelope spec")
+      (events/bus-close! bus))))
+
+(deftest test-make-event-extras-arity
+  (testing "make-event 4-arity merges extras onto the envelope top level"
+    (let [sid (java.util.UUID/randomUUID)
+          event (events/make-event :scenario/finished "run-x" {:a 1}
+                                   {:scenario/id sid})]
+      (is (= sid (:scenario/id event)))
+      (is (= {:a 1} (:payload event)))
+      (is (s/valid? ::events/event-envelope event)))
+    (testing "nil extras are a no-op"
+      (let [event (events/make-event :test/x "run-x" {} nil)]
+        (is (s/valid? ::events/event-envelope event))
+        (is (not (contains? event :scenario/id)))))))
+
+(deftest test-full-bus-never-throws-and-counts-drops
+  (testing "publish! against a wedged bus drops + counts instead of throwing"
+    ;; One subscriber whose handler never returns wedges the mult (its
+    ;; sub-chan fills at 64, the mult parks), so the 1024 input buffer
+    ;; fills and offer! starts refusing. Under put! semantics this test
+    ;; would THROW on the publishing thread after 1024 pending puts.
+    (let [bus (events/make-memory-bus)
+          block (promise)
+          _sub (events/subscribe! bus (fn [_] @block))]
+      (dotimes [n 1400]
+        (events/publish! bus (events/make-event :test/flood "run-flood" {:n n})))
+      (is (pos? (events/dropped-events bus))
+          "Overflow must be counted, not thrown")
+      (deliver block :released)
+      (events/bus-close! bus))))
+
+(deftest test-close-drains-accepted-events
+  (testing "every event the bus accepted is handled before bus-close! returns
+            — no sleep, no polling (the sl-4tsi drop-at-close fix)"
+    (let [bus (events/make-memory-bus)
+          got (atom [])
+          _sub (events/subscribe! bus (fn [e] (swap! got conj (:seq e))))]
+      (dotimes [n 50]
+        (events/publish! bus (events/make-event :test/drain "run-drain" {:n n})))
+      ;; Close IMMEDIATELY — the old force-close vaporized in-flight events
+      ;; here ~1-in-3 under load.
+      (events/bus-close! bus)
+      (is (= (range 50) @got)
+          "all accepted events delivered, in order, by close time")))
+  (testing "drain covers multiple subscribers"
+    (let [bus (events/make-memory-bus)
+          got1 (atom 0)
+          got2 (atom 0)
+          _s1 (events/subscribe! bus (fn [_] (swap! got1 inc)))
+          _s2 (events/subscribe! bus (fn [_] (swap! got2 inc)))]
+      (dotimes [n 30]
+        (events/publish! bus (events/make-event :test/drain2 "run-drain2" {:n n})))
+      (events/bus-close! bus)
+      (is (= 30 @got1))
+      (is (= 30 @got2)))))
+
+(deftest test-close-never-hangs-on-wedged-handler
+  (testing "a handler that never returns cannot hang bus-close! (bounded
+            grace, then force-close + warn) — observers never block the run"
+    (let [bus (events/make-memory-bus)
+          gate (promise)
+          _sub (events/subscribe! bus (fn [_] @gate))
+          _ (events/publish! bus (events/make-event :test/wedge "run-wedge" {}))
+          start (System/currentTimeMillis)]
+      (events/bus-close! bus)
+      (is (< (- (System/currentTimeMillis) start) 10000)
+          "close returned despite the wedged handler")
+      (deliver gate :released))))
+
+(deftest test-publish-after-close-counts-as-drop
+  (testing "publish! on a closed bus is a counted drop, never a throw"
+    (let [bus (events/make-memory-bus)]
+      (events/bus-close! bus)
+      (events/publish! bus (events/make-event :test/late "run-late" {}))
+      (is (= 1 (events/dropped-events bus))))))
+
+(defn- recording-logger-factory
+  "A tools.logging factory whose loggers are always enabled and record
+   [level message] into `logs` — the default NOP SLF4J backend reports
+   every level as disabled, so with-redefs on log* never fires."
+  [logs]
+  (reify log-impl/LoggerFactory
+    (name [_] "recording")
+    (get-logger [_ _ns]
+      (reify log-impl/Logger
+        (enabled? [_ _level] true)
+        (write! [_ level _throwable message]
+          (swap! logs conj [level (str message)]))))))
+
+(deftest test-dropped-count-logged-at-bus-close
+  (testing "a positive drop count is logged (warn) at bus close; zero is silent"
+    (let [logs (atom [])]
+      (binding [log/*logger-factory* (recording-logger-factory logs)]
+        (testing "wedged bus accumulates drops, close logs them"
+          (let [bus (events/make-memory-bus)
+                gate (promise)
+                _sub (events/subscribe! bus (fn [_] @gate))]
+            (dotimes [n 1400]
+              (events/publish! bus (events/make-event :test/flood "run-log" {:n n})))
+            (deliver gate :released)
+            (events/bus-close! bus)
+            (is (some (fn [[level msg]]
+                        (and (= :warn level) (re-find #"dropped" msg)))
+                      @logs)
+                (pr-str @logs))))
+        (testing "clean bus logs nothing at close"
+          (reset! logs [])
+          (let [bus (events/make-memory-bus)]
+            (events/bus-close! bus)
+            (is (empty? @logs))))))))

@@ -1,0 +1,10 @@
+EXIT 0
+--- STDOUT ---
+--- STDERR ---
+PASSED Basic passing scenario
+  ✓ I have 5 items in my cart
+  ✓ I add 3 more items
+  ✓ I should have 8 items total
+
+
+1 scenario(s): 1 passed

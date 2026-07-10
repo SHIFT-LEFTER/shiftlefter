@@ -212,6 +212,54 @@ Use a different pattern for your custom step. The authoritative list of built-in
 
 ---
 
+## E009: JUnit XML Has No Official Spec — We Target the Consumer Subset
+
+**Date discovered**: 2026-07-08
+
+**Source**: ShiftLefter JUnit-XML reporter (`shiftlefter.runner.report.junit`, sl-40to)
+
+**Description**:
+There is no single authoritative JUnit XML schema. The format is Ant-origin
+folklore; every CI consumer (GitLab, GitHub, Jenkins, CircleCI) parses its own
+de-facto subset. ShiftLefter's `--junit-xml` reporter deliberately targets the
+common interoperable subset documented by `testmoapp/junitxml` and
+`llg.cubic.org` — a flat `testsuites → testsuite → testcase` tree with
+`<failure>`/`<error>`/`<skipped>` outcomes and `<system-out>` transcripts.
+Anything that doesn't fit that flat model (rich step provenance, attachments)
+is intentionally out of scope; it belongs to a future ShiftLefter-native rich
+reporter, not to this lossy interop envelope.
+
+Two behaviors that surprise consumers of stricter test tools:
+
+- **Pending mirrors the exit code (D2).** A pending scenario is `<skipped>`
+  when `:allow-pending?` is set (the run exits 0) and `<failure type="pending">`
+  when strict (the run exits 1). The reporter never contradicts the exit code:
+  the XML contains ≥1 `<failure>`/`<error>` iff the run's exit code is nonzero.
+- **No file on planning error (D3).** A planning/config failure exits 2 and
+  writes **no** JUnit file at all — the exit code is the gate. A CI job that
+  keys only on the report's presence must ALSO check the process exit code, or
+  it will read a green (missing) report as success. Prefer gating on exit code.
+
+**Impact**:
+Consumers should not assume a formal XSD contract. We validate output against a
+bundled community XSD in tests (`test/fixtures/junit/junit.xsd`) and prove real
+CI ingest, but a consumer with an idiosyncratic parser may still need tweaks.
+The failure-vs-error split is a v1 heuristic: a step error carrying an
+`:exception-class` (any thrown exception) becomes `<error>`; everything else
+(e.g. an invalid step return) becomes `<failure>`.
+
+**Our workaround**:
+Target the documented consumer subset; net correctness three ways (community
+XSD, a `clojure.xml` parse-back property, and a real GitLab
+`artifacts:reports:junit` ingest). Gate CI on the process exit code, not merely
+on the report file's existence.
+
+**Upstream status**: By design — there is no upstream to report to. JUnit 5's
+Open Test Reporting is the forward-looking successor; we watch it but do not
+build against it yet.
+
+---
+
 ## Template for New Entries
 
 ```markdown

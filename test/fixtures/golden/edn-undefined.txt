@@ -1,0 +1,4 @@
+EXIT 2
+--- STDOUT ---
+{:run/id "UUID", :run/exit-code 2, :run/status :planning-failed, :planning {:issues [{:type :undefined, :step/text "I do something undefined", :step/id #uuid "UUID", :uri "ROOT/test/fixtures/features/undefined.feature", :line 5, :column 5}], :counts {:undefined-count 1, :ambiguous-count 0, :invalid-arity-count 0, :svo-issue-count 0, :total-issues 1}}}
+--- STDERR ---
