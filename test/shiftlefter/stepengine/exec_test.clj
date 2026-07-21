@@ -211,6 +211,27 @@
       (is (= :passed (:status result)))
       (is (= {:count 3} (:scenario-ctx result))))))
 
+(deftest test-run-interfaces-stashed-in-scenario-ctx
+  (testing "opts :interfaces is stashed into scenario ctx for step bodies (sl-3jr4)"
+    (let [interfaces {:web {:type :web :adapter :etaoin
+                            :config {:base-url "http://localhost:9092"}}}
+          seen (atom nil)
+          plan (make-plan [(make-bound-step
+                            (fn [ctx]
+                              (reset! seen (cap/get-run-interface-config ctx :web))
+                              ctx)
+                            1 [])])
+          result (exec/execute-scenario plan {} {:interfaces interfaces})]
+      (is (= :passed (:status result)))
+      (is (= {:base-url "http://localhost:9092"} @seen)
+          "Step body reads the interface :config from ctx")
+      (is (= interfaces (:run/interfaces (:scenario-ctx result))))))
+
+  (testing "No :interfaces opts → no stash (bare/REPL invoke path)"
+    (let [plan (make-plan [(make-bound-step (fn [ctx] ctx) 1 [])])
+          result (exec/execute-scenario plan {})]
+      (is (nil? (:run/interfaces (:scenario-ctx result)))))))
+
 ;; -----------------------------------------------------------------------------
 ;; execute-suite Tests
 ;; -----------------------------------------------------------------------------
@@ -1394,6 +1415,20 @@
       (is (= [[:provision :web] [:step :s1]] @events)
           "Provisioning happens before the first step body"))))
 
+(deftest test-run-interfaces-stash-survives-eager-provisioning
+  (testing "The :run/interfaces stash (sl-3jr4) rides through eager delta merges"
+    (let [interfaces (mock/interfaces {:web {:adapter :web}})
+          registry (mock/registry {:web {}})
+          bound (make-bound-step-with-svo
+                 (fn [ctx] ctx) 1 []
+                 {:subject :alice :verb :click :interface :web})
+          plan (make-plan [bound])
+          result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                 :adapter-registry registry
+                                                 :provisioning :eager})]
+      (is (= :passed (:status result)))
+      (is (= interfaces (:run/interfaces (:scenario-ctx result)))))))
+
 (deftest test-eager-fails-fast-on-bad-creds
   (testing "Eager provisioning failure → first step :failed, rest :skipped, no step body runs"
     (let [step1-ran? (atom false)
@@ -1577,6 +1612,113 @@
       (is (= :passed (:status result)))
       (is (empty? @events)
           "Synthetic step's svo shouldn't trigger eager provisioning"))))
+
+;; -----------------------------------------------------------------------------
+;; Partial-Provisioning Failure Cleanup (sl-uu7x)
+;;
+;; When provisioning fails partway — Alice's browser up, Bob's factory
+;; fails — the error result carries the partially-provisioned ctx so
+;; scenario-end cleanup still closes the live impls. Before sl-uu7x the
+;; ctx was dropped and every such failure leaked a Chrome/driver process.
+;; -----------------------------------------------------------------------------
+
+(defn- fail-on-nth-factory
+  "Factory succeeding until the `n`th call (1-based), which errors."
+  [n]
+  (let [calls (atom 0)]
+    (fn [_config]
+      (if (< (swap! calls inc) n)
+        {:ok {:type :test-impl :call @calls}}
+        {:error {:type :adapter/test-failure
+                 :message (str "provision call " @calls " fails")}}))))
+
+(deftest test-partial-eager-failure-cleans-provisioned-capability
+  (testing "Second subject's provision failure still closes the first's impl"
+    (let [events (atom [])
+          registry (mock/registry {:mock-web {:events events
+                                              :factory (fail-on-nth-factory 2)}})
+          interfaces (mock/interfaces {:web {:adapter :mock-web}})
+          step (fn [subj]
+                 (make-bound-step-with-svo
+                   (fn [ctx] ctx) 1 []
+                   {:subject subj :verb :click :interface :web}))
+          plan (make-plan [(step :alice) (step :bob)])
+          result (exec/execute-suite [plan] {:interfaces interfaces
+                                             :adapter-registry registry
+                                             :provisioning :eager})
+          scenario (-> result :scenarios first)]
+      (is (= :failed (:status scenario)))
+      (is (= :svo/provisioning-failed (-> scenario :steps first :error :type)))
+      (is (= [{:action :closed :interface :web.alice :adapter :mock-web}]
+             (-> scenario :capability-cleanup :cleaned))
+          "Alice's already-provisioned capability is closed, not orphaned")
+      (is (= 1 (count (filter #(= :cleanup (first %)) @events)))
+          "Adapter :cleanup fired exactly once"))))
+
+(deftest test-multi-interface-eager-failure-cleans-healthy-group
+  (testing "A failing interface group doesn't orphan a sibling group's impls"
+    (let [events (atom [])
+          registry (mock/registry {:mock-web {:events events}
+                                   :mock-sms {:events events :fail? true}})
+          interfaces (mock/interfaces {:web {:adapter :mock-web}
+                                       :sms {:adapter :mock-sms}})
+          web-step (make-bound-step-with-svo
+                     (fn [ctx] ctx) 1 []
+                     {:subject :alice :verb :click :interface :web})
+          sms-step (make-bound-step-with-svo
+                     (fn [ctx] ctx) 1 []
+                     {:subject :alice :verb :recv :interface :sms})
+          plan (make-plan [web-step sms-step])
+          result (exec/execute-suite [plan] {:interfaces interfaces
+                                             :adapter-registry registry
+                                             :provisioning :eager})
+          scenario (-> result :scenarios first)]
+      (is (= :failed (:status scenario)))
+      (is (some #{[:cleanup :mock-web]} @events)
+          "The web group provisioned fine and its impl is closed")
+      (is (= [:web.alice]
+             (mapv :interface (-> scenario :capability-cleanup :cleaned)))))))
+
+(deftest test-on-provision-hook-failure-cleans-impl-eager
+  (testing "Eager: hook throw after successful provision still closes the impl"
+    (let [events (atom [])
+          registry (mock/registry
+                    {:mock-web {:events events
+                                :on-provision (fn [_ctx _impl]
+                                                (throw (ex-info "hook boom" {})))}})
+          interfaces (mock/interfaces {:web {:adapter :mock-web}})
+          bound (make-bound-step-with-svo
+                  (fn [ctx] ctx) 1 []
+                  {:subject :alice :verb :click :interface :web})
+          plan (make-plan [bound])
+          result (exec/execute-suite [plan] {:interfaces interfaces
+                                             :adapter-registry registry
+                                             :provisioning :eager})
+          scenario (-> result :scenarios first)]
+      (is (= :failed (:status scenario)))
+      (is (= :adapter/on-provision-failed (-> scenario :steps first :error :type)))
+      (is (some #{[:cleanup :mock-web]} @events)
+          "The impl provisioned before the hook threw is closed"))))
+
+(deftest test-on-provision-hook-failure-cleans-impl-lazy
+  (testing "Lazy: hook throw on per-step provisioning still closes the impl"
+    (let [events (atom [])
+          registry (mock/registry
+                    {:mock-web {:events events
+                                :on-provision (fn [_ctx _impl]
+                                                (throw (ex-info "hook boom" {})))}})
+          interfaces (mock/interfaces {:web {:adapter :mock-web}})
+          bound (make-bound-step-with-svo
+                  (fn [ctx] ctx) 1 []
+                  {:subject :alice :verb :click :interface :web})
+          plan (make-plan [bound])
+          ;; No :provisioning :eager — the per-step lazy path provisions.
+          result (exec/execute-suite [plan] {:interfaces interfaces
+                                             :adapter-registry registry})
+          scenario (-> result :scenarios first)]
+      (is (= :failed (:status scenario)))
+      (is (some #{[:cleanup :mock-web]} @events)
+          "The impl provisioned before the hook threw is closed"))))
 
 ;; -----------------------------------------------------------------------------
 ;; Costume :wears Provisioning Tests (sl-rnm)

@@ -11,6 +11,8 @@
       that requires a non-default protocol successfully binds).
    4. :stop fires after the group's scenarios complete (including on pass)."
   (:require [babashka.fs :as fs]
+            [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [shiftlefter.runner.core :as core]))
 
@@ -147,6 +149,95 @@
                        :step-paths  [(str (fs/path dir "steps"))]})]
           (is (= 2 (:exit-code result))
               "Undeclared CLI path should fail planning"))))))
+
+;; -----------------------------------------------------------------------------
+;; Dry-run is a pure plan preview (sl-ev0b)
+;; -----------------------------------------------------------------------------
+
+(defn- spit-probe-project!
+  "The minimal setup-mode project: one feature, one step, one group whose
+   :start RECORDS then THROWS — so any code path that invokes it under
+   dry-run turns the preview red. Returns dir."
+  [dir]
+  (spit-file dir "shiftlefter.edn" (pr-str {:runner {:step-paths []}}))
+  (spit-file dir "features/probe.feature"
+             "Feature: Probe\n  Scenario: Trivial\n    Given a trivial assertion\n")
+  (spit-file dir "steps/probe.clj"
+             "(ns probe-steps
+                (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+              (defstep #\"a trivial assertion\" [] nil)")
+  (spit-file dir "setup.clj"
+             "(ns setup
+                (:require [shiftlefter.runner.core-setup-test :as t]))
+              (defn- start-fn [_config]
+                (t/record-event! :start)
+                (throw (ex-info \"fixture server must not spawn in dry-run\" {})))
+              (def setups
+                [{:label \"probe-group\"
+                  :start start-fn
+                  :features [\"features/probe.feature\"]}])")
+  dir)
+
+(defn- dry-run! [dir opts]
+  (let [out (java.io.StringWriter.)
+        err (java.io.StringWriter.)
+        result (binding [*out* out *err* err]
+                 (core/execute!
+                  (merge {:paths []
+                          :config-path (str (fs/path dir "shiftlefter.edn"))
+                          :step-paths [(str (fs/path dir "steps"))]
+                          :dry-run true
+                          :no-color true}
+                         opts)))]
+    {:result result :out (str out) :err (str err)}))
+
+(deftest dry-run-executes-no-user-lifecycle-code
+  (testing "AC1/AC3: dry-run never invokes :start/:stop — a THROWING :start
+            still yields a green preview, proving it was never called"
+    (with-temp-project
+      (fn [dir]
+        (reset! lifecycle-events [])
+        (spit-probe-project! dir)
+        (let [{:keys [result err]} (dry-run! dir {})]
+          (is (= 0 (:exit-code result))
+              (str "dry-run must preview, not execute; got " result))
+          (is (empty? @lifecycle-events) "no user lifecycle code ran")
+          (is (str/includes?
+               err "[probe-group] 1 scenario(s) bound successfully (dry run)")
+              "the per-group plan line still prints"))))))
+
+(deftest dry-run-lists-hooks-without-firing-them
+  (testing "the sl-esq hooks preview survives; Befores never execute"
+    (with-temp-project
+      (fn [dir]
+        (reset! lifecycle-events [])
+        (spit-probe-project! dir)
+        (spit-file dir "hooks.clj"
+                   "(ns hooks
+                      (:require [shiftlefter.runner.core-setup-test :as t]))
+                    (def hooks
+                      [{:name \"audit\"
+                        :global? true
+                        :before (fn [_payload] (t/record-event! :before-hook))}])")
+        (let [{:keys [result err]} (dry-run! dir {})]
+          (is (= 0 (:exit-code result)))
+          (is (empty? @lifecycle-events) "neither :start nor any Before fired")
+          (is (str/includes? err "hooks:") "hooks preview block prints")
+          (is (str/includes? err "Trivial: audit")
+              "hook listed against its scenario, execution order"))))))
+
+(deftest dry-run-edn-summary-in-setup-mode-is-side-effect-free
+  (with-temp-project
+    (fn [dir]
+      (reset! lifecycle-events [])
+      (spit-probe-project! dir)
+      (let [{:keys [result out]} (dry-run! dir {:edn true})
+            summary (edn/read-string out)]
+        (is (= 0 (:exit-code result)))
+        (is (empty? @lifecycle-events))
+        (is (= :dry-run (:run/status summary)))
+        (is (= "probe-group" (:group summary)))
+        (is (= 1 (-> summary :counts :scenarios)))))))
 
 (deftest no-setup-file-uses-classic-pipeline
   (testing "Without setup.clj, runner falls back to discovery + single-suite path"

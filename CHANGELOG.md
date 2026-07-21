@@ -1,3 +1,263 @@
+# Changelog: 0.5.2
+
+**Release Date:** 2026-07-21
+
+---
+
+**ShiftLefter 0.5.2 is the standard-test-features release: scenario lifecycle hooks, a scenario data plane that carries captured values across steps and interfaces with zero custom code, named locations with region-vs-exact URL assertions, and configs that warn instead of silently shrugging.**
+
+v0.5.1 made `sl run` a CI citizen. v0.5.2 fills in the features every test suite eventually reaches for — setup/teardown, passing a value from one step to a later one, asserting where the browser landed — each built the ShiftLefter way: declared in the feature file, checked at planning time, previewable with `--dry-run`.
+
+<!-- no-entry: sl-qzhn (internal Java-floor fix — hand-rolled named-group scanner replaces a Java 20+ API; no user-visible change) -->
+<!-- no-entry: sl-22h8 (internal: dead helper deleted) -->
+<!-- no-entry: sl-i9hn (research/falsifier — no shipped surface) -->
+<!-- no-entry: sl-hx8j (audit bead) -->
+<!-- no-entry: sl-wwuq (test hygiene: run-to-run assertion-count variance; no user surface) -->
+<!-- no-entry: sl-beag (folded into the sl-esq hooks entry — docs/hooks.md) -->
+<!-- no-entry: sl-lhsn, sl-zy5r, sl-asam (release-process beads: Herald pass, Warden delta-pass, cut & tag) -->
+<!-- no-entry: sl-anru (internal: the changelog drift-guard test itself; no user surface) -->
+<!-- The no-entry allowlist above is the sl-anru convention: every closed 0-5-2
+     bead must appear either as a changelog entry (with an adjacent
+     `entry:` marker comment) or here, machine-enforced by
+     test/shiftlefter/changelog_guard_test.clj. -->
+
+## What's New
+
+<!-- entry: sl-esq -->
+### Scenario lifecycle hooks
+
+Scenarios can now name the Before/After work that runs around them — and the
+feature file says so, right where you read it:
+
+```gherkin
+@hook=reset-db
+Scenario: Seeded scenario
+```
+
+Registrations live in `hooks.clj`, a sibling of your `shiftlefter.edn`
+(discovered exactly like `setup.clj`): an ordered vector of named maps, each
+with optional `:before` and `:after` fns; `:global? true` applies a hook to
+every scenario. Befores run *before* capability provisioning — a broken seed
+hook fails before you pay for a browser launch. Afters run after the steps
+but *before* cleanup, so a screenshot-on-failure hook still reaches the live
+browser. The unwind is LIFO, try-with-resources style: Afters run in reverse
+order of the Befores that succeeded, and one failing After never stops the
+rest.
+
+Hook failure is loud (see `:error` under Behavior Changes), every hook that
+ran is stamped into the scenario envelope under `:hooks`, and `--dry-run`
+prints each scenario's firing list — console and EDN — without running
+anything. A hook can also declare `:requires-serial` (the carrying scenario
+auto-serializes under `--max-parallel`) and `:provides` (binding names it
+contributes, feeding the data plane's static check below).
+
+Before writing one, read `docs/hooks.md` — *Hooks, and When Not to Use
+Them*. Hooks are the lowest rung of a ladder; that page routes the classic
+hook use-cases to their stronger mechanisms. Full mechanics reference:
+`sl agent-doc hooks`.
+
+<!-- entry: sl-yh7 -->
+### Scenario data plane: named bindings
+
+A scenario can carry a value from the step where it's born to the step that
+needs it — across interfaces — with no custom code. Name a regex group where
+the value appears; reference it as `{name}` where it's consumed:
+
+```gherkin
+And [:sms] :user/alice receives a message matching /code is: (?<code>\d{6})/
+And :user/alice fills Login.code with {code}
+```
+
+Named groups in a matcher bind into the scenario's data plane
+(`:sl/bindings`); `{name}` tokens in value, location, and matcher slots
+resolve against it. Two rules keep it predictable:
+
+- **Quoted is always literal.** `'{code}'` is the six-character text
+  `{code}`, never a lookup — the same rule as every other slot.
+- **A binding is a value, never a regex fragment.** A `{name}` consumed
+  inside a matcher is regex-quoted before the pattern compiles.
+
+The flow is checked statically at planning time: consuming a `{name}` no
+earlier step or hook produces is a planning error with a did-you-mean, and a
+matcher whose groups are all unnamed gets a notice (it binds nothing).
+`--dry-run` previews all of it without touching an interface.
+`docs/across-interfaces.md` has the worked cross-interface examples,
+including the magic-link pattern — capture a URL out of a message, then
+`opens the browser to {resetLink}`.
+
+<!-- entry: sl-zgna -->
+### Web capture builtin
+
+The step that makes the data plane general rather than an SMS feature:
+
+```gherkin
+And :user/alice captures Checkout.confirmation matching /Order (?<orderNumber>[A-Z0-9-]+)/
+```
+
+Capture is assert-plus-bind with should-see semantics: it polls the element
+like a `should see`, and no match is a step failure — it fails as though you
+could not see that text. With it, the 2FA example's 14-line custom handoff
+stepdef is deleted; `examples/04-sms-2fa` now runs on zero custom steps.
+
+<!-- entry: sl-3jr4 -->
+### Named locations
+
+An intent may now declare its own address: `:location {:web {:path "/login"}}`
+— the semantic PATH lives on the intent, the environmental HOST lives in the
+interface config as `:base-url`. `opens the browser to Login` and
+`should be on Login` resolve the bare intent name; quoted literal URLs keep
+working. Strict SVO validation catches typo'd names with a did-you-mean.
+
+<!-- entry: sl-q81m -->
+### `should be on exactly`
+
+A second location-assertion frame for when every part of the URL matters:
+full-URL structural equality — path and fragment exact, query compared as a
+multimap (cross-key parameter order is insignificant, duplicate-key value
+order is significant). The expectation is a quoted literal or a captured
+`{binding}` token — `should be on exactly {resetLink}` asserts the browser
+landed on precisely the URL captured earlier in the scenario (the magic-link
+pattern). Named-location refs stay region-only (`should be on Feed`).
+
+<!-- entry: sl-hlkz -->
+### Config lint
+
+Config problems now make noise. An unknown top-level config key, or a known
+key at the wrong nesting level, prints a warning to stderr at load time:
+
+```
+Config warning: config key :step-paths is not read at the top level and was ignored — did you mean [:runner :step-paths]? [shiftlefter.edn]
+```
+
+Warnings only, never errors — a newer config on an older version still runs,
+and the exit code is never affected. `sl orient` surfaces the same lints as
+`:warn` diagnostics. (An example config once carried a top-level
+`:step-paths` for its entire life and nothing ever said so; that class of
+silent shrug is gone.)
+
+<!-- entry: sl-lnj1 -->
+In machine mode the diagnostics ride the data instead of stderr: the
+runner's `--edn` summary carries them under `[:diagnostics :config-lints]`
+(under `:planning` on a planning failure) — each a map of
+`:type`/`:key`/`:message`, plus `:suggested-path` when there's a better
+nesting. Additive and absent on clean runs: existing consumers see
+byte-identical output.
+
+<!-- entry: sl-gh75 -->
+### CI integration guide
+
+`docs/CI.md` assembles the pipeline story in one place: worked GitLab CI and
+GitHub Actions examples, image and install guidance, headless-browser setup,
+pending-scenario policy, and the one rule — gate on the exit code, not the
+report file.
+
+## Breaking Changes
+
+<!-- entry: sl-yh7 -->
+- **`:sms/captures` is removed from the scenario context.** The SMS receive
+  matcher no longer stores positional groups at `[:sms/captures :groups]`;
+  a custom stepdef that reads that key will find it absent. Name the groups
+  instead — `(?<code>\d{6})` — and consume `{code}` directly in step text,
+  or read `:sl/bindings` from the stepdef. The machinery keys
+  (`:sms/last-message`, `:sms/last-receive-ts`) and the poll/timeout
+  behavior are unchanged.
+
+## Behavior Changes
+
+<!-- entry: sl-esq -->
+- **New `:error` scenario status: a failing hook turns the run red as an
+  infrastructure failure, distinct from a step failure.** A Before that
+  throws marks the scenario `:error` and skips its steps; an After that
+  throws marks it `:error` even when every step passed — broken cleanup is
+  a lying suite. The exit code is 1, like any red run (never 2, which stays
+  reserved for planning failures). JUnit XML renders these as `<error>` —
+  not `<failure>` — with hook attribution, and console, EDN, and the HTML
+  report gain an error count. Additive when absent: hook-less runs keep the
+  four-key counts map and byte-identical output.
+- **`should be on` is now a region assertion, not a substring test.** It
+  compares the normalized path (plus fragment) of the browser URL against the
+  expectation and ignores the query string and host. Path-only expectations
+  like `'/secure'` behave as before; expectations that relied on substring
+  matching of hosts or query strings (`'example.com/dash'`, `'?tab=home'`)
+  must switch to a path form or to `should be on exactly '<url>'`.
+  Percent-encoding normalization, host-case rules, and byte-exact matching
+  are deliberately out of scope — write a custom step assertion for those.
+<!-- entry: sl-iseq -->
+- **Quoted values never classify as refs in location slots.** One rule across
+  the authored surface, matching element slots: quoted = literal, always;
+  a bare PascalCase token = named-location ref. (`opens the browser to Feed`
+  resolves the `Feed` intent; `opens the browser to 'Feed'` navigates to the
+  literal string `Feed`.)
+
+## Bug Fixes
+
+<!-- entry: sl-ka80 -->
+- **`should be on exactly '{token}'` no longer resolves the quoted text.**
+  The at-exactly pattern captured inside its quotes, so a quoted `'{myUrl}'`
+  reached the engine's capture normalization already unquoted, resolved as a
+  binding token (violating quoted = literal, always), and produced an
+  unparseable expected URL; the static lint also mis-registered the quoted
+  text as a binding consumption. The slot now captures whole like every
+  other value/location slot: quoted stays literal, and the same change is
+  what admits the bare `{token}` consumption described under
+  `should be on exactly` above.
+
+<!-- entry: sl-uu7x -->
+- **Partial provisioning failure no longer leaks browser processes.** When
+  scenario-start provisioning failed partway (Alice's browser up, Bob's
+  failed), capabilities provisioned before the failure were invisible to
+  scenario-end cleanup — the adapter's `:cleanup` never ran and a
+  Chrome/driver process leaked per failing scenario. The failure path now
+  carries the partially-provisioned context, so every impl that came up is
+  closed. Side effect worth knowing: After hooks on such failures now see
+  the live partially-provisioned capabilities (they run before cleanup), so
+  screenshot-on-failure hooks can reach a browser that did come up.
+
+<!-- entry: sl-ev0b -->
+- **`--dry-run` in setup mode no longer executes user lifecycle code.**
+  `sl run --dry-run` against a `setup.clj` project used to call each group's
+  `:start` fn — fixture servers spawned, ports bound — during what should be
+  a pure plan preview. Dry-run now skips `:start`/`:stop` and every
+  Before/After entirely: the preview lists each group's plan and its hook
+  firing lists without running any of it.
+
+<!-- entry: sl-27uh -->
+- **Report data with non-round-tripping keyword or symbol names is now
+  stringified.** `edn-safe?` admitted keywords and symbols whose names don't
+  survive an EDN round-trip (`(keyword "a b")`, `(symbol "-1")`), letting
+  them embed raw in the `--edn` summary and the HTML report's EDN island —
+  where a hostile name could break the island's readability. Such tokens are
+  now scrubbed to their `pr-str` string form, and the HTML island gained an
+  integrity guard that aborts loudly rather than emit an unreadable island.
+  Well-formed data is untouched.
+
+## Stats
+
+```
+1882 tests, 6271 assertions, 0 failures
+Cucumber compliance: 46/46 good, 11/11 bad (100%)
+```
+
+## Installation
+
+**One-line installer (recommended):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash
+export PATH="$PWD/sl:$PATH"
+sl --version
+```
+
+**Manual:** download `shiftlefter-v0.5.2.zip` from releases, unzip, add to PATH. Java 11+ is the only requirement — no Clojure toolchain needed.
+
+## Links
+
+- [README](https://github.com/SHIFT-LEFTER/shiftlefter/blob/v0.5.2/README.md)
+- [Running in CI](https://github.com/SHIFT-LEFTER/shiftlefter/blob/v0.5.2/docs/CI.md)
+- [Fit check — would ShiftLefter work for my project?](https://github.com/SHIFT-LEFTER/shiftlefter/blob/v0.5.2/docs/FIT.md)
+
+---
+
 # Changelog: 0.5.1
 
 **Release Date:** 2026-07-10

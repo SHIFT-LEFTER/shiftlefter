@@ -33,6 +33,7 @@
    ```"
   (:require [clojure.edn :as edn]
             [clojure.spec.alpha :as s]
+            [clojure.string :as str]
             [shiftlefter.gherkin.io :as io]
             [shiftlefter.project-context :as project-context]))
 
@@ -53,8 +54,11 @@
                         :opt-un [::registry-paths]))
 ;; sl-aa5: capability provisioning strategy. :eager (default, scoped-eager
 ;; — provision every interface the scenario touches at scenario start)
-;; or :lazy (legacy, provision on first step that needs it). Opt-out
-;; exists for the rare test pattern that benefits from lazy short-circuit.
+;; or :lazy (provision on first step that needs it). :lazy exists because
+;; bare callers (REPL step invocation) have NO PLAN to scan — eager is not
+;; declined for them but IMPOSSIBLE, so lazy is their only coherent mode;
+;; that REPL path was the primary driver. Eager was always the intended
+;; suite default.
 (s/def ::provisioning #{:eager :lazy})
 ;; Reporter output config (sl-40to). [:runner :report :junit-xml] is the
 ;; config mirror for the --junit-xml flag; a nil/absent value = off. The flag
@@ -82,8 +86,14 @@
 ;; impl (browser pattern). Used for interfaces where one resource per
 ;; scenario suffices, e.g. SMS Twilio account, future shared queues.
 (s/def ::shared-impl? boolean?)
+;; Per-interface :config is an OPEN map — adapter keys (:headless,
+;; :adapter-opts, :webdriver-url, ...) pass through untyped. :base-url is the
+;; environmental home of a named location's HOST half (sl-3jr4); the semantic
+;; PATH half lives on the intent's :location.
+(s/def :interface/base-url string?)
+(s/def :interface/config (s/keys :opt-un [:interface/base-url]))
 (s/def ::interface-def (s/keys :req-un [::type ::adapter]
-                               :opt-un [::config ::shared-impl?]))
+                               :opt-un [:interface/config ::shared-impl?]))
 (s/def ::interfaces (s/map-of keyword? ::interface-def))
 
 ;; SVO enforcement sub-config
@@ -110,6 +120,13 @@
 (s/def ::config-error (s/keys :req-un [::status ::type ::message]
                               :opt-un [::path]))
 (s/def ::config-result (s/or :ok ::config-ok :error ::config-error))
+
+;; Config lint (sl-hlkz) — warning shape for silently-ignored top-level keys
+(s/def ::key keyword?)
+(s/def ::suggested-path (s/coll-of keyword? :kind vector? :min-count 1))
+(s/def ::lint-warning (s/keys :req-un [::type ::key ::message]
+                              :opt-un [::suggested-path]))
+(s/def ::lint-warnings (s/coll-of ::lint-warning :kind vector?))
 
 ;; -----------------------------------------------------------------------------
 ;; Default Configuration
@@ -340,6 +357,73 @@
   (get-in config [:runner :macros :registry-paths] []))
 
 ;; -----------------------------------------------------------------------------
+;; Config Lint (sl-hlkz)
+;; -----------------------------------------------------------------------------
+
+(def known-top-level-keys
+  "Top-level keys config consumers actually read: the `::config` spec set
+   plus the :webdriver/:webdriver-url pair `normalize` handles. Anything
+   else at the top level is silently ignored by every reader — exactly the
+   defect family sl-hlkz warns about (example 03 carried a top-level
+   :step-paths for its whole life and only worked by coinciding with the
+   default)."
+  #{:parser :runner :glossaries :interfaces :svo :webdriver :webdriver-url})
+
+(def ^:private misplaced-key-paths
+  ;; Known NESTED keys users plausibly write at the top level, mapped to the
+  ;; path the runner actually reads. Drives the did-you-mean suggestion;
+  ;; top-level keys absent here get the plain unknown-key warning.
+  {:step-paths        [:runner :step-paths]
+   :allow-pending?    [:runner :allow-pending?]
+   :macros            [:runner :macros]
+   :provisioning      [:runner :provisioning]
+   :report            [:runner :report]
+   :max-parallel      [:runner :max-parallel]
+   :junit-xml         [:runner :report :junit-xml]
+   :html              [:runner :report :html]
+   :dialect           [:parser :dialect]
+   :subjects          [:glossaries :subjects]
+   :verbs             [:glossaries :verbs]
+   :intents           [:glossaries :intents]
+   :unknown-subject   [:svo :unknown-subject]
+   :unknown-verb      [:svo :unknown-verb]
+   :unknown-interface [:svo :unknown-interface]
+   :unknown-object    [:svo :unknown-object]})
+
+(defn lint-config
+  "Lint a loaded (merged) config map for silently-ignored TOP-LEVEL keys
+   (sl-hlkz). Returns a sorted vector of `::lint-warning` maps — empty when
+   clean.
+
+   Works on the MERGED map because `deep-merge` only contributes known keys
+   from `default-config`: any unknown/misplaced top-level key in the result
+   came from the user's file. WARNINGS ONLY, never errors — a newer config
+   running on an older version must still work (forward compat, bead
+   ruling). Top-level only by scope: nested maps (:interfaces entries,
+   adapter :config blocks) are open by design. Lint BEFORE `normalize`,
+   whose synthetic :errors key would otherwise self-trigger."
+  [config]
+  (->> (keys config)
+       (remove known-top-level-keys)
+       sort
+       (mapv (fn [k]
+               (if-let [path (get misplaced-key-paths k)]
+                 {:type :config/misplaced-key
+                  :key k
+                  :suggested-path path
+                  :message (str "config key " k " is not read at the top level"
+                                " and was ignored — did you mean "
+                                (pr-str path) "?")}
+                 {:type :config/unknown-key
+                  :key k
+                  :message (str "unknown top-level config key " k
+                                " was ignored")})))))
+
+(s/fdef lint-config
+  :args (s/cat :config map?)
+  :ret ::lint-warnings)
+
+;; -----------------------------------------------------------------------------
 ;; Config Normalization / Validation
 ;; -----------------------------------------------------------------------------
 
@@ -383,6 +467,17 @@
      :data {:interface interface-name
             :type (:type interface-def)
             :known-types known-interface-types}}
+
+    ;; :base-url, when present, must be a non-blank string (sl-3jr4)
+    (let [base-url (get-in interface-def [:config :base-url])]
+      (and (some? base-url)
+           (or (not (string? base-url)) (str/blank? base-url))))
+    {:type :config/invalid-interface
+     :message (str "Interface :" (name interface-name)
+                   " :config :base-url must be a non-blank string, got: "
+                   (pr-str (get-in interface-def [:config :base-url])))
+     :data {:interface interface-name
+            :definition interface-def}}
 
     :else nil))
 
@@ -519,6 +614,15 @@
    Returns the :adapter keyword (e.g., :etaoin) or nil."
   [config interface-name]
   (get-in config [:interfaces interface-name :adapter]))
+
+(defn get-base-url
+  "Get the :base-url configured for an interface — the environmental HOST half
+   of named-location resolution (sl-3jr4); the semantic PATH half lives on the
+   intent's :location.
+
+   Returns the string or nil when unset."
+  [config interface-name]
+  (get-in config [:interfaces interface-name :config :base-url]))
 
 ;; -----------------------------------------------------------------------------
 ;; SVO Config Accessors

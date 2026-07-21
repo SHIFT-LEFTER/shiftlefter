@@ -45,13 +45,30 @@
 ;; facet shape from plan inspection — the scheduler consumes one facet
 ;; and never knows why.
 (s/def :shiftlefter.schedule/serial? boolean?)
-(s/def :shiftlefter.schedule/reason #{:tag :costume :shared-impl})
+;; [:hook <name>] (sl-esq): a registered hook carrying :requires-serial
+;; auto-serializes every scenario it applies to — the hook owns the hazard,
+;; so its name rides the reason for the notice line and derived-scheduling
+;; surfacing.
+(s/def :shiftlefter.schedule/reason
+  (s/or :source #{:tag :costume :shared-impl}
+        :hook (s/tuple #{:hook} string?)))
 (s/def ::schedule (s/keys :req-un [:shiftlefter.schedule/serial?
                                    :shiftlefter.schedule/reason]))
+;; The hooks facet (sl-esq): ordered references to named lifecycle hooks,
+;; extracted from @hook=<name> value-tags in PICKLE-TAG ORDER (= feature ->
+;; rule -> scenario -> examples-block nesting by pickler construction).
+;; Names are unresolved here — the seam knows the `hook` KEY, never which
+;; names exist; runner/hooks.clj resolves them against the loaded registry.
+(s/def :shiftlefter.hook-ref/name string?)
+(s/def :shiftlefter.hook-ref/location (s/nilable map?))
+(s/def ::hooks (s/coll-of (s/keys :req-un [:shiftlefter.hook-ref/name]
+                                  :opt-un [:shiftlefter.hook-ref/location])
+                          :kind vector?))
 ;; Open map by design (addendum 2b): future facets (:blocked-on,
 ;; :annotations) are additive keys — never a disposition-type enum.
-;; :schedule landed with sl-q9wp.
-(s/def ::disposition (s/keys :req-un [::selected?] :opt-un [::reason ::schedule]))
+;; :schedule landed with sl-q9wp; :hooks with sl-esq.
+(s/def ::disposition
+  (s/keys :req-un [::selected?] :opt-un [::reason ::schedule ::hooks]))
 
 ;; -----------------------------------------------------------------------------
 ;; CLI-boundary helpers (liberal: accept tags with or without `@`)
@@ -103,6 +120,47 @@
    feature level it marks each scenario individually, NOT an atomic block."
   "@serial")
 
+;; -----------------------------------------------------------------------------
+;; Value-tags — @<key>=<value> (sl-esq; the sl-zsay key-registry shape
+;; arriving early)
+;; -----------------------------------------------------------------------------
+
+(def value-tag-keys
+  "The value-tag KEY REGISTRY: key string -> disposition facet. Tags stay
+   opaque tokens through parser and pickler (Gherkin compliance; dedupe and
+   filtering operate on full tokens unchanged); the split on the FIRST '='
+   happens HERE and only here. `hook` is the first registered key; future
+   keys (`blocked`, `because`, `fixture`) are registry entries, not new
+   parsing. Unknown keys are INERT in MVP — silently ordinary tags — until
+   sl-zsay's user-extensible registry makes an unknown-key lint fair."
+  {"hook" :hooks})
+
+(defn split-value-tag
+  "Split a tag token on the first '='. `\"@hook=reset-db\"` ->
+   `{:key \"hook\" :value \"reset-db\"}`; nil when the token carries no '='.
+   The value is everything after the first '=' — a value containing '=' is
+   preserved verbatim."
+  [tag-name]
+  (when-let [idx (str/index-of tag-name "=")]
+    (when (str/starts-with? tag-name "@")
+      {:key (subs tag-name 1 idx)
+       :value (subs tag-name (inc idx))})))
+
+(defn- value-tag-facets
+  "Extract registered value-tag facets from a pickle's tags, ORDER
+   PRESERVED (pickle-tag order = outer->inner nesting). Each facet is a
+   vector of {:name <value> :location <tag location>}. Unknown keys
+   contribute nothing. Returns {} when no registered value-tags present."
+  [pickle]
+  (reduce (fn [acc {:keys [name location]}]
+            (if-let [{:keys [key value]} (split-value-tag name)]
+              (if-let [facet (value-tag-keys key)]
+                (update acc facet (fnil conj []) {:name value :location location})
+                acc)
+              acc))
+          {}
+          (:pickle/tags pickle)))
+
 (defn disposition
   "THE tag-disposition seam: read one pickle's tags, decide its disposition.
    Returns an open map — `{:selected? true}` or
@@ -111,7 +169,13 @@
 
    A pickle tagged @serial additionally carries the scheduling facet
    `{:schedule {:serial? true :reason :tag}}` (sl-q9wp), independent of
-   filter rules."
+   filter rules.
+
+   A pickle carrying @hook=<name> value-tags additionally carries the
+   `:hooks` facet (sl-esq): an ordered vector of unresolved
+   {:name <value> :location <tag location>} references, in pickle-tag
+   order. Registered value-tag keys come from `value-tag-keys`; unknown
+   keys stay inert."
   [rules pickle]
   (let [names (pickle-tag-names pickle)
         {:keys [include exclude]} rules
@@ -124,7 +188,7 @@
                {:selected? false :reason {:rule :include :wanted include}}
 
                :else {:selected? true})]
-    (cond-> base
+    (cond-> (merge base (value-tag-facets pickle))
       (contains? names serial-tag)
       (assoc :schedule {:serial? true :reason :tag}))))
 

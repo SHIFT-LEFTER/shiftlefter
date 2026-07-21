@@ -26,6 +26,17 @@ case: define `Post` once, mount it anywhere its markup is consistent.
 
 ## What it demonstrates
 
+- **Named locations** (sl-3jr4): the first scenario navigates with
+  `opens the browser to Feed` and asserts arrival with
+  `should be on Feed` (a region assertion: normalized path + fragment,
+  query ignored — sl-q81m). The name is **bare** on purpose: quoted =
+  literal, always; bare = ref (sl-iseq) — no URL in the feature text. The semantic
+  PATH lives on the `Feed` intent (`:location {:web {:path "/feed"}}`); the
+  environmental HOST lives in `shiftlefter.edn` under
+  `[:interfaces :web :config :base-url]`. To point a run at another host,
+  pass `--config` with an alternate `shiftlefter.edn` (the file is replaced
+  wholesale, not merged). Literal URLs still work — the second scenario
+  keeps one on purpose.
 - **Self-rooted anchoring** (§7.2): one `:root`, mounted twice, zero wiring.
 - **Indexing**: `[1]`, `[2]`, `[3]`, `[-1]`.
 - **Heterogeneous-cell exclusion** (§7.7): `Feed.post[3]` is Carol, not the ad

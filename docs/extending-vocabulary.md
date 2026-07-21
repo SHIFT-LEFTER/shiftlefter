@@ -98,15 +98,23 @@ only here:
 - **Test fixtures / data setup** — seeding a database, standing up state. A real gap
   today; first-class fixtures are planned, and until then a custom step is the honest
   stopgap.
-- **Composing interfaces** — passing a value captured on one interface into another.
-  The 2FA demo's SMS receive step stashes its regex captures at `ctx[:sms/captures]`;
-  a ~14-line `defstep` reads that and types it into a browser field. Cross-interface
-  handoff needs a small step like this today — generic step-text interpolation
-  (`{ctx.sms.captures…}`) is a roadmap item, not a built-in yet.
 - **Genuinely unusual web** — driving a canvas, running custom JavaScript, niche
   interactions the built-ins don't cover.
 - **A new interface verb or adapter** — you're extending ShiftLefter itself. That's a
   contribution, and you're the best kind of user.
+
+**Composing interfaces is no longer on this list.** Passing a value captured
+on one interface into another is built in: name a regex group
+(`(?<code>\d{6})`) to produce a scenario binding, consume it as `{code}` in
+any literal-admitting slot — see
+[Test Across Interfaces](across-interfaces.md#passing-a-value-between-interfaces-named-bindings).
+The 2FA demo's old 14-line handoff `defstep` is deleted.
+
+One forward note for custom steps you do write: a step definition may read
+and write ctx freely today (that's what makes the fixture escape-hatch
+work), but direct ctx writes are slated to be fenced behind a declared
+calling convention in the 0.6 contracts arc — prefer the documented
+surfaces (capabilities, `bindings/capture!`) where one exists.
 
 If you're reaching for `defstep` to do an ordinary browser or SMS action, step back —
 there's almost certainly a built-in step or a macro that fits. When you do need it,

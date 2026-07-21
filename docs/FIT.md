@@ -74,8 +74,11 @@ built on. The discipline you put in early is what you'd be glad you have when it
 
 **Wait for a later release if, *today*, you need:**
 
-- **First-class fixtures or hooks** — not built yet (there's a Clojure escape
-  hatch for test-data setup, but it isn't first-class). Tag filtering
+- **First-class fixtures** — not built yet (there's a Clojure escape
+  hatch for test-data setup, but it isn't first-class). Scenario
+  lifecycle **hooks** *are* built: Before/After hooks registered in a
+  `hooks.clj` next to your config, named per-scenario via `@hook=<name>`
+  tags so the feature file states what runs around it. Tag filtering
   (`--tags` / `--skip-tags`) *is* built.
 - **To migrate an existing suite as-is** — your `.feature` files parse unchanged, but
   an existing Java/JavaScript/Ruby step library doesn't transfer. See
@@ -98,7 +101,7 @@ the upside and the gaps.
 | 3 | **Who maintains tests** | Agents (esp. multiple models) + humans sharing one vocabulary. | A team that needs everything in their host language with zero Clojure. |
 | 4 | **Scenario shape** | Multiple actors, or web + SMS together. | Single linear single-actor flows (works, just less upside). |
 | 5 | **Reporting** | Console, machine-readable EDN, CI-ingestible JUnit XML (`--junit-xml`), or a self-contained HTML report (`--html`). | Need JSON or a custom report format today. |
-| 6 | **Fixtures/hooks** | Test data set up in a step; tag selection (`--tags`/`--skip-tags`) covers subset runs. | Need first-class fixtures or hooks now. |
+| 6 | **Fixtures/hooks** | Before/After hooks via `hooks.clj` + `@hook=` tags; test data set up in a step or a Before hook; tag selection (`--tags`/`--skip-tags`) covers subset runs. | Need first-class declarative fixtures now (hooks are the escape hatch, not the destination). |
 
 **Verdict:** strong on 1–4 → **strong fit**. A gap on 5 or 6 but yes on 1–2 →
 **workable, with a known edge**. A "no" on 1 or 2 → **not yet for this project** —

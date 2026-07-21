@@ -84,13 +84,15 @@
 ;; Placeholder Substitution
 ;; -----------------------------------------------------------------------------
 
-(defn- placeholder?
-  "Returns true if value is a placeholder keyword like :$1, :$2."
+(defn placeholder?
+  "Returns true if value is a placeholder keyword like :$1, :$2.
+   Public since sl-yh7 — the binder's slot-kind stamping maps frame args
+   back to capture positions."
   [v]
   (and (keyword? v)
        (str/starts-with? (name v) "$")))
 
-(defn- placeholder-index
+(defn placeholder-index
   "Extract the index from a placeholder keyword.
    :$1 => 0, :$2 => 1, etc. (0-indexed for vector access)"
   [placeholder]

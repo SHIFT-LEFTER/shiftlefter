@@ -231,3 +231,106 @@
             :else
             {:message (str "Unknown segment \"" nm "\" in intent \"" cur "\"")
              :segment nm}))))))
+
+;; -----------------------------------------------------------------------------
+;; Named locations (sl-3jr4)
+;; -----------------------------------------------------------------------------
+;;
+;; The authored rule (sl-iseq): QUOTED = LITERAL, ALWAYS; BARE = REF — one
+;; rule across the whole surface, matching element slots (addresses bare,
+;; values quoted). A :location-kind slot value is an intent ref IFF it is a
+;; bare PascalCase token (optionally dotted — dotted refs bind so they can
+;; fail resolution with a did-you-mean instead of a confusing no-step-binds
+;; error). Quoted strings, schemes, paths, and lowercase starts are literals.
+;; This classifier is the one shared seam between planning-time SVO
+;; validation and runtime step resolution — both must call it, or strict
+;; mode drifts from execution.
+
+(def ^:private location-ref-pattern
+  "Bare location-ref token: PascalCase name, optional dotted segments."
+  #"[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*")
+
+(defn location-ref?
+  "True iff `s` is a bare (unquoted) PascalCase token — the ref form for
+   :location slots. Quoted strings ('…') and anything with a scheme, slash,
+   or lowercase first letter are literal URLs (sl-iseq: quoted = literal,
+   always; bare = ref)."
+  [s]
+  (boolean (and (string? s) (re-matches location-ref-pattern s))))
+
+(defn validate-location-static
+  "Statically validate a named-location ref against the loaded schema, WITHOUT
+   a browser: the intent must be known, must declare :location, and its entry
+   for `interface` must carry a :path.
+
+   Returns nil when valid, else {:type <kind> :message <human-readable>} where
+   :type is :unknown-intent | :no-location | :no-location-for-interface
+   (callers use it to attach did-you-mean suggestions, sl-q81m)."
+  [intents intent-name interface]
+  (let [location (loader/get-location intents intent-name)]
+    (cond
+      (not (loader/known-intent? intents intent-name))
+      {:type :unknown-intent
+       :message (str "Unknown intent \"" intent-name "\"")}
+
+      (nil? location)
+      {:type :no-location
+       :message (str "Intent \"" intent-name "\" declares no :location")}
+
+      (nil? (get-in location [interface :path]))
+      {:type :no-location-for-interface
+       :message (str "Intent \"" intent-name "\" :location has no :path for "
+                     "interface " interface)}
+
+      :else nil)))
+
+(defn located-intents
+  "Names of loaded intents whose :location carries a :path for `interface` —
+   the did-you-mean candidate pool for named-location refs (sl-q81m)."
+  [intents interface]
+  (filterv #(some? (get-in (loader/get-location intents %) [interface :path]))
+           (:intents intents)))
+
+(defn resolve-location
+  "Resolve a named-location ref to a full URL: the interface's `base-url` plus
+   the intent's :location :path. The SINGLE URL-assembly point (sl-4mv8 guard) —
+   every caller that turns a named location into a URL goes through here.
+
+   Parameters:
+   - intents: loaded intents map from loader/load-all-intents
+   - intent-name: string, e.g. \"Feed\" (a bare name per location-ref?)
+   - interface: keyword like :web
+   - base-url: the interface's :config :base-url (may be nil — that's an error)
+
+   Returns:
+   - {:ok \"http://host/path\"} on success (exactly one slash at the join)
+   - {:error {:type ... :message ... :intent ... :interface ...}} otherwise"
+  [intents intent-name interface base-url]
+  (let [location (loader/get-location intents intent-name)
+        path (get-in location [interface :path])
+        err (fn [type message]
+              {:error {:type type :message message
+                       :intent intent-name :interface interface}})]
+    (cond
+      (not (loader/known-intent? intents intent-name))
+      (err :intent/unknown-intent
+           (str "Unknown intent \"" intent-name "\""))
+
+      (nil? location)
+      (err :intent/no-location
+           (str "Intent \"" intent-name "\" declares no :location"))
+
+      (nil? path)
+      (err :intent/no-location-for-interface
+           (str "Intent \"" intent-name "\" :location has no :path for "
+                "interface " interface
+                (when (contains? location interface)
+                  " (binding present but :path absent)")))
+
+      (or (nil? base-url) (str/blank? base-url))
+      (err :intent/missing-base-url
+           (str "No :base-url configured for interface " interface
+                " — set [:interfaces " interface " :config :base-url]"))
+
+      :else
+      {:ok (str (str/replace base-url #"/+$" "") path)})))

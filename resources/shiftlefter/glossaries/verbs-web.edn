@@ -19,8 +19,13 @@
 ;; (sl-rlxa). Absent means :intent — the object must be an intent reference
 ;; and is validated against the intent glossary under :svo {:unknown-object ...}.
 ;; :location means the slot accepts a literal URL (mirroring the raw-EDN-locator
-;; doctrine: allowed, never an :unknown-object error); named-location /
-;; intent-ref resolution for :location slots lands additively in sl-3jr4.
+;; doctrine: allowed, never an :unknown-object error). A :location frame may
+;; additionally declare :location-refs? true (sl-3jr4): the slot then also
+;; accepts a bare PascalCase intent name, resolved via the intent's :location
+;; root binding + the interface's :config :base-url — and under
+;; :svo {:unknown-object ...} a bare-name ref that doesn't resolve IS an
+;; :unknown-object issue (literals stay exempt). Assertion frames stay
+;; literal-only pending the sl-q81m frame-semantics ruling.
 ;;
 ;; See sl-hse for the design rationale. sl-psc closed verbs that were
 ;; permanently dropped (:upload, :check, :uncheck, :submit; the
@@ -68,11 +73,13 @@
   :fill
   {:desc "Enter text into an input field"
    :frames {:with {:args [:value]
+                   :arg-kinds {:value :value}
                    :pattern "S fills O with VALUE"}}}
 
   :select
   {:desc "Select an option from a dropdown"
    :frames {:from {:args [:value]
+                   :arg-kinds {:value :value}
                    :pattern "S selects VALUE from O"}}}
 
   :drag
@@ -84,7 +91,8 @@
   {:desc "Navigate to a URL; the URL is the object"
    :frames {:to {:args []
                  :pattern "S navigates to O"
-                 :object-kind :location}}}
+                 :object-kind :location
+                 :location-refs? true}}}
 
   ;; ---------------------------------------------------------------------------
   ;; Action verbs with implicit objects (the object is elided from step text)
@@ -166,10 +174,13 @@
             :on-page          {:args []
                                :pattern "S sees O on the page"}
             :text             {:args [:text]
+                               :arg-kinds {:text :value}
                                :pattern "S sees O with text TEXT"}
             :value            {:args [:value]
+                               :arg-kinds {:value :value}
                                :pattern "S sees O with value VALUE"}
             :attribute        {:args [:attribute :value]
+                               :arg-kinds {:attribute :value :value :value}
                                :pattern "S sees O with attribute ATTRIBUTE equal to VALUE"}
             :enabled          {:args []
                                :pattern "S sees O enabled"}
@@ -183,6 +194,7 @@
                                :pattern "S sees an alert"
                                :implicit-object :alert}
             :alert-with-text  {:args [:text]
+                               :arg-kinds {:text :value}
                                :pattern "S sees an alert with TEXT"
                                :implicit-object :alert}}}
 
@@ -191,6 +203,20 @@
    :frames {:invisible {:args []
                         :pattern "S does not see O"}}}
 
+  ;; :capture is assert-plus-bind (sl-zgna): read O's text with the should-see
+  ;; family's wait-then-assert semantics, match MATCH against it, and merge the
+  ;; pattern's (?<name>...) named groups into the scenario data plane
+  ;; (:sl/bindings). No match within the retry budget = step failure — it fails
+  ;; as though the subject could not see that text. MATCH is a :matcher slot:
+  ;; its named groups PRODUCE bindings statically (dry-run enumerates them from
+  ;; the step-text literal, interface-blind) and embedded {binding} tokens
+  ;; interpolate as regex-quoted literals.
+  :capture
+  {:desc "Observe an element's text and bind named-group matches"
+   :frames {:default {:args [:match]
+                      :arg-kinds {:match :matcher}
+                      :pattern "S captures O matching MATCH"}}}
+
   ;; ---------------------------------------------------------------------------
   ;; State-assertion verbs — assert properties of the subject or page that
   ;; aren't observations of an element. `:be` generalizes "is at URL",
@@ -198,9 +224,19 @@
   ;; ---------------------------------------------------------------------------
   :be
   {:desc "Assert a property or state of the subject"
+   ;; Two location-assertion frames (sl-q81m ruling): :at is REGION-level
+   ;; (path + fragment, query stripped, trailing slash normalized; accepts
+   ;; named-location intent refs); :at-exactly is STRUCTURAL full-URL
+   ;; equality (a quoted literal or a captured {binding} token, sl-ka80 —
+   ;; a named-location ref remains nonsensical there: resolution IS
+   ;; normalization).
    :frames {:at {:args []
                  :pattern "S is on O"
-                 :object-kind :location}}}
+                 :object-kind :location
+                 :location-refs? true}
+            :at-exactly {:args []
+                         :pattern "S is on exactly O"
+                         :object-kind :location}}}
 
   ;; ---------------------------------------------------------------------------
   ;; Await verbs — pause until a condition is met or a duration elapses.
@@ -215,6 +251,7 @@
             :for-element {:args []
                           :pattern "S waits for O"}
             :for-text    {:args [:text]
+                          :arg-kinds {:text :value}
                           :pattern "S waits for O to show TEXT"}
             :for-count   {:args [:count]
                           :pattern "S waits for COUNT O"}}}}}

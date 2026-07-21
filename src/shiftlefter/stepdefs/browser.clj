@@ -54,6 +54,16 @@
    - `:subject should see an alert`
    - `:subject should see an alert with '<text>'`
 
+   ## Capture Steps (sl-zgna)
+
+   - `:subject captures {<locator>} matching /<regex>/`
+
+   Capture is assert-plus-bind: read the element's text with the should-see
+   family's wait-then-assert semantics, match the pattern, and merge its
+   `(?<name>...)` named groups into the scenario data plane (`:sl/bindings`).
+   No match within the retry budget = step failure — it fails as though the
+   subject could not see that text.
+
    ## Await Steps (sl-jsn)
 
    - `:subject waits <N> seconds`                       — :wait :duration
@@ -72,8 +82,9 @@
    transient browser errors for up to `*retry-timeout-ms*` (default 3000ms).
    Await steps (`:wait` frames) retry against `*wait-timeout-ms*` (default
    5000ms). Both use 100ms backoff. Retryable errors: stale element
-   references, missing elements, and assertion failures
-   (`:browser/assertion-failed`).
+   references, missing elements, assertion failures
+   (`:browser/assertion-failed`), and capture misses
+   (`:bindings/capture-failure` — the capture step polls like a should-see).
 
    Exceptions:
    - `should not see` does NOT retry (negation is instant — if visible now,
@@ -104,12 +115,14 @@
    NOTE: Vector shorthand `[:css \"...\"]` is DEPRECATED
    and no longer supported."
   (:require [shiftlefter.stepengine.registry :refer [defstep]]
+            [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.browser.errors :as browser-errors]
             [shiftlefter.browser.locators :as locators]
             [shiftlefter.browser.protocol :as bp]
             [shiftlefter.browser.target :as target]
             [shiftlefter.browser.intent :as browser-intent]
+            [shiftlefter.browser.url-match :as url-match]
             [shiftlefter.intent.state :as intent-state]
             [shiftlefter.intent.resolve :as intent-resolve]
             [clojure.edn :as edn]
@@ -133,6 +146,20 @@
    NOTE: Vector shorthand ([...]) is deprecated and no longer matched."
   "[A-Z][A-Za-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*(?:\\[-?\\d+\\]|\\[\\*\\])?)+|\\{[^}]+\\}")
 
+(def ^:private value-re
+  "Central value-slot fragment (sl-yh7): quoted literal (captured WITH its
+   quotes — the engine strips them by the frame's :arg-kinds at exec) or a
+   {binding} token resolved from :sl/bindings. '{code}' stays literal."
+  bindings/value-re-fragment)
+
+(def ^:private location-re
+  "Regex pattern string for :location-slot captures (sl-iseq/sl-3jr4/sl-yh7):
+   quoted literal URL | {binding} token | bare PascalCase named-location ref.
+   Tokens resolve at exec (quote-wrapped, so resolve-location-object's
+   literal path handles them); bare refs resolve via :base-url."
+  (str "'[^']+'|" bindings/token-re-fragment
+       "|[A-Z][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_-]+)*"))
+
 ;; Pre-built pattern strings for common step patterns
 (def ^:private click-pattern
   (re-pattern (str ":([\\w./-]+) clicks (" locator-re ")")))
@@ -150,7 +177,7 @@
   (re-pattern (str ":([\\w./-]+) drags (" locator-re ") to (" locator-re ")")))
 
 (def ^:private fill-pattern
-  (re-pattern (str ":([\\w./-]+) fills (" locator-re ") with '([^']+)'")))
+  (re-pattern (str ":([\\w./-]+) fills (" locator-re ") with (" value-re ")")))
 
 (def ^:private scroll-to-pattern
   (re-pattern (str ":([\\w./-]+) scrolls to (" locator-re ")")))
@@ -159,7 +186,7 @@
   (re-pattern (str ":([\\w./-]+) clears (" locator-re ")")))
 
 (def ^:private select-from-pattern
-  (re-pattern (str ":([\\w./-]+) selects '([^']+)' from (" locator-re ")")))
+  (re-pattern (str ":([\\w./-]+) selects (" value-re ") from (" locator-re ")")))
 
 (def ^:private switch-frame-pattern
   (re-pattern (str ":([\\w./-]+) switches to frame (" locator-re ")")))
@@ -168,13 +195,14 @@
   (re-pattern (str ":([\\w./-]+) should see (\\d+) (" locator-re ") elements")))
 
 (def ^:private should-see-text-pattern
-  (re-pattern (str ":([\\w./-]+) should see (" locator-re ") with text '([^']+)'")))
+  (re-pattern (str ":([\\w./-]+) should see (" locator-re ") with text (" value-re ")")))
 
 (def ^:private should-see-value-pattern
-  (re-pattern (str ":([\\w./-]+) should see (" locator-re ") with value '([^']+)'")))
+  (re-pattern (str ":([\\w./-]+) should see (" locator-re ") with value (" value-re ")")))
 
 (def ^:private should-see-attr-pattern
-  (re-pattern (str ":([\\w./-]+) should see (" locator-re ") with attribute '([^']+)' equal to '([^']+)'")))
+  (re-pattern (str ":([\\w./-]+) should see (" locator-re ") with attribute ("
+                   value-re ") equal to (" value-re ")")))
 
 (def ^:private should-see-enabled-pattern
   (re-pattern (str ":([\\w./-]+) should see (" locator-re ") enabled")))
@@ -187,6 +215,12 @@
 
 (def ^:private should-not-see-pattern
   (re-pattern (str ":([\\w./-]+) should not see (" locator-re ")")))
+
+;; :capture (sl-zgna): the match slot is a :matcher (frame :arg-kinds) — its
+;; (?<name>...) named groups produce bindings; the /.../ delimiters follow the
+;; SMS receive surface.
+(def ^:private capture-pattern
+  (re-pattern (str ":([\\w./-]+) captures (" locator-re ") matching /(.+)/")))
 
 ;; --- :hover and :wait patterns (sl-jsn) ---
 
@@ -205,7 +239,7 @@
 
 ;; :wait :for-text — "S waits for O to show 'TEXT'"
 (def ^:private wait-for-text-pattern
-  (re-pattern (str ":([\\w./-]+) waits for (" locator-re ") to show '([^']+)'")))
+  (re-pattern (str ":([\\w./-]+) waits for (" locator-re ") to show (" value-re ")")))
 
 ;; :wait :for-count — "S waits for N O" (N is digits, distinguishes from :for-element)
 (def ^:private wait-for-count-pattern
@@ -273,16 +307,20 @@
       including the chromedriver inspector error 'Node with given id does not
       belong to the document' surfaced by the sl-bnk stress run.
    2. ShiftLefter verification-step signals that mean 'not present yet, poll':
-      a `:browser/assertion-failed` result, and an `:intent/index-out-of-range`
+      a `:browser/assertion-failed` result, an `:intent/index-out-of-range`
       diagnostic (an indexed intent match not yet in the DOM — same class as
-      'no such element' for a wait/verify step). These are NOT WebDriver errors
-      and are intentionally local to this predicate (session-error? must not
-      reconnect on them)."
+      'no such element' for a wait/verify step), and a
+      `:bindings/capture-failure` (the capture step's no-match-yet, sl-zgna —
+      same wait-then-assert family; only the capture step throws it inside a
+      retry, so SMS's poll-timeout machinery is untouched). These are NOT
+      WebDriver errors and are intentionally local to this predicate
+      (session-error? must not reconnect on them)."
   [e]
   (let [data (ex-data e)
         err-types (set (map :type (:errors data)))]
     (or (browser-errors/transient-dom-error? e)
         (= :browser/assertion-failed (:type data))
+        (= :bindings/capture-failure (:type data))
         (contains? err-types :intent/index-out-of-range))))
 
 (def ^:dynamic *retry-timeout-ms*
@@ -518,18 +556,48 @@
                        :session-key subject
                        :available-sessions (web-subjects-in-ctx ctx)})))))
 
+(defn- unquote-literal
+  "Strip the single quotes off a quoted location-slot capture ('…' → …).
+   Non-quoted values pass through unchanged."
+  [s]
+  (if (and (string? s)
+           (>= (count s) 2)
+           (str/starts-with? s "'")
+           (str/ends-with? s "'"))
+    (subs s 1 (dec (count s)))
+    s))
+
+(defn- resolve-location-object
+  "Resolve a :location-slot object under the authored rule (sl-iseq):
+   QUOTED = LITERAL, ALWAYS ('…' is stripped and passed through verbatim);
+   BARE = REF — a bare PascalCase token (per `intent-resolve/location-ref?`,
+   the classifier shared with SVO validation) resolves via the intent's
+   :location :path + the :web interface's :config :base-url. All URL assembly
+   delegates to `intent-resolve/resolve-location` — the single assembly point.
+   Throws structured ex-info when a ref doesn't resolve."
+  [ctx object-str]
+  (if-not (intent-resolve/location-ref? object-str)
+    (unquote-literal object-str)
+    (let [base-url (:base-url (cap/get-run-interface-config ctx :web))
+          result (intent-resolve/resolve-location (intent-state/get-intents)
+                                                  object-str :web base-url)]
+      (if (:error result)
+        (throw (ex-info (get-in result [:error :message]) (:error result)))
+        (:ok result)))))
+
 ;; =============================================================================
 ;; Subject-Extracting Action Steps
 ;; =============================================================================
 
 ;; --- Kernel Actions (0.2.x) ---
 
-(defstep #":([\w./-]+) opens the browser to '([^']+)'"
+(defstep (re-pattern (str ":([\\w./-]+) opens the browser to (" location-re ")"))
   {:interface :web
    :svo {:subject :$1 :verb :navigate :frame :to :object :$2}}
   [ctx subject-str url]
-  (with-subject-browser ctx subject-str
-    (fn [browser] (bp/open-to! browser url))))
+  (let [url' (resolve-location-object ctx url)]
+    (with-subject-browser ctx subject-str
+      (fn [browser] (bp/open-to! browser url')))))
 
 (defstep click-pattern
   {:interface :web
@@ -776,6 +844,37 @@
                               :locator locator-str}))))))
     ctx'))
 
+;; :capture (sl-zgna) — assert-plus-bind: read the element's text (same
+;; wait-then-assert semantics as the should-see family), match the pattern,
+;; merge its (?<name>...) named groups into the scenario data plane. The
+;; matcher slot reaches this fn untouched (frame :arg-kinds :matcher);
+;; embedded {binding} tokens interpolate as regex-quoted literals inside
+;; attempt-capture. A no-match throws :bindings/capture-failure — retryable
+;; here (the DOM may still be settling), surfacing on exhaustion with the
+;; pattern, an excerpt of the text actually seen, and the locator: it fails
+;; as though the subject could not see that text. An unresolved embedded
+;; token is NOT retryable and fails fast.
+(defstep capture-pattern
+  {:interface :web
+   :svo {:subject :$1 :verb :capture :frame :default
+         :object :$2 :args {:match :$3}}}
+  [ctx subject-str locator-str match-str]
+  (let [[ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [resolved (target/ensure-single
+                        (resolve-target* browser locator-str (:interface step-meta))
+                        locator-str)
+              actual (bp/get-text browser resolved)]
+          (try
+            (bindings/capture! ctx' match-str actual)
+            (catch clojure.lang.ExceptionInfo e
+              (if (= :bindings/capture-failure (:type (ex-data e)))
+                (throw (ex-info (ex-message e)
+                                (assoc (ex-data e) :locator locator-str)
+                                e))
+                (throw e)))))))))
+
 (defstep should-see-value-pattern
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :value
@@ -889,19 +988,46 @@
                         :locator locator-str})))
     ctx'))
 
-(defstep #":([\w./-]+) should be on '([^']+)'"
+;; Region-level location assertion (sl-q81m ruling): the object is a BARE
+;; intent ref (resolved via the intent's :location + :base-url) or a QUOTED
+;; literal URL/path (sl-iseq: quoted = literal, always; bare = ref);
+;; match = normalized path + fragment, query stripped, host ignored. For
+;; structural full-URL equality use "should be on exactly".
+(defstep (re-pattern (str ":([\\w./-]+) should be on (" location-re ")"))
   {:interface :web
    :svo {:subject :$1 :verb :be :frame :at :object :$2}}
-  [ctx subject-str expected-url]
-  (let [[ctx' browser] (with-subject-query ctx subject-str)]
+  [ctx subject-str expected]
+  (let [expected-url (resolve-location-object ctx expected)
+        [ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
       (fn []
-        (let [actual (bp/get-url browser)]
-          (when-not (.contains (str actual) expected-url)
-            (throw (ex-info (str "Expected URL to contain '" expected-url "' but was '" actual "'")
-                             {:type :browser/assertion-failed
-                              :expected expected-url
-                              :actual actual}))))))
+        (let [actual (str (bp/get-url browser))]
+          (when-let [mismatch (url-match/region-match expected-url actual)]
+            (throw (ex-info (:message mismatch)
+                            (assoc mismatch :type :browser/assertion-failed)))))))
+    ctx'))
+
+;; Structural full-URL equality (sl-q81m): scheme+host + exact path + exact
+;; fragment + query as an ordered multimap (cross-key order insignificant,
+;; duplicate-key value order significant). The object is a quoted literal —
+;; captured WITH its quotes, sl-yh7/sl-ka80: quoted = literal, always — or a
+;; captured {binding} token (magic-link flows; the engine resolves it and
+;; quote-wraps, so both arrive quoted and are unquoted here). Named-location
+;; refs stay excluded: resolution IS normalization, so a ref is nonsensical
+;; under structural equality. Percent-encoding and host-case rules are
+;; deferred: exotic matching = custom step assertion.
+(defstep (re-pattern (str ":([\\w./-]+) should be on exactly (" value-re ")"))
+  {:interface :web
+   :svo {:subject :$1 :verb :be :frame :at-exactly :object :$2}}
+  [ctx subject-str expected]
+  (let [expected-url (unquote-literal expected)
+        [ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [actual (str (bp/get-url browser))]
+          (when-let [mismatch (url-match/exact-match expected-url actual)]
+            (throw (ex-info (:message mismatch)
+                            (assoc mismatch :type :browser/assertion-failed)))))))
     ctx'))
 
 (defstep #":([\w./-]+) should see the title '([^']+)'"
@@ -921,7 +1047,7 @@
 
 ;; --- Alert Verification Steps (0.3.6) ---
 
-(defstep #":([\w./-]+) should see an alert with '([^']+)'"
+(defstep (re-pattern (str ":([\\w./-]+) should see an alert with (" value-re ")"))
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :alert-with-text
          :object nil :args {:text :$2}}}

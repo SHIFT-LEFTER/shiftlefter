@@ -203,11 +203,13 @@ function scenarioStatusClass(scenario) {
   return "st-" + (status || ":unknown").slice(1);
 }
 
-// "Red" mirrors exit-code semantics: failed always; pending only when the
-// run was strict (allow-pending? false). Red scenarios render default-open.
+// "Red" mirrors exit-code semantics: failed always; :error (a lifecycle
+// hook threw, sl-esq) always; pending only when the run was strict
+// (allow-pending? false). Red scenarios render default-open.
 function isRed(scenario, allowPending) {
   const status = k(scenario, ":status");
   if (status === ":failed") return true;
+  if (status === ":error") return true;
   if (status === ":pending" && !allowPending) return true;
   return false;
 }
@@ -339,6 +341,12 @@ function renderHeader(runCtx, summary, scenarios) {
     const n = counts ? k(counts, status) || 0 : 0;
     countsList.appendChild(el("li", "count st-" + status.slice(1), n + " " + status.slice(1)));
   }
+  // :error (hook threw, sl-esq) — only when present, so hook-less reports
+  // keep the historical four-count row.
+  const errorCount = counts ? k(counts, ":error") || 0 : 0;
+  if (errorCount > 0) {
+    countsList.appendChild(el("li", "count st-error", errorCount + " error"));
+  }
   header.appendChild(countsList);
 
   const controls = el("div", "controls");
@@ -410,6 +418,31 @@ function renderStep(step, counts) {
   return li;
 }
 
+// One row per lifecycle hook that ran (sl-esq): name, phase, status,
+// duration, and the ctx keys a Before contributed.
+function renderHookLine(record) {
+  const status = k(record, ":status"); // ":ok" | ":failed"
+  const line = el("div", "hook-line" + (status === ":failed" ? " st-failed" : ""));
+  line.appendChild(el("span", "hook-status", status === ":failed" ? "FAILED" : "OK"));
+  line.appendChild(
+    el(
+      "span",
+      "hook-text",
+      "hook " + k(record, ":name") + " [" + String(k(record, ":phase")).slice(1) + "]",
+    ),
+  );
+  const contributed = k(record, ":contributed") || [];
+  if (contributed.length) {
+    line.appendChild(el("span", "contributed", "-> " + contributed.join(", ")));
+  }
+  const err = k(record, ":error");
+  if (err && k(err, ":message")) {
+    line.appendChild(el("span", "hook-error", k(err, ":message")));
+  }
+  line.appendChild(el("span", "duration", fmtMs(k(record, ":duration-ms"))));
+  return line;
+}
+
 function renderScenario(scenario, allowPending) {
   const statusClass = scenarioStatusClass(scenario);
   const red = isRed(scenario, allowPending);
@@ -428,14 +461,62 @@ function renderScenario(scenario, allowPending) {
     }
     summary.appendChild(tagSpan);
   }
+  // Derived-scheduling annotation (sl-esq round-5 unification): a scenario
+  // auto-serialized by a gate (costume, shared-impl, a :requires-serial
+  // hook) shows a greyed @serial chip annotated with WHY — "ran as though
+  // this was also true", visually distinct from authored tags. An authored
+  // @serial (:tag reason) already shows its real tag chip.
+  const schedule = k(scenario, ":schedule");
+  if (schedule && k(schedule, ":serial?") === true) {
+    const reason = k(schedule, ":reason");
+    if (reason !== ":tag") {
+      const reasonText = Array.isArray(reason)
+        ? String(reason[0]).slice(1) + " " + reason[1]
+        : String(reason).slice(1);
+      const derived = el("span", "tags derived-schedule");
+      derived.appendChild(el("span", "tag derived", "@serial"));
+      derived.appendChild(el("span", "derived-note", "via " + reasonText));
+      summary.appendChild(derived);
+    }
+  }
   summary.appendChild(el("span", "duration", fmtMs(k(scenario, ":duration-ms"))));
   details.appendChild(summary);
+
+  // Scenario-level hook failure (sl-esq): the :error lives on the scenario,
+  // not on any step — render its attributed detail block above the steps.
+  const scenarioError = k(scenario, ":error");
+  if (scenarioError) {
+    const detail = el("div", "error-detail scenario-error");
+    detail.appendChild(
+      el("div", "error-type", (k(scenarioError, ":type") || "").slice(1) || "error"),
+    );
+    let message = "";
+    if (k(scenarioError, ":hook")) message += "hook '" + k(scenarioError, ":hook") + "' -- ";
+    message += k(scenarioError, ":message") || "";
+    const reg = k(k(scenarioError, ":registration"), ":path");
+    if (reg) message += "\nregistered at: " + reg;
+    const tagSource = k(scenarioError, ":tag-source");
+    if (tagSource && k(tagSource, ":file")) {
+      message += "\ntagged at: " + k(tagSource, ":file") + ":" + k(tagSource, ":line");
+    }
+    detail.appendChild(el("pre", null, message));
+    details.appendChild(detail);
+  }
 
   const steps = k(scenario, ":steps") || [];
   const counts = macroCounts(steps);
   const list = el("ol", "steps");
   for (const step of steps) list.appendChild(renderStep(step, counts));
+  // Hook lines (sl-esq) mirror execution order: before-phase above the
+  // steps, after-phase below. Hook-less scenarios render exactly as before.
+  const hookRecords = k(scenario, ":hooks") || [];
+  for (const h of hookRecords.filter((r) => k(r, ":phase") === ":before")) {
+    details.appendChild(renderHookLine(h));
+  }
   details.appendChild(list);
+  for (const h of hookRecords.filter((r) => k(r, ":phase") === ":after")) {
+    details.appendChild(renderHookLine(h));
+  }
   return details;
 }
 

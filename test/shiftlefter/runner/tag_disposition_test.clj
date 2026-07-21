@@ -114,3 +114,43 @@
       (is (= {:selected [p1] :filtered-out [p2 p3]}
              (tagd/apply-dispositions {:include #{"@fast"} :exclude #{"@wip"}}
                                       [p1 p2 p3]))))))
+
+;; -----------------------------------------------------------------------------
+;; Value-tags + the :hooks facet (sl-esq)
+;; -----------------------------------------------------------------------------
+
+(deftest split-value-tag-test
+  (testing "splits on the FIRST '='"
+    (is (= {:key "hook" :value "reset-db"} (tagd/split-value-tag "@hook=reset-db")))
+    (is (= {:key "hook" :value "a=b"} (tagd/split-value-tag "@hook=a=b"))
+        "value containing '=' preserved verbatim")
+    (is (= {:key "hook" :value ""} (tagd/split-value-tag "@hook="))))
+  (testing "plain tags carry no '=' — nil"
+    (is (nil? (tagd/split-value-tag "@smoke")))
+    (is (nil? (tagd/split-value-tag "@serial")))))
+
+(deftest hooks-facet-test
+  (testing "@hook= tags produce the :hooks facet in pickle-tag order"
+    (let [d (tagd/disposition nil (pickle "@hook=reset-db" "@smoke" "@hook=screenshot"))]
+      (is (true? (:selected? d)))
+      (is (= ["reset-db" "screenshot"] (mapv :name (:hooks d))))
+      (is (every? :location (:hooks d)) "tag locations ride along for attribution")))
+  (testing "no @hook= tags — no :hooks key (absent, not empty)"
+    (is (not (contains? (tagd/disposition nil (pickle "@smoke")) :hooks)))
+    (is (not (contains? (tagd/disposition nil (pickle)) :hooks))))
+  (testing "unknown value-tag KEYS are inert — ordinary tags, no facet"
+    (let [d (tagd/disposition nil (pickle "@hok=reset-db" "@blocked=sl-123"))]
+      (is (not (contains? d :hooks)))
+      (is (true? (:selected? d)))))
+  (testing "@hook=a and @hook=b are distinct full tokens — both present"
+    (is (= ["a" "b"]
+           (mapv :name (:hooks (tagd/disposition nil (pickle "@hook=a" "@hook=b")))))))
+  (testing "facet present even on a filtered-out pickle (same as :schedule)"
+    (let [d (tagd/disposition {:exclude #{"@wip"}} (pickle "@wip" "@hook=reset-db"))]
+      (is (not (:selected? d)))
+      (is (= ["reset-db"] (mapv :name (:hooks d))))))
+  (testing "value-tags still work as accidental filter queries (opaque tokens)"
+    (is (:selected? (tagd/disposition {:include #{"@hook=reset-db"}}
+                                      (pickle "@hook=reset-db"))))
+    (is (not (:selected? (tagd/disposition {:include #{"@hook=reset-db"}}
+                                           (pickle "@hook=other")))))))

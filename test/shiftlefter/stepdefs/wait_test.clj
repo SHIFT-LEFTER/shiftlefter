@@ -13,6 +13,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [shiftlefter.stepengine.registry :as registry]
             [shiftlefter.stepengine.bind :as bind]
+            [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.browser.protocol :as bp]
@@ -127,11 +128,20 @@
 (defn- find-stepdef [text]
   (first (filter #(re-matches (:pattern %) text) (registry/all-stepdefs))))
 
-(defn- invoke-step [text ctx]
+(defn- invoke-step
+  "Match text, replicate the engine's data-plane capture normalization
+   (sl-yh7 — value slots capture WITH quotes; the engine strips them by
+   the frame's :arg-kinds), invoke the stepdef fn directly."
+  [text ctx]
   (let [stepdef  (find-stepdef text)
         matcher  (re-matcher (:pattern stepdef) text)
         _        (.matches matcher)
-        captures (mapv #(.group matcher %) (range 1 (inc (.groupCount matcher))))
+        raw      (mapv #(.group matcher %) (range 1 (inc (.groupCount matcher))))
+        kinds    (bind/default-slot-kinds (:metadata stepdef) (count raw))
+        norm     (bindings/normalize-captures raw kinds ctx)
+        _        (when-let [err (:error norm)]
+                   (throw (ex-info (:message err) err)))
+        captures (:ok norm)
         arity    (:arity stepdef)
         args     (if (= arity (inc (count captures)))
                    (into [ctx] captures)

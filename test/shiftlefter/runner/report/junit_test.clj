@@ -275,6 +275,70 @@
     (testing "the golden validates against the XSD"
       (is (true? (xsd-valid? xml))))))
 
+;; -----------------------------------------------------------------------------
+;; :error status — scenario-level hook failures (sl-esq)
+;; -----------------------------------------------------------------------------
+
+(defn- error-scenario
+  "An :error scenario (hook threw) built through the REAL envelope seam —
+   the :error lives on the scenario, all steps :skipped."
+  []
+  (reporter/scenario-envelope
+   {:status :error
+    :duration-ms 2.0
+    :error {:type :hook/before-failed
+            :message "connection refused"
+            :hook "reset-db"
+            :registration {:path "/proj/hooks.clj"}
+            :tag-source {:file "/proj/features/x.feature" :line 3}}
+    :plan {:plan/pickle {:pickle/id (java.util.UUID/randomUUID)
+                         :pickle/name "Seeded scenario"
+                         :pickle/feature-name "Seeding"
+                         :pickle/source-file "/proj/features/x.feature"
+                         :pickle/location {:line 3}}}
+    :steps [(step "Given" "I log in" :skipped)]}))
+
+(deftest error-scenario-renders-error-element-with-hook-type
+  (let [xml (doc [(error-scenario)])]
+    (testing "renders <error> with a hook-typed type attribute — never <skipped>"
+      (is (str/includes? xml "<error type=\"hook/before-failed\""))
+      (is (not (str/includes? xml "scenario not executed"))))
+    (testing "message carries hook name + dual attribution"
+      (is (str/includes? xml "hook 'reset-db' -- connection refused"))
+      (is (str/includes? xml "[registered at /proj/hooks.clj]"))
+      (is (str/includes? xml "[tagged at /proj/features/x.feature:3]")))
+    (testing "testsuite rollup counts it under errors"
+      (is (str/includes? xml "errors=\"1\"")))
+    (testing "still XSD-valid"
+      (is (true? (xsd-valid? xml))))))
+
+(deftest hook-lines-render-in-system-out
+  (let [env (reporter/scenario-envelope
+             {:status :passed
+              :duration-ms 2.0
+              :plan {:plan/pickle {:pickle/id (java.util.UUID/randomUUID)
+                                   :pickle/name "Hooked"
+                                   :pickle/feature-name "Hooks"
+                                   :pickle/source-file "/proj/features/h.feature"
+                                   :pickle/location {:line 1}}}
+              :steps [(step "Given" "a step" :passed)]
+              :hooks [{:name "reset-db" :phase :before :status :ok
+                       :duration-ms 1.5 :contributed [:seed/user-id]}
+                      {:name "screenshot" :phase :after :status :ok
+                       :duration-ms 0.5}]})
+        xml (doc [env])]
+    (testing "before-phase above the steps, after-phase below"
+      (let [cdata xml
+            before-idx (str/index-of cdata "hook reset-db [before] [ok]")
+            step-idx (str/index-of cdata "Given a step [passed]")
+            after-idx (str/index-of cdata "hook screenshot [after] [ok]")]
+        (is (and before-idx step-idx after-idx))
+        (is (< before-idx step-idx after-idx))))
+    (testing ":contributed keys ride the before line"
+      (is (str/includes? xml "-> :seed/user-id")))
+    (testing "still XSD-valid"
+      (is (true? (xsd-valid? xml))))))
+
 ;; Regenerate the macro golden (run in a REPL after a deliberate mapping change):
 ;;   (spit "test/fixtures/junit/macro-golden.xml"
 ;;         (shiftlefter.runner.report.junit/build-document

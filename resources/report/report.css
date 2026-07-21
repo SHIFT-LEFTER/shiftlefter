@@ -239,6 +239,52 @@ body {
   font-size: 0.72rem;
 }
 
+/* Derived-scheduling annotation (sl-esq): a gate serialized this scenario.
+   Greyed + dashed = "ran as though this was also true" — never pretending
+   the tag was authored. */
+.tag.derived {
+  background: transparent;
+  border: 1px dashed var(--fg-muted);
+  opacity: 0.65;
+}
+
+.derived-note {
+  color: var(--fg-muted);
+  font-size: 0.72rem;
+  font-style: italic;
+}
+
+/* Lifecycle hook lines (sl-esq): rendered around the steps list, mirroring
+   execution order — before-phase above, after-phase below. */
+.hook-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.15rem 0.75rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--fg-muted);
+}
+
+.hook-line .hook-status {
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.hook-line.st-failed,
+.hook-line.st-failed .hook-status,
+.hook-line .hook-error {
+  color: var(--red, #c0392b);
+}
+
+.hook-line .contributed {
+  font-style: italic;
+}
+
+.hook-line .duration {
+  margin-left: auto;
+}
+
 .duration {
   color: var(--fg-muted);
   font-size: 0.78rem;

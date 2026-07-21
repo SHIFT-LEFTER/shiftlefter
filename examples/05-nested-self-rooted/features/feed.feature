@@ -5,7 +5,13 @@ Feature: Self-rooted nested addressing
   feature text never mentions a selector — only semantic addresses.
 
   Scenario: A flat timeline indexes posts and skips interleaved ads
-    When :user/reader opens the browser to 'http://localhost:9092/feed'
+    # Named location (sl-3jr4/sl-iseq): bare Feed resolves via the intent's
+    # :location :path + the :web interface's :base-url — no URL in the
+    # feature text. Quoted = literal, always; bare = ref (like element
+    # addresses). The region assertion (sl-q81m) accepts the same name:
+    # path match, query ignored.
+    When :user/reader opens the browser to Feed
+    Then :user/reader should be on Feed
     Then :user/reader should see Feed.post[1].author with text 'Alice'
     And  :user/reader should see Feed.post[2].author with text 'Bob'
     # The 3rd POST is Carol even though an ad cell sits between Bob and Carol —

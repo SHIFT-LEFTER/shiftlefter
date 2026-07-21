@@ -101,7 +101,10 @@ sl run features/
 ### Verification
 - `:alice should see '<text>'` — text appears anywhere on page
 - `:alice should see the title '<text>'` — exact page title match
-- `:alice should be on '<url>'` — URL contains string
+- `:alice should be on '<url>'` — region match: normalized path + fragment;
+  query string and host ignored. A bare intent name (`should be on Feed`,
+  unquoted) resolves via the intent's `:location`; use
+  `should be on exactly '<url>'` for full-URL structural equality
 - `:alice should see {<locator>}` — element is visible
 - `:alice should not see {<locator>}` — element is not visible
 - `:alice should see <N> {<locator>} elements` — exact count

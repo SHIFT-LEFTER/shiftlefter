@@ -139,7 +139,9 @@ In Shifted mode, attach `:svo` metadata so the step resolves to a typed triple.
 ### Minimal config
 
 `shiftlefter.edn` in the project root. Note `:step-paths` lives **under
-`:runner`** — a top-level `:step-paths` is ignored:
+`:runner`** — a top-level `:step-paths` is ignored (since 0.5.2 the runner
+prints a `Config warning:` with the correct path; older versions ignore it
+silently):
 
 ```clojure
 {:runner {:step-paths ["steps/"]}
@@ -156,9 +158,26 @@ In Shifted mode, attach `:svo` metadata so the step resolves to a typed triple.
 |-------|-----|
 | `(defstep #"..." [n] ...)` | `(defstep #"..." [ctx n] ...)` — `ctx` is always first |
 | Forget to return `ctx` | Return `ctx` or `(assoc ctx ...)` from every step |
-| `:step-paths` at config top level | Nest it under `:runner` |
+| `:step-paths` at config top level (warned since 0.5.2, ignored either way) | Nest it under `:runner` |
 | `When :login-form submits` | Subjects are actors: `When :user/alice clicks Login.submit` |
 | Compare a capture as a number | `(parse-long n)` first — captures are strings |
+
+### URL assertions beyond the built-in frames
+
+`should be on <X>` asserts the REGION: normalized path + fragment, query
+string ignored (query is state, not region), host ignored, trailing slash
+normalized. **Quoted = literal, always; bare = ref**: a bare intent name
+(`should be on Feed`) resolves via the intent's `:location`; a quoted value
+(`should be on '/feed'`) is a literal. `should be on exactly '<url>'` asserts the exact resource + state
+structurally: full URL required, path and fragment exact, query compared as a
+multimap — cross-key order insignificant, duplicate-key value order
+significant. It takes a quoted literal or a captured `{binding}` token
+(`should be on exactly {resetLink}`); bare intent names stay region-only.
+
+Anything more exotic — percent-encoding normalization, host-case rules,
+byte-exact string comparison — is deliberately not built in. Write a custom
+step assertion (`defstep` + the browser's current URL) for the case at hand,
+or petition for a third frame if the need is general.
 
 ### Worked examples
 
@@ -218,6 +237,14 @@ maintenance harder.
 If an object is missing from accepted intents, record the gap and use the
 bootstrap/reconciliation workflow. Do not silently promote a guessed locator into
 accepted truth.
+
+The same preference applies to URLs: navigation and region assertions
+(`opens the browser to`, `should be on`) accept a bare intent name (`Feed`,
+unquoted) resolved via the intent's `:location` binding plus the interface's
+`:config :base-url` — prefer that over hardcoding URLs in step text. Quoted
+values are always literals (quoted = literal, bare = ref — the same rule as
+element slots); literal URLs remain the fallback, exactly like raw EDN
+locators.
 
 ### Choosing a web locator strategy
 
@@ -300,6 +327,117 @@ objects in place.
 
 ---
 
+## Scenario Lifecycle Hooks
+
+Hooks are the escape hatch for lifecycle code around a scenario — seeding or
+resetting external state before it runs, capturing a screenshot or scraping a
+console after it. Prefer the stronger mechanisms when they exist (a step, the
+`setup.clj` orchestration for run-level lifecycle); reach for hooks when the
+work genuinely belongs to the scenario boundary.
+
+### Naming: the feature file states what runs around it
+
+Scenarios NAME their hooks with `@hook=<name>` value-tags. Nothing fires
+invisibly: for any scenario, "which hooks fire, in what order" is answerable
+from the feature file plus one registry file, and `sl run --dry-run` prints
+the resolved per-scenario firing list.
+
+```gherkin
+@hook=reset-db
+Scenario: Purchase with a fresh account
+  Given alice opens the shop
+```
+
+Tag inheritance follows Gherkin: a feature-level `@hook=` applies to every
+scenario in the file; Rule- and Examples-block-level tags nest the same way.
+The same hook named at two levels runs once, at the outermost position.
+An `@hook=` naming an unknown hook is a planning error (exit 2) reporting
+the tag's file and line. Unrecognized value-tag keys (`@foo=bar`) are
+ordinary inert tags.
+
+### Registration: hooks.clj
+
+Registrations live in `hooks.clj` next to your `shiftlefter.edn` (discovered
+exactly like `setup.clj`; no file = no hooks). It declares `(ns hooks)` and
+defines `hooks` — an ordered vector, or a `(fn [config])` returning one:
+
+```clojure
+(ns hooks)
+
+(def hooks
+  [{:name "audit"                       ;; required, unique
+    :global? true                       ;; applies to every scenario, visibly
+    :before (fn [{:keys [ctx scenario]}]
+              nil)}
+   {:name "reset-db"
+    :requires-serial true               ;; auto-serialize carrying scenarios
+    :before (fn [{:keys [ctx scenario]}]
+              {:seed/user-id 1234})     ;; map return merges into ctx
+    :after  (fn [{:keys [ctx scenario result]}]
+              (when (= :failed (:status result))
+                ;; capabilities are still live here (before cleanup)
+                nil))}])
+```
+
+- `:name` (required, unique) — what `@hook=<name>` resolves against.
+  Duplicate names are a planning error.
+- `:before` / `:after` — optional; either or both. A pair registered under
+  one name unwinds as one frame.
+- `:global?` — runs for every scenario, stamped and previewed like any named
+  hook; vector order is the execution order among globals.
+- `:requires-serial` — scenarios this hook applies to run exclusively under
+  parallel execution; reports show the derived `@serial` annotation with the
+  hook named as the reason.
+- `:provides` — optional vector of binding names (bare lowerCamel keywords,
+  e.g. `[:sessionToken]`) this hook's `:before` seeds into the scenario data
+  plane. A static declaration: it satisfies dry-run's
+  consumed-without-producer check for `{name}` tokens. Conforming
+  bare-lowerCamel contribution keys mirror into `:sl/bindings` at execution
+  whether declared or not.
+
+### Execution order
+
+Per scenario: **Befores → capability provisioning → steps → Afters →
+capability cleanup.**
+
+- Befores run outermost-first: globals (registry order), then `@hook=` tags
+  in feature → rule → scenario → examples nesting order.
+- Befores run BEFORE provisioning — a broken seed hook fails before paying
+  browser-launch cost. Befores therefore see no capabilities.
+- Afters run AFTER steps but BEFORE cleanup — a screenshot or console-scrape
+  hook can reach the live browser via `:ctx`.
+- Afters unwind in strict LIFO order of the Befores that ran. If provisioning
+  itself fails, every After still unwinds — WITHOUT capabilities, so an After
+  must check for the capability it wants, not assume it.
+
+### Payloads and failure semantics
+
+- `:before` receives `{:ctx ... :scenario ...}` (scenario = name, tags,
+  source file/line). A map return merges into ctx — the sanctioned way to
+  hand data to steps; the report records the contributed keys. nil = no
+  contribution.
+- `:after` receives `{:ctx ... :scenario ... :result ...}` where `:result`
+  is the in-flight scenario result (status, per-step results with durations,
+  error). On-failure conditionality is a plain `when` on
+  `(:status result)` — there is no separate on-failure hook kind. The
+  return value is ignored (reserved).
+- A `:before` throw makes the scenario `:error` (never `:failed`), skips its
+  steps, and unwinds only the frames whose Befores succeeded. A `:after`
+  throw makes the scenario `:error` even when all steps passed — broken
+  cleanup is a lying suite. One failing After does not stop the unwind.
+- Every hook that runs is stamped in the scenario envelope and rendered in
+  JUnit system-out and the HTML transcript:
+  `{:name .. :phase .. :status .. :duration-ms .. :contributed [..]}`.
+
+### Reaching external systems
+
+In this release a hook that must touch an external system (reset a database,
+call an internal CLI) shells out — `clojure.java.shell/sh` — or uses what is
+already on the framework classpath. Adding project dependencies onto the
+hook classpath is a planned extension, not a current feature.
+
+---
+
 ## ShiftLefter SIEVE Bootstrap
 
 SIEVE is the workflow for turning observed or proposed interface facts into
@@ -353,30 +491,30 @@ patterns and the verb/frame they map to.
 
 ##### `:receive` — Poll for an inbound SMS matching a body pattern
 
-- frame `:default`: `S receives an SMS to TO-PHONE matching MATCH` — args `:to-phone`, `:match` — implicit object `:sms-message`
-- frame `:since-iso`: `S receives an SMS to TO-PHONE since SINCE-ISO matching MATCH` — args `:to-phone`, `:since-iso`, `:match` — implicit object `:sms-message`
-- frame `:within-last`: `S receives an SMS to TO-PHONE within the last DURATION matching MATCH` — args `:to-phone`, `:duration`, `:match` — implicit object `:sms-message`
+- frame `:default`: `S receives an SMS to TO-PHONE matching MATCH` — args `:to-phone` (literal or `{binding}`), `:match` (regex; `(?<name>...)` produces `{name}` bindings) — implicit object `:sms-message`
+- frame `:since-iso`: `S receives an SMS to TO-PHONE since SINCE-ISO matching MATCH` — args `:to-phone` (literal or `{binding}`), `:since-iso` (literal or `{binding}`), `:match` (regex; `(?<name>...)` produces `{name}` bindings) — implicit object `:sms-message`
+- frame `:within-last`: `S receives an SMS to TO-PHONE within the last DURATION matching MATCH` — args `:to-phone` (literal or `{binding}`), `:duration`, `:match` (regex; `(?<name>...)` produces `{name}` bindings) — implicit object `:sms-message`
 
 ##### `:see` — Assert observable state about SMS messages
 
-- frame `:count`: `S sees COUNT messages to TO-PHONE` — args `:count`, `:to-phone` — implicit object `:sms-messages`
+- frame `:count`: `S sees COUNT messages to TO-PHONE` — args `:count`, `:to-phone` (literal or `{binding}`) — implicit object `:sms-messages`
 
 ##### `:send` — Send an SMS to a phone number
 
-- frame `:to`: `S sends an SMS to TO-PHONE saying BODY` — args `:to-phone`, `:body` — implicit object `:sms-message`
+- frame `:to`: `S sends an SMS to TO-PHONE saying BODY` — args `:to-phone` (literal or `{binding}`), `:body` (literal or `{binding}`) — implicit object `:sms-message`
 
 ##### `:send-media` — Send an MMS (text + media) to a phone number
 
-- frame `:to`: `S sends an MMS to TO-PHONE with caption BODY and media MEDIA-URL` — args `:to-phone`, `:body`, `:media-url` — implicit object `:mms-message`
+- frame `:to`: `S sends an MMS to TO-PHONE with caption BODY and media MEDIA-URL` — args `:to-phone` (literal or `{binding}`), `:body` (literal or `{binding}`), `:media-url` (literal or `{binding}`) — implicit object `:mms-message`
 
 #### Built-in step patterns
 
-- `:([\w./-]+) receives an SMS to '([^']+)' matching /(.+)/` → `:receive`/`:default` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) receives an SMS to '([^']+)' since '([^']+)' matching /(.+)/` → `:receive`/`:since-iso` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) receives an SMS to '([^']+)' within the last (\d+ (?:seconds?|minutes?|hours?)) matching /(.+)/` → `:receive`/`:within-last` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) sends an MMS to '([^']+)' with caption '([^']*)' and media '([^']+)'` → `:send-media`/`:to` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) sends an SMS to '([^']+)' saying '([^']*)'` → `:send`/`:to` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) should see (\d+) messages to '([^']+)'` → `:see`/`:count` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) receives an SMS to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching /(.+)/` → `:receive`/`:default` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) receives an SMS to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) since ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching /(.+)/` → `:receive`/`:since-iso` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) receives an SMS to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) within the last (\d+ (?:seconds?|minutes?|hours?)) matching /(.+)/` → `:receive`/`:within-last` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) sends an MMS to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) with caption ('[^']*'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) and media ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:send-media`/`:to` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) sends an SMS to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) saying ('[^']*'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:send`/`:to` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) should see (\d+) messages to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:count` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
 
 ### Interface `:web`
 
@@ -393,7 +531,12 @@ patterns and the verb/frame they map to.
 
 ##### `:be` — Assert a property or state of the subject
 
-- frame `:at`: `S is on O`
+- frame `:at`: `S is on O` — O: intent ref (bare PascalCase name), literal URL, or `{binding}`
+- frame `:at-exactly`: `S is on exactly O` — O: literal URL
+
+##### `:capture` — Observe an element's text and bind named-group matches
+
+- frame `:default`: `S captures O matching MATCH` — args `:match` (regex; `(?<name>...)` produces `{name}` bindings)
 
 ##### `:clear` — Clear input field contents
 
@@ -417,7 +560,7 @@ patterns and the verb/frame they map to.
 
 ##### `:fill` — Enter text into an input field
 
-- frame `:with`: `S fills O with VALUE` — args `:value`
+- frame `:with`: `S fills O with VALUE` — args `:value` (literal or `{binding}`)
 
 ##### `:hover` — Hover the mouse over an element (delegates to the move-to kernel op)
 
@@ -433,7 +576,7 @@ patterns and the verb/frame they map to.
 
 ##### `:navigate` — Navigate to a URL; the URL is the object
 
-- frame `:to`: `S navigates to O`
+- frame `:to`: `S navigates to O` — O: intent ref (bare PascalCase name), literal URL, or `{binding}`
 
 ##### `:navigate-back` — Navigate backward in browser history
 
@@ -471,20 +614,20 @@ patterns and the verb/frame they map to.
 ##### `:see` — Observe an element or page property
 
 - frame `:alert`: `S sees an alert` — implicit object `:alert`
-- frame `:alert-with-text`: `S sees an alert with TEXT` — args `:text` — implicit object `:alert`
-- frame `:attribute`: `S sees O with attribute ATTRIBUTE equal to VALUE` — args `:attribute`, `:value`
+- frame `:alert-with-text`: `S sees an alert with TEXT` — args `:text` (literal or `{binding}`) — implicit object `:alert`
+- frame `:attribute`: `S sees O with attribute ATTRIBUTE equal to VALUE` — args `:attribute` (literal or `{binding}`), `:value` (literal or `{binding}`)
 - frame `:count`: `S sees COUNT O` — args `:count`
 - frame `:disabled`: `S sees O disabled`
 - frame `:enabled`: `S sees O enabled`
 - frame `:on-page`: `S sees O on the page`
-- frame `:text`: `S sees O with text TEXT` — args `:text`
+- frame `:text`: `S sees O with text TEXT` — args `:text` (literal or `{binding}`)
 - frame `:title`: `S sees the title O`
-- frame `:value`: `S sees O with value VALUE` — args `:value`
+- frame `:value`: `S sees O with value VALUE` — args `:value` (literal or `{binding}`)
 - frame `:visible`: `S sees O`
 
 ##### `:select` — Select an option from a dropdown
 
-- frame `:from`: `S selects VALUE from O` — args `:value`
+- frame `:from`: `S selects VALUE from O` — args `:value` (literal or `{binding}`)
 
 ##### `:switch-frame` — Switch into an iframe or back to the main frame
 
@@ -500,47 +643,49 @@ patterns and the verb/frame they map to.
 - frame `:duration`: `S waits DURATION seconds` — args `:duration` — implicit object `:time`
 - frame `:for-count`: `S waits for COUNT O` — args `:count`
 - frame `:for-element`: `S waits for O`
-- frame `:for-text`: `S waits for O to show TEXT` — args `:text`
+- frame `:for-text`: `S waits for O to show TEXT` — args `:text` (literal or `{binding}`)
 
 #### Built-in step patterns
 
 - `:([\w./-]+) accepts the alert` → `:accept-alert`/`:default` `[:web]`
+- `:([\w./-]+) captures ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) matching /(.+)/` → `:capture`/`:default` `[:web]`
 - `:([\w./-]+) clears ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:clear`/`:default` `[:web]`
 - `:([\w./-]+) clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:click`/`:default` `[:web]`
 - `:([\w./-]+) dismisses the alert` → `:dismiss-alert`/`:default` `[:web]`
 - `:([\w./-]+) double-clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:doubleclick`/`:default` `[:web]`
 - `:([\w./-]+) drags ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:drag`/`:to` `[:web]`
-- `:([\w./-]+) fills ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with '([^']+)'` → `:fill`/`:with` `[:web]`
+- `:([\w./-]+) fills ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:fill`/`:with` `[:web]`
 - `:([\w./-]+) goes back` → `:navigate-back`/`:default` `[:web]`
 - `:([\w./-]+) goes forward` → `:navigate-forward`/`:default` `[:web]`
 - `:([\w./-]+) hovers over ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:hover`/`:default` `[:web]`
 - `:([\w./-]+) maximizes the window` → `:maximize`/`:default` `[:web]`
 - `:([\w./-]+) moves to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:move`/`:default` `[:web]`
-- `:([\w./-]+) opens the browser to '([^']+)'` → `:navigate`/`:to` `[:web]`
+- `:([\w./-]+) opens the browser to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}|[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)` → `:navigate`/`:to` `[:web]`
 - `:([\w./-]+) presses (.+)` → `:press`/`:default` `[:web]`
 - `:([\w./-]+) refreshes the page` → `:refresh`/`:default` `[:web]`
 - `:([\w./-]+) resizes the window to (\d+)x(\d+)` → `:resize`/`:dimensions` `[:web]`
 - `:([\w./-]+) right-clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:rightclick`/`:default` `[:web]`
 - `:([\w./-]+) scrolls to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:scroll`/`:to-element` `[:web]`
 - `:([\w./-]+) scrolls to the (top|bottom)` → `:scroll`/`:to-position` `[:web]`
-- `:([\w./-]+) selects '([^']+)' from ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:select`/`:from` `[:web]`
-- `:([\w./-]+) should be on '([^']+)'` → `:be`/`:at` `[:web]`
+- `:([\w./-]+) selects ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) from ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:select`/`:from` `[:web]`
+- `:([\w./-]+) should be on ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}|[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)` → `:be`/`:at` `[:web]`
+- `:([\w./-]+) should be on exactly ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:be`/`:at-exactly` `[:web]`
 - `:([\w./-]+) should not see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:not-see`/`:invisible` `[:web]`
 - `:([\w./-]+) should see '([^']+)'` → `:see`/`:on-page` `[:web]`
 - `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:see`/`:visible` `[:web]`
 - `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) disabled` → `:see`/`:disabled` `[:web]`
 - `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) enabled` → `:see`/`:enabled` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with attribute '([^']+)' equal to '([^']+)'` → `:see`/`:attribute` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with text '([^']+)'` → `:see`/`:text` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with value '([^']+)'` → `:see`/`:value` `[:web]`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with attribute ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) equal to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:attribute` `[:web]`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with text ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:text` `[:web]`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with value ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:value` `[:web]`
 - `:([\w./-]+) should see (\d+) ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) elements` → `:see`/`:count` `[:web]`
 - `:([\w./-]+) should see an alert` → `:see`/`:alert` `[:web]`
-- `:([\w./-]+) should see an alert with '([^']+)'` → `:see`/`:alert-with-text` `[:web]`
+- `:([\w./-]+) should see an alert with ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:alert-with-text` `[:web]`
 - `:([\w./-]+) should see the title '([^']+)'` → `:see`/`:title` `[:web]`
 - `:([\w./-]+) switches to frame ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:switch-frame`/`:into` `[:web]`
 - `:([\w./-]+) switches to the main frame` → `:switch-frame`/`:main` `[:web]`
 - `:([\w./-]+) switches to the next window` → `:switch-window`/`:default` `[:web]`
 - `:([\w./-]+) waits (\d+(?:\.\d+)?) seconds?` → `:wait`/`:duration` `[:web]`
 - `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:wait`/`:for-element` `[:web]`
-- `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to show '([^']+)'` → `:wait`/`:for-text` `[:web]`
+- `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to show ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:wait`/`:for-text` `[:web]`
 - `:([\w./-]+) waits for (\d+) ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:wait`/`:for-count` `[:web]`

@@ -423,17 +423,24 @@
 ;; -----------------------------------------------------------------------------
 
 (def ^:private location-glossary
-  "Glossary whose :navigate/:to and :be/:at frames declare :object-kind
-   :location, mirroring the framework verbs-web.edn; :click stays intent-only."
+  "Glossary mirroring the framework verbs-web.edn location frames: navigate
+   and the region assertion (:be/:at) accept named-location refs (sl-3jr4 /
+   sl-q81m); the exactly assertion (:be/:at-exactly) is literal-only;
+   :click stays intent-only."
   {:subjects {:alice {:desc "Standard customer"}}
    :verbs {:web {:click    {:desc "Click element"
                             :frames {:default {:args [] :pattern "S clicks O"}}}
                  :navigate {:desc "Navigate to URL"
                             :frames {:to {:args [] :pattern "S navigates to O"
-                                          :object-kind :location}}}
+                                          :object-kind :location
+                                          :location-refs? true}}}
                  :be       {:desc "Assert state"
                             :frames {:at {:args [] :pattern "S is on O"
-                                          :object-kind :location}}}}}})
+                                          :object-kind :location
+                                          :location-refs? true}
+                                     :at-exactly {:args []
+                                                  :pattern "S is on exactly O"
+                                                  :object-kind :location}}}}}})
 
 (deftest object-kind-location-url-literal-test
   (testing "URL literal in a :location slot passes under :strict (sl-rlxa)"
@@ -698,3 +705,163 @@
           (is (some? issue) "unknown segment should be flagged")
           (is (str/includes? (:message issue) "bogus")
               "the message names the offending segment"))))))
+
+;; -----------------------------------------------------------------------------
+;; Named-location refs in :location-refs? slots (sl-3jr4)
+;; -----------------------------------------------------------------------------
+;;
+;; The navigate frame accepts bare PascalCase intent refs resolved via the
+;; intent's :location; the be-at frame does NOT (carved out to sl-q81m) and
+;; keeps the rlxa skip-everything behavior.
+
+(defn- with-location-intents
+  "Load a located Feed + unlocated ProductCard into intent-state, run `f`, clear."
+  [f]
+  (let [dir (fs/create-temp-dir {:prefix "svo-location-"})]
+    (try
+      (spit (fs/file dir "feed.edn")
+            (pr-str {:intent "Feed"
+                     :location {:web {:path "/feed"}}
+                     :elements {:title {:bindings {:web {:css "h1"}}}}}))
+      (spit (fs/file dir "card.edn")
+            (pr-str {:intent "ProductCard"
+                     :elements {:price {:bindings {:web {:css ".price"}}}}}))
+      (intent-state/reload-intents! (str dir))
+      (f)
+      (finally
+        (intent-state/clear-intents!)
+        (fs/delete-tree dir)))))
+
+(deftest location-ref-valid-in-navigate-slot
+  (with-location-intents
+    (fn []
+      (testing "A valid named-location ref passes under :strict (AC 3)"
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :navigate :frame :to
+                       :object "Feed" :interface :web}
+                      {:unknown-object :strict})]
+          (is (true? (:valid? result)))
+          (is (empty? (:issues result))))))))
+
+(deftest location-ref-typo-errors-in-navigate-slot
+  (with-location-intents
+    (fn []
+      (testing "A typo'd ref is :svo/unknown-object under :strict (AC 4)"
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :navigate :frame :to
+                       :object "Feeed" :interface :web}
+                      {:unknown-object :strict})
+              issue (first (:issues result))]
+          (is (false? (:valid? result)))
+          (is (= :svo/unknown-object (:type issue)))
+          (is (str/includes? (:message issue) "Feeed"))))
+
+      (testing "Same under :warn — the issue is still produced"
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :navigate :frame :to
+                       :object "Feeed" :interface :web}
+                      {:unknown-object :warn})]
+          (is (seq (filter #(= :svo/unknown-object (:type %)) (:issues result)))))))))
+
+(deftest location-ref-without-location-errors
+  (with-location-intents
+    (fn []
+      (testing "Ref to an intent without :location errors under :strict"
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :navigate :frame :to
+                       :object "ProductCard" :interface :web}
+                      {:unknown-object :strict})
+              issue (first (:issues result))]
+          (is (= :svo/unknown-object (:type issue)))
+          (is (str/includes? (:message issue) ":location"))))
+
+      (testing "Ref whose :location lacks this interface's :path errors"
+        (let [result (validate/validate-svo
+                      location-glossary
+                      (assoc test-interfaces :mobile {:type :web :adapter :etaoin})
+                      {:subject :alice :verb :navigate :frame :to
+                       :object "Feed" :interface :mobile}
+                      {:unknown-object :strict})]
+          (is (seq (filter #(= :svo/unknown-object (:type %)) (:issues result)))))))))
+
+(deftest location-literals-still-pass-in-navigate-slot
+  (with-location-intents
+    (fn []
+      (testing "Literal URLs never classify as refs even with intents loaded (AC 3)"
+        (doseq [literal ["http://localhost:9090/feed" "/feed" "example.com"
+                         "about:blank" "{:css \"#a\"}"]]
+          (let [result (validate/validate-svo
+                        location-glossary test-interfaces
+                        {:subject :alice :verb :navigate :frame :to
+                         :object literal :interface :web}
+                        {:unknown-object :strict})]
+            (is (empty? (filter #(= :svo/unknown-object (:type %)) (:issues result)))
+                (str literal " must stay a literal"))))))))
+
+(deftest be-at-region-slot-accepts-refs
+  (with-location-intents
+    (fn []
+      (testing "sl-q81m: the region assertion slot validates refs like navigate"
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :be :frame :at
+                       :object "Feed" :interface :web}
+                      {:unknown-object :strict})]
+          (is (true? (:valid? result)) "valid located ref passes"))
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :be :frame :at
+                       :object "/feed?tab=hot" :interface :web}
+                      {:unknown-object :strict})]
+          (is (true? (:valid? result)) "literals always pass")))
+
+      (testing "QUOTED captures never classify as refs (sl-iseq: quoted =
+                literal, always) — even a quoted intent name or typo"
+        (doseq [object ["'Feed'" "'Feeed'" "'http://h/feed'" "'/feed'"]]
+          (let [result (validate/validate-svo
+                        location-glossary test-interfaces
+                        {:subject :alice :verb :be :frame :at
+                         :object object :interface :web}
+                        {:unknown-object :strict})]
+            (is (true? (:valid? result))
+                (str object " is quoted → literal → passes strict")))))
+
+      (testing "typo'd ref errors WITH a did-you-mean suggestion (AC 4)"
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :be :frame :at
+                       :object "Feeed" :interface :web}
+                      {:unknown-object :strict})
+              issue (first (:issues result))]
+          (is (= :svo/unknown-object (:type issue)))
+          (is (= :Feed (:suggestion issue))
+              "nearest LOCATED intent is suggested")
+          (is (str/includes? (:message issue) "Did you mean: :Feed?"))))
+
+      (testing "ref to an unlocated intent gets no bogus suggestion"
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :be :frame :at
+                       :object "ProductCard" :interface :web}
+                      {:unknown-object :strict})
+              issue (first (:issues result))]
+          (is (= :svo/unknown-object (:type issue)))
+          (is (nil? (:suggestion issue))))))))
+
+(deftest at-exactly-slot-stays-literal-only
+  (with-location-intents
+    (fn []
+      (testing "The exactly slot never classifies refs (resolution IS
+                normalization) — even a typo'd bare name passes silently"
+        (doseq [object ["Feed" "Feeed" "http://h/p?a=1"]]
+          (let [result (validate/validate-svo
+                        location-glossary test-interfaces
+                        {:subject :alice :verb :be :frame :at-exactly
+                         :object object :interface :web}
+                        {:unknown-object :strict})]
+            (is (true? (:valid? result))
+                (str object " in at-exactly slot must pass (literal-only slot)"))))))))

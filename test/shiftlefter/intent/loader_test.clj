@@ -533,3 +533,72 @@
           (is (= "" (loader/get-boundary-css intents "Nonexistent" :web))))
         (finally
           (cleanup-temp-dir dir))))))
+
+;; -----------------------------------------------------------------------------
+;; :location — named locations (sl-3jr4)
+;; -----------------------------------------------------------------------------
+
+(deftest location-loads-into-region
+  (testing "An intent may declare :location; get-location returns it per-interface"
+    (let [dir (create-temp-intents-dir
+               {"feed.edn"
+                (pr-str {:intent "Feed"
+                         :location {:web {:path "/feed"}}
+                         :elements {:title {:bindings {:web {:css "h1"}}}}})})]
+      (try
+        (let [result (loader/load-all-intents (str dir))
+              intents (:ok result)]
+          (is (:ok result) "Should load successfully")
+          (is (= {:web {:path "/feed"}} (loader/get-location intents "Feed")))
+          (is (= {:web {:path "/feed"}}
+                 (:location (loader/get-region intents "Feed")))))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest location-is-optional-for-component-intents
+  (testing "AC 8 — an intent without :location loads clean; get-location is nil"
+    (let [dir (create-temp-intents-dir
+               {"card.edn"
+                (pr-str {:intent "ProductCard"
+                         :elements {:price {:bindings {:web {:css ".price"}}}}})})]
+      (try
+        (let [result (loader/load-all-intents (str dir))
+              intents (:ok result)]
+          (is (:ok result) "No :location, no complaint")
+          (is (nil? (loader/get-location intents "ProductCard")))
+          (is (nil? (loader/get-location intents "Nonexistent"))))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest location-open-map-binding-is-valid
+  (testing "Forward-compat guard (sl-4mv8): a binding map without :path is legal"
+    (let [dir (create-temp-intents-dir
+               {"feed.edn"
+                (pr-str {:intent "Feed"
+                         :location {:web {}}
+                         :elements {:title {:bindings {:web {:css "h1"}}}}})})]
+      (try
+        (let [result (loader/load-all-intents (str dir))]
+          (is (:ok result) "Open map: extra/absent keys are not a load error")
+          (is (= {:web {}} (loader/get-location (:ok result) "Feed"))))
+        (finally
+          (cleanup-temp-dir dir))))))
+
+(deftest invalid-location-shapes-rejected
+  (testing "Bare strings, non-map bindings, and bad paths are loud load errors"
+    (doseq [bad-location ["\"/feed\""                 ; bare string, not a map
+                          "{:web \"/feed\"}"          ; binding is a string
+                          "{}"                        ; empty per-interface map
+                          "{:web {:path \"feed\"}}"   ; path missing leading /
+                          "{:web {:path 42}}"]]       ; path not a string
+      (let [dir (create-temp-intents-dir
+                 {"feed.edn"
+                  (str "{:intent \"Feed\" :location " bad-location
+                       " :elements {:title {:bindings {:web {:css \"h1\"}}}}}")})]
+        (try
+          (let [result (loader/load-all-intents (str dir))]
+            (is (:errors result) (str "Should reject :location " bad-location))
+            (is (= :intent/invalid-location (-> result :errors first :type))
+                (str "Error type for " bad-location)))
+          (finally
+            (cleanup-temp-dir dir)))))))

@@ -99,7 +99,13 @@
         (let [resolved (resolve-config-declared-paths project-context (:config result))
               normalized (config/normalize resolved)]
           {:ok {:config normalized
-                :diagnostics (vec (:errors normalized))}})))))
+                :diagnostics (vec (:errors normalized))
+                ;; sl-hlkz: lint PRE-normalize output (normalize's synthetic
+                ;; :errors key would self-trigger the unknown-key warning).
+                ;; Kept separate from :diagnostics — the caller wraps those
+                ;; as :error; lints are :warn (runner parity: the same lints
+                ;; print as stderr notices in load-config-stage).
+                :lints (config/lint-config resolved)}})))))
 
 (defn- interface-projection [adapter-registry [interface-name interface-def]]
   (let [adapter-name (:adapter interface-def)
@@ -425,8 +431,14 @@
             :diagnostics [(diagnostic :config :error (:error config-result))]}
            (let [cfg (-> config-result :ok :config)
                  mode (config-mode cfg)
-                 config-diagnostics (map #(diagnostic :config :error %)
-                                         (-> config-result :ok :diagnostics))
+                 config-diagnostics (concat
+                                     (map #(diagnostic :config :error %)
+                                          (-> config-result :ok :diagnostics))
+                                     ;; sl-hlkz config lints: :warn severity —
+                                     ;; rides like glossary-warnings, never
+                                     ;; flips projection :status.
+                                     (map #(diagnostic :config :warn %)
+                                          (-> config-result :ok :lints)))
                  glossary-result (load-glossary-projection cfg)
                  ;; Vanilla honesty (sl-hjnp): the runner never loads project
                  ;; glossaries in Vanilla mode, so a broken :glossaries config

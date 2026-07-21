@@ -151,6 +151,31 @@
       ctx)))
 
 ;; -----------------------------------------------------------------------------
+;; Run Interface Config (sl-3jr4)
+;; -----------------------------------------------------------------------------
+;;
+;; The run's :interfaces config map, stashed into scenario ctx once by
+;; execute-scenario so step bodies can reach per-interface :config (e.g.
+;; :base-url for named-location resolution). Deliberately NOT :cap/*-namespaced:
+;; capability enumeration and cleanup must never see it.
+
+(def run-interfaces-key
+  "Ctx key holding the run's :interfaces config map."
+  :run/interfaces)
+
+(defn assoc-run-interfaces
+  "Stash the run's interfaces config map ({:web {:type ... :config {...}} ...})
+   into ctx. Returns updated ctx."
+  [ctx interfaces]
+  (assoc ctx run-interfaces-key interfaces))
+
+(defn get-run-interface-config
+  "The :config map of `interface-name` from the stashed run interfaces, or nil
+   when absent (bare REPL invoke-step paths carry no stash)."
+  [ctx interface-name]
+  (get-in ctx [run-interfaces-key interface-name :config]))
+
+;; -----------------------------------------------------------------------------
 ;; Subject Key Parsing
 ;; -----------------------------------------------------------------------------
 

@@ -166,8 +166,29 @@
         (str "+ [" (:key macro) " " n "/" (or m "?") "] " base))
       base)))
 
-(defn- transcript [scenario counts]
-  (str/join "\n" (map #(step-line % counts) (:steps scenario))))
+(defn- hook-line
+  "One transcript line for a lifecycle hook record (sl-esq): ASCII marker
+   discipline like the macro '+' lines — `hook reset-db [before] [ok]
+   (0.012s)`. :contributed keys ride along when present."
+  [record]
+  (str "hook " (:name record)
+       " [" (name (:phase record)) "]"
+       " [" (name (:status record)) "]"
+       " (" (secs (:duration-ms record)) "s)"
+       (when-let [contributed (seq (:contributed record))]
+         (str " -> " (str/join ", " (map str contributed))))))
+
+(defn- transcript
+  "Scenario transcript: before-phase hook lines above the steps, after-phase
+   below — mirroring actual execution order. Hook-less scenarios are
+   byte-identical to before."
+  [scenario counts]
+  (let [hooks (:hooks scenario)
+        befores (filter #(= :before (:phase %)) hooks)
+        afters (filter #(= :after (:phase %)) hooks)]
+    (str/join "\n" (concat (map hook-line befores)
+                           (map #(step-line % counts) (:steps scenario))
+                           (map hook-line afters)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Failure / error / skipped classification
@@ -208,11 +229,25 @@
          (when msg (str " -- " (clean msg)))
          (clean (macro-attribution failing-step counts)))))
 
+(defn- hook-error-message
+  "Message for a scenario-level hook failure (sl-esq): hook name, error
+   message, and dual attribution (registration home + @hook= tag file:line)."
+  [err]
+  (let [ts (:tag-source err)]
+    (str "hook '" (:hook err) "' -- " (clean (:message err))
+         (when-let [reg (:path (:registration err))]
+           (str " [registered at " reg "]"))
+         (when (and ts (:file ts))
+           (str " [tagged at " (:file ts) ":" (:line ts) "]")))))
+
 (defn- testcase-outcome
   "Return the outcome child element for a scenario testcase, or nil for a pass.
    :error when the failing step carried an :exception-class, else :failure;
    pending mirrors the exit code via allow-pending? (D2). `counts` is the
-   macro N/M lookup (may be {} when only the outcome tag is needed)."
+   macro N/M lookup (may be {} when only the outcome tag is needed).
+   Scenario :error (a lifecycle hook threw, sl-esq) renders <error> with a
+   hook-typed type attribute, reading the SCENARIO-level :error — no step
+   carries a hook failure."
   [scenario allow-pending? counts]
   (case (:status scenario)
     :passed nil
@@ -221,6 +256,13 @@
                   tag (if (:exception-class err) "error" "failure")
                   etype (or (:exception-class err) (some-> (:type err) name))]
               (el tag {:type etype :message (failure-message fs counts)} nil))
+    :error (let [err (:error scenario)
+                 t (:type err)
+                 etype (cond
+                         (nil? t) "hook"
+                         (namespace t) (str (namespace t) "/" (name t)) ; "hook/before-failed"
+                         :else (name t))]
+             (el "error" {:type etype :message (hook-error-message err)} nil))
     :pending (let [ps (first-step-of-status scenario :pending)
                    text (clean (get-in ps [:step :step/text]))
                    msg (str "pending: " text)]

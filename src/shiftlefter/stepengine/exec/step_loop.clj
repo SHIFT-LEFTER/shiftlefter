@@ -7,12 +7,16 @@
    Internal: external callers should go through
    `shiftlefter.stepengine.exec` (the facade) which re-exports
    `invoke-step` and `execute-scenario` from this ns."
-  (:require [shiftlefter.runner.events :as events]
+  (:require [shiftlefter.capabilities.ctx :as cap]
+            [shiftlefter.runner.events :as events]
+            [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.stepengine.exec.provisioning :as prov]))
 
 ;; -----------------------------------------------------------------------------
 ;; Step Invocation
 ;; -----------------------------------------------------------------------------
+
+(declare invoke-step*)
 
 (defn invoke-step
   "Invoke a single step function with appropriate dispatch.
@@ -46,7 +50,21 @@
         ;; Extract scenario and step from nested ctx
         scenario-ctx (:scenario ctx)
         step (:step ctx)
-        ;; Attach step metadata to ctx (not in ctx map, in metadata)
+        ;; Data-plane normalization (sl-yh7): strip value-slot quotes,
+        ;; resolve {binding} tokens — by bind-time :slot-kinds, before the
+        ;; stepdef fn ever sees the captures.
+        normalized (bindings/normalize-captures captures (:slot-kinds binding)
+                                                scenario-ctx)]
+    (if-let [err (:error normalized)]
+      {:status :failed
+       :scenario scenario-ctx
+       :error err}
+      (invoke-step* step-fn ctx-aware? (:ok normalized) scenario-ctx step))))
+
+(defn- invoke-step*
+  "The dispatch/apply half of invoke-step, after capture normalization."
+  [step-fn ctx-aware? captures scenario-ctx step]
+  (let [;; Attach step metadata to ctx (not in ctx map, in metadata)
         ctx-with-meta (with-meta (or scenario-ctx {})
                         {:step/arguments (:step/arguments step)
                          :step/text (:step/text step)
@@ -209,10 +227,12 @@
     :else
     (let [provision-result (prov/ensure-capability scenario-ctx bound-step interfaces registry)]
       (if (:error provision-result)
-        ;; Provisioning failed
+        ;; Provisioning failed. An :on-provision hook failure carries :ctx
+        ;; with the already-live capability — thread it so cleanup can
+        ;; close the impl (sl-uu7x).
         {:step-result (prov/make-step-result bound-step :failed scenario-ctx
                                              (:error provision-result))
-         :scenario-ctx scenario-ctx
+         :scenario-ctx (or (:ctx provision-result) scenario-ctx)
          :status :failed}
         ;; Execute step
         (do
@@ -223,10 +243,21 @@
                 result (invoke-step (:binding bound-step)
                                     (-> bound-step :binding :captures)
                                     ctx)
-                duration-ms (/ (- (System/nanoTime) start-ns) 1e6)]
-            {:step-result (assoc (prov/make-step-result bound-step (:status result)
-                                                        (:scenario result) (:error result))
-                                 :duration-ms duration-ms)
+                duration-ms (/ (- (System/nanoTime) start-ns) 1e6)
+                ;; Binding provenance (sl-yh7): names this step produced,
+                ;; recorded in run evidence — never in the map itself.
+                produced (let [before (get provisioned-ctx bindings/bindings-key)
+                               after (get (:scenario result) bindings/bindings-key)]
+                           (seq (keep (fn [[k v]]
+                                        (when (or (not (contains? before k))
+                                                  (not= v (get before k)))
+                                          k))
+                                      after)))]
+            {:step-result (cond-> (assoc (prov/make-step-result
+                                          bound-step (:status result)
+                                          (:scenario result) (:error result))
+                                         :duration-ms duration-ms)
+                            produced (assoc :bindings/produced (vec produced)))
              :scenario-ctx (:scenario result)
              :status (:status result)}))))))
 
@@ -284,12 +315,26 @@
                              (get-in plan [:plan/pickle :pickle/id]))
            interfaces (:interfaces opts)
            registry   (:adapter-registry opts)
+           ;; Stash the run's interfaces config into scenario ctx (sl-3jr4):
+           ;; step bodies resolve named locations against the interface's
+           ;; :config :base-url. Done before eager provisioning so the stash
+           ;; survives parallel-group delta merges.
+           initial-ctx (cond-> initial-ctx
+                         (seq interfaces) (cap/assoc-run-interfaces interfaces)
+                         ;; Reserve the data plane (sl-yh7). `or` — Before
+                         ;; hooks may already have mirrored contributions in.
+                         :always (update bindings/bindings-key #(or % {})))
            eager?     (and (= :eager (:provisioning opts)) interfaces)
            eager-result (if eager?
                           (prov/eager-provision-scenario plan initial-ctx interfaces registry)
                           {:ok initial-ctx})]
        (if (:error eager-result)
-         (prov/eager-failure-result plan (:error eager-result))
+         ;; The error's :ctx (partial provisioning, sl-uu7x) rides into the
+         ;; failure result — falling back to initial-ctx so Before-hook
+         ;; contributions survive either way — letting the After unwind see
+         ;; live capabilities and cleanup close them.
+         (prov/eager-failure-result plan (:error eager-result)
+                                    (or (:ctx eager-result) initial-ctx))
          ;; Execute steps with fail-fast
          (let [provisioned-ctx (:ok eager-result)
                raw-results

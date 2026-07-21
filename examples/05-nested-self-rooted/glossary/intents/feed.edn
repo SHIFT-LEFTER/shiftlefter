@@ -1,7 +1,12 @@
 ;; Feed — the flat timeline. Self-rooted Post mounted with NO :selector, so it
 ;; falls back to Post's own :root (§7.5). Demonstrates the self-rooted ergonomic:
 ;; define Post once, mount it here with zero per-place wiring.
+;;
+;; :location (sl-3jr4) — the region's own address: PATH is semantic and lives
+;; here; the HOST half is environmental and lives in shiftlefter.edn's
+;; interface :config :base-url. The feature navigates via the bare name 'Feed'.
 {:intent "Feed"
+ :location {:web {:path "/feed"}}
  :elements {}
  :root {:web {:css "[data-testid='feed']"}}
  :collections {:post {:intent "Post" :cardinality :many}}}

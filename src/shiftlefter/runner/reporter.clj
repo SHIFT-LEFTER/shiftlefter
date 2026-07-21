@@ -31,9 +31,12 @@
 
    3. PURE DATA. Every value handed to a reporter is pure, immutable,
       EDN-NATIVE data: it round-trips through `pr-str`/`read-string` with
-      the default data readers. Maps, vectors, sets, strings, keywords,
-      numbers, booleans, nil, UUIDs (`#uuid` tagged literals) and symbols
-      all qualify; timestamps are ISO-8601 strings. What is banned is the
+      the default data readers. Maps, vectors, sets, strings, numbers,
+      booleans, nil, and UUIDs (`#uuid` tagged literals) qualify; keywords
+      and symbols qualify when their printed form re-reads to an equal
+      value — names that break EDN's token grammar (sl-27uh) are
+      stringified by `scrub`; timestamps are ISO-8601 strings. What is
+      banned is the
       actual danger: functions, channels, atoms/refs, driver and capability
       objects, and arbitrary Java objects. This is what lets a future
       grid-style coordinator feed these same reporters from envelopes that
@@ -58,7 +61,8 @@
    Implementations may be stateful (e.g. JUnit accumulates results and
    writes its file in on-run-end); methods are called for effect and their
    return values are ignored."
-  (:require [clojure.spec.alpha :as s]
+  (:require [clojure.edn :as edn]
+            [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]))
 
 ;; -----------------------------------------------------------------------------
@@ -68,7 +72,9 @@
 ;; -----------------------------------------------------------------------------
 
 (s/def ::run-id string?)
-(s/def ::status #{:passed :failed :pending :skipped})
+;; :error (sl-esq): a lifecycle hook threw — infrastructure failure, distinct
+;; from :failed (a step assertion). Scenario-level only; steps never carry it.
+(s/def ::status #{:passed :failed :pending :skipped :error})
 (s/def ::exit-code int?)
 (s/def ::counts (s/map-of keyword? int?))
 
@@ -98,13 +104,44 @@
 (s/def ::run-summary
   (s/keys :req-un [::run-id ::exit-code ::counts ::status]))
 
+(def ^:private safe-token-part-re
+  ;; Fast-path charset for keyword/symbol name parts (sl-27uh): names made
+  ;; only of these characters always survive pr-str/read-string, so they skip
+  ;; the definitional read-back in `readable-token?`. Every framework-internal
+  ;; keyword/symbol (:mode, :plan/pickle, :step/invalid-return, stepdef :ns
+  ;; symbols) matches. The leading class deliberately excludes `+ - .` and
+  ;; digits — a leading sign or dot before a digit re-reads as a NUMBER
+  ;; ((symbol \"-1\") prints as -1) — so such names pay the slow path, which
+  ;; decides definitionally. Being outside this charset never rejects a token;
+  ;; it only costs the read-back.
+  #"[A-Za-z*!_?=][A-Za-z0-9*+!_?=.-]*")
+
+(defn- readable-token?
+  "True when a keyword/symbol's printed form re-reads to an equal value —
+   invariant 3's round-trip, checked definitionally rather than by
+   re-implementing EDN's (underspecified) token grammar. Names matching the
+   conservative charset above skip the read-back (Tower-sanctioned perf
+   fast path, 2026-07-10)."
+  [x]
+  (let [fast? #(and % (re-matches safe-token-part-re %))]
+    (if (and (fast? (name x))
+             (or (nil? (namespace x)) (fast? (namespace x))))
+      true
+      (try (= x (edn/read-string (pr-str x)))
+           ;; Style exception: broad catch — this is a validity probe; ANY
+           ;; reader throw means exactly "not readable", never a bug to surface.
+           (catch Exception _ false)))))
+
 (defn edn-safe?
   "True when x is pure, immutable, EDN-native data (invariant 3) — it
    round-trips through `pr-str`/`read-string` with the default data readers.
 
-   UUIDs and symbols qualify: `#uuid` is a tagged literal in the EDN spec and
-   symbols are EDN scalars. Functions, channels, atoms/refs, driver and
-   capability objects, and arbitrary Java objects do not.
+   UUIDs qualify (`#uuid` is a tagged literal in the EDN spec); keywords and
+   symbols qualify only when their printed form re-reads to an equal value
+   (sl-27uh) — a token like `(keyword \"a b\")` prints as `:a b`, which
+   re-reads as `:a`, so it is NOT admitted; `scrub` stringifies it. Functions,
+   channels, atoms/refs, driver and capability objects, and arbitrary Java
+   objects do not qualify.
 
    DEFRECORDS DO NOT QUALIFY, even though they satisfy `map?`: `pr-str` emits
    `#my.ns.Rec{...}`, which needs both a reader tag and the record class on the
@@ -112,8 +149,8 @@
    not have. `scrub` flattens them to plain maps."
   [x]
   (cond
-    (or (nil? x) (string? x) (keyword? x) (number? x) (boolean? x)
-        (uuid? x) (symbol? x)) true
+    (or (nil? x) (string? x) (number? x) (boolean? x) (uuid? x)) true
+    (or (keyword? x) (symbol? x)) (readable-token? x)
     (record? x) false
     (map? x) (every? (fn [[k v]] (and (edn-safe? k) (edn-safe? v))) x)
     (or (vector? x) (set? x) (seq? x)) (every? edn-safe? x)
@@ -153,7 +190,12 @@
     (cond-> {:type (:type error) :message (:message error)}
       (:exception-class error) (assoc :exception-class (:exception-class error))
       (:data error)            (assoc :data (scrub (:data error)))
-      (:value error)           (assoc :value (pr-str (:value error))))))
+      (:value error)           (assoc :value (pr-str (:value error)))
+      ;; Hook failure attribution (sl-esq): hook name + registration home
+      ;; + the @hook= tag's file:line — all EDN-native by construction.
+      (:hook error)            (assoc :hook (:hook error))
+      (:registration error)    (assoc :registration (:registration error))
+      (:tag-source error)      (assoc :tag-source (:tag-source error)))))
 
 (defn scenario-envelope
   "Project a raw execute-suite scenario result onto the report/observe planes.
@@ -184,6 +226,27 @@
      ;; Per-scenario wall clock (D5, sl-40to). Absent on the REPL path.
      (:duration-ms scenario-result)
      (assoc :duration-ms (:duration-ms scenario-result))
+     ;; Scenario-level hook failure (sl-esq): a lifecycle hook threw. Lives
+     ;; on the scenario, never on a step; absent everywhere else.
+     (:error scenario-result)
+     (assoc :error (error-envelope (:error scenario-result)))
+     ;; Derived-scheduling surfacing (sl-esq round-5 unification): effective
+     ;; non-default scheduling with its reason — {:serial? true :reason
+     ;; :costume|:shared-impl|[:hook name]|:tag} — so a report reader can
+     ;; see a scenario ran exclusively and WHY. Retrofits the costume/
+     ;; shared-impl reasons, which previously surfaced only as a stderr
+     ;; notice. Absent for default-scheduled scenarios.
+     (-> scenario-result :plan :plan/schedule)
+     (assoc :schedule (-> scenario-result :plan :plan/schedule))
+     ;; Hook records (sl-esq): every hook that ran, timed and stamped —
+     ;; {:name :phase :status :duration-ms :contributed}; failures keep
+     ;; their error (re-enveloped). Absent for hook-less scenarios.
+     (seq (:hooks scenario-result))
+     (assoc :hooks (mapv (fn [record]
+                           (cond-> record
+                             (:error record)
+                             (assoc :error (error-envelope (:error record)))))
+                         (:hooks scenario-result)))
      ;; sl-q9wp R4: absent only for hand-built plans with no pickle (tests).
      (-> scenario-result :plan :plan/pickle :pickle/id)
      (assoc :scenario/id (-> scenario-result :plan :plan/pickle :pickle/id)))))

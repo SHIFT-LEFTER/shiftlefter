@@ -49,6 +49,13 @@
 ;; The defrecord gap (sl-21z) proved the two can drift. These properties pin
 ;; the whole class: anything edn-safe? admits must actually round-trip, and
 ;; non-data must be rejected (false, not thrown) wherever it hides.
+;;
+;; CORRECTION (sl-27uh): sl-48n6's original conclusion — "no gaps found in
+;; edn-safe?" — was false: its generators only produced well-formed
+;; keyword/symbol names, so the type-only check passed the property while
+;; admitting non-round-tripping tokens like (keyword "a b"). The hostile
+;; generators below close that blind spot ("property tests are only as
+;; strong as their generators", ARCHITECTURE.md).
 
 (def ^:private gen-edn-scalar
   ;; The scalar vocabulary invariant 3 admits. NaN is deliberately absent:
@@ -64,6 +71,31 @@
                (gen/double* {:NaN? false})
                gen/boolean
                gen/uuid]))
+
+(def ^:private gen-hostile-name
+  ;; Names that break (or stress) EDN's token grammar: whitespace,
+  ;; reader-significant characters, control chars, leading digits, and the
+  ;; island-hostile shape from sl-27uh. Some combinations DO round-trip
+  ;; (`:<script` is readable) — the properties below are conditional, so
+  ;; that's exactly the point: admit iff round-trip, per token, definitionally.
+  (gen/one-of [(gen/return "</script><script>alert(1)</script>")
+               (gen/return "a b")
+               (gen/return "x]y")
+               (gen/return "")
+               (gen/fmap (fn [[a c b]] (str a c b))
+                         (gen/tuple gen/string-alphanumeric
+                                    (gen/elements [" " "\t" "\n" "]" ")" "}"
+                                                   "\"" ";" "\\" "<" "/" "@"
+                                                   "^" "`" "~" (str (char 0))])
+                                    gen/string-alphanumeric))
+               (gen/fmap #(str % "a") (gen/choose 0 9))]))
+
+(def ^:private gen-hostile-token
+  ;; sl-27uh: keywords/symbols whose NAMES may not survive pr-str/read-string.
+  ;; sl-48n6's original generators never produced these — the exact blind spot
+  ;; behind its "no gaps found in edn-safe?" claim, which this bead corrects.
+  (gen/one-of [(gen/fmap keyword gen-hostile-name)
+               (gen/fmap symbol gen-hostile-name)]))
 
 (def ^:private gen-nasty-leaf
   ;; The actual danger, per invariant 3 — plus the two shapes that LOOK like
@@ -87,7 +119,9 @@
 (def ^:private gen-mixed-value
   ;; Deeply nested mixed collections where any leaf may be safe or nasty.
   (gen/recursive-gen gen-containers
-                     (gen/frequency [[4 gen-edn-scalar] [1 gen-nasty-leaf]])))
+                     (gen/frequency [[4 gen-edn-scalar]
+                                     [1 gen-nasty-leaf]
+                                     [1 gen-hostile-token]])))
 
 (def ^:private gen-buried-nasty
   ;; A nasty leaf under 0-4 layers of otherwise-safe containers.
@@ -134,6 +168,41 @@
   (testing "arbitrary objects are rendered with pr-str"
     (is (string? (:drv (reporter/scrub {:drv (Object.)}))))
     (is (reporter/edn-safe? (reporter/scrub {:f identity})))))
+
+(deftest edn-safe?-rejects-non-round-tripping-tokens
+  ;; sl-27uh: the type check alone admitted any keyword/symbol; invariant 3
+  ;; stands unweakened (Tower ruling 2026-07-10), so admission requires the
+  ;; token's printed form to re-read to an equal value.
+  (testing "the Warden evidence shapes are rejected"
+    (is (not (reporter/edn-safe? (keyword "</script><script>alert(1)</script>"))))
+    (is (not (reporter/edn-safe? (keyword "a b"))))
+    (is (not (reporter/edn-safe? (symbol "a b"))))
+    (is (not (reporter/edn-safe? (symbol "x]y"))))
+    (is (not (reporter/edn-safe? (keyword ""))))
+    (is (not (reporter/edn-safe? (symbol "-1")))
+        "prints as the NUMBER -1: type lost on re-read"))
+
+  (testing "hostile tokens are caught at any depth, key or value"
+    (is (not (reporter/edn-safe? {:k [(symbol "a b")]})))
+    (is (not (reporter/edn-safe? {(keyword "a b") 1}))))
+
+  (testing "scrub stringifies what edn-safe? now rejects (pr-str form)"
+    (is (= ":a b" (reporter/scrub (keyword "a b"))))
+    (is (= {:k "a b"} (reporter/scrub {:k (symbol "a b")})))
+    (is (= {:x ":</script><script>alert(1)</script>"}
+           (reporter/scrub {:x (keyword "</script><script>alert(1)</script>")}))
+        "the muq9 coupling: a hostile keyword can now only reach the island
+         as a STRING, where escape-island handles it"))
+
+  (testing "well-formed tokens still qualify — fast path and slow path alike"
+    (is (reporter/edn-safe? :step/invalid-return))
+    (is (reporter/edn-safe? 'shiftlefter.runner.core))
+    (is (reporter/edn-safe? '->))
+    ;; suspicious-LOOKING but genuinely readable names take the definitional
+    ;; slow path and are correctly admitted; the island emitter's integrity
+    ;; guard (html.clj, sl-27uh) is the defense layer for the `</` corner.
+    (is (reporter/edn-safe? (keyword "<script")))
+    (is (reporter/edn-safe? (keyword "1a")))))
 
 (deftest error-envelope-pr-strs-value-exactly-once
   (testing "R2: :value is an arbitrary runtime value, stringified here and only here"
@@ -280,3 +349,54 @@
   (testing "AC 6: the bus is retained but write-only; reporters are NOT subscribers"
     (let [bus (events/make-memory-bus)]
       (is (zero? (count @(:subscriptions-atom bus)))))))
+
+;; -----------------------------------------------------------------------------
+;; Scenario-level :error projection (sl-esq)
+;; -----------------------------------------------------------------------------
+
+(deftest scenario-envelope-projects-scenario-level-error
+  (testing "an :error scenario's error survives the envelope seam with hook attribution"
+    (let [envelope (reporter/scenario-envelope
+                    {:status :error
+                     :error {:type :hook/before-failed
+                             :message "boom"
+                             :exception-class "java.lang.IllegalStateException"
+                             :hook "reset-db"
+                             :registration {:path "/proj/hooks.clj"}
+                             :tag-source {:file "features/x.feature" :line 3}}
+                     :plan {:plan/pickle {:pickle/id (java.util.UUID/randomUUID)}}
+                     :steps []})]
+      (is (= :error (:status envelope)))
+      (is (= "reset-db" (-> envelope :error :hook)))
+      (is (= "/proj/hooks.clj" (-> envelope :error :registration :path)))
+      (is (= 3 (-> envelope :error :tag-source :line)))
+      (is (reporter/edn-safe? envelope))
+      (is (= envelope (edn/read-string (pr-str envelope))))))
+  (testing "no :error on the raw result — no :error key on the envelope (byte-identity guard)"
+    (let [envelope (reporter/scenario-envelope
+                    {:status :passed
+                     :plan {:plan/pickle {:pickle/id (java.util.UUID/randomUUID)}}
+                     :steps []})]
+      (is (not (contains? envelope :error))))))
+
+;; -----------------------------------------------------------------------------
+;; Derived-scheduling surfacing (sl-esq AC8, round-5 unification)
+;; -----------------------------------------------------------------------------
+
+(deftest scenario-envelope-records-effective-scheduling
+  (testing "non-default scheduling with reason survives the seam — costume,
+            shared-impl (the retrofit) and [:hook name] alike"
+    (doseq [reason [:costume :shared-impl [:hook "reset-db"]]]
+      (let [envelope (reporter/scenario-envelope
+                      {:status :passed
+                       :plan {:plan/pickle {:pickle/id (java.util.UUID/randomUUID)}
+                              :plan/schedule {:serial? true :reason reason}}
+                       :steps []})]
+        (is (= {:serial? true :reason reason} (:schedule envelope)))
+        (is (reporter/edn-safe? envelope)))))
+  (testing "default-scheduled scenarios: no :schedule key (byte-identity guard)"
+    (let [envelope (reporter/scenario-envelope
+                    {:status :passed
+                     :plan {:plan/pickle {:pickle/id (java.util.UUID/randomUUID)}}
+                     :steps []})]
+      (is (not (contains? envelope :schedule))))))

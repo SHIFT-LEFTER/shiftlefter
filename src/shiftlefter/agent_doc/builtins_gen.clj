@@ -53,15 +53,35 @@
     (sort-by (comp name key) coll)
     (sort-by name coll)))
 
+(defn- arg-cell
+  "Render one arg slot, annotating its value kind when the frame declares
+   one (sl-yh7): :value slots take a quoted literal or a {binding} token;
+   :matcher slots are regex source whose named groups produce bindings."
+  [arg arg-kinds]
+  (case (get arg-kinds arg)
+    :value   (str "`" arg "` (literal or `{binding}`)")
+    :matcher (str "`" arg "` (regex; `(?<name>...)` produces `{name}` bindings)")
+    (str "`" arg "`")))
+
 (defn- frame-line
   "Render one verb frame as a Markdown bullet: surface pattern, the arg slots
-   it introduces, and any implicit object."
-  [frame-kw {:keys [args pattern implicit-object]}]
+   it introduces (with their value kinds, sl-yh7), any implicit object, and
+   the O-slot kind when the frame declares one (sl-3jr4 — agents navigate by
+   this doc, so a :location slot says whether it takes an intent ref, a
+   literal URL, a {binding} token, or several)."
+  [frame-kw {:keys [args pattern implicit-object object-kind location-refs?
+                    arg-kinds]}]
   (str "- frame `" frame-kw "`: `" pattern "`"
        (when (seq args)
-         (str " — args " (str/join ", " (map #(str "`" % "`") args))))
+         (str " — args " (str/join ", " (map #(arg-cell % arg-kinds) args))))
        (when implicit-object
-         (str " — implicit object `" implicit-object "`"))))
+         (str " — implicit object `" implicit-object "`"))
+       (when object-kind
+         (str " — O: " (if (= object-kind :location)
+                         (if location-refs?
+                           "intent ref (bare PascalCase name), literal URL, or `{binding}`"
+                           "literal URL")
+                         (str "`" object-kind "`"))))))
 
 (defn- verb-block
   "Render one verb: its description heading and a bullet per frame."

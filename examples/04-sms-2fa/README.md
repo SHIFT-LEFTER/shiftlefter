@@ -1,14 +1,14 @@
 # Two-Factor Password Reset via SMS
 
 A real browser drives a password reset flow. The second factor — a 6-digit
-verification code — arrives by SMS. ShiftLefter reads it back from the
-mock SMS line and types it into the form. One scenario, two interfaces,
-no plumbing in the feature file.
+verification code — arrives by SMS. ShiftLefter captures it into the
+scenario data plane and types it back into the form. One scenario, two
+interfaces, **zero custom code**.
 
-> **Mode: Shifted** — the config carries `:svo` and a subject glossary, so
-> the scenario validates against the project vocabulary at planning time
-> (`sl orient` will say `Mode: Shifted`). This is also the first example
-> with `setup.clj` orchestration — see
+> **Mode: Shifted** — the config carries `:svo`, a subject glossary, and a
+> `Login` intent, so the scenario validates against the project vocabulary
+> at planning time (`sl orient` will say `Mode: Shifted`). This is also the
+> first example with `setup.clj` orchestration — see
 > [the examples index](../README.md) for where it sits on the path.
 
 ## The Punchline
@@ -18,13 +18,13 @@ Feature: Two-factor password reset via SMS
 
   Scenario: Alice resets her password using a code sent to her phone
     When :user/alice opens the browser to 'http://localhost:9090/reset-password'
-    And  :user/alice fills {:id "email"} with 'alice@example.com'
-    And  :user/alice clicks {:css "button[type=\"submit\"]"}
+    And  :user/alice fills Login.email with 'alice@example.com'
+    And  :user/alice clicks Login.submit
     Then :user/alice should see 'Enter Verification Code'
 
-    When [:sms] :user/alice receives an SMS to '+15550001111' matching /verification code is: (\d{6})/
-    And  :user/alice fills {:id "code"} with the SMS code
-    And  :user/alice clicks {:css "button[type=\"submit\"]"}
+    When [:sms] :user/alice receives an SMS to '+15550001111' matching /verification code is: (?<code>\d{6})/
+    And  :user/alice fills Login.code with {code}
+    And  :user/alice clicks Login.submit
     Then :user/alice should see 'Code verified for alice'
 ```
 
@@ -32,34 +32,28 @@ That's it. Each step calls into one of two interfaces (`:web` via Etaoin,
 `:sms` via a mock adapter). The `[:sms]` annotation on the receive step
 narrows binding to the SMS interface — that's the lane marker.
 
-## The 14 Lines of Custom Code
+## The Handoff: Named Bindings
 
-The framework's SMS receive step stashes the regex captures into ctx as
-`{:sms/captures {:groups [code]}}`. There's no built-in step today that
-types a captured value into a browser field. So you write one:
+The cross-interface bridge is two tokens of Gherkin:
 
-```clojure
-;; steps/handoff.clj
-(defstep #":([\w./-]+) fills (\{[^}]+\}) with the SMS code"
-  {:interface :web
-   :requires-protocols [:shiftlefter.browser.protocol/IBrowser]}
-  [ctx subject locator-text]
-  (let [code        (first (get-in ctx [:sms/captures :groups]))
-        session-key (bctx/subject->session-key subject)
-        browser     (bctx/get-session ctx session-key)]
-    (bp/fill! browser (edn/read-string locator-text) code)
-    ctx))
-```
+1. **Produce.** The receive step's match pattern names a group:
+   `(?<code>\d{6})`. On a match, the captured text becomes a scenario
+   binding — `{code}` — in the scenario's data plane. (An unnamed group
+   `(\d{6})` binds nothing, and the dry run notices it.)
+2. **Consume.** Any literal-admitting slot accepts a `{name}` token:
+   `fills Login.code with {code}` resolves the binding at execution time.
+   Quoted text is always literal — `'{code}'` would type the five
+   characters `{code}`.
 
-That's the entire bridge between web and SMS. A planned follow-up
-(generic ctx-interpolation) may make this expressible as
-`{ctx.sms.captures.groups.0}` in step text directly. For now, custom
-stepdefs are how you compose interfaces — and they're easy.
+Bindings are scenario-scoped, flow forward only, and die at scenario end.
+The dry run statically checks every consumed name has an upstream producer
+(with a did-you-mean on typos), so a misspelled `{coed}` fails at planning
+time, not mid-run.
 
-One expected notice at load time: `Step … has :interface without :svo —
-SVO validation will be skipped`. That's accurate — this step's value comes
-from ctx rather than step text, which the SVO arg model can't declare yet,
-so the step opts out of SVO validation.
+Earlier versions of this example needed a 14-line custom step definition
+to read the captured code out of ctx. That stepdef — and the load-time
+"SVO validation will be skipped" notice it carried — is gone: the receive
+step's frame is fully declared, and the handoff is first-class.
 
 ## Standing Up the SUT — `setup.clj`
 
@@ -135,8 +129,11 @@ for messages sent before the scenario began.
 
 ## What This Proves
 
-- **Cross-interface scenarios are trivial to write.** One feature file,
-  two interfaces, one custom step.
+- **Cross-interface composition needs zero custom code.** One feature
+  file, two interfaces, a named group, and a `{code}` token.
+- **The data plane is statically checked.** Consumed-without-producer is
+  a planning error with a did-you-mean; a groups-but-no-names pattern
+  gets a notice. Typos die in the dry run.
 - **Test orchestration has a home.** `setup.clj` is where you stand up
   whatever your test needs — HTTP servers, queues, mocked external
   services — and share state with the framework's capabilities.

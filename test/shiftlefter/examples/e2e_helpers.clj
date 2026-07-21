@@ -24,11 +24,13 @@
   "True when live-browser E2E tests should run."
   (some? (System/getenv "SHIFTLEFTER_LIVE_WEBDRIVER")))
 
-(defn run-against
-  "Load intents from `:intents-dir`, stand up the fixture server with `:pages`,
-   open a real (headless) browser to `:path`, then call
-   `(f browser intents resolve)` where `resolve` is `(fn [address] target)` for
-   the `:web` interface. Cleans up the browser and server even on throw.
+(defn run-against*
+  "Full-context variant of `run-against`: load intents from `:intents-dir`,
+   stand up the fixture server with `:pages`, open a real (headless) browser to
+   `:path`, then call `(f {:browser :intents :resolve :base-url})` — `:base-url`
+   is the fixture server's dynamic `http://localhost:<port>`, for validators
+   that exercise named-location resolution (sl-3jr4). Cleans up the browser and
+   server even on throw.
 
    Throws if the intents fail to load (a broken glossary is a test failure, not
    a silent skip)."
@@ -42,10 +44,25 @@
           browser (:browser cap)]
       (try
         (bp/open-to! browser (str "http://localhost:" port path))
-        (f browser intents (fn [address] (bi/resolve-target browser intents address :web)))
+        (f {:browser browser
+            :intents intents
+            :resolve (fn [address] (bi/resolve-target browser intents address :web))
+            :base-url (str "http://localhost:" port)})
         (finally
           (eta-adapter/close-browser cap)
           (srv/stop-server server))))))
+
+(defn run-against
+  "Load intents from `:intents-dir`, stand up the fixture server with `:pages`,
+   open a real (headless) browser to `:path`, then call
+   `(f browser intents resolve)` where `resolve` is `(fn [address] target)` for
+   the `:web` interface. Cleans up the browser and server even on throw.
+
+   Throws if the intents fail to load (a broken glossary is a test failure, not
+   a silent skip)."
+  [opts f]
+  (run-against* opts (fn [{:keys [browser intents resolve]}]
+                       (f browser intents resolve))))
 
 (defn text-of
   "Text of a single resolved `{:el}`/`{:q}` target."

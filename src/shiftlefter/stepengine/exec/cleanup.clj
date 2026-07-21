@@ -8,6 +8,7 @@
    `execute-suite` from this ns."
   (:require [shiftlefter.adapters.registry :as registry]
             [shiftlefter.capabilities.ctx :as cap]
+            [shiftlefter.stepengine.exec.hooks :as hooks]
             [shiftlefter.stepengine.exec.provisioning :as prov]
             [shiftlefter.stepengine.exec.step-loop :as step-loop])
   (:import (java.util IdentityHashMap)
@@ -118,12 +119,47 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- execute-scenario-with-cleanup
-  "Execute a scenario, then clean up its ephemeral capabilities.
+  "Execute a scenario with its lifecycle hooks (sl-esq), then clean up its
+   ephemeral capabilities.
 
-   Returns scenario result with `:capability-cleanup` populated."
+   The weave: Befores -> execute-scenario (provisioning + steps) -> Afters
+   -> capability cleanup. A Before failure skips execute-scenario entirely
+   (no provisioning cost paid); Afters unwind the succeeded frames LIFO,
+   BEFORE cleanup so they can reach live capabilities. Non-runnable plans
+   (binding failures) pay no user lifecycle code. Bare/REPL callers going
+   through exec/execute-scenario bypass hooks entirely — they have no plan
+   scan and no :plan/hooks.
+
+   Returns scenario result with `:capability-cleanup` populated; when hooks
+   ran, `:hooks` carries their records and a hook failure sets `:status
+   :error` with the (first) failure on `:error`."
   [plan opts]
-  (let [start-ns    (System/nanoTime)
-        result      (step-loop/execute-scenario plan {} opts)
+  (let [start-ns  (System/nanoTime)
+        entries   (when (:plan/runnable? plan) (:plan/hooks plan))
+        sid       (when (seq entries) (hooks/scenario-identity plan))
+        {befores-ctx :ctx :keys [frames] before-records :records before-error :error}
+        (hooks/run-befores! entries sid {})
+
+        result    (if before-error
+                    (hooks/error-scenario-result plan befores-ctx before-error)
+                    (step-loop/execute-scenario plan befores-ctx opts))
+        ;; The in-flight result handed to Afters — richer than the envelope
+        ;; (hooks are in-process trusted code; invariant 3 governs the
+        ;; reporter seam, not hook payloads).
+        in-flight (cond-> result
+                    (seq before-records) (assoc :hooks before-records))
+        {after-records :records after-errors :errors}
+        (hooks/run-afters! frames sid (:scenario-ctx result) in-flight)
+
+        hook-records (into (vec before-records) after-records)
+        result    (cond-> result
+                    (seq hook-records) (assoc :hooks hook-records)
+                    ;; A failing :after makes the scenario :error even when
+                    ;; all steps passed (round 2: harsh is correct). The
+                    ;; first failure carries attribution; a pre-existing
+                    ;; before-error keeps precedence.
+                    (seq after-errors) (-> (assoc :status :error)
+                                           (update :error #(or % (first after-errors)))))
         duration-ms (/ (- (System/nanoTime) start-ns) 1e6)
         scenario-ctx (:scenario-ctx result)
         interfaces  (:interfaces opts)
@@ -225,7 +261,8 @@
 
    Returns:
    - {:scenarios [{:status ... :plan ... :steps ... :capability-cleanup ...} ...]
-      :counts {:passed N :failed N :pending N :skipped N}
+      :counts {:passed N :failed N :pending N :skipped N
+               :error N}   ;; only when positive — a lifecycle hook threw (sl-esq)
       :status :passed|:failed}
 
    `:scenarios` is in PLAN order at every :max-parallel.
@@ -254,8 +291,12 @@
          counts (frequencies (map :status results))
          suite-passed? (every? #(= :passed (:status %)) results)]
      {:scenarios results
-      :counts {:passed (get counts :passed 0)
-               :failed (get counts :failed 0)
-               :pending (get counts :pending 0)
-               :skipped (get counts :skipped 0)}
+      ;; :error (sl-esq, hook threw) is emitted only when positive so
+      ;; hook-less runs keep the historical four-key map byte-identical.
+      :counts (cond-> {:passed (get counts :passed 0)
+                       :failed (get counts :failed 0)
+                       :pending (get counts :pending 0)
+                       :skipped (get counts :skipped 0)}
+                (pos? (get counts :error 0))
+                (assoc :error (get counts :error)))
       :status (if suite-passed? :passed :failed)})))

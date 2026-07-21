@@ -74,6 +74,8 @@ No code required — these ship with ShiftLefter:
 :user/alice should see {<locator>}
 :user/alice should not see {<locator>}
 :user/alice should be on '<url>'
+:user/alice should be on <Intent>
+:user/alice should be on exactly '<url>'
 
 # timing
 :user/alice waits <N> seconds
@@ -82,6 +84,16 @@ No code required — these ship with ShiftLefter:
 ```
 
 The current built-in set, with each verb's frames, is `sl agent-doc builtins`.
+
+`should be on` is a **region** assertion: it compares the normalized path (and
+fragment) and ignores the query string and host. **Quoted = literal, always;
+bare = ref** (the same rule as element slots): a bare intent name like `Feed`
+resolves via the intent's `:location` + the interface `:base-url`, while a
+quoted value is taken as a literal URL or path. `should be on exactly`
+compares the full URL structurally (query parameter order across keys doesn't
+matter; everything else must match); it takes a quoted literal or a captured
+`{binding}` token (a magic-link URL captured earlier in the scenario), never
+a bare intent name.
 
 ### Locators
 

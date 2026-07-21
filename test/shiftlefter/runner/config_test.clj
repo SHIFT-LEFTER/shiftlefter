@@ -1,9 +1,11 @@
 (ns shiftlefter.runner.config-test
   (:require [babashka.fs :as fs]
+            [clojure.edn :as edn]
             [clojure.spec.alpha :as s]
             [clojure.test :refer [deftest is testing]]
             [shiftlefter.paths :as paths]
-            [shiftlefter.runner.config :as config]))
+            [shiftlefter.runner.config :as config]
+            [shiftlefter.runner.reporter :as reporter]))
 
 ;; -----------------------------------------------------------------------------
 ;; default-config Tests
@@ -16,6 +18,73 @@
       (is (= ["steps/"] (get-in cfg [:runner :step-paths])))
       (is (= false (get-in cfg [:runner :allow-pending?])))
       (is (= false (get-in cfg [:runner :macros :enabled?]))))))
+
+;; -----------------------------------------------------------------------------
+;; Config Lint Tests (sl-hlkz)
+;; -----------------------------------------------------------------------------
+
+(deftest lint-config-flags-misplaced-known-keys
+  (testing "the evidence case: top-level :step-paths (example 03's silent ignore)"
+    (let [warnings (config/lint-config
+                    (merge config/default-config {:step-paths ["steps/"]}))]
+      (is (= 1 (count warnings)))
+      (is (= :config/misplaced-key (:type (first warnings))))
+      (is (= :step-paths (:key (first warnings))))
+      (is (= [:runner :step-paths] (:suggested-path (first warnings))))
+      (is (s/valid? ::config/lint-warnings warnings))))
+
+  (testing "other known-nested keys get their canonical path suggested"
+    (doseq [[k path] {:dialect [:parser :dialect]
+                      :junit-xml [:runner :report :junit-xml]
+                      :verbs [:glossaries :verbs]
+                      :unknown-verb [:svo :unknown-verb]}]
+      (let [[w] (config/lint-config {k :whatever})]
+        (is (= :config/misplaced-key (:type w)) (str k))
+        (is (= path (:suggested-path w)) (str k))))))
+
+(deftest lint-config-flags-unknown-keys
+  (let [[w :as warnings] (config/lint-config
+                          (merge config/default-config {:stpe-paths ["x"]}))]
+    (is (= 1 (count warnings)))
+    (is (= :config/unknown-key (:type w)))
+    (is (= :stpe-paths (:key w)))
+    (is (nil? (:suggested-path w)))))
+
+(deftest lint-config-accepts-every-known-top-level-key
+  (testing "default-config and the full documented shape are clean"
+    (is (= [] (config/lint-config config/default-config)))
+    (is (= [] (config/lint-config
+               {:parser {:dialect "en"}
+                :runner {:step-paths ["steps/"]}
+                :glossaries {:subjects "g/s.edn"}
+                :interfaces {:web {:type :web :adapter :etaoin}}
+                :svo {:unknown-verb :warn}
+                :webdriver-url "http://localhost:9515"
+                :webdriver {:host "localhost" :port 9515}}))))
+  (testing "empty config is clean"
+    (is (= [] (config/lint-config {})))))
+
+(deftest lint-config-is-deterministic-and-never-blocks
+  (testing "multiple offenders come back sorted by key"
+    (is (= [:aaa :step-paths :zzz]
+           (mapv :key (config/lint-config {:zzz 1 :aaa 2 :step-paths ["x"]})))))
+  (testing "warnings only: the config itself is untouched and loading proceeds
+            (forward compat — a newer config on an older version must run)"
+    (let [cfg (merge config/default-config {:future-key {:x 1}})]
+      (is (= cfg (do (config/lint-config cfg) cfg)))
+      (is (vector? (config/lint-config cfg))))))
+
+(deftest lint-config-scrub-composition
+  ;; sl-lnj1 attach-time scrub (the exact expression compile-suite-stage
+  ;; uses): a lint's :key holds the OFFENDING keyword itself, which can be
+  ;; non-round-tripping (sl-27uh class — unreachable from an EDN config
+  ;; file, but reachable from programmatic execute! callers). Scrub
+  ;; stringifies it so the machine summary can never be corrupted.
+  (let [lints (reporter/scrub (config/lint-config {(keyword "a b") 1}))]
+    (is (= 1 (count lints)))
+    (is (= ":a b" (:key (first lints))) "hostile keyword arrives as its pr-str string")
+    (is (= :config/unknown-key (:type (first lints))))
+    (is (= lints (edn/read-string (pr-str lints))) "scrubbed lints round-trip")))
 
 ;; -----------------------------------------------------------------------------
 ;; load-config Tests
@@ -412,6 +481,29 @@
     (let [cfg {:interfaces {}}
           result (config/normalize cfg)]
       (is (nil? (:errors result))))))
+
+(deftest test-interface-base-url
+  (testing "A string :base-url in interface :config is valid and spec-conformant"
+    (let [iface {:type :web :adapter :etaoin
+                 :config {:base-url "http://localhost:9092" :headless true}}
+          cfg {:interfaces {:web iface}}
+          result (config/normalize cfg)]
+      (is (nil? (:errors result)))
+      (is (s/valid? :shiftlefter.runner.config/interface-def iface))
+      (is (= "http://localhost:9092" (config/get-base-url result :web)))))
+
+  (testing "get-base-url is nil when unset"
+    (let [result (config/normalize {:interfaces {:web {:type :web :adapter :etaoin}}})]
+      (is (nil? (config/get-base-url result :web)))))
+
+  (testing "Non-string or blank :base-url is a loud config error (sl-3jr4)"
+    (doseq [bad [9092 "" "   " :localhost]]
+      (let [cfg {:interfaces {:web {:type :web :adapter :etaoin
+                                    :config {:base-url bad}}}}
+            result (config/normalize cfg)]
+        (is (seq (:errors result)) (str ":base-url " (pr-str bad) " should error"))
+        (is (= :config/invalid-interface (-> result :errors first :type)))
+        (is (re-find #"base-url" (-> result :errors first :message)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Glossary Config Accessor Tests

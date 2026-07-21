@@ -159,7 +159,8 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest test-receive-default-finds-and-captures
-  (testing ":receive :default returns ctx with :sms/captures + advanced last-receive-ts"
+  (testing ":receive :default binds named groups into :sl/bindings (sl-yh7)
+            + advances last-receive-ts"
     (let [m   (mock/make-mock-sms)
           ts  (Instant/now)
           ctx (ctx-with-sms m :alice ts)]
@@ -169,14 +170,65 @@
                                       :to   "+15551234567"
                                       :body "Your code: 987654"})
       (let [step   (find-sms-stepdef :receive :default)
-            result (invoke step ctx "alice" "+15551234567" "code: (\\d+)")]
-        (is (= "code: 987654" (get-in result [:sms/captures :full])))
-        (is (= ["987654"]     (get-in result [:sms/captures :groups])))
+            result (invoke step ctx "alice" "+15551234567" "code: (?<code>\\d+)")]
+        (is (= "987654" (get-in result [:sl/bindings :code])))
+        (is (nil? (:sms/captures result))
+            "legacy :sms/captures public storage is gone")
         (is (= "Your code: 987654" (-> result :sms/last-message :body)))
         (is (some? (:sms/last-receive-ts result)))
         (is (= (-> result :sms/last-message :date-sent)
                (:sms/last-receive-ts result))
             "last-receive-ts advances to matched message's :date-sent")))))
+
+(deftest test-receive-multiple-named-groups-all-bind
+  (let [m   (mock/make-mock-sms)
+        ctx (ctx-with-sms m :alice)]
+    (Thread/sleep 5)
+    (sms-proto/simulate-inbound! m {:from "+1" :to "+15551234567"
+                                    :body "user alice pin 4242"})
+    (let [step   (find-sms-stepdef :receive :default)
+          result (invoke step ctx "alice" "+15551234567"
+                         "user (?<user>[a-z]+) pin (?<pin>\\d+)")]
+      (is (= {:user "alice" :pin "4242"} (:sl/bindings result))))))
+
+(deftest test-receive-unnamed-groups-bind-nothing
+  (let [m   (mock/make-mock-sms)
+        ctx (ctx-with-sms m :alice)]
+    (Thread/sleep 5)
+    (sms-proto/simulate-inbound! m {:from "+1" :to "+15551234567" :body "code: 42"})
+    (let [step   (find-sms-stepdef :receive :default)
+          result (invoke step ctx "alice" "+15551234567" "code: (\\d+)")]
+      (is (empty? (:sl/bindings result))
+          "positional groups never bind — dry-run notices this")
+      (is (= "code: 42" (-> result :sms/last-message :body))
+          "the match itself still succeeds (capture is also an assert)"))))
+
+(deftest test-receive-matcher-interpolates-embedded-tokens
+  (testing "embedded {binding} tokens in the match pattern interpolate as
+            regex-quoted literals (sl-yh7)"
+    (let [m   (mock/make-mock-sms)
+          ctx (assoc (ctx-with-sms m :alice)
+                     :sl/bindings {:orderNumber "A-12.3"})]
+      (Thread/sleep 5)
+      (sms-proto/simulate-inbound! m {:from "+1" :to "+15551234567"
+                                      :body "order A-12.3 shipped, track 777"})
+      ;; A-12x3 must NOT match — the dot is quoted, not a wildcard
+      (sms-proto/simulate-inbound! m {:from "+1" :to "+15551234567"
+                                      :body "order A-12x3 shipped, track 888"})
+      (let [step   (find-sms-stepdef :receive :default)
+            result (invoke step ctx "alice" "+15551234567"
+                           "order {orderNumber} shipped, track (?<track>\\d+)")]
+        (is (= "777" (get-in result [:sl/bindings :track])))))))
+
+(deftest test-receive-invalid-pattern-is-structured
+  (testing "a bad match regex (incl. duplicate group names) throws
+            :bindings/invalid-pattern"
+    (let [m   (mock/make-mock-sms)
+          ctx (ctx-with-sms m :alice)
+          step (find-sms-stepdef :receive :default)
+          thrown (try (invoke step ctx "alice" "+1" "(?<a>x)|(?<a>y)") nil
+                      (catch Exception e (ex-data e)))]
+      (is (= :bindings/invalid-pattern (:type thrown))))))
 
 (deftest test-receive-default-uses-last-receive-ts-baseline
   (testing "Sequential :receive uses :sms/last-receive-ts, not scenario-start"
@@ -190,11 +242,12 @@
       (sms-proto/simulate-inbound! m {:from "+1" :to "+15551234567" :body "code: 111"})
       (Thread/sleep 5)
       (sms-proto/simulate-inbound! m {:from "+1" :to "+15551234567" :body "code: 222"})
-      (let [r1 (invoke step ctx "alice" "+15551234567" "code: (\\d+)")
-            r2 (invoke step r1  "alice" "+15551234567" "code: (\\d+)")]
-        (is (= ["111"] (get-in r1 [:sms/captures :groups])))
-        (is (= ["222"] (get-in r2 [:sms/captures :groups]))
-            "Second :receive advances past the first message via last-receive-ts")))))
+      (let [r1 (invoke step ctx "alice" "+15551234567" "code: (?<code>\\d+)")
+            r2 (invoke step r1  "alice" "+15551234567" "code: (?<code>\\d+)")]
+        (is (= "111" (get-in r1 [:sl/bindings :code])))
+        (is (= "222" (get-in r2 [:sl/bindings :code]))
+            "Second :receive advances past the first message via
+             last-receive-ts, and rebinding {code} is last-write-wins")))))
 
 (deftest test-receive-times-out-when-no-match
   (testing ":receive throws :sms/receive-timeout when no matching message arrives"
@@ -224,7 +277,7 @@
           step (find-sms-stepdef :receive :since-iso)
           result (invoke step ctx "alice" "+15551234567"
                          "2026-05-06T09:30:00Z" "after")]
-      (is (= "after" (get-in result [:sms/captures :full])))
+      (is (= "after" (-> result :sms/last-message :body)))
       (is (some? msg)))))
 
 (deftest test-receive-since-iso-rejects-malformed
@@ -249,10 +302,10 @@
           ctx (ctx-with-sms m :alice (.minusSeconds (Instant/now) 600))
           step (find-sms-stepdef :receive :within-last)
           ;; "within the last 1 minute" → only `recent` is in window
-          result (invoke step ctx "alice" "+15551234567" "1 minute" "(\\d+)")]
+          result (invoke step ctx "alice" "+15551234567" "1 minute" "(?<n>\\d+)")]
       (is (some? recent))
       (is (some? old))
-      (is (= ["999"] (get-in result [:sms/captures :groups]))
+      (is (= "999" (get-in result [:sl/bindings :n]))
           "within-last 1 minute should match the 30-seconds-ago message"))))
 
 (deftest test-receive-within-last-rejects-bad-duration

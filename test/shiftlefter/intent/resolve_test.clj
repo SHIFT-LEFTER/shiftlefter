@@ -273,3 +273,103 @@
               (is (= {:css "button.submit"} (:ok result)))))))
       (finally
         (cleanup-temp-dir dir)))))
+
+;; -----------------------------------------------------------------------------
+;; Named locations (sl-3jr4)
+;; -----------------------------------------------------------------------------
+
+(deftest location-ref-classifier
+  (testing "Bare PascalCase tokens are refs (sl-iseq: bare = ref)"
+    (is (resolve/location-ref? "Feed"))
+    (is (resolve/location-ref? "Login"))
+    (is (resolve/location-ref? "BuyBox2"))
+    (is (resolve/location-ref? "Feed.x")
+        "dotted bare tokens bind as ref shapes so resolution can give a
+         did-you-mean instead of a no-step-binds error")
+    (is (resolve/location-ref? "Login.submit")))
+  (testing "Quoted values and URL shapes are literals (quoted = literal, always)"
+    (is (not (resolve/location-ref? "'Feed'")))
+    (is (not (resolve/location-ref? "'http://h/feed'")))
+    (is (not (resolve/location-ref? "http://localhost:9092/feed")))
+    (is (not (resolve/location-ref? "https://example.com/login")))
+    (is (not (resolve/location-ref? "/login")))
+    (is (not (resolve/location-ref? "example.com")))
+    (is (not (resolve/location-ref? "about:blank")))
+    (is (not (resolve/location-ref? "login")))
+    (is (not (resolve/location-ref? "{:css \"#a\"}")))
+    (is (not (resolve/location-ref? "")))
+    (is (not (resolve/location-ref? nil)))))
+
+(defn- location-fixture-intents []
+  (let [dir (create-temp-intents-dir
+             {"feed.edn"
+              (pr-str {:intent "Feed"
+                       :location {:web {:path "/feed"}}
+                       :elements {:title {:bindings {:web {:css "h1"}}}}})
+              "card.edn"
+              (pr-str {:intent "ProductCard"
+                       :elements {:price {:bindings {:web {:css ".price"}}}}})
+              "stub.edn"
+              (pr-str {:intent "Stub"
+                       :location {:web {}}
+                       :elements {:x {:bindings {:web {:css ".x"}}}}})})]
+    (try
+      (:ok (loader/load-all-intents (str dir)))
+      (finally
+        (cleanup-temp-dir dir)))))
+
+(deftest resolve-location-happy-path
+  (let [intents (location-fixture-intents)]
+    (testing "base-url + path, exactly one slash at the join"
+      (is (= "http://localhost:9092/feed"
+             (:ok (resolve/resolve-location intents "Feed" :web
+                                            "http://localhost:9092"))))
+      (is (= "http://localhost:9092/feed"
+             (:ok (resolve/resolve-location intents "Feed" :web
+                                            "http://localhost:9092/")))
+          "trailing slash on base-url is trimmed"))))
+
+(deftest resolve-location-errors
+  (let [intents (location-fixture-intents)]
+    (testing "unknown intent"
+      (is (= :intent/unknown-intent
+             (-> (resolve/resolve-location intents "Feeed" :web "http://h")
+                 :error :type))))
+    (testing "intent without :location"
+      (is (= :intent/no-location
+             (-> (resolve/resolve-location intents "ProductCard" :web "http://h")
+                 :error :type))))
+    (testing "no entry for the interface"
+      (is (= :intent/no-location-for-interface
+             (-> (resolve/resolve-location intents "Feed" :mobile "http://h")
+                 :error :type))))
+    (testing "binding present but :path absent (open-map guard, sl-4mv8)"
+      (is (= :intent/no-location-for-interface
+             (-> (resolve/resolve-location intents "Stub" :web "http://h")
+                 :error :type))))
+    (testing "missing base-url names the config path"
+      (let [r (resolve/resolve-location intents "Feed" :web nil)]
+        (is (= :intent/missing-base-url (-> r :error :type)))
+        (is (.contains ^String (-> r :error :message) ":base-url")))
+      (is (= :intent/missing-base-url
+             (-> (resolve/resolve-location intents "Feed" :web "  ")
+                 :error :type))))))
+
+(deftest validate-location-static-check
+  (let [intents (location-fixture-intents)]
+    (is (nil? (resolve/validate-location-static intents "Feed" :web)))
+    (testing "typed errors (sl-q81m — callers key did-you-mean off :type)"
+      (is (= :unknown-intent
+             (:type (resolve/validate-location-static intents "Feeed" :web))))
+      (is (= :no-location
+             (:type (resolve/validate-location-static intents "ProductCard" :web))))
+      (is (= :no-location-for-interface
+             (:type (resolve/validate-location-static intents "Feed" :mobile))))
+      (is (= :no-location-for-interface
+             (:type (resolve/validate-location-static intents "Stub" :web)))))))
+
+(deftest located-intents-candidates
+  (let [intents (location-fixture-intents)]
+    (is (= ["Feed"] (resolve/located-intents intents :web))
+        "only intents with a :path for the interface are candidates")
+    (is (= [] (resolve/located-intents intents :mobile)))))

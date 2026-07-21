@@ -13,7 +13,10 @@
    is ambiguous and the top-level post count includes the quoted post. The
    flat-timeline test is green today."
   (:require [clojure.test :refer [deftest is testing]]
+            [shiftlefter.browser.protocol :as bp]
+            [shiftlefter.browser.url-match :as url-match]
             [shiftlefter.examples.e2e-helpers :as h]
+            [shiftlefter.intent.resolve :as intent-resolve]
             ;; Side-effect: registers the :feed fixture page.
             [shiftlefter.demo.fixture.feed]))
 
@@ -46,6 +49,27 @@
         (testing "out-of-range is a loud error, never nil (§5)"
           (is (= :intent/index-out-of-range
                  (h/error-type (resolve "Feed.post[9].author")))))))))
+
+;; -----------------------------------------------------------------------------
+;; Named-location navigation (sl-3jr4) — green today
+;; -----------------------------------------------------------------------------
+
+(deftest ^:e2e named-location-navigation
+  (if-not h/live?
+    (is true "skipped — SHIFTLEFTER_LIVE_WEBDRIVER not set")
+    (h/run-against*
+     {:intents-dir intents-dir :pages [:feed] :path "/feed"}
+     (fn [{:keys [browser intents base-url]}]
+       (testing "'Feed' resolves via its :location :path + the fixture base-url"
+         (let [r (intent-resolve/resolve-location intents "Feed" :web base-url)]
+           (is (= (str base-url "/feed") (:ok r))
+               "resolve-location is the single URL-assembly point")
+           (bp/open-to! browser (:ok r))
+           (is (nil? (url-match/region-match (:ok r) (str (bp/get-url browser))))
+               "the region assertion (sl-q81m) matches the landed URL")
+           (is (some? (url-match/region-match "/elsewhere"
+                                              (str (bp/get-url browser))))
+               "and a different region does not")))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Recursion + cross-type descent — green today

@@ -11,9 +11,15 @@
     :run/exit-code 0|1|2|3
     :run/status :passed|:failed|:planning-failed|:crashed
     :counts {:passed N :failed N :pending N :skipped N
+             :error N          ;; only when positive (hook threw, sl-esq)
              :scenarios N :steps N}
-    :planning {...}     ;; present when exit-code 2
+    :planning {...}     ;; present when exit-code 2 (may carry :config-lints)
     :failures [{...}]   ;; present when exit-code 1
+    :diagnostics {:svo-issues [...]     ;; warn-level, non-blocking (sl-qk8l)
+                  :config-lints [...]}  ;; sl-lnj1 — unknown/misplaced
+                                        ;; top-level config keys; shape is
+                                        ;; runner.config ::lint-warnings,
+                                        ;; scrubbed. Absent on clean runs.
     :error {...}}       ;; present when exit-code 3
    ```
 
@@ -44,7 +50,12 @@
              :message (:message error)}
       (:exception-class error) (assoc :exception-class (:exception-class error))
       (:data error) (assoc :data (:data error))
-      (:value error) (assoc :value (:value error)))))
+      (:value error) (assoc :value (:value error))
+      ;; Hook failure attribution (sl-esq): hook name + registration home
+      ;; + the @hook= tag's file:line.
+      (:hook error) (assoc :hook (:hook error))
+      (:registration error) (assoc :registration (:registration error))
+      (:tag-source error) (assoc :tag-source (:tag-source error)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Failure Extraction
@@ -84,14 +95,30 @@
              :error (serialize-error (:error step-result))}
       macro-info (assoc :macro macro-info))))
 
+(defn- extract-scenario-error
+  "Extract a scenario-level hook failure (sl-esq) — the scenario carries
+   :error directly; no step bears it (steps are :skipped or carry their
+   own step-level failures)."
+  [scenario]
+  (let [pickle (-> scenario :plan :plan/pickle)]
+    {:scenario/name (:pickle/name pickle)
+     :scenario/id (:pickle/id pickle)
+     :error (serialize-error (:error scenario))}))
+
 (defn- extract-failures
-  "Extract all failures from scenario results."
+  "Extract all failures from scenario results. :failed scenarios contribute
+   their failed steps; :error scenarios (hook threw, sl-esq) contribute a
+   scenario-level entry plus any failed steps (the after-throw case)."
   [scenarios]
-  (for [scenario scenarios
-        :when (= :failed (:status scenario))
-        step (:steps scenario)
-        :when (= :failed (:status step))]
-    (extract-step-failure step scenario)))
+  (concat
+   (for [scenario scenarios
+         :when (= :error (:status scenario))]
+     (extract-scenario-error scenario))
+   (for [scenario scenarios
+         :when (#{:failed :error} (:status scenario))
+         step (:steps scenario)
+         :when (= :failed (:status step))]
+     (extract-step-failure step scenario))))
 
 ;; -----------------------------------------------------------------------------
 ;; Planning Diagnostics
@@ -146,20 +173,28 @@
         (seq stepdef-issues)    (assoc :stepdef-issues (vec stepdef-issues))
         (seq annotation-errors) (assoc :annotation-errors (vec annotation-errors))
         (seq macro-errors)      (assoc :macro-errors (vec macro-errors))
-        (seq other-errors)      (assoc :errors other-errors)))))
+        (seq other-errors)      (assoc :errors other-errors)
+        ;; sl-lnj1: config-lint warnings ride the planning block too — a run
+        ;; that fails planning still had a lintable config.
+        (seq (:config-lints diagnostics))
+        (assoc :config-lints (vec (:config-lints diagnostics)))))))
 
 (defn execution-diagnostics
   "Extract diagnostics for EDN output on non-blocked runs (exit code 0/1
-   and dry-run success). Only includes SVO issues (warnings that didn't
-   block execution). Public so runner core can attach diagnostics to the
-   dry-run summaries it builds inline (sl-qk8l).
-   Returns nil if no diagnostics to report."
+   and dry-run success): SVO issues and config-lint warnings (sl-lnj1) —
+   the warn-level signals that didn't block execution. Public so runner
+   core can attach diagnostics to the dry-run summaries it builds inline
+   (sl-qk8l).
+   Returns nil if no diagnostics to report (clean-run summaries stay
+   byte-identical)."
   [diagnostics]
   (when diagnostics
-    (let [{:keys [svo-issues counts]} diagnostics]
-      (when (seq svo-issues)
-        {:svo-issues svo-issues
-         :counts (select-keys counts [:svo-issue-count])}))))
+    (let [{:keys [svo-issues config-lints counts]} diagnostics]
+      (not-empty
+       (cond-> {}
+         (seq svo-issues)   (assoc :svo-issues svo-issues
+                                   :counts (select-keys counts [:svo-issue-count]))
+         (seq config-lints) (assoc :config-lints (vec config-lints)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Summary Building

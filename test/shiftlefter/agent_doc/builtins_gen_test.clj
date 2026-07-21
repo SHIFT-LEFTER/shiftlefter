@@ -29,7 +29,14 @@
         (is (str/includes? md ":shiftlefter.browser.protocol/IBrowser"))
         (is (str/includes? md "`:sms-mock`")))
       (testing "capability lane (requires-protocols) is surfaced for gated steps"
-        (is (str/includes? md "requires `:shiftlefter.sms.protocol/ISMS`"))))))
+        (is (str/includes? md "requires `:shiftlefter.sms.protocol/ISMS`")))
+      (testing ":location slot kinds are rendered (sl-3jr4 / sl-q81m / sl-yh7)"
+        (is (str/includes? md "`S navigates to O` — O: intent ref (bare PascalCase name), literal URL, or `{binding}`"))
+        (is (str/includes? md "`S is on O` — O: intent ref (bare PascalCase name), literal URL, or `{binding}`"))
+        (is (str/includes? md "`S is on exactly O` — O: literal URL")))
+      (testing ":arg-kinds are rendered (sl-yh7 AC11 — regen is not a no-op)"
+        (is (str/includes? md "`:value` (literal or `{binding}`)"))
+        (is (str/includes? md "`:match` (regex; `(?<name>...)` produces `{name}` bindings)"))))))
 
 (deftest checked-in-resource-up-to-date-test
   (testing "the committed builtins.md equals fresh generation (drift guard, AC1/AC5)"
@@ -69,4 +76,32 @@
                              :metadata {:interface :web
                                         :svo {:verb :hover :frame :default}}})]
       (is (not= (gen/render base-sources) (gen/render with-step)))
-      (is (str/includes? (gen/render with-step) ":(.+) hovers over (.+)")))))
+      (is (str/includes? (gen/render with-step) ":(.+) hovers over (.+)"))))
+
+  (testing "declaring :object-kind on a frame changes the output (sl-3jr4)"
+    (let [locate (fn [frame] (assoc-in base-sources
+                                       [:verbs :web :navigate]
+                                       {:desc "Navigate to a URL"
+                                        :frames {:to frame}}))
+          literal-only (locate {:args [] :pattern "S navigates to O"
+                                :object-kind :location})
+          with-refs (locate {:args [] :pattern "S navigates to O"
+                             :object-kind :location :location-refs? true})]
+      (is (str/includes? (gen/render literal-only)
+                         "`S navigates to O` — O: literal URL"))
+      (is (str/includes? (gen/render with-refs)
+                         "— O: intent ref (bare PascalCase name), literal URL, or `{binding}`"))
+      (is (not= (gen/render literal-only) (gen/render with-refs)))))
+
+  (testing "declaring :arg-kinds on a frame changes the output (sl-yh7 AC11)"
+    (let [with-kind (assoc-in base-sources [:verbs :web :fill]
+                              {:desc "Enter text"
+                               :frames {:with {:args [:value]
+                                               :arg-kinds {:value :value}
+                                               :pattern "S fills O with VALUE"}}})
+          without-kind (assoc-in base-sources [:verbs :web :fill]
+                                 {:desc "Enter text"
+                                  :frames {:with {:args [:value]
+                                                  :pattern "S fills O with VALUE"}}})]
+      (is (str/includes? (gen/render with-kind) "`:value` (literal or `{binding}`)"))
+      (is (not= (gen/render with-kind) (gen/render without-kind))))))

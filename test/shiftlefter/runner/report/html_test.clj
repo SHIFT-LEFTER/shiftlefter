@@ -103,6 +103,34 @@
       (is (= "@smoke" (-> island :scenarios first :plan :plan/pickle
                           :pickle/tags first :name))))))
 
+(deftest island-carries-hooks-and-schedule
+  ;; sl-esq: hook records and derived scheduling ride the island so the
+  ;; client renderer (locked below) has them; hook-less envelopes carry
+  ;; neither key.
+  (let [hooked (reporter/scenario-envelope
+                {:status :passed
+                 :duration-ms 2.0
+                 :plan {:plan/pickle {:pickle/id (java.util.UUID/randomUUID)
+                                      :pickle/name "h" :pickle/feature-name "F"
+                                      :pickle/source-file "/proj/features/x.feature"
+                                      :pickle/location {:line 1}}
+                        :plan/schedule {:serial? true :reason [:hook "reset-db"]}}
+                 :steps [(step "Given" "a" :passed)]
+                 :hooks [{:name "reset-db" :phase :before :status :ok
+                          :duration-ms 1.2 :contributed [:seed/user-id]}
+                         {:name "reset-db" :phase :after :status :ok
+                          :duration-ms 0.4}]})
+        plain (scenario {:name "p" :feature "F" :status :passed
+                         :steps [(step "Given" "a" :passed)]})
+        [_doc island] (doc-and-island [hooked plain])]
+    (is (reporter/edn-safe? island))
+    (is (= [:seed/user-id]
+           (-> island :scenarios first :hooks first :contributed)))
+    (is (= {:serial? true :reason [:hook "reset-db"]}
+           (-> island :scenarios first :schedule)))
+    (is (not (contains? (-> island :scenarios second) :hooks)))
+    (is (not (contains? (-> island :scenarios second) :schedule)))))
+
 (deftest selection-story-in-run-ctx
   (testing "AC3/AC4: a filter-active run-ctx carries :selection through the island"
     (let [ctx (assoc run-ctx :selection {:selected 1 :filtered-out 3
@@ -133,6 +161,43 @@
     (testing "the renderer never uses innerHTML (textContent-only contract)"
       (is (not (str/includes? (slurp (io/resource "report/report.js"))
                               "innerHTML"))))))
+
+(deftest hostile-keyword-is-stringified-and-inert
+  ;; sl-27uh: a keyword NAME carrying </script> prints OUTSIDE any string
+  ;; literal, where escape-island cannot reach it — the coupling the
+  ;; hostile-STRING test above cannot catch. The seam fix: scrub (via the
+  ;; tightened edn-safe?) stringifies non-round-tripping tokens, so the
+  ;; hostile text reaches the island only inside an escapable string.
+  (let [nasty (keyword "</script><script>alert(1)</script>")
+        [doc island] (doc-and-island
+                      [(scenario {:name "k" :feature "F" :status :failed
+                                  :steps [(step "Then" "x" :failed
+                                                {:type :step/exception
+                                                 :message "boom"
+                                                 :data {:got nasty}})]})])]
+    (testing "the island survives: data cannot terminate the script element"
+      (is (not (str/includes? doc "<script>alert")))
+      (is (= 2 (count (re-seq #"</script" doc)))))
+    (testing "the token arrives as its pr-str STRING, data preserved"
+      (is (= ":</script><script>alert(1)</script>"
+             (-> island :scenarios first :steps first :error :data :got))))))
+
+(deftest island-guard-aborts-on-unescapable-token
+  ;; Defense-in-depth (sl-27uh, Tower 2026-07-10): (keyword "x<" "script")
+  ;; genuinely round-trips EDN — it passes edn-safe? and sails through scrub
+  ;; untouched — yet prints :x</script, raw. EDN has no \uXXXX escapes inside
+  ;; keyword/symbol tokens, so the only safe move is a loud abort (reporter
+  ;; invariant 4): never emit a breakable island.
+  (doseq [hostile [(keyword "x<" "script") (keyword "a<!--b")]]
+    (testing (pr-str hostile)
+      (is (reporter/edn-safe? hostile)
+          "precondition: the token is genuinely EDN-native; scrub passes it")
+      (let [e (is (thrown? clojure.lang.ExceptionInfo
+                           (html/island-edn {:run-ctx {:x hostile}
+                                             :scenarios []
+                                             :diagnostics nil
+                                             :summary {}})))]
+        (is (= :report/island-integrity (:type (ex-data e))))))))
 
 (deftest ansi-stripped-from-island-strings
   (let [[_doc island] (doc-and-island
@@ -207,7 +272,13 @@
       (is (str/includes? js "failures-only")))
     (testing "D6 macro rules: child marker + dual attribution"
       (is (str/includes? js "\"+ [\""))
-      (is (str/includes? js "via macro '")))))
+      (is (str/includes? js "via macro '")))
+    (testing "sl-esq: hook lines render around the steps list"
+      (is (str/includes? js "renderHookLine"))
+      (is (str/includes? js ":contributed")))
+    (testing "sl-esq: derived-scheduling chip, never pretending authorship"
+      (is (str/includes? js "tag derived"))
+      (is (str/includes? js "\"via \" + reasonText")))))
 
 ;; -----------------------------------------------------------------------------
 ;; AC5: macro golden parity — the same real-expansion scenario the JUnit

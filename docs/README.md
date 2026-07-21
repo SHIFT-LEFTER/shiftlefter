@@ -28,6 +28,11 @@ for a commercial Cucumber/Selenium suite.
 - Multi-actor browser driving — multiple independent sessions with real isolation.
 - The typed SVO/glossary discipline — your vocabulary, validated before execution.
 - The `sl` CLI — run, format, dry-run, diagnose; CI-ready output (JUnit XML, HTML, EDN), tag filtering, parallel scenarios.
+- Scenario lifecycle hooks — `@hook=<name>` tags + `hooks.clj`, with loud
+  failure and dry-run preview ([when not to use them](hooks.md)).
+- The scenario data plane — capture a value with a named regex group, consume
+  it as `{name}` in later step text, across interfaces
+  ([worked examples](across-interfaces.md)).
 
 **Preview — works, expect change**
 
@@ -38,11 +43,12 @@ for a commercial Cucumber/Selenium suite.
 
 **Not here yet — roadmap**
 
-- Test fixtures and hooks as first-class features.
+- Test fixtures as first-class declarative features — the forms that will
+  grow out of today's scenario hooks.
 - Brownfield migration of an existing suite.
 - The traceability graph — the destination.
 
-If your team needs first-class fixtures and hooks *today*, it isn't ready
+If your team needs first-class declarative fixtures *today*, it isn't ready
 for you yet — check back. If you're starting something new and the discipline
 appeals, you're exactly who it's for.
 
@@ -50,8 +56,9 @@ appeals, you're exactly who it's for.
 
 For the normal path, **no** — you (and/or your agent) author a glossary (plain EDN) and write features
 against built-in steps. Clojure enters in only three cases: setting up test
-fixtures/data (a current gap), genuinely unusual web work (canvas, custom JS), or
-contributing a new interface. See [Add domain language](extending-vocabulary.md).
+fixtures/data (lifecycle code — see [Hooks](hooks.md)), genuinely unusual web
+work (canvas, custom JS), or contributing a new interface. See
+[Add domain language](extending-vocabulary.md).
 
 ## Pick a path
 
@@ -59,12 +66,14 @@ contributing a new interface. See [Add domain language](extending-vocabulary.md)
 |---|---|
 | decide whether it fits my project | [Would ShiftLefter work for my project?](FIT.md) |
 | get a browser test running | [Add your first browser behavior](browser-getting-started.md) |
+| run my suite in CI (GitLab, GitHub Actions) | [Running ShiftLefter in CI](CI.md) |
 | choose a locator that survives refactors | [Choosing web locators](LOCATORS.md) |
 | understand the validation model | [SVO](SVO.md) |
 | model multiple users & sessions | [Multiple actors](multiple-actors.md) |
 | test across web + SMS | [Across interfaces](across-interfaces.md) |
 | add my own domain language | [Extend the vocabulary](extending-vocabulary.md) |
 | drive authenticated / real-account sessions | [Costumes](COSTUMES.md) |
+| seed data or run code around scenarios | [Hooks — and when not to use them](hooks.md) |
 | know what I can run (Java vs Clojure) | [What can I do?](CAPABILITIES.md) |
 | look up a term | [Glossary](GLOSSARY.md) |
 | bring existing Gherkin (preview) | [Adoption](adoption.md) |

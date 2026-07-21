@@ -21,6 +21,7 @@
    - 3: Harness crash (uncaught exception)"
   (:require [babashka.fs :as fs]
             [clojure.spec.alpha :as s]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [shiftlefter.gherkin.api :as api]
             [shiftlefter.gherkin.io :as io]
@@ -29,6 +30,7 @@
             [shiftlefter.runner.config :as config]
             [shiftlefter.runner.discover :as discover]
             [shiftlefter.runner.events :as events]
+            [shiftlefter.runner.hooks :as hooks]
             [shiftlefter.intent.state :as intent-state]
             [shiftlefter.runner.report.console :as console]
             [shiftlefter.runner.report.edn :as report-edn]
@@ -42,6 +44,7 @@
             [shiftlefter.stepengine.compile :as compile]
             [shiftlefter.stepengine.exec :as exec]
             [shiftlefter.stepengine.registry :as registry]
+            [shiftlefter.svo.bindings-lint :as bindings-lint]
             [shiftlefter.version :as version]
             ;; NOTE: Built-in step definitions (shiftlefter.stepdefs.browser)
             ;; are NOT required here — they must be loaded AFTER the step-loader
@@ -140,10 +143,13 @@
        :errors []})))
 
 (defn- compute-exit-code
-  "Compute exit code from execution result."
+  "Compute exit code from execution result. Scenario :error (a lifecycle
+   hook threw, sl-esq) is a red run like :failed — never exit 2, which is
+   reserved for planning failures."
   [exec-result allow-pending?]
-  (let [{:keys [failed pending]} (:counts exec-result)]
+  (let [{:keys [failed pending error]} (:counts exec-result)]
     (cond
+      (pos? (or error 0)) 1
       (pos? (or failed 0)) 1
       (and (pos? (or pending 0)) (not allow-pending?)) 1
       :else 0)))
@@ -337,6 +343,20 @@
      :run-id run-id
      :status :planning-failed}))
 
+(defn- print-config-lint-notices!
+  "Config-lint warnings (sl-hlkz) — the i608 notice pattern: one stderr line
+   per warning, suppressed in EDN mode (the machine contract stays
+   byte-stable; `orient --edn` carries the same lints as :warn diagnostics,
+   and sl-lnj1 will add them to the runner's EDN envelope). NOT suppressed
+   in dry-run: unlike the tag-filter notice, nothing else carries this
+   signal. Warnings only — never affects the exit code."
+  [opts config-path lints]
+  (when (and (seq lints) (not (:edn opts)))
+    (binding [*out* *err*]
+      (doseq [{:keys [message]} lints]
+        (println (str "Config warning: " message
+                      (when config-path (str " [" config-path "]"))))))))
+
 (defn- load-config-stage
   "Stage 1: Load configuration.
    Returns [:continue {:config ... :step-paths ... :allow-pending? ...}]
@@ -349,6 +369,8 @@
                {:error {:type :config/error :message (:message config-result)}
                 :stderr-msg #(println "Config error:" (:message config-result))})]
       (let [config (resolve-config-declared-paths project-context (:config config-result))]
+        (print-config-lint-notices! opts (:config-path project-context)
+                                    (config/lint-config config))
         [:continue {:config config
                     :step-paths (or (some->> (:step-paths opts)
                                              (project-context/resolve-cli-paths project-context))
@@ -442,11 +464,13 @@
     (let [counts (schedule/auto-serial-counts plans)
           costume (get counts :costume 0)
           shared-impl (get counts :shared-impl 0)
-          total (+ costume shared-impl)]
+          hook (get counts :hook 0)
+          total (+ costume shared-impl hook)]
       (when (pos? total)
         (binding [*out* *err*]
           (println (str total " scenario(s) auto-serialized: "
-                        costume " costume, " shared-impl " shared-impl")))))))
+                        costume " costume, " shared-impl " shared-impl, "
+                        hook " hook")))))))
 
 (defn- tag-filter-stage
   "Stage 4b (sl-i608): planning-time tag filtering through the disposition
@@ -492,17 +516,28 @@
    Returns [:continue {:plans [...] :diagnostics {...}}] or [:exit error-result].
 
    `opts` may carry `:adapter-registry`; it's forwarded to the binder so
-   capability gating (sl-ewn) honors a setup.clj-supplied custom registry."
+   capability gating (sl-ewn) honors a setup.clj-supplied custom registry.
+   `opts` may carry `:hooks-registry` ({:registry [...] :path ...} from
+   load-hooks-stage, sl-esq); hook applicability resolves here, riding the
+   plan as the additive :plan/hooks key."
   [run-id opts config all-pickles report-opts]
   (let [stepdefs (registry/all-stepdefs)
         compile-opts (when-let [r (:adapter-registry opts)]
                        {:adapter-registry r})
         {:keys [plans runnable? diagnostics]}
         (compile/compile-suite config all-pickles stepdefs compile-opts)
-        ;; sl-q9wp: the scheduling facet rides the compiled plan (additive
-        ;; :plan/schedule key). Inert at :max-parallel 1 — the sequential
-        ;; execution path never reads it.
-        plans (schedule/attach-schedules plans (:interfaces config))]
+        ;; sl-lnj1: config-lint warnings join the diagnostics map here — the
+        ;; one point both pipelines share — so every downstream output (EDN
+        ;; summary 0/1/2, dry-run, reporter on-diagnostics channel) carries
+        ;; them. Re-linting is a set-membership check over ~7 keys; cheaper
+        ;; than threading state from load-config-stage. Scrubbed AT ATTACH:
+        ;; a lint's :key holds the offending keyword itself, which can be
+        ;; non-round-tripping (sl-27uh class), and the exit-2 path prints
+        ;; diagnostics without the reporter-envelope scrub. Absent key when
+        ;; clean — all existing output stays byte-identical.
+        diagnostics (let [lints (config/lint-config config)]
+                      (cond-> diagnostics
+                        (seq lints) (assoc :config-lints (reporter/scrub lints))))]
     (if-not runnable?
       (let [exit-code 2]
         (when-not (:edn opts)
@@ -514,7 +549,54 @@
                 :run-id run-id
                 :status :planning-failed
                 :diagnostics diagnostics}])
-      [:continue {:plans plans :diagnostics diagnostics}])))
+      ;; sl-esq: resolve @hook= names against the loaded registry; an
+      ;; unknown name is a planning error naming the tag and its file:line.
+      ;; Runs even with no hooks.clj (nil registry) — a dangling @hook=
+      ;; tag must fail loudly, not silently no-op. Hooks attach BEFORE
+      ;; schedules: the :requires-serial gate reads :plan/hooks.
+      (let [hooks-info (:hooks-registry opts)
+            {plans' :ok hooks-err :error}
+            (hooks/attach-hooks plans (:registry hooks-info) (:path hooks-info))]
+        (if hooks-err
+          ;; :diagnostics carries the error into the EDN summary's :planning
+          ;; block (build-summary's exit-2 path renders diagnostics only).
+          [:exit (report-planning-error! run-id opts
+                   {:error hooks-err
+                    :diagnostics {:errors [hooks-err]}
+                    :stderr-msg #(println "Hooks error:" (:message hooks-err))})]
+          ;; sl-yh7: the data-plane static check runs HERE — after hook
+          ;; attachment, because hook :provides declarations (riding
+          ;; :plan/hooks) count as binding producers. Its issues join
+          ;; :svo-issues (same shape, severity, reporting); any :error
+          ;; (consumed-without-producer, invalid capture pattern) is a
+          ;; planning failure, exit 2 like every other blocking issue.
+          (let [bindings-issues (bindings-lint/check-plans plans')
+                diagnostics (cond-> diagnostics
+                              (seq bindings-issues)
+                              (-> (update :svo-issues (fnil into []) bindings-issues)
+                                  (update-in [:counts :svo-issue-count]
+                                             (fnil + 0) (count bindings-issues))
+                                  (update-in [:counts :total-issues]
+                                             (fnil + 0) (count bindings-issues))))]
+            (if (bindings-lint/blocking? bindings-issues)
+              (let [exit-code 2]
+                (when-not (:edn opts)
+                  (console/print-diagnostics! diagnostics report-opts))
+                (when (:edn opts)
+                  (report-edn/prn-summary
+                   (report-edn/build-summary run-id exit-code nil
+                                             {:diagnostics diagnostics})))
+                [:exit {:exit-code exit-code
+                        :run-id run-id
+                        :status :planning-failed
+                        :diagnostics diagnostics}])
+              ;; sl-q9wp: the scheduling facet rides the compiled plan
+              ;; (additive :plan/schedule key). Inert at :max-parallel 1 —
+              ;; the sequential execution path never reads it.
+              [:continue {:plans (schedule/attach-schedules plans' (:interfaces config))
+                          :diagnostics diagnostics}])))))))
+
+(declare dry-run-hooks-entries)
 
 (defn- dry-run-edn-summary
   "Build the EDN summary for a dry-run success, including warn-level SVO
@@ -531,8 +613,38 @@
                     :steps (reduce + (map #(count (:plan/steps %)) plans))}}
     group-label (assoc :group group-label)
     filtered-count (assoc :filtered-out filtered-count)
+    ;; sl-esq AC9: per-scenario hook firing lists — additive, absent for
+    ;; hook-less suites so the summary stays byte-identical.
+    (dry-run-hooks-entries plans)
+    (assoc :hooks (dry-run-hooks-entries plans))
     (report-edn/execution-diagnostics diagnostics)
     (assoc :diagnostics (report-edn/execution-diagnostics diagnostics))))
+
+(defn- dry-run-hooks-entries
+  "Per-scenario hook firing lists for the dry-run preview (sl-esq AC9):
+   [{:scenario/name .. :hooks [name ..]} ..] in plan order, EXECUTION order
+   within each scenario (globals outermost, then tag order — resolved at
+   planning, riding :plan/hooks). nil when no selected plan carries hooks,
+   keeping hook-less dry-run output byte-unchanged."
+  [plans]
+  (not-empty
+   (into []
+         (keep (fn [plan]
+                 (when-let [hooks (seq (:plan/hooks plan))]
+                   {:scenario/name (get-in plan [:plan/pickle :pickle/name])
+                    :hooks (mapv :name hooks)})))
+         plans)))
+
+(defn- print-dry-run-hooks!
+  "stderr block under the dry-run summary line: which hooks fire for each
+   scenario, in execution order — the legibility requirement's cheap
+   mechanical query. Prints nothing when `entries` is nil."
+  [entries]
+  (when entries
+    (binding [*out* *err*]
+      (println "hooks:")
+      (doseq [{nm :scenario/name hooks :hooks} entries]
+        (println (str "  " nm ": " (str/join ", " hooks)))))))
 
 (defn- dry-run-console-line
   "The dry-run success line. With a tag filter active (non-nil
@@ -711,6 +823,22 @@
         [:loaded {:setups ok :path setup-path}]))
     [:none nil]))
 
+(defn- load-hooks-stage
+  "Locate and load hooks.clj sibling-of-config (sl-esq). Returns one of:
+   - [:continue nil]                       — no hooks.clj present, no hooks
+   - [:continue {:registry [...] :path}]   — loaded successfully
+   - [:exit error-result]                  — malformed/duplicate-name, planning error"
+  [run-id opts config]
+  (if-let [hooks-path (hooks/find-hooks-file (:project-context opts))]
+    (let [{:keys [ok error path]} (hooks/load-hooks hooks-path config)]
+      (if error
+        [:exit (report-planning-error! run-id opts
+                 {:error error
+                  :diagnostics {:errors [error]}
+                  :stderr-msg #(println "Hooks error:" (:message error))})]
+        [:continue {:registry ok :path path}]))
+    [:continue nil]))
+
 (defn- compute-suite-exit-code
   "Aggregate per-group exit codes into a suite exit code.
    Worst code wins: planning-error (2) > failed (1) > passed (0)."
@@ -725,7 +853,9 @@
 
    Lifecycle: call (:start config) → parse this group's features →
    compile-suite (with the group's adapter-registry) → execute → :stop
-   (in finally; runs even on failure).
+   (in finally; runs even on failure). Under :dry-run, :start and :stop are
+   skipped ENTIRELY (sl-ev0b) — the preview binds against the default
+   adapter registry and no user lifecycle code runs.
 
    Returns a per-group result map shaped like execute-and-report-stage's,
    plus :group-label and :status."
@@ -734,10 +864,14 @@
         features (setup/resolve-group-features group)
         ;; :start may throw or return malformed shape — both treated as
         ;; planning errors local to this group; other groups still run.
-        start-result (try
-                       ((:start group) config)
-                       (catch Throwable t
-                         {::start-throw t}))]
+        ;; sl-ev0b: dry-run is a pure plan preview — no user lifecycle code
+        ;; runs. nil start-result → no adapter registry threaded, and no
+        ;; :stop in the finally (there is nothing to stop).
+        start-result (when-not (:dry-run opts)
+                       (try
+                         ((:start group) config)
+                         (catch Throwable t
+                           {::start-throw t})))]
     (cond
       (::start-throw start-result)
       (let [t (::start-throw start-result)]
@@ -782,7 +916,8 @@
                               (console/print-warnings! diagnostics report-opts)
                               (binding [*out* *err*]
                                 (println (str "[" label "] "
-                                              (dry-run-console-line (count plans) filtered-count)))))
+                                              (dry-run-console-line (count plans) filtered-count))))
+                              (print-dry-run-hooks! (dry-run-hooks-entries plans)))
                             (when (:edn opts)
                               (report-edn/prn-summary
                                (dry-run-edn-summary run-id plans diagnostics label filtered-count)))
@@ -890,9 +1025,16 @@
                 (let [;; Setup-aware branch (sl-dbu): load setup.clj if present.
                       ;; If found, it owns the feature plan — bypass discovery and
                       ;; the single-suite pipeline; loop over groups instead.
-                      [s-setup d-setup] (load-setup-stage run-id opts config)]
+                      [s-setup d-setup] (load-setup-stage run-id opts config)
+                      ;; Hooks registry (sl-esq): loaded once, threaded via opts
+                      ;; into BOTH pipelines' compile-suite-stage.
+                      [s-hooks d-hooks] (when-not (= :exit s-setup)
+                                          (load-hooks-stage run-id opts config))
+                      opts (cond-> opts d-hooks (assoc :hooks-registry d-hooks))]
                   (cond
                     (= :exit s-setup) d-setup
+
+                    (= :exit s-hooks) d-hooks
 
                     (= :loaded s-setup)
                     (let [[s4 d4] (load-steps-stage run-id opts step-paths)
@@ -926,7 +1068,8 @@
                                               (when-not (:edn opts)
                                                 (console/print-warnings! diagnostics report-opts)
                                                 (binding [*out* *err*]
-                                                  (println (dry-run-console-line (count plans) filtered-count))))
+                                                  (println (dry-run-console-line (count plans) filtered-count)))
+                                                (print-dry-run-hooks! (dry-run-hooks-entries plans)))
                                               (when (:edn opts)
                                                 (report-edn/prn-summary
                                                  (dry-run-edn-summary run-id plans diagnostics nil filtered-count)))
@@ -956,9 +1099,3 @@
              :run-id run-id
              :status :crashed
              :error error}))))))
-
-(defn execute-with-crash!
-  "Test helper: force a crash to test exit code 3."
-  []
-  (execute! {:paths ["nonexistent"]
-             :_force-crash true}))

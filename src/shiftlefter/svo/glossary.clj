@@ -81,10 +81,25 @@
 (s/def ::args (s/coll-of ::arg-name :kind vector?))
 (s/def ::pattern string?)
 (s/def ::implicit-object keyword?)
+;; :object-kind (sl-rlxa): the accepted value kind for the O slot. Absent
+;; means :intent (validated as an intent ref); :location accepts literal URLs.
+;; :location-refs? (sl-3jr4): a :location frame that also accepts bare
+;; PascalCase named-location intent refs (the navigate slot today).
+(s/def ::object-kind #{:intent :location})
+(s/def ::location-refs? boolean?)
+;; :arg-kinds (sl-yh7): per-arg slot value kinds. :value = a literal-admitting
+;; slot (quoted literal or {binding} token; the engine strips quotes/resolves
+;; tokens by this declaration). :matcher = a regex-source slot whose named
+;; groups PRODUCE bindings and whose embedded {binding} tokens interpolate as
+;; regex-quoted literals. Args without a kind are plain captures — no token
+;; admission, no normalization.
+(s/def ::arg-kind #{:value :matcher})
+(s/def ::arg-kinds (s/map-of ::arg-name ::arg-kind))
 
 (s/def ::frame
   (s/keys :req-un [::args ::pattern]
-          :opt-un [::implicit-object]))
+          :opt-un [::implicit-object ::object-kind ::location-refs?
+                   ::arg-kinds]))
 
 ;; A verb must declare at least one frame; a frame-less verb is
 ;; effectively unimplemented and shouldn't be in a loaded glossary.

@@ -31,7 +31,7 @@ parser is 100% Gherkin-compatible, so these mean what they mean upstream.
 | **Examples** | Value table driving Scenario Outline substitution. |
 | **Rule** | Keyword grouping scenarios under one business rule. |
 | **Scenario Outline** | Parameterized scenario template; N examples → N scenarios. |
-| **Tag** | Metadata marker (`@wip`, `@slow`). Parsed and preserved; `sl run --tags` / `--skip-tags` selects a tagged subset at planning time. `@serial` marks a scenario as exclusive under parallel runs. |
+| **Tag** | Metadata marker (`@wip`, `@slow`). Parsed and preserved; `sl run --tags` / `--skip-tags` selects a tagged subset at planning time. `@serial` marks a scenario as exclusive under parallel runs. Value-tags (`@<key>=<value>`) attach machinery by name: `@hook=<name>` runs the named lifecycle hook from `hooks.clj` around the scenario (unknown hook names are planning errors; unrecognized keys are ordinary tags). |
 
 ## Modes
 
@@ -66,6 +66,14 @@ Validation strictness is **fine-grained**, not a global switch: each check in th
   every expanded step traces back to the original ` +` line.
 - **shiftlefter.edn** — the single project configuration file (parser, runner,
   glossaries, interfaces, modes).
+- **Lifecycle hooks / `hooks.clj`** — scenario Before/After work, registered
+  in `hooks.clj` (a sibling of `shiftlefter.edn`) and named per-scenario with
+  `@hook=<name>` tags. Read [hooks.md](hooks.md) before writing one.
+- **Named bindings (the scenario data plane)** — values captured by named
+  regex groups (`(?<code>\d{6})`) during a scenario, stored at
+  `:sl/bindings`, and consumed as `{code}` in later step text — including
+  across interfaces. Worked examples:
+  [across-interfaces.md](across-interfaces.md).
 
 ## Interfaces, adapters, capabilities
 

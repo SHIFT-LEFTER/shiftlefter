@@ -554,3 +554,53 @@
       ;; No macro provenance
       (is (not (str/includes? output "macro call-site:")))
       (is (not (str/includes? output "definition-step:"))))))
+
+;; -----------------------------------------------------------------------------
+;; :error status — scenario-level hook failures (sl-esq)
+;; -----------------------------------------------------------------------------
+
+(deftest test-print-summary-error-segment-only-when-present
+  (testing ":error count renders red segment when positive"
+    (let [result {:counts {:passed 1 :failed 0 :pending 0 :skipped 0 :error 2}}
+          output (with-err-str (console/print-summary! result {:no-color true}))]
+      (is (str/includes? output "3 scenario(s)"))
+      (is (str/includes? output "1 passed, 2 error"))))
+  (testing "no :error key — historical output byte-identical"
+    (let [result {:counts {:passed 1 :failed 2 :pending 3 :skipped 4}}
+          output (with-err-str (console/print-summary! result {:no-color true}))]
+      (is (str/includes? output "10 scenario(s): 1 passed, 2 failed, 3 pending, 4 skipped"))
+      (is (not (str/includes? output "error"))))))
+
+(deftest test-print-failures-includes-error-scenario
+  (testing "an :error scenario renders in the failure section with dual attribution"
+    (let [scenarios [{:status :error
+                      :error {:type :hook/before-failed
+                              :message "connection refused"
+                              :hook "reset-db"
+                              :registration {:path "/proj/hooks.clj"}
+                              :tag-source {:file "features/x.feature" :line 3}}
+                      :plan {:plan/pickle {:pickle/name "Seeded scenario"
+                                           :pickle/source-file "features/x.feature"}}
+                      :steps [{:status :skipped :step {:step/text "I log in"}}]}]
+          output (with-err-str (console/print-failures! scenarios {:no-color true}))]
+      (is (str/includes? output "Failures:"))
+      (is (str/includes? output "Seeded scenario"))
+      (is (str/includes? output "Hook 'reset-db' failed"))
+      (is (str/includes? output "connection refused"))
+      (is (str/includes? output "registered at: /proj/hooks.clj"))
+      (is (str/includes? output "tagged at: features/x.feature:3"))))
+  (testing "after-throw plus step failure: hook block AND failed step both render"
+    (let [scenarios [{:status :error
+                      :error {:type :hook/after-failed
+                              :message "screenshot dir missing"
+                              :hook "screenshot"
+                              :registration {:path "/proj/hooks.clj"}}
+                      :plan {:plan/pickle {:pickle/name "Both fail"
+                                           :pickle/source-file "features/x.feature"}}
+                      :steps [{:status :failed
+                               :step {:step/text "I click the button"}
+                               :error {:message "no such element"}}]}]
+          output (with-err-str (console/print-failures! scenarios {:no-color true}))]
+      (is (str/includes? output "Hook 'screenshot' failed"))
+      (is (str/includes? output "I click the button"))
+      (is (str/includes? output "no such element")))))

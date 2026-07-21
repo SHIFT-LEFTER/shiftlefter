@@ -217,7 +217,9 @@
 
    Returns:
    - {:ok <updated-ctx>} with capability provisioned (or already present)
-   - {:error {...}} if provisioning fails"
+   - {:error {...}} if provisioning fails; when the `:on-provision` hook is
+     what failed, the result also carries `:ctx <ctx'>` holding the already-
+     live capability so cleanup can reach it (sl-uu7x)"
   [scenario-ctx svo interfaces registry]
   (let [interface-name (:interface svo)
         subject (:subject svo)]
@@ -278,11 +280,17 @@
                            (assoc-in [cap-k :cleanup-handle] cleanup-handle))
                          ;; Record the costume as worn so a later wearer is caught.
                          (cond-> costume
-                           (assoc-in [worn-costumes-key costume] (or subject interface-name))))]
-            ;; Generic adapter `:on-provision` hook — adapters seed per-
-            ;; interface scenario state (e.g., :sms/scenario-start-ts) here
-            ;; rather than the engine special-casing each interface type.
-            (run-on-provision-hook ctx' impl adapter-name registry)))))))
+                           (assoc-in [worn-costumes-key costume] (or subject interface-name))))
+                ;; Generic adapter `:on-provision` hook — adapters seed per-
+                ;; interface scenario state (e.g., :sms/scenario-start-ts)
+                ;; here rather than the engine special-casing each interface
+                ;; type.
+                hook-r (run-on-provision-hook ctx' impl adapter-name registry)]
+            ;; On hook failure the capability is already live in ctx' — carry
+            ;; it as :ctx so cleanup can still close the impl (sl-uu7x).
+            (if (:error hook-r)
+              (assoc hook-r :ctx ctx')
+              hook-r)))))))
 
 (defn ensure-capability
   "Ensure capability is available for step's interface and subject.
@@ -340,14 +348,16 @@
 
    Sequential within an interface so `:shared-impl?` handoff works:
    Alice's call constructs the impl, Bob's call finds it via
-   `find-existing-shared-impl`. Returns {:ok ctx'} or {:error {...}};
-   stops on first error (fail-fast within the group)."
+   `find-existing-shared-impl`. Returns {:ok ctx'} or {:error {...} :ctx ctx};
+   stops on first error (fail-fast within the group). The error's :ctx holds
+   every capability provisioned before the failure — Alice's live browser when
+   Bob's fails — so cleanup can close them (sl-uu7x)."
   [initial-ctx targets interfaces registry]
   (reduce (fn [acc target]
             (let [ctx (:ok acc)
                   r (ensure-capability-for-svo ctx target interfaces registry)]
               (if (:error r)
-                (reduced r)
+                (reduced (assoc r :ctx (or (:ctx r) ctx)))
                 r)))
           {:ok initial-ctx}
           targets))
@@ -378,12 +388,17 @@
           group-ctxs))
 
 (defn eager-provision-scenario
-  "Scoped-eager provisioning phase. Returns {:ok ctx'} or {:error {...}}.
+  "Scoped-eager provisioning phase. Returns {:ok ctx'} or
+   {:error {...} :ctx ctx}.
 
    Targets are grouped by interface. Different interfaces are provisioned
    in parallel (futures); within an interface, sequentially so
    `:shared-impl?` reuse works. Errors from all groups are collected
-   before returning so callers see every failure, not just the first."
+   before returning so callers see every failure, not just the first.
+
+   On failure, :ctx merges every capability that DID come up — successful
+   sibling groups' plus the failing group's pre-failure partial — so the
+   caller can hand cleanup a ctx that sees the live impls (sl-uu7x)."
   [plan initial-ctx interfaces registry]
   (let [targets (collect-provisioning-targets plan)
         ;; group-by preserves group order via the reducing function;
@@ -405,19 +420,27 @@
                          (mapv deref))
             errors  (->> results (keep :error))]
         (if (seq errors)
-          {:error (aggregate-eager-errors errors)}
+          {:error (aggregate-eager-errors errors)
+           :ctx (merge-group-deltas initial-ctx
+                                    (mapv #(or (:ok %) (:ctx %)) results))}
           {:ok (merge-group-deltas initial-ctx (mapv :ok results))})))))
 
 (defn eager-failure-result
   "Build a scenario result for an eager-provisioning failure: scenario
    :failed, first step bears the error (matches today's lazy first-step
-   semantics), remaining steps :skipped."
-  [plan error]
-  (let [steps (:plan/steps plan)
-        [first-step & rest-steps] steps
-        step-results (cons (make-step-result first-step :failed nil error)
-                           (mapv #(make-step-result % :skipped nil nil) rest-steps))]
-    {:status :failed
-     :plan plan
-     :steps (vec step-results)
-     :scenario-ctx {}}))
+   semantics), remaining steps :skipped.
+
+   `initial-ctx` (3-arity, sl-esq) preserves Before-hook contributions in
+   :scenario-ctx: when provisioning fails, ALL Afters still unwind
+   (tolerate-and-run) and must see the ctx the Befores built. The 2-arity
+   keeps the historical empty ctx for callers with no hooks in play."
+  ([plan error] (eager-failure-result plan error {}))
+  ([plan error initial-ctx]
+   (let [steps (:plan/steps plan)
+         [first-step & rest-steps] steps
+         step-results (cons (make-step-result first-step :failed nil error)
+                            (mapv #(make-step-result % :skipped nil nil) rest-steps))]
+     {:status :failed
+      :plan plan
+      :steps (vec step-results)
+      :scenario-ctx initial-ctx})))

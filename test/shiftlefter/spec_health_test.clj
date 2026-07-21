@@ -23,6 +23,7 @@
             [shiftlefter.gherkin.pickler]
             [shiftlefter.gherkin.printer]
             [shiftlefter.gherkin.tokens]
+            [shiftlefter.runner.hooks]
             [shiftlefter.runner.setup]
             [shiftlefter.sieve.contract]
             [shiftlefter.sms.protocol]))

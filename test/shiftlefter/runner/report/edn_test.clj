@@ -75,6 +75,49 @@
 ;; prn-summary Tests
 ;; -----------------------------------------------------------------------------
 
+;; -----------------------------------------------------------------------------
+;; Config-lint diagnostics (sl-lnj1)
+;; -----------------------------------------------------------------------------
+
+(def ^:private step-paths-lint
+  {:type :config/misplaced-key :key :step-paths
+   :suggested-path [:runner :step-paths]
+   :message (str "config key :step-paths is not read at the top level and"
+                 " was ignored — did you mean [:runner :step-paths]?")})
+
+(deftest test-execution-diagnostics-config-lints
+  (testing "nil when clean — clean-run summaries stay byte-identical"
+    (is (nil? (report-edn/execution-diagnostics nil)))
+    (is (nil? (report-edn/execution-diagnostics {})))
+    (is (nil? (report-edn/execution-diagnostics {:svo-issues [] :config-lints []}))))
+  (testing "config-lints alone: no :svo-issues key, no empty :counts noise"
+    (is (= {:config-lints [step-paths-lint]}
+           (report-edn/execution-diagnostics {:config-lints [step-paths-lint]}))))
+  (testing "svo-issues alone keeps the historical shape"
+    (is (= {:svo-issues [{:severity :warn}] :counts {:svo-issue-count 1}}
+           (report-edn/execution-diagnostics {:svo-issues [{:severity :warn}]
+                                              :counts {:svo-issue-count 1 :other 9}}))))
+  (testing "both present, both carried"
+    (let [d (report-edn/execution-diagnostics {:svo-issues [{:severity :warn}]
+                                               :counts {:svo-issue-count 1}
+                                               :config-lints [step-paths-lint]})]
+      (is (= [step-paths-lint] (:config-lints d)))
+      (is (= [{:severity :warn}] (:svo-issues d))))))
+
+(deftest test-config-lints-in-summaries
+  (testing "exit 0: :diagnostics :config-lints rides the summary and round-trips"
+    (let [summary (report-edn/build-summary
+                   "r" 0 {:scenarios [] :counts {:passed 0}}
+                   {:diagnostics {:config-lints [step-paths-lint]}})]
+      (is (= [step-paths-lint] (-> summary :diagnostics :config-lints)))
+      (is (= summary (edn/read-string (pr-str summary))))))
+  (testing "exit 2: :planning :config-lints rides the summary"
+    (let [summary (report-edn/build-summary
+                   "r" 2 nil
+                   {:diagnostics {:undefined [] :ambiguous [] :invalid-arity []
+                                  :counts {} :config-lints [step-paths-lint]}})]
+      (is (= [step-paths-lint] (-> summary :planning :config-lints))))))
+
 (deftest test-prn-summary-outputs-to-stdout
   (testing "prn-summary outputs to stdout, not stderr"
     (let [summary {:run/id "x" :run/exit-code 0}
@@ -450,3 +493,45 @@
         ;; Still has other fields
         (is (= "I do something" (:step/text failure)))
         (is (some? (:location failure)))))))
+
+;; -----------------------------------------------------------------------------
+;; :error status — scenario-level hook failures (sl-esq)
+;; -----------------------------------------------------------------------------
+
+(deftest test-error-scenario-contributes-scenario-level-failure
+  (testing "an :error scenario yields a scenario-level :failures entry with hook attribution"
+    (let [sid (java.util.UUID/randomUUID)
+          result {:scenarios [{:status :error
+                               :error {:type :hook/before-failed
+                                       :message "connection refused"
+                                       :hook "reset-db"
+                                       :registration {:path "/proj/hooks.clj"}
+                                       :tag-source {:file "features/x.feature" :line 3}}
+                               :plan {:plan/pickle {:pickle/name "Seeded" :pickle/id sid}}
+                               :steps [{:status :skipped
+                                        :step {:step/text "I log in"}}]}]
+                  :counts {:passed 0 :failed 0 :pending 0 :skipped 0 :error 1}}
+          summary (report-edn/build-summary "run-err" 1 result {})]
+      (is (= 1 (-> summary :counts :error)))
+      (let [failure (first (:failures summary))]
+        (is (= "Seeded" (:scenario/name failure)))
+        (is (= sid (:scenario/id failure)))
+        (is (= :hook/before-failed (-> failure :error :type)))
+        (is (= "reset-db" (-> failure :error :hook)))
+        (is (= "/proj/hooks.clj" (-> failure :error :registration :path)))
+        (is (= 3 (-> failure :error :tag-source :line))))))
+  (testing "after-throw plus step failure: scenario entry AND failed-step entry"
+    (let [result {:scenarios [{:status :error
+                               :error {:type :hook/after-failed :message "boom"
+                                       :hook "screenshot"}
+                               :plan {:plan/pickle {:pickle/name "Both"
+                                                    :pickle/id (java.util.UUID/randomUUID)}}
+                               :steps [{:status :failed
+                                        :step {:step/text "I click" :step/id "s1"}
+                                        :binding {:source {:file "steps.clj" :line 5}}
+                                        :error {:type :step/exception :message "no element"}}]}]
+                  :counts {:passed 0 :failed 0 :pending 0 :skipped 0 :error 1}}
+          summary (report-edn/build-summary "run-both" 1 result {})]
+      (is (= 2 (count (:failures summary))))
+      (is (= "screenshot" (-> summary :failures first :error :hook)))
+      (is (= "I click" (-> summary :failures second :step/text))))))

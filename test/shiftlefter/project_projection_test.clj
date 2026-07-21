@@ -85,6 +85,32 @@
         (is (some #(= :web (:name %)) (:interfaces p)))
         (is (seq (:verbs p)))))))
 
+(deftest projection-surfaces-config-lint-as-warn
+  ;; sl-hlkz: the same lints the runner prints as stderr notices ride the
+  ;; projection as :warn config diagnostics (runner parity per the sl-hjnp
+  ;; rule), so orient surfaces them WITHOUT flipping :status.
+  (with-temp-project
+    (fn [dir]
+      (make-basic-project! dir)
+      (write-edn! (fs/path dir "shiftlefter.edn")
+                  {:step-paths ["steps/"]  ; misplaced — the evidence case
+                   :mystery-knob true      ; unknown
+                   :runner {:step-paths ["steps/"]
+                            :allow-pending? false
+                            :macros {:enabled? false}}})
+      (let [p (projection/build-projection (project-context dir)
+                                           {:source :working-tree})
+            config-warns (filter #(and (= :config (:stage %))
+                                       (= :warn (:severity %)))
+                                 (:diagnostics p))]
+        (is (= :ok (:status p)) "warn-severity lints never fail orientation")
+        (is (= #{:step-paths :mystery-knob} (set (map :key config-warns))))
+        (is (= [:runner :step-paths]
+               (->> config-warns
+                    (filter #(= :step-paths (:key %)))
+                    first
+                    :suggested-path)))))))
+
 (deftest projection-includes-project-knowledge
   (with-temp-project
     (fn [dir]

@@ -45,7 +45,10 @@
 
 (s/def ::type #{:svo/missing-subject :svo/unknown-subject :svo/unknown-verb
                 :svo/unknown-interface :svo/provisioning-failed
-                :svo/unknown-object :svo/raw-locator-disallowed})
+                :svo/unknown-object :svo/raw-locator-disallowed
+                ;; Scenario data plane (sl-yh7) — ride the same issue channel
+                :bindings/consumed-without-producer :bindings/invalid-pattern
+                :bindings/unnamed-only-groups :bindings/produced-never-consumed})
 (s/def ::subject keyword?)
 (s/def ::verb keyword?)
 (s/def ::interface keyword?)
@@ -107,10 +110,12 @@
     (str (namespace kw) "/" (name kw))
     (name kw)))
 
-(defn- suggest-similar
+(defn suggest-similar
   "Find the most similar keyword from candidates.
    Uses full keyword string (including namespace) for comparison.
-   Returns the best match if distance <= max-distance, else nil."
+   Returns the best match if distance <= max-distance, else nil.
+   Public since sl-yh7 — the bindings lint reuses it for
+   consumed-without-producer did-you-mean."
   [target candidates max-distance]
   (when (and target (seq candidates))
     (let [target-str (keyword->str target)
@@ -188,6 +193,14 @@
         (get-in glossary [:verbs interface-type verb :frames frame :object-kind]))
       :intent))
 
+(defn- location-refs-frame?
+  "True when the SVO's verb frame declares :location-refs? — a :location slot
+   that additionally accepts bare PascalCase named-location refs (sl-3jr4)."
+  [glossary interface-type {:keys [verb frame]}]
+  (boolean
+   (when (and interface-type verb frame)
+     (get-in glossary [:verbs interface-type verb :frames frame :location-refs?]))))
+
 (defn- validate-object
   "Validate object (locator) against intent glossary.
 
@@ -196,47 +209,78 @@
    - :warn — unknown intents warn (raw locators allowed)
    - :off — no validation
 
-   Slots whose frame declares :object-kind :location accept literal
-   values (URLs) and are never validated as intent references (sl-rlxa) —
-   named-location resolution lands additively in sl-3jr4.
+   Slots whose frame declares :object-kind :location accept literal values
+   (URLs) — never an :unknown-object issue (sl-rlxa). When the frame also
+   declares :location-refs? (sl-3jr4), a BARE PascalCase token is a
+   named-location intent ref and IS statically validated (the classifier is
+   `intent-resolve/location-ref?`, shared with runtime resolution so planning
+   and execution can't drift). QUOTED captures ('…') never classify as refs —
+   quoted = literal, always (sl-iseq). Frames without :location-refs?
+   (the exactly assertion) keep the skip-everything behavior.
 
    Returns issue map or nil if valid."
-  [object-str interface enforcement kind]
+  [object-str interface enforcement kind location-refs?]
   (when (and object-str (string? object-str)
-             (not= enforcement :off)
-             (not= kind :location))
-    (cond
-      ;; Raw locator check (strict mode only)
-      (and (= enforcement :strict) (raw-locator? object-str))
-      {:type :svo/raw-locator-disallowed
-       :object object-str
-       :message "Raw locators are not allowed in strict mode. Use intent references instead."}
+             (not= enforcement :off))
+    (if (= kind :location)
+      ;; :location slot — literals always pass; bare-name refs validate only
+      ;; on ref-accepting frames.
+      (when (and location-refs? (intent-resolve/location-ref? object-str))
+        (try
+          (let [intents (intent-state/get-intents)
+                loc-error (intent-resolve/validate-location-static
+                           intents object-str interface)]
+            (when loc-error
+              ;; Did-you-mean (sl-q81m): suggest the nearest LOCATED intent —
+              ;; suggesting an unlocated one would just be a second error.
+              (let [suggestion (when (= :unknown-intent (:type loc-error))
+                                 (suggest-similar
+                                  (keyword object-str)
+                                  (map keyword (intent-resolve/located-intents
+                                                intents interface))
+                                  2))]
+                (cond-> {:type :svo/unknown-object
+                         :object object-str
+                         :interface interface
+                         :message (cond-> (:message loc-error)
+                                    suggestion
+                                    (str ". Did you mean: " suggestion "?"))}
+                  suggestion (assoc :suggestion suggestion)))))
+          (catch Exception _
+            ;; If intents not loaded yet, skip validation
+            nil)))
+      (cond
+        ;; Raw locator check (strict mode only)
+        (and (= enforcement :strict) (raw-locator? object-str))
+        {:type :svo/raw-locator-disallowed
+         :object object-str
+         :message "Raw locators are not allowed in strict mode. Use intent references instead."}
 
-      ;; Intent reference check — supports flat AND nested (multi-segment) refs.
-      (not (raw-locator? object-str))
-      (let [parse-result (intent-resolve/parse-intent-ref object-str)]
-        (if (:error parse-result)
-          ;; Invalid intent reference syntax
-          {:type :svo/unknown-object
-           :object object-str
-           :message (-> parse-result :error :message)}
-          ;; Valid syntax — statically walk the path against the schema (no browser):
-          ;; intent known -> each non-last name is a collection -> last is a
-          ;; collection or an element with a binding for this interface.
-          (try
-            (let [intents (intent-state/get-intents)
-                  path-error (intent-resolve/validate-path-static
-                              intents (:ok parse-result) interface)]
-              (when path-error
-                {:type :svo/unknown-object
-                 :object object-str
-                 :interface interface
-                 :message (:message path-error)}))
-            (catch Exception _
-              ;; If intents not loaded yet, skip validation
-              nil))))
+        ;; Intent reference check — supports flat AND nested (multi-segment) refs.
+        (not (raw-locator? object-str))
+        (let [parse-result (intent-resolve/parse-intent-ref object-str)]
+          (if (:error parse-result)
+            ;; Invalid intent reference syntax
+            {:type :svo/unknown-object
+             :object object-str
+             :message (-> parse-result :error :message)}
+            ;; Valid syntax — statically walk the path against the schema (no browser):
+            ;; intent known -> each non-last name is a collection -> last is a
+            ;; collection or an element with a binding for this interface.
+            (try
+              (let [intents (intent-state/get-intents)
+                    path-error (intent-resolve/validate-path-static
+                                intents (:ok parse-result) interface)]
+                (when path-error
+                  {:type :svo/unknown-object
+                   :object object-str
+                   :interface interface
+                   :message (:message path-error)}))
+              (catch Exception _
+                ;; If intents not loaded yet, skip validation
+                nil))))
 
-      :else nil)))
+        :else nil))))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API
@@ -281,9 +325,11 @@
                           (validate-verb glossary interface-type verb))
                         (validate-interface interfaces interface)
                         ;; Validate object/locator (when enforcement is not :off
-                        ;; and the frame's O slot expects an intent reference)
+                        ;; and the frame's O slot expects an intent reference —
+                        ;; or a named-location ref on a :location-refs? frame)
                         (validate-object object interface object-enforcement
-                                         (object-kind glossary interface-type svo))])]
+                                         (object-kind glossary interface-type svo)
+                                         (location-refs-frame? glossary interface-type svo))])]
      {:valid? (empty? issues)
       :issues (vec issues)})))
 
@@ -569,6 +615,58 @@
          (when message (str "\n       " message))
          "\n       Example: Login.submit or Checkout.pay-button")))
 
+(defn format-consumed-without-producer
+  "Format a :bindings/consumed-without-producer issue (sl-yh7).
+
+   Example output:
+   ERROR: Binding {coed} is consumed but never produced in step \"...\"
+          at features/reset.feature:14
+          Producers upstream: {code}
+          Did you mean: {code}?"
+  [issue]
+  (let [{:keys [token known suggestion location]} issue
+        {:keys [step-text uri line]} location]
+    (str "Binding " token " is consumed but never produced"
+         (when step-text (str " in step \"" step-text "\""))
+         (when (and uri line) (str "\n       at " uri ":" line))
+         (if (seq known)
+           (str "\n       Producers upstream: "
+                (str/join ", " (map #(str "{" (name %) "}") known)))
+           "\n       No upstream step or hook produces any binding")
+         (when suggestion
+           (str "\n       Did you mean: {" (name suggestion) "}?")))))
+
+(defn format-bindings-invalid-pattern
+  "Format a :bindings/invalid-pattern issue (sl-yh7) — bad capture regex,
+   including duplicate named groups."
+  [issue]
+  (let [{:keys [pattern message location]} issue
+        {:keys [step-text uri line]} location]
+    (str "Invalid capture pattern /" pattern "/"
+         (when step-text (str " in step \"" step-text "\""))
+         (when (and uri line) (str "\n       at " uri ":" line))
+         (when message (str "\n       " message)))))
+
+(defn format-unnamed-only-groups
+  "Format a :bindings/unnamed-only-groups notice (sl-yh7) — the pattern
+   captures groups but names none, so it binds nothing."
+  [issue]
+  (let [{:keys [pattern location]} issue
+        {:keys [step-text uri line]} location]
+    (str "Capture pattern /" pattern "/ has only unnamed groups — it binds nothing"
+         (when step-text (str " in step \"" step-text "\""))
+         (when (and uri line) (str "\n       at " uri ":" line))
+         "\n       Name a group ((?<name>...)) to produce a {name} binding.")))
+
+(defn format-produced-never-consumed
+  "Format a :bindings/produced-never-consumed notice (sl-yh7)."
+  [issue]
+  (let [{:keys [name location]} issue
+        {:keys [step-text uri line]} location]
+    (str "Binding {" (clojure.core/name name) "} is produced but never consumed"
+         (when step-text (str " in step \"" step-text "\""))
+         (when (and uri line) (str "\n       at " uri ":" line)))))
+
 (defn format-svo-issue
   "Format any SVO issue by dispatching on :type.
 
@@ -591,5 +689,9 @@
     :svo/provisioning-failed (format-provisioning-failed issue)
     :svo/unknown-object (format-unknown-object issue)
     :svo/raw-locator-disallowed (format-raw-locator-disallowed issue)
+    :bindings/consumed-without-producer (format-consumed-without-producer issue)
+    :bindings/invalid-pattern (format-bindings-invalid-pattern issue)
+    :bindings/unnamed-only-groups (format-unnamed-only-groups issue)
+    :bindings/produced-never-consumed (format-produced-never-consumed issue)
     ;; Fallback for unknown types
     (str "SVO issue: " (pr-str issue))))

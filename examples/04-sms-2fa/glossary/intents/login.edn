@@ -1,0 +1,7 @@
+;; Login — the reset-password flow's form surface. Both stages of the
+;; fixture page reuse one submit button markup, so a single :submit
+;; element serves stage 1 (email) and stage 2 (code).
+{:intent "Login"
+ :elements {:email  {:bindings {:web {:id "email"}}}
+            :code   {:bindings {:web {:id "code"}}}
+            :submit {:bindings {:web {:css "button[type=\"submit\"]"}}}}}

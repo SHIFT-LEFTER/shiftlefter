@@ -6,13 +6,16 @@
 ;; alongside, so the code the server sends is the code the framework's
 ;; SMS receive step polls for.
 ;;
-;; Subjects glossary declares :user/alice. Verb glossaries for :web and
-;; :sms are auto-loaded from framework defaults.
+;; Subjects glossary declares :user/alice; the Login intent supplies the
+;; form's locators. Verb glossaries for :web and :sms are auto-loaded
+;; from framework defaults. No custom steps — the SMS code crosses to
+;; the browser via the scenario data plane ((?<code>...) -> {code},
+;; sl-yh7), so there is no steps/ directory anymore.
 
 {:interfaces {:web {:type :web :adapter :etaoin :config {}}
               :sms {:type :sms :adapter :sms-mock}}
- :runner     {:step-paths ["steps/"]}
- :glossaries {:subjects "glossary/subjects.edn"}
+ :glossaries {:subjects "glossary/subjects.edn"
+              :intents  "glossary/intents"}
  :svo        {:unknown-subject :error
               :unknown-verb    :warn
               :unknown-interface :error}}

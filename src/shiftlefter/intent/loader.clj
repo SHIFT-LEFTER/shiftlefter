@@ -38,6 +38,7 @@
             [clojure.set :as set]
             [clojure.string :as str]
             [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen]
             [shiftlefter.browser.locators :as locators]
             [shiftlefter.gherkin.io :as sio]))
 
@@ -51,6 +52,16 @@
 ;; An intent's self-locating root: the :unrooted sentinel or a located map.
 (s/def :region/root (s/or :unrooted #{:unrooted}
                           :located ::interface-locator))
+
+;; An intent's optional named location (sl-3jr4): per-interface, each value an
+;; OPEN map — never a bare string — with an optional :path (leading "/").
+;; Open-map + optional :path are the forward-compat guards for named bases
+;; (sl-4mv8).
+(s/def :location/path
+  (s/with-gen (s/and string? #(str/starts-with? % "/"))
+    #(gen/fmap (fn [s] (str "/" s)) (gen/string-alphanumeric))))
+(s/def ::location-binding (s/keys :opt-un [:location/path]))
+(s/def :intent/location (s/map-of keyword? ::location-binding :min-count 1))
 
 ;; One :collections entry. :intent (the referenced component) is required; the
 ;; parent :selector, :cardinality, :optional and :count are all optional.
@@ -160,6 +171,17 @@
      :intent intent-name
      :path file-path}))
 
+(defn- validate-location
+  "Validate an intent's optional :location. Returns error or nil."
+  [location intent-name file-path]
+  (when (and (some? location) (not (s/valid? :intent/location location)))
+    {:type :intent/invalid-location
+     :message (str "Intent \"" intent-name "\" :location must be a per-interface "
+                   "map of maps (each with an optional :path starting with \"/\"), "
+                   "got: " (pr-str location))
+     :intent intent-name
+     :path file-path}))
+
 (defn- validate-collection
   "Validate one :collections entry. Returns vector of errors (may be empty)."
   [coll-key coll-def intent-name file-path]
@@ -218,7 +240,8 @@
   (let [intent-name (:intent intent-data)
         elements (:elements intent-data)
         collections (:collections intent-data)
-        root (:root intent-data)]
+        root (:root intent-data)
+        location (:location intent-data)]
     (cond
       ;; Missing :intent key
       (nil? intent-name)
@@ -244,7 +267,8 @@
       :else
       (let [elements (or elements {})]
         (-> (filterv some? [(validate-intent-name intent-name file-path)
-                            (validate-root root intent-name file-path)])
+                            (validate-root root intent-name file-path)
+                            (validate-location location intent-name file-path)])
             (into (validate-elements elements intent-name file-path))
             (into (validate-collections collections intent-name file-path))
             (into (validate-no-name-collision elements collections
@@ -307,10 +331,12 @@
 
 (defn- build-region
   "Build the per-intent region entry (parallel to the element lookup): the
-   intent's :root, :collections, :reusable marker, and the set of element names.
-   This is the schema the nested resolver and the static path check consult."
+   intent's :root, :location, :collections, :reusable marker, and the set of
+   element names. This is the schema the nested resolver and the static path
+   check consult."
   [intent-data]
   {:root (:root intent-data)
+   :location (:location intent-data)
    :collections (or (:collections intent-data) {})
    :reusable (boolean (:reusable intent-data))
    :elements (set (map name (keys (:elements intent-data))))})
@@ -548,8 +574,9 @@
   (contains? (:lookup intents) [intent-name element-name]))
 
 (defn get-region
-  "Return the per-intent region entry (`{:root :collections :reusable :elements}`)
-   for `intent-name`, or nil if unknown. The nesting schema the resolver consults."
+  "Return the per-intent region entry (`{:root :location :collections :reusable
+   :elements}`) for `intent-name`, or nil if unknown. The nesting schema the
+   resolver consults."
   [intents intent-name]
   (get-in intents [:regions intent-name]))
 
@@ -558,6 +585,13 @@
    sentinel, or nil if none/unknown)."
   [intents intent-name]
   (get-in intents [:regions intent-name :root]))
+
+(defn get-location
+  "Return the :location of `intent-name` (a per-interface map of open maps with
+   an optional :path, or nil if none/unknown). :location is OPTIONAL — component
+   intents legitimately carry none (sl-3jr4)."
+  [intents intent-name]
+  (get-in intents [:regions intent-name :location]))
 
 (defn get-collection
   "Return the :collections entry named `coll-name` (string) within `intent-name`,

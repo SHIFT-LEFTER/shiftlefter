@@ -40,17 +40,25 @@
    stable scenario-scoped count, not on whatever `:receive` left in
    `:sms/last-receive-ts`.
 
-   ## Capture storage
+   ## Capture storage (sl-yh7: the scenario data plane)
 
-   Successful `:receive` writes:
+   `:receive` is REBUILT on `shiftlefter.stepengine.bindings` — named
+   groups `(?<name>...)` in the match pattern produce scenario bindings
+   under `:sl/bindings`, consumable downstream as `{name}` tokens in any
+   literal-admitting slot. Embedded `{binding}` tokens in the match
+   pattern interpolate as regex-quoted literals. Unnamed groups bind
+   nothing (dry-run notices this).
 
-       :sms/captures      {:full <match-string> :groups [g1 g2 ...]}
-       :sms/last-message  <full message-map>
+   Successful `:receive` also writes MACHINERY keys (not user surface):
+
+       :sms/last-message     <full message-map>
        :sms/last-receive-ts  <matched-message :date-sent>
 
-   to ctx. The advance of `:sms/last-receive-ts` plus the protocol's
+   The advance of `:sms/last-receive-ts` plus the protocol's
    strict-exclusive `:since-ts` semantics is what prevents a chained
-   `:receive` from double-matching the message just consumed.
+   `:receive` from double-matching the message just consumed. A chained
+   receive re-producing a name (e.g. a second `(?<code>...)`) rebinds it —
+   last write wins.
 
    ## Capability gating
 
@@ -59,6 +67,7 @@
    the configured adapter provides ISMS before the scenario runs."
   (:require [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.sms.protocol :as sms-proto]
+            [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.stepengine.registry :refer [defstep]])
   (:import (java.time Duration Instant)
            (java.util.regex Pattern)))
@@ -178,28 +187,14 @@
 ;; Receive: shared core
 ;; -----------------------------------------------------------------------------
 
-(defn- compile-match
-  "Compile the user-supplied match expression to a `Pattern`. Throws a
-   structured error if the regex is invalid."
-  [s]
-  (try
-    (Pattern/compile s)
-    (catch Exception e
-      (throw (ex-info (str "Invalid match regex: " (pr-str s))
-                      {:type   :sms/invalid-match-regex
-                       :input  s
-                       :reason (ex-message e)})))))
-
 (defn- match-message
-  "Run `pattern` against `msg`'s :body. Returns
-   `{:msg msg :full <whole-match> :groups [g1 ...]}` on hit, nil on miss."
+  "Run `pattern` against `msg`'s :body via the data plane's named-group
+   matcher (sl-yh7). Returns `{:msg msg :full <whole-match>
+   :bindings {name value}}` on hit (participating named groups only),
+   nil on miss."
   [^Pattern pattern msg]
-  (let [m (.matcher pattern (str (:body msg)))]
-    (when (.find m)
-      {:msg    msg
-       :full   (.group m 0)
-       :groups (mapv #(.group m (int %))
-                     (range 1 (inc (.groupCount m))))})))
+  (when-let [{:keys [full bindings]} (bindings/match-named pattern (:body msg))]
+    {:msg msg :full full :bindings bindings}))
 
 (defn- attempt-receive
   "One non-blocking pass: query the adapter once and try to match.
@@ -212,22 +207,27 @@
     (some #(match-message pattern %) ok)))
 
 (defn- update-receive-state
-  "Stash a successful match into ctx: `:sms/captures`, `:sms/last-message`,
-   `:sms/last-receive-ts`. The last-receive-ts advance is what makes
-   chained `:receive` calls non-double-matching under strict-exclusive
-   `:since-ts`."
-  [ctx {:keys [msg full groups]}]
+  "Stash a successful match into ctx: named-group bindings into the
+   scenario data plane (`:sl/bindings`, sl-yh7 — last write wins on a
+   chained receive), plus the `:sms/last-message` and
+   `:sms/last-receive-ts` machinery keys. The last-receive-ts advance is
+   what makes chained `:receive` calls non-double-matching under
+   strict-exclusive `:since-ts`."
+  [ctx {:keys [msg bindings]}]
   (-> ctx
-      (assoc :sms/captures      {:full full :groups groups})
+      (bindings/merge-bindings (or bindings {}))
       (assoc :sms/last-message  msg)
       (assoc :sms/last-receive-ts (:date-sent msg))))
 
 (defn- do-receive
-  "Common :receive body — resolve impl, build filters with the given
-   :since-ts, poll-with-timeout, stash on hit."
+  "Common :receive body — resolve impl, compile the match pattern (with
+   embedded {binding} tokens interpolated as regex-quoted literals),
+   build filters with the given :since-ts, poll-with-timeout, stash on
+   hit. The poll-timeout ladder is SMS's capture-failure semantics: no
+   match within budget throws :sms/receive-timeout."
   [ctx subject-str to-phone match-str since-ts]
   (let [sms     (get-sms-impl ctx subject-str)
-        pattern (compile-match match-str)
+        pattern (bindings/compile-pattern ctx match-str)
         filters {:since-ts  since-ts
                  :to        to-phone
                  :direction :inbound}
@@ -240,27 +240,37 @@
 ;; Patterns
 ;; -----------------------------------------------------------------------------
 
+;; Value slots use the central fragment (sl-yh7): quoted literal — captured
+;; WITH quotes, stripped by the engine per the frame's :arg-kinds — or a
+;; {binding} token. The MMS caption slot allows an empty quoted literal.
+(def ^:private value-re bindings/value-re-fragment)
+
+(def ^:private empty-ok-value-re
+  (str "'[^']*'|" bindings/token-re-fragment))
+
 (def ^:private send-pattern
-  (re-pattern ":([\\w./-]+) sends an SMS to '([^']+)' saying '([^']*)'"))
+  (re-pattern (str ":([\\w./-]+) sends an SMS to (" value-re
+                   ") saying (" empty-ok-value-re ")")))
 
 (def ^:private send-media-pattern
-  (re-pattern (str ":([\\w./-]+) sends an MMS to '([^']+)'"
-                   " with caption '([^']*)' and media '([^']+)'")))
+  (re-pattern (str ":([\\w./-]+) sends an MMS to (" value-re ")"
+                   " with caption (" empty-ok-value-re
+                   ") and media (" value-re ")")))
 
 (def ^:private receive-default-pattern
-  (re-pattern ":([\\w./-]+) receives an SMS to '([^']+)' matching /(.+)/"))
+  (re-pattern (str ":([\\w./-]+) receives an SMS to (" value-re ") matching /(.+)/")))
 
 (def ^:private receive-since-pattern
-  (re-pattern (str ":([\\w./-]+) receives an SMS to '([^']+)'"
-                   " since '([^']+)' matching /(.+)/")))
+  (re-pattern (str ":([\\w./-]+) receives an SMS to (" value-re ")"
+                   " since (" value-re ") matching /(.+)/")))
 
 (def ^:private receive-within-pattern
-  (re-pattern (str ":([\\w./-]+) receives an SMS to '([^']+)'"
+  (re-pattern (str ":([\\w./-]+) receives an SMS to (" value-re ")"
                    " within the last (\\d+ (?:seconds?|minutes?|hours?))"
                    " matching /(.+)/")))
 
 (def ^:private see-count-pattern
-  (re-pattern ":([\\w./-]+) should see (\\d+) messages to '([^']+)'"))
+  (re-pattern (str ":([\\w./-]+) should see (\\d+) messages to (" value-re ")")))
 
 ;; -----------------------------------------------------------------------------
 ;; Stepdefs

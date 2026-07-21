@@ -64,8 +64,12 @@
 (s/def ::stepdef-source (s/nilable string?))
 (s/def ::svo (s/nilable map?))
 
+(s/def ::slot-kinds (s/coll-of (s/nilable #{:value :matcher :location})
+                               :kind vector?))
+
 (s/def ::binding-map
-  (s/keys :opt-un [::fn ::arity ::captures ::arity-ok? ::stepdef-source ::svo]))
+  (s/keys :opt-un [::fn ::arity ::captures ::arity-ok? ::stepdef-source ::svo
+                   ::slot-kinds]))
 
 ;; Bound step
 (s/def ::status #{:matched :undefined :ambiguous :synthetic})
@@ -428,6 +432,73 @@
                 bound-step))]
       (mapv #(update % :plan/steps (partial mapv stamp-step)) plans))))
 
+(defn frame-slot-kinds
+  "Vector aligned with a bound step's captures: the slot kind governing
+   each capture position, nil for plain captures (sl-yh7).
+
+   Kinds come from the verb glossary frame: :arg-kinds maps frame arg
+   names to #{:value :matcher}; an :object-kind :location O slot marks
+   its capture :location. The stepdef's :svo metadata (:$N placeholders)
+   maps frame args back to capture positions. Returns nil when the frame
+   can't be resolved — plain-capture behavior, no token admission."
+  [metadata glossary interfaces capture-count]
+  (let [{:keys [interface svo]} metadata
+        {:keys [verb frame object args]} svo
+        iface-type (or (get-in interfaces [interface :type]) interface)
+        frame-map (get-in glossary [:verbs iface-type verb :frames frame])]
+    (when frame-map
+      (let [base (vec (repeat capture-count nil))
+            in-range? (fn [idx] (and (some? idx) (<= 0 idx) (< idx capture-count)))
+            with-args (reduce-kv
+                       (fn [acc arg-name capture-ref]
+                         (let [kind (get-in frame-map [:arg-kinds arg-name])
+                               idx (when (and kind (extract/placeholder? capture-ref))
+                                     (extract/placeholder-index capture-ref))]
+                           (if (in-range? idx) (assoc acc idx kind) acc)))
+                       base (or args {}))
+            obj-idx (when (and (= :location (:object-kind frame-map))
+                               (extract/placeholder? object))
+                      (extract/placeholder-index object))]
+        (if (in-range? obj-idx)
+          (assoc with-args obj-idx :location)
+          with-args)))))
+
+(def ^:private default-stamp-glossary
+  "Framework default glossaries, for slot-kind stamping in vanilla mode.
+   Builtin value slots capture WITH their quote delimiters (sl-yh7), so
+   the exec normalization that strips them must run in EVERY mode — the
+   builtin frames' :arg-kinds are compiled-in truth, not an SVO opt-in."
+  (delay (glossary/load-default-glossaries)))
+
+(defn default-slot-kinds
+  "Slot kinds for a stepdef's metadata against the FRAMEWORK DEFAULT
+   glossaries — the same kinds vanilla-mode stamping produces. For test
+   harnesses that invoke stepdef fns directly and must replicate the
+   engine's capture normalization (bindings/normalize-captures)."
+  [metadata capture-count]
+  (frame-slot-kinds metadata @default-stamp-glossary nil capture-count))
+
+(defn- stamp-slot-kinds
+  "Stamp each matched bound step's binding with :slot-kinds (sl-yh7) —
+   at bind time, the one place the glossary is in scope — so the exec
+   path can normalize value/location captures (strip quotes, resolve
+   {binding} tokens) without the glossary being threaded to it. Vanilla
+   mode (no project glossary) stamps from the framework defaults. No-op
+   for steps without a resolvable frame. Plan-side only; never enters
+   the pickle."
+  [plans glossary interfaces]
+  (let [glossary (or glossary @default-stamp-glossary)]
+    (letfn [(stamp-step [bound-step]
+              (let [metadata (-> bound-step :binding :metadata)
+                    captures (-> bound-step :binding :captures)]
+                (if-let [kinds (and (= :matched (:status bound-step))
+                                    (:svo metadata)
+                                    (frame-slot-kinds metadata glossary interfaces
+                                                      (count captures)))]
+                  (assoc-in bound-step [:binding :slot-kinds] kinds)
+                  bound-step)))]
+      (mapv #(update % :plan/steps (partial mapv stamp-step)) plans))))
+
 (defn bind-suite
   "Bind all pickles to stepdefs, producing plans and diagnostics.
 
@@ -455,8 +526,12 @@
   ([pickles stepdefs opts]
    (let [{:keys [glossary interfaces svo]} opts
          ;; Bind, then stamp each SVO with the costume its subject :wears
-         ;; (sl-rnm) — the runtime provisioning path reads (:wears svo).
-         plans (stamp-costumes (mapv #(bind-pickle % stepdefs) pickles) glossary)
+         ;; (sl-rnm) — the runtime provisioning path reads (:wears svo) —
+         ;; and each binding with its :slot-kinds (sl-yh7) — the exec path
+         ;; reads them to normalize value/location captures.
+         plans (-> (mapv #(bind-pickle % stepdefs) pickles)
+                   (stamp-costumes glossary)
+                   (stamp-slot-kinds glossary interfaces))
          binding-issues (collect-issues plans)
          ;; SVO validation (only if opts provided)
          svo-issues (collect-svo-issues plans glossary interfaces svo)

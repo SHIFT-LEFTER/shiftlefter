@@ -4,7 +4,7 @@
 
 An agent can write you a passing browser test in one shot today. That's not the hard part anymore. The hard part is the **second** shot, and the tenth: each regeneration re-derives your app from scratch — its own selectors, its own names, its own idea of who "the user" is — and the suite drifts faster the more agents (and models) touch it. ShiftLefter gives that loop something stable to stand on: a typed vocabulary you define once, shared by every agent and every human on the team, and validated before anything runs. ([The full problem statement and fit check →](docs/FIT.md))
 
-## Status: v0.5.1
+## Status: v0.5.2
 
 ShiftLefter is an early, openly-scoped foundation for driving real software behavior from Gherkin — multiple users, multiple interfaces, all checked before anything runs. The core — driving a browser with multiple independent actors over a typed glossary you control — is solid and meant to be built on. The surrounding test-suite machinery and the traceability graph are on the way.
 
@@ -31,6 +31,11 @@ ShiftLefter runs in two modes. **Vanilla** is a plain Gherkin runner — parse, 
 - The typed SVO/glossary discipline — your vocabulary, validated before execution.
 - The `sl` CLI — run, format, dry-run, diagnose; CI-ready output (JUnit XML, HTML, EDN), tag filtering, parallel scenarios.
 - Gherkin parsing & lossless formatting — Cucumber-compliant (46/46 official test files).
+- Scenario lifecycle hooks — `@hook=<name>` tags + `hooks.clj`, with loud
+  failure and dry-run preview ([when not to use them](docs/hooks.md)).
+- The scenario data plane — capture a value with a named regex group, consume
+  it as `{name}` in later step text, across interfaces
+  ([worked examples](docs/across-interfaces.md)).
 
 **Preview — works, expect change before 1.0**
 
@@ -40,7 +45,8 @@ ShiftLefter runs in two modes. **Vanilla** is a plain Gherkin runner — parse, 
 
 **Not here yet — roadmap**
 
-- Test fixtures and hooks as first-class features.
+- Test fixtures as first-class declarative features — the forms that will
+  grow out of today's scenario hooks.
 - Brownfield migration of an existing suite.
 - The traceability graph — the destination: executable traceability, use-case ↔ feature mapping & generation, and observation lineage from real-world requirements through to running tests.
 
@@ -56,12 +62,12 @@ One-line installer — drops a runnable `sl` + jar into `./sl/` and prints the
 agent on-ramp breadcrumb (see below):
 
 ```bash
-# From the public release (once published):
+# From the public release:
 curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash
 
-# Or from a locally built release-zip (dev / pre-release):
-clj -T:build release-zip :version '"0.5.1"'
-release/install.sh --zip target/shiftlefter-v0.5.1.zip
+# Or from a locally built release-zip (dev / pre-release; use the version you're building):
+clj -T:build release-zip :version '"X.Y.Z"'
+release/install.sh --zip target/shiftlefter-vX.Y.Z.zip
 
 export PATH="$PWD/sl:$PATH"
 ```
@@ -171,7 +177,7 @@ sl run features/ --step-paths steps/ -v
 | `--skip-tags TAGS` | — | Skip scenarios carrying any of these tags (same syntax; exclude wins over `--tags`) |
 | `--max-parallel N` | `:runner {:max-parallel N}` | Run up to N scenarios concurrently (default 1 = sequential). Results and console output are identical to a sequential run. `@serial`, costume-wearing, and shared-interface scenarios run alone. |
 | `--edn` | — | Output results as EDN to stdout |
-| `--junit-xml PATH` | `:runner {:report {:junit-xml "..."}}` | Write a CI-ingestible JUnit XML report (alongside console/EDN; flag wins over config). A planning error (exit 2) writes **no** file — gate CI on the exit code. See [ERRATA E009](ERRATA.md). |
+| `--junit-xml PATH` | `:runner {:report {:junit-xml "..."}}` | Write a CI-ingestible JUnit XML report (alongside console/EDN; flag wins over config). A planning error (exit 2) writes **no** file — gate CI on the exit code. See [docs/CI.md](docs/CI.md) for worked pipelines and [ERRATA E009](ERRATA.md) for format details. |
 | `--html PATH` | `:runner {:report {:html "..."}}` | Write a self-contained HTML run report (one file, works offline via double-click; flag wins over config). Embeds the full run data as a readable EDN island alongside the rendered view. |
 | `-v, --verbose` | — | Show each step as it executes |
 | `--version` | — | Print ShiftLefter version |
@@ -320,6 +326,12 @@ Feature: Shopping cart
 ```
 
 **Convention:** `ctx` is always the **first** argument, followed by regex captures in order.
+
+Before writing a custom step to *carry a value* from one step to another,
+check the scenario data plane first: a named regex group (`(?<code>\d{6})`)
+in a builtin matcher binds the value, and `{code}` consumes it in later step
+text — often no `defstep` needed. See
+[Test Across Interfaces](docs/across-interfaces.md).
 
 **Return values:**
 
@@ -623,6 +635,7 @@ isn't), plus a task-based index of every guide. Highlights:
 
 - [docs/FIT.md](docs/FIT.md) — Would ShiftLefter work for my project? A practical fit check (hand it to your agent)
 - [docs/browser-getting-started.md](docs/browser-getting-started.md) — Browser automation quick start (built-in steps)
+- [docs/CI.md](docs/CI.md) — Running ShiftLefter in CI: worked GitLab & GitHub Actions pipelines, JUnit report wiring, exit-code gating
 - [docs/SVO.md](docs/SVO.md) — SVO validation guide (glossaries, defstep metadata, incremental adoption)
 - [docs/AGENT.md](docs/AGENT.md) — the agent surface: operating doctrine + built-in vocabulary (also packaged: `sl agent-doc`)
 - [docs/CAPABILITIES.md](docs/CAPABILITIES.md) — What you can do at each installation tier, bundled libraries, browser backend config
@@ -693,7 +706,7 @@ CLI commands return consistent exit codes for scripting and CI integration.
 | Code | Meaning |
 |------|---------|
 | 0 | All scenarios passed (or pending allowed via config) |
-| 1 | One or more scenarios failed, or pending steps when not allowed |
+| 1 | One or more scenarios failed or errored (a lifecycle hook threw), or pending steps when not allowed |
 | 2 | Planning failure (undefined steps, parse errors, config errors, no features found) |
 | 3 | Runner crash (unexpected exception) |
 

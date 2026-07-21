@@ -53,7 +53,9 @@ In Shifted mode, attach `:svo` metadata so the step resolves to a typed triple.
 ## Minimal config
 
 `shiftlefter.edn` in the project root. Note `:step-paths` lives **under
-`:runner`** — a top-level `:step-paths` is ignored:
+`:runner`** — a top-level `:step-paths` is ignored (since 0.5.2 the runner
+prints a `Config warning:` with the correct path; older versions ignore it
+silently):
 
 ```clojure
 {:runner {:step-paths ["steps/"]}
@@ -70,9 +72,26 @@ In Shifted mode, attach `:svo` metadata so the step resolves to a typed triple.
 |-------|-----|
 | `(defstep #"..." [n] ...)` | `(defstep #"..." [ctx n] ...)` — `ctx` is always first |
 | Forget to return `ctx` | Return `ctx` or `(assoc ctx ...)` from every step |
-| `:step-paths` at config top level | Nest it under `:runner` |
+| `:step-paths` at config top level (warned since 0.5.2, ignored either way) | Nest it under `:runner` |
 | `When :login-form submits` | Subjects are actors: `When :user/alice clicks Login.submit` |
 | Compare a capture as a number | `(parse-long n)` first — captures are strings |
+
+## URL assertions beyond the built-in frames
+
+`should be on <X>` asserts the REGION: normalized path + fragment, query
+string ignored (query is state, not region), host ignored, trailing slash
+normalized. **Quoted = literal, always; bare = ref**: a bare intent name
+(`should be on Feed`) resolves via the intent's `:location`; a quoted value
+(`should be on '/feed'`) is a literal. `should be on exactly '<url>'` asserts the exact resource + state
+structurally: full URL required, path and fragment exact, query compared as a
+multimap — cross-key order insignificant, duplicate-key value order
+significant. It takes a quoted literal or a captured `{binding}` token
+(`should be on exactly {resetLink}`); bare intent names stay region-only.
+
+Anything more exotic — percent-encoding normalization, host-case rules,
+byte-exact string comparison — is deliberately not built in. Write a custom
+step assertion (`defstep` + the browser's current URL) for the case at hand,
+or petition for a third frame if the need is general.
 
 ## Worked examples
 

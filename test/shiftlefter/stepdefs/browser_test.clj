@@ -1,9 +1,12 @@
 (ns shiftlefter.stepdefs.browser-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [shiftlefter.stepengine.bind :as bind]
+            [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.stepengine.registry :as registry]
             [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.browser.protocol :as bp]
             [shiftlefter.browser.intent :as browser-intent]
+            [shiftlefter.intent.state :as intent-state]
             [shiftlefter.stepdefs.browser]))
 
 ;; -----------------------------------------------------------------------------
@@ -40,7 +43,12 @@
   ;; --- Query Operations ---
   (get-text [_this locator]
     (swap! calls conj {:op :get-text :locator locator})
-    (get @config :page-text "Hello World"))
+    ;; :page-texts (optional) is a queue for retry tests — each read pops
+    ;; one entry, the last entry sticks. Falls back to static :page-text.
+    (if-let [[t & r] (seq (get @config :page-texts))]
+      (do (when (seq r) (swap! config assoc :page-texts (vec r)))
+          t)
+      (get @config :page-text "Hello World")))
   (get-url [_this]
     (swap! calls conj {:op :get-url})
     (get @config :url "https://example.com"))
@@ -165,12 +173,23 @@
 
 (defn- invoke-step
   "Invoke a stepdef with text and ctx.
-   Note: ctx-first convention - ctx goes first, then captures."
+   Note: ctx-first convention - ctx goes first, then captures.
+
+   Replicates the engine's data-plane capture normalization (sl-yh7):
+   value slots capture WITH quotes / {binding} tokens, and the engine
+   strips/resolves them by the frame's :arg-kinds before the stepdef fn
+   runs. Without this the helper would hand quoted values to fn bodies
+   the real exec path never shows them to."
   [text ctx]
   (let [stepdef (find-stepdef text)
         matcher (re-matcher (:pattern stepdef) text)
         _ (.matches matcher)
-        captures (mapv #(.group matcher %) (range 1 (inc (.groupCount matcher))))
+        raw-captures (mapv #(.group matcher %) (range 1 (inc (.groupCount matcher))))
+        kinds (bind/default-slot-kinds (:metadata stepdef) (count raw-captures))
+        normalized (bindings/normalize-captures raw-captures kinds ctx)
+        _ (when-let [err (:error normalized)]
+            (throw (ex-info (:message err) err)))
+        captures (:ok normalized)
         arity (:arity stepdef)
         ;; ctx-first: if arity > captures, prepend ctx
         args (if (= arity (inc (count captures)))
@@ -189,6 +208,111 @@
           result (invoke-step ":user opens the browser to 'https://example.com'" ctx)]
       (is (map? result))
       (is (= [{:op :open-to :url "https://example.com"}] (get-calls browser))))))
+
+;; --- Named locations (sl-3jr4) ---
+
+(def ^:private location-intents
+  "Hand-built loaded-intents stub: a located Feed, an unlocated ProductCard
+   (shape per intent.loader/build-region)."
+  {:intents ["Feed" "ProductCard"]
+   :regions {"Feed" {:location {:web {:path "/feed"}}}
+             "ProductCard" {}}})
+
+(defn- ctx-with-base-url
+  "Attach the :run/interfaces stash carrying a :web :base-url to ctx."
+  [ctx base-url]
+  (cap/assoc-run-interfaces
+   ctx {:web {:type :web :adapter :etaoin :config {:base-url base-url}}}))
+
+(deftest test-open-browser-to-named-location
+  (with-redefs [intent-state/get-intents (constantly location-intents)]
+    (testing "A BARE ref resolves via :location + :base-url (sl-iseq)"
+      (let [browser (make-fake-browser)
+            ctx (-> (make-ctx-with-subject :user browser)
+                    (ctx-with-base-url "http://localhost:9092"))
+            result (invoke-step ":user opens the browser to Feed" ctx)]
+        (is (map? result))
+        (is (= [{:op :open-to :url "http://localhost:9092/feed"}]
+               (get-calls browser)))))
+
+    (testing "QUOTED is always a literal — even a quoted intent name (AC 2)"
+      (let [browser (make-fake-browser)
+            ctx (-> (make-ctx-with-subject :user browser)
+                    (ctx-with-base-url "http://localhost:9092"))]
+        (invoke-step ":user opens the browser to 'Feed'" ctx)
+        (is (= [{:op :open-to :url "Feed"}] (get-calls browser))
+            "quotes stripped, no resolution attempted")))
+
+    (testing "Quoted literal URLs pass through with quotes stripped"
+      (let [browser (make-fake-browser)
+            ctx (-> (make-ctx-with-subject :user browser)
+                    (ctx-with-base-url "http://localhost:9092"))]
+        (invoke-step ":user opens the browser to 'http://elsewhere:1234/x'" ctx)
+        (is (= [{:op :open-to :url "http://elsewhere:1234/x"}]
+               (get-calls browser)))))
+
+    (testing "Unknown bare ref throws structured :intent/unknown-intent"
+      (let [browser (make-fake-browser)
+            ctx (-> (make-ctx-with-subject :user browser)
+                    (ctx-with-base-url "http://localhost:9092"))
+            e (try (invoke-step ":user opens the browser to Feeed" ctx)
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (= :intent/unknown-intent (:type (ex-data e))))
+        (is (empty? (get-calls browser)) "No navigation on a failed resolve")))
+
+    (testing "Dotted bare token binds and fails resolution with did-you-mean"
+      (let [browser (make-fake-browser)
+            ctx (-> (make-ctx-with-subject :user browser)
+                    (ctx-with-base-url "http://localhost:9092"))
+            e (try (invoke-step ":user opens the browser to Feed.x" ctx)
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (= :intent/unknown-intent (:type (ex-data e))))))
+
+    (testing "Bare ref without :base-url in ctx throws :intent/missing-base-url"
+      (let [browser (make-fake-browser)
+            ctx (make-ctx-with-subject :user browser)
+            e (try (invoke-step ":user opens the browser to Feed" ctx)
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (= :intent/missing-base-url (:type (ex-data e))))
+        (is (re-find #"base-url" (ex-message e))
+            "Error message names the config key")))))
+
+(deftest test-should-be-on-named-location
+  (testing "sl-q81m/sl-iseq: 'should be on' resolves a BARE named-location ref
+            and asserts the REGION (path + fragment, query ignored)"
+    (with-redefs [intent-state/get-intents (constantly location-intents)]
+      (let [browser (make-fake-browser {:url "http://localhost:9092/feed?tab=hot"})
+            ctx (-> (make-ctx-with-subject :alice browser)
+                    (ctx-with-base-url "http://localhost:9092"))
+            result (invoke-step ":alice should be on Feed" ctx)]
+        (is (map? result) "region /feed matches despite the query string"))))
+
+  (testing "a bare ref on the wrong region fails with the region mismatch"
+    (with-redefs [intent-state/get-intents (constantly location-intents)]
+      (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 100]
+        (let [browser (make-fake-browser {:url "http://localhost:9092/login"})
+              ctx (-> (make-ctx-with-subject :alice browser)
+                      (ctx-with-base-url "http://localhost:9092"))]
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                                #"Expected region '/feed'"
+                                (invoke-step ":alice should be on Feed" ctx)))))))
+
+  (testing "QUOTED 'Feed' is a path literal — region-mismatches /feed with a
+            clean error and no ref resolution (AC 2)"
+    (with-redefs [intent-state/get-intents (constantly location-intents)]
+      (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 100]
+        (let [browser (make-fake-browser {:url "http://localhost:9092/feed"})
+              ctx (-> (make-ctx-with-subject :alice browser)
+                      (ctx-with-base-url "http://localhost:9092"))]
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                                #"Expected region 'Feed'"
+                                (invoke-step ":alice should be on 'Feed'" ctx))))))))
 
 (deftest test-click
   (testing ":user clicks {locator} clicks element"
@@ -689,19 +813,94 @@
                             (invoke-step ":alice should not see {:css \"#visible\"}" ctx))))))
 
 (deftest test-should-be-on-url-pass
-  (testing ":alice should be on 'url' passes on substring match"
+  (testing ":alice should be on 'url' passes on region match (query is state,
+            not region — sl-q81m)"
     (let [browser (make-fake-browser {:url "https://example.com/dashboard?tab=home"})
           ctx (make-ctx-with-subject :alice browser)
-          result (invoke-step ":alice should be on 'example.com/dashboard'" ctx)]
-      (is (map? result)))))
+          result (invoke-step ":alice should be on '/dashboard'" ctx)]
+      (is (map? result))))
+
+  (testing "trailing slash is normalized; host in a full-URL literal is ignored"
+    (let [browser (make-fake-browser {:url "https://example.com/dashboard"})
+          ctx (make-ctx-with-subject :alice browser)]
+      (is (map? (invoke-step ":alice should be on '/dashboard/'" ctx)))
+      (is (map? (invoke-step ":alice should be on 'http://staging/dashboard'" ctx))))))
 
 (deftest test-should-be-on-url-fail
-  (testing ":alice should be on 'url' throws on mismatch"
-    (let [browser (make-fake-browser {:url "https://other.com"})
+  (testing ":alice should be on 'url' throws on region mismatch"
+    (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 100]
+      (let [browser (make-fake-browser {:url "https://other.com/login"})
+            ctx (make-ctx-with-subject :alice browser)]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"Expected region"
+                              (invoke-step ":alice should be on '/dashboard'" ctx)))))))
+
+(deftest test-should-be-on-exactly
+  (testing "structural equality: cross-key query reorder passes"
+    (let [browser (make-fake-browser {:url "http://h:9092/p?b=2&a=1"})
           ctx (make-ctx-with-subject :alice browser)]
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                            #"Expected URL to contain"
-                            (invoke-step ":alice should be on 'example.com'" ctx))))))
+      (is (map? (invoke-step ":alice should be on exactly 'http://h:9092/p?a=1&b=2'" ctx)))))
+
+  (testing "value change fails; duplicate-key reorder fails"
+    (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 100]
+      (let [browser (make-fake-browser {:url "http://h:9092/p?a=2"})
+            ctx (make-ctx-with-subject :alice browser)]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"Expected exactly query"
+                              (invoke-step ":alice should be on exactly 'http://h:9092/p?a=1'" ctx))))
+      (let [browser (make-fake-browser {:url "http://h:9092/p?a=2&a=1"})
+            ctx (make-ctx-with-subject :alice browser)]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"Expected exactly query"
+                              (invoke-step ":alice should be on exactly 'http://h:9092/p?a=1&a=2'" ctx))))))
+
+  (testing "a non-full-URL expectation fails loudly, pointing at the region frame"
+    (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 100]
+      (let [browser (make-fake-browser {:url "http://h:9092/p"})
+            ctx (make-ctx-with-subject :alice browser)]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                              #"requires a full URL"
+                              (invoke-step ":alice should be on exactly '/p'" ctx)))))))
+
+;; sl-ka80: the at-exactly object slot joins the data plane properly — the
+;; capture keeps its quotes so exec normalization sees what the user wrote.
+(deftest test-should-be-on-exactly-data-plane
+  (testing "quoted '{token}' stays LITERAL — never resolved (sl-iseq, sl-ka80)"
+    (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 100]
+      (let [browser (make-fake-browser {:url "http://h:9092/p"})
+            ctx (-> (make-ctx-with-subject :alice browser)
+                    (bindings/merge-bindings {:myUrl "http://h:9092/p"}))
+            e (try (invoke-step ":alice should be on exactly '{myUrl}'" ctx)
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (= "{myUrl}" (:expected (ex-data e)))
+            "the literal text {myUrl} must not resolve to the bound URL — a
+             resolved (quote-wrapped) URL here would also throw, so assert
+             on WHAT the assertion compared, not that it failed"))))
+
+  (testing "magic-link shape: a captured URL is consumed by should be on exactly"
+    (let [browser (make-fake-browser
+                   {:page-text "Reset here: https://app.test/reset?token=abc123"
+                    :url "https://app.test/reset?token=abc123"})
+          ctx (make-ctx-with-subject :alice browser)
+          ctx' (invoke-step
+                ":alice captures {:id \"email\"} matching /(?<nextUrl>https:\\S+)/"
+                ctx)]
+      (is (= "https://app.test/reset?token=abc123"
+             (-> ctx' (get bindings/bindings-key) :nextUrl))
+          "the URL is born in captured text")
+      (is (map? (invoke-step ":alice should be on exactly {nextUrl}" ctx'))
+          "…and consumed as the exact-match expectation")))
+
+  (testing "an unbound bare token is a structured :bindings/unresolved"
+    (let [browser (make-fake-browser {:url "http://h:9092/p"})
+          ctx (make-ctx-with-subject :alice browser)
+          e (try (invoke-step ":alice should be on exactly {nope}" ctx)
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (= :bindings/unresolved (:type (ex-data e))))))
+
+  (testing "named-location refs stay excluded (sl-q81m boundary survives sl-ka80)"
+    (is (nil? (find-stepdef ":alice should be on exactly Dashboard.home"))
+        "PascalCase on at-exactly matches NO stepdef — not this one, not :at")))
 
 (deftest test-should-see-title-pass
   (testing ":alice should see the title 'text' passes on match"
@@ -875,6 +1074,7 @@
                             ":alice should see {:css \"#x\"}"
                             ":alice should not see {:css \"#x\"}"
                             ":alice should be on 'https://x.com'"
+                            ":alice should be on exactly 'https://x.com/p'"
                             ":alice should see the title 'X'"
                             ;; New verification steps
                             ":alice should see {:id \"x\"} with text 'hello'"
@@ -883,7 +1083,9 @@
                             ":alice should see {:id \"x\"} enabled"
                             ":alice should see {:id \"x\"} disabled"
                             ":alice should see an alert"
-                            ":alice should see an alert with 'text'"]]
+                            ":alice should see an alert with 'text'"
+                            ;; Capture step (sl-zgna)
+                            ":alice captures {:id \"x\"} matching /(?<code>\\d+)/"]]
       (doseq [text subject-patterns]
         (let [stepdef (find-stepdef text)]
           (is (some? stepdef) (str "No stepdef found for: " text))
@@ -910,7 +1112,8 @@
                  ":alice should see {:id \"x\"} disabled"
                  ":alice should see {:id \"x\"}"
                  ":alice should see an alert"
-                 ":alice should see an alert with 'text'"]]
+                 ":alice should see an alert with 'text'"
+                 ":alice captures {:id \"x\"} matching /(?<code>\\d+)/"]]
       (doseq [text texts]
         (let [matches (filter #(re-matches (:pattern %) text) (registry/all-stepdefs))]
           (is (= 1 (count matches))
@@ -1042,10 +1245,92 @@
         ":browser/assertion-failed")
     (is (retryable-error?
          (ex-info "idx" {:errors [{:type :intent/index-out-of-range}]}))
-        ":intent/index-out-of-range diagnostic"))
+        ":intent/index-out-of-range diagnostic")
+    (is (retryable-error?
+         (ex-info "no match" {:type :bindings/capture-failure}))
+        ":bindings/capture-failure — the capture step polls like a should-see (sl-zgna)"))
 
   (testing "non-transient errors are NOT retried (over-match guard)"
     (is (not (retryable-error?
               (ex-info "click intercepted" {:type :etaoin/http-error
                                             :response {:value {:error "element click intercepted"}}}))))
+    (is (not (retryable-error?
+              (ex-info "unresolved" {:type :bindings/unresolved})))
+        "an unresolved embedded token fails fast — no amount of polling resolves it")
     (is (not (retryable-error? (ex-info "boom" {}))))))
+
+;; =============================================================================
+;; Capture Step Tests (sl-zgna) — assert-plus-bind into the data plane
+;; =============================================================================
+
+(deftest test-capture-binds-named-groups
+  (testing ":alice captures {locator} matching /.../ merges named groups into :sl/bindings"
+    (let [browser (make-fake-browser {:page-text "Order XK-42 confirmed for alice"})
+          ctx (make-ctx-with-subject :alice browser)
+          result (invoke-step
+                  ":alice captures {:id \"order\"} matching /Order (?<orderNumber>[A-Z]+-\\d+) (?<status>\\w+)/"
+                  ctx)]
+      (is (= {:orderNumber "XK-42" :status "confirmed"}
+             (get result bindings/bindings-key))
+          "every participating named group binds")
+      (let [call (first (get-calls browser))]
+        (is (= :get-text (:op call)))
+        (is (= {:id "order"} (-> call :locator :q)))))))
+
+(deftest test-capture-failure-is-structured-step-failure
+  (testing "no match within the retry budget = :bindings/capture-failure with pattern, excerpt, locator"
+    (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 250]
+      (let [browser (make-fake-browser {:page-text "nothing relevant here"})
+            ctx (make-ctx-with-subject :alice browser)
+            e (try (invoke-step
+                    ":alice captures {:id \"order\"} matching /(?<code>\\d{6})/"
+                    ctx)
+                   (catch clojure.lang.ExceptionInfo e e))
+            data (ex-data e)]
+        (is (= :bindings/capture-failure (:type data)))
+        (is (= "(?<code>\\d{6})" (:pattern data)))
+        (is (= "nothing relevant here" (:text data))
+            "the text actually seen rides the error")
+        (is (= "{:id \"order\"}" (:locator data))
+            "the capture step stamps the locator onto capture!'s error")
+        (is (> (count (get-calls browser)) 1)
+            "the miss polls (wait-then-assert) before surfacing")))))
+
+(deftest test-capture-retries-until-text-appears
+  (testing "capture polls the live DOM — late-arriving text still binds"
+    (let [browser (make-fake-browser
+                   {:page-texts ["Loading…" "Loading…" "Your code is 123456"]})
+          ctx (make-ctx-with-subject :alice browser)
+          result (invoke-step
+                  ":alice captures {:id \"msg\"} matching /code is (?<code>\\d{6})/"
+                  ctx)]
+      (is (= {:code "123456"} (get result bindings/bindings-key))))))
+
+(deftest test-capture-embedded-token-interpolates-as-literal
+  (testing "an embedded {binding} token in the matcher resolves regex-quoted before matching"
+    (let [browser (make-fake-browser {:page-text "Order XK-42 shipped"})
+          ctx (-> (make-ctx-with-subject :alice browser)
+                  (bindings/merge-bindings {:orderNumber "XK-42"}))
+          result (invoke-step
+                  ":alice captures {:id \"order\"} matching /Order {orderNumber} (?<status>\\w+)/"
+                  ctx)]
+      (is (= "shipped" (-> result (get bindings/bindings-key) :status))))))
+
+(deftest test-capture-unresolved-embedded-token-fails-fast
+  (testing "an unresolved embedded {binding} token is a fast :bindings/unresolved, not a poll"
+    (let [browser (make-fake-browser {:page-text "Order XK-42 shipped"})
+          ctx (make-ctx-with-subject :alice browser)
+          e (try (invoke-step
+                  ":alice captures {:id \"order\"} matching /Order {missing} (?<status>\\w+)/"
+                  ctx)
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (= :bindings/unresolved (:type (ex-data e))))
+      (is (= 1 (count (get-calls browser)))
+          "fails on the first read — unresolved tokens are not retryable"))))
+
+(deftest test-capture-match-slot-is-stamped-matcher
+  (testing "the default web glossary declares the capture frame's :match slot :matcher"
+    (let [stepdef (find-stepdef ":alice captures {:id \"x\"} matching /(?<code>\\d+)/")]
+      (is (= [nil nil :matcher]
+             (bind/default-slot-kinds (:metadata stepdef) 3))
+          "subject and locator are plain captures; the pattern is a :matcher slot — its named groups are statically enumerable"))))

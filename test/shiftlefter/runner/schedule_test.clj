@@ -87,3 +87,43 @@
         "@serial (:tag) is user intent, not an auto gate — excluded")
     (is (= {} (schedule/auto-serial-counts
                [(plan {:steps [(step :web :alice)]})])))))
+
+;; -----------------------------------------------------------------------------
+;; [:hook <name>] source (sl-esq AC8)
+;; -----------------------------------------------------------------------------
+
+(defn- with-hooks [p hooks] (assoc p :plan/hooks hooks))
+
+(deftest plan-schedule-hook-source-test
+  (testing "a resolved :requires-serial hook auto-serializes the plan"
+    (is (= {:serial? true :reason [:hook "reset-db"]}
+           (schedule/plan-schedule
+            (with-hooks (plan {:steps [(step :web :alice)]})
+              [{:name "audit"}
+               {:name "reset-db" :requires-serial true}])
+            interfaces))))
+  (testing "hooks without :requires-serial make no scheduling claim"
+    (is (nil? (schedule/plan-schedule
+               (with-hooks (plan {:steps [(step :web :alice)]})
+                 [{:name "audit"}])
+               interfaces))))
+  (testing "precedence: :tag > :hook"
+    (is (= {:serial? true :reason :tag}
+           (schedule/plan-schedule
+            (with-hooks (plan {:tags ["@serial"] :steps [(step :web :alice)]})
+              [{:name "reset-db" :requires-serial true}])
+            interfaces))))
+  (testing "precedence: :hook > :costume"
+    (is (= {:serial? true :reason [:hook "reset-db"]}
+           (schedule/plan-schedule
+            (with-hooks (plan {:steps [(step :web :alice :wears "c1")]})
+              [{:name "reset-db" :requires-serial true}])
+            interfaces)))))
+
+(deftest auto-serial-counts-include-hooks
+  (let [plans (schedule/attach-schedules
+               [(with-hooks (plan {:steps [(step :web :alice)]})
+                  [{:name "reset-db" :requires-serial true}])
+                (plan {:steps [(step :web :a :wears "c1")]})]
+               interfaces)]
+    (is (= {:hook 1 :costume 1} (schedule/auto-serial-counts plans)))))

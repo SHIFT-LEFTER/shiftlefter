@@ -99,6 +99,32 @@
     (is (nil? (glossary/load-default-verbs :unknown)))))
 
 ;; -----------------------------------------------------------------------------
+;; Frame spec — :object-kind / :location-refs? (sl-rlxa / sl-3jr4)
+;; -----------------------------------------------------------------------------
+
+(deftest frame-object-kind-spec-test
+  (let [base {:args [] :pattern "S navigates to O"}]
+    (testing "frames may declare :object-kind and :location-refs?"
+      (is (s/valid? ::glossary/frame base))
+      (is (s/valid? ::glossary/frame (assoc base :object-kind :location)))
+      (is (s/valid? ::glossary/frame (assoc base :object-kind :location
+                                            :location-refs? true))))
+    (testing "a typo'd :object-kind or non-boolean :location-refs? fails the spec"
+      (is (not (s/valid? ::glossary/frame (assoc base :object-kind :locations))))
+      (is (not (s/valid? ::glossary/frame (assoc base :object-kind "location"))))
+      (is (not (s/valid? ::glossary/frame (assoc base :location-refs? "yes")))))
+    (testing "the packaged web glossary carries the navigate ref-slot declaration"
+      (let [g (glossary/load-default-verbs :web)]
+        (is (= :location (get-in g [:verbs :navigate :frames :to :object-kind])))
+        (is (true? (get-in g [:verbs :navigate :frames :to :location-refs?])))
+        (is (= :location (get-in g [:verbs :be :frames :at :object-kind])))
+        (is (true? (get-in g [:verbs :be :frames :at :location-refs?]))
+            "the region assertion frame accepts named-location refs (sl-q81m)")
+        (is (= :location (get-in g [:verbs :be :frames :at-exactly :object-kind])))
+        (is (nil? (get-in g [:verbs :be :frames :at-exactly :location-refs?]))
+            "the exactly frame stays literal-only — resolution IS normalization")))))
+
+;; -----------------------------------------------------------------------------
 ;; merge-glossaries Tests
 ;; -----------------------------------------------------------------------------
 
@@ -580,10 +606,11 @@
                  :disabled :count :title :alert :alert-with-text}
                see-frames))))
 
-    (testing ":be verb has the :at frame (sl-rch)"
+    (testing ":be verb has the :at and :at-exactly frames (sl-rch, sl-q81m)"
       (is (contains? verbs :be))
-      (is (= #{:at} (set (keys (get-in verbs [:be :frames])))))
-      (is (= "S is on O" (get-in verbs [:be :frames :at :pattern]))))
+      (is (= #{:at :at-exactly} (set (keys (get-in verbs [:be :frames])))))
+      (is (= "S is on O" (get-in verbs [:be :frames :at :pattern])))
+      (is (= "S is on exactly O" (get-in verbs [:be :frames :at-exactly :pattern]))))
 
     (testing "multi-frame verbs declare the right frames"
       (is (= #{:to-element :to-position}

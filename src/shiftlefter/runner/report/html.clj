@@ -30,7 +30,12 @@
    (b) still `clojure.edn/read-string` cleanly (tests slice and re-read it).
    Both hold by escaping `<` as \\u003c INSIDE island string literals only
    (`escape-island` below); \\uXXXX is a valid EDN string escape, and pr-str
-   of scrubbed envelopes puts arbitrary text only inside strings.
+   of scrubbed envelopes puts arbitrary text only inside strings — scrub
+   stringifies keywords/symbols whose names don't round-trip (sl-27uh), so
+   a hostile token can't smuggle text outside a string. A final integrity
+   guard (`assert-island-integrity`) backstops the residue: a token that
+   round-trips EDN yet prints `</` or `<!--` raw cannot be escaped (EDN has
+   no \\u escapes inside tokens), so emission fails loudly instead.
 
    ## Invariants upheld
 
@@ -84,8 +89,10 @@
   "Escape `<` as \\u003c inside the string literals of an EDN document
    string, so no `</script` (or `<!--`) sequence in the data can escape the
    island's raw-text <script> element. Arbitrary/untrusted text reaches
-   pr-str output only inside strings, so scanning with in-string tracking is
-   exact; the result still reads back identically via clojure.edn."
+   pr-str output only inside strings — scrub guarantees it by stringifying
+   non-round-tripping keyword/symbol names (sl-27uh) — so scanning with
+   in-string tracking is exact; the result still reads back identically via
+   clojure.edn. `assert-island-integrity` verifies the guarantee post-hoc."
   [edn-str]
   (let [sb (StringBuilder.)]
     (loop [i 0 in-string? false]
@@ -109,6 +116,46 @@
             :else
             (do (.append sb c)
                 (recur (inc i) in-string?))))))))
+
+(defn- assert-island-integrity
+  "Fail-loud backstop (sl-27uh defense-in-depth): re-scan the escaped island
+   text with the same in-string tracking as `escape-island` and THROW if a
+   raw `</` or `<!--` survives outside a string literal. escape-island
+   neutralizes `<` inside strings, and scrub stringifies non-round-tripping
+   tokens — but a rare token that genuinely round-trips EDN can still print
+   `</` outside any string (e.g. (keyword \"x<\" \"script\")), and EDN has no
+   \\uXXXX escapes inside keyword/symbol tokens, so such a value cannot be
+   escaped at all. Emitting it would let the data terminate the island's
+   <script> element (or, via `<!--`, shift the HTML parser into script-data
+   escaped state and swallow the real closing tag) — so per reporter
+   invariant 4 we abort loudly rather than write a breakable artifact.
+   Returns edn-str unchanged when clean."
+  [^String edn-str]
+  (let [n (count edn-str)
+        looking-at? (fn [i s] (.regionMatches edn-str i ^String s 0 (count s)))]
+    (loop [i 0 in-string? false]
+      (if (>= i n)
+        edn-str
+        (let [c (.charAt edn-str i)]
+          (cond
+            (and in-string? (= c \\))
+            (recur (+ i 2) true)
+
+            (= c \")
+            (recur (inc i) (not in-string?))
+
+            (and (not in-string?) (= c \<)
+                 (or (looking-at? i "</") (looking-at? i "<!--")))
+            (throw (ex-info "HTML report island integrity violation: an EDN token prints a raw '</' or '<!--' outside any string literal; emitting it would break the data island, so the report is not written"
+                            {:type :report/island-integrity
+                             :message "raw '</' or '<!--' outside a string literal in island EDN"
+                             :location {:index i
+                                        :context (subs edn-str
+                                                       (max 0 (- i 30))
+                                                       (min n (+ i 30)))}}))
+
+            :else
+            (recur (inc i) in-string?)))))))
 
 (defn- escape-html
   "Escape text for the static HTML shell (title, noscript). Island and
@@ -142,7 +189,7 @@
             *print-readably* true
             *print-meta* false
             *print-dup* false]
-    (-> island-data clean-strings pr-str escape-island)))
+    (-> island-data clean-strings pr-str escape-island assert-island-integrity)))
 
 (defn build-document
   "Pure: build the self-contained HTML document string from the island data

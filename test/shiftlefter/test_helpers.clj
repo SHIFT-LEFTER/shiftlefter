@@ -19,6 +19,8 @@
     shiftlefter.gherkin.pickler
     shiftlefter.gherkin.printer
     shiftlefter.graph
+    ;; sl-hlkz: first fdef in runner.config (lint-config)
+    shiftlefter.runner.config
     ;; sl-hse note: shiftlefter.stepengine.registry has an s/fdef on
     ;; register! that validates :svo structure (capture-refs are :$N,
     ;; :frame is required, etc.). Activation is held back: ~37 existing

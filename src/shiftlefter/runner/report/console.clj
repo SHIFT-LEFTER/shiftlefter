@@ -57,6 +57,7 @@
   (case status
     :passed :green
     :failed :red
+    :error :red
     :pending :yellow
     :skipped :cyan
     :gray))
@@ -112,13 +113,33 @@
          (when-let [data (:data error)]
            (str "     " (colorize (str "Data: " (pr-str data)) :gray use-color?) "\n")))))
 
+(defn- format-hook-failure
+  "Format a scenario-level hook failure (sl-esq) with dual attribution:
+   the hook's name + registration home, and the @hook= tag's file:line."
+  [error use-color?]
+  (str "  " (colorize (str "Hook '" (:hook error) "' failed"
+                           (when-let [t (:type error)] (str " (" t ")"))
+                           ": " (:message error))
+                      :red use-color?) "\n"
+       (when-let [reg (:path (:registration error))]
+         (str "     " (colorize "registered at: " :gray use-color?) reg "\n"))
+       (when-let [ts (:tag-source error)]
+         (str "     " (colorize "tagged at: " :gray use-color?)
+              (format-location ts) "\n"))
+       (when-let [data (:data error)]
+         (str "     " (colorize (str "Data: " (pr-str data)) :gray use-color?) "\n"))))
+
 (defn- format-scenario-failure
-  "Format a scenario with its failed steps."
+  "Format a scenario with its failed steps. A scenario-level :error (a
+   lifecycle hook threw, sl-esq) renders its own attributed block; any
+   failed steps still follow (the after-throw-plus-step-failure case)."
   [scenario-result use-color?]
   (let [pickle (-> scenario-result :plan :plan/pickle)
         source-file (:pickle/source-file pickle)
         failed-steps (filter #(= :failed (:status %)) (:steps scenario-result))]
     (str (colorize (str "Scenario: " (:pickle/name pickle)) :bold use-color?) "\n"
+         (when-let [error (:error scenario-result)]
+           (format-hook-failure error use-color?))
          (str/join "\n" (map-indexed #(format-step-failure %2 %1 source-file use-color?) failed-steps)))))
 
 ;; -----------------------------------------------------------------------------
@@ -398,11 +419,12 @@
 ;; -----------------------------------------------------------------------------
 
 (defn print-failures!
-  "Print failure details.
+  "Print failure details — :failed scenarios and :error scenarios (a
+   lifecycle hook threw, sl-esq) both belong here.
    Outputs to stderr."
   [scenarios opts]
   (let [use-color? (colors-enabled? opts)
-        failed (filter #(= :failed (:status %)) scenarios)]
+        failed (filter #(#{:failed :error} (:status %)) scenarios)]
     (when (seq failed)
       (binding [*out* *err*]
         (println)
@@ -420,22 +442,23 @@
    - opts: {:no-color bool :verbose bool :duration-ms N}"
   [result opts]
   (let [use-color? (colors-enabled? opts)
-        {:keys [passed failed pending skipped]} (:counts result)
-        total (+ (or passed 0) (or failed 0) (or pending 0) (or skipped 0))]
+        {:keys [passed failed error pending skipped]} (:counts result)
+        total (+ (or passed 0) (or failed 0) (or error 0)
+                 (or pending 0) (or skipped 0))
+        ;; Segments joined with ", " — identical output to the historical
+        ;; nested-when chain for the four original statuses; :error (sl-esq)
+        ;; appears only when positive.
+        segments (keep (fn [[n label color]]
+                         (when (pos? (or n 0))
+                           (colorize (str n " " label) color use-color?)))
+                       [[passed "passed" :green]
+                        [failed "failed" :red]
+                        [error "error" :red]
+                        [pending "pending" :yellow]
+                        [skipped "skipped" :cyan]])]
     (binding [*out* *err*]
       (println)
-      (println (str total " scenario(s): "
-                    (when (pos? (or passed 0))
-                      (str (colorize (str passed " passed") :green use-color?)
-                           (when (pos? (+ (or failed 0) (or pending 0) (or skipped 0))) ", ")))
-                    (when (pos? (or failed 0))
-                      (str (colorize (str failed " failed") :red use-color?)
-                           (when (pos? (+ (or pending 0) (or skipped 0))) ", ")))
-                    (when (pos? (or pending 0))
-                      (str (colorize (str pending " pending") :yellow use-color?)
-                           (when (pos? (or skipped 0)) ", ")))
-                    (when (pos? (or skipped 0))
-                      (colorize (str skipped " skipped") :cyan use-color?))))
+      (println (str total " scenario(s): " (str/join ", " segments)))
       (when-let [duration (:duration-ms opts)]
         (println (colorize (format "Completed in %.2fs" (/ duration 1000.0)) :gray use-color?))))))
 

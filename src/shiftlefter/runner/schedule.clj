@@ -20,9 +20,15 @@
      `:shared-impl? true` (e.g. SMS). Cross-scenario isolation for shared
      impls rests on :sms/scenario-start-ts acting as a time fence, which
      only holds when scenario wall-clock windows never overlap.
+   - `[:hook <name>]` (sl-esq) — the plan carries a resolved hook registered
+     {:requires-serial true}. The flagship Before class (data reset/seed)
+     IS the shared-state hazard; the hook owns it, so its declaration
+     suffices — no co-tagging demanded. Requires :plan/hooks to be attached
+     BEFORE this facet (compile-suite-stage orders it so).
 
-   Precedence :tag > :costume > :shared-impl — first match wins. A scenario
-   matching several reasons is serialized once; the reason is cosmetic.
+   Precedence :tag > :hook > :costume > :shared-impl — first match wins
+   (explicit declarations before inferred sources). A scenario matching
+   several reasons is serialized once; the reason is cosmetic.
 
    At :max-parallel 1 (or unset) the facet is inert: the sequential path
    never reads it."
@@ -35,6 +41,8 @@
    to run on the pool. `interfaces` is the config :interfaces map."
   [plan interfaces]
   (or (:schedule (tagd/disposition nil (:plan/pickle plan)))
+      (when-let [h (first (filter :requires-serial (:plan/hooks plan)))]
+        {:serial? true :reason [:hook (:name h)]})
       (let [targets (prov/collect-provisioning-targets plan)]
         (cond
           (some :wears targets)
@@ -60,12 +68,16 @@
         plans))
 
 (defn auto-serial-counts
-  "How many plans each AUTO gate serialized: {:costume N :shared-impl N},
-   keys present only when positive. @serial (:tag) is deliberate user
-   intent, not an auto gate, so it is excluded — the notice line (DP1)
-   reports only what the runner decided on the user's behalf."
+  "How many plans each AUTO gate serialized: {:costume N :shared-impl N
+   :hook N}, keys present only when positive. @serial (:tag) is deliberate
+   user intent, not an auto gate, so it is excluded — the notice line (DP1)
+   reports only what the runner decided on the user's behalf. [:hook name]
+   reasons (sl-esq) count under :hook."
   [plans]
   (->> plans
        (keep (comp :reason :plan/schedule))
-       (filter #{:costume :shared-impl})
+       (keep #(cond
+                (#{:costume :shared-impl} %) %
+                (and (vector? %) (= :hook (first %))) :hook
+                :else nil))
        frequencies))

@@ -8,8 +8,14 @@
    §7.5 load-time validation case needs no browser and runs in the default suite."
   (:require [babashka.fs :as fs]
             [clojure.test :refer [deftest is testing]]
+            [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.examples.e2e-helpers :as h]
             [shiftlefter.intent.loader :as loader]
+            [shiftlefter.intent.state :as intent-state]
+            [shiftlefter.stepdefs.browser :as browser-steps]
+            [shiftlefter.stepengine.bind :as bind]
+            [shiftlefter.stepengine.bindings :as bindings]
+            [shiftlefter.stepengine.registry :as registry]
             ;; Side-effect: registers the :catalog fixture page.
             [shiftlefter.demo.fixture.catalog]))
 
@@ -67,3 +73,66 @@
        (testing "out-of-range is a loud error, never nil (§5)"
          (is (= :intent/index-out-of-range
                 (h/error-type (resolve "Dashboard.featured[9].title")))))))))
+
+;; -----------------------------------------------------------------------------
+;; Live web capture into the data plane (^:e2e, gated) — sl-zgna
+;;
+;; The one thing FakeBrowser units structurally cannot prove: live-DOM text
+;; extraction feeding bindings/capture!. This drives the REAL capture stepdef
+;; (registry-matched, engine-style capture normalization) against the fixture
+;; catalog in real Chrome and asserts the named group lands in :sl/bindings.
+;; -----------------------------------------------------------------------------
+
+(defn- invoke-registered-step
+  "Match text against the registry and invoke the stepdef ctx-first,
+   replicating the engine's capture normalization (sl-yh7). Local copy of
+   the browser-test helper — extraction into a shared test helper is a
+   filed chore from the yh7 fit-pass."
+  [text ctx]
+  (let [stepdef (first (filter #(re-matches (:pattern %) text)
+                               (registry/all-stepdefs)))
+        _ (when-not stepdef
+            (throw (ex-info (str "No stepdef matches: " text) {})))
+        matcher (re-matcher (:pattern stepdef) text)
+        _ (.matches matcher)
+        raw (mapv #(.group matcher %) (range 1 (inc (.groupCount matcher))))
+        kinds (bind/default-slot-kinds (:metadata stepdef) (count raw))
+        {:keys [ok error]} (bindings/normalize-captures raw kinds ctx)
+        _ (when error (throw (ex-info (:message error) error)))
+        args (if (= (:arity stepdef) (inc (count ok)))
+               (into [ctx] ok)
+               ok)]
+    (apply (:fn stepdef) args)))
+
+(deftest ^:e2e web-capture-binds-from-live-dom
+  (if-not h/live?
+    (is true "skipped — SHIFTLEFTER_LIVE_WEBDRIVER not set")
+    (do
+      (registry/clear-registry!)
+      (require 'shiftlefter.stepdefs.browser :reload)
+      (try
+        (intent-state/reload-intents! intents-dir)
+        (h/run-against
+         {:intents-dir intents-dir :pages [:catalog] :path "/catalog"}
+         (fn [browser _intents _resolve]
+           (let [ctx (cap/assoc-capability {} :web browser :ephemeral :alice)
+                 result (invoke-registered-step
+                         ":alice captures Dashboard.featured[1].title matching /(?<widgetName>Widget .+)/"
+                         ctx)]
+             (testing "a named group captured off the live DOM lands in the data plane"
+               (is (= "Widget A"
+                      (get-in result [bindings/bindings-key :widgetName]))))
+             (testing "a live no-match is the structured capture failure, locator stamped"
+               (let [e (try (binding [browser-steps/*retry-timeout-ms* 250]
+                              (invoke-registered-step
+                               ":alice captures Dashboard.featured[1].title matching /(?<code>\\d{6})/"
+                               ctx))
+                            (catch clojure.lang.ExceptionInfo e e))
+                     data (ex-data e)]
+                 (is (= :bindings/capture-failure (:type data)))
+                 (is (= "Widget A" (:text data))
+                     "the error carries the text actually seen on the page")
+                 (is (= "Dashboard.featured[1].title" (:locator data))))))))
+        (finally
+          (intent-state/clear-intents!)
+          (registry/clear-registry!))))))

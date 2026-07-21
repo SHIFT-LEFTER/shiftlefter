@@ -16,6 +16,14 @@ If an object is missing from accepted intents, record the gap and use the
 bootstrap/reconciliation workflow. Do not silently promote a guessed locator into
 accepted truth.
 
+The same preference applies to URLs: navigation and region assertions
+(`opens the browser to`, `should be on`) accept a bare intent name (`Feed`,
+unquoted) resolved via the intent's `:location` binding plus the interface's
+`:config :base-url` — prefer that over hardcoding URLs in step text. Quoted
+values are always literals (quoted = literal, bare = ref — the same rule as
+element slots); literal URLs remain the fallback, exactly like raw EDN
+locators.
+
 ## Choosing a web locator strategy
 
 The above is intent references vs. raw locators. This is which raw locator to use

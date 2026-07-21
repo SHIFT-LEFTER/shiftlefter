@@ -2,9 +2,11 @@
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [shiftlefter.project-context :as project-context]
+            [shiftlefter.runner.config :as config]
             [shiftlefter.runner.core :as runner]
             [shiftlefter.stepengine.registry :as registry]
             [shiftlefter.test-helpers.adapter-registry :as mock]))
@@ -449,9 +451,10 @@
       (is (= (:status sequential) (:status parallel))))))
 
 (deftest test-auto-serial-notice-line
-  ;; sl-q9wp DP1: 'N scenario(s) auto-serialized: X costume, Y shared-impl' —
-  ;; stderr, i608 notice pattern, suppressed in EDN + dry-run; @serial (:tag)
-  ;; is user intent and is not counted.
+  ;; sl-q9wp DP1: 'N scenario(s) auto-serialized: X costume, Y shared-impl,
+  ;; Z hook' — stderr, i608 notice pattern, suppressed in EDN + dry-run;
+  ;; @serial (:tag) is user intent and is not counted. The hook segment
+  ;; landed with sl-esq AC8 (deliberate format change).
   (let [notice! #'runner/print-auto-serial-notice!
         plans [{:plan/schedule {:serial? true :reason :costume}}
                {:plan/schedule {:serial? true :reason :costume}}
@@ -462,12 +465,130 @@
                   (let [sw (java.io.StringWriter.)]
                     (binding [*err* sw] (notice! opts ps))
                     (str sw)))]
-    (is (= "3 scenario(s) auto-serialized: 2 costume, 1 shared-impl\n"
+    (is (= "3 scenario(s) auto-serialized: 2 costume, 1 shared-impl, 0 hook\n"
            (capture {} plans)))
+    (is (= "4 scenario(s) auto-serialized: 2 costume, 1 shared-impl, 1 hook\n"
+           (capture {} (conj plans
+                             {:plan/schedule {:serial? true
+                                              :reason [:hook "reset-db"]}}))))
     (is (= "" (capture {:edn true} plans)) "suppressed in EDN mode")
     (is (= "" (capture {:dry-run true} plans)) "suppressed in dry-run")
     (is (= "" (capture {} [{:plan/schedule {:serial? true :reason :tag}} {}]))
         "no auto gates fired, no line")))
+
+;; -----------------------------------------------------------------------------
+;; Config lint notices (sl-hlkz)
+;; -----------------------------------------------------------------------------
+
+(deftest test-config-lint-notice-line
+  ;; sl-hlkz: i608 notice pattern — stderr, suppressed in EDN mode ONLY.
+  ;; Dry-run keeps the warning: unlike the tag-filter notice, nothing else
+  ;; carries this signal.
+  (let [notice! #'runner/print-config-lint-notices!
+        lints [{:type :config/misplaced-key :key :step-paths
+                :suggested-path [:runner :step-paths]
+                :message (str "config key :step-paths is not read at the top"
+                              " level and was ignored — did you mean"
+                              " [:runner :step-paths]?")}]
+        capture (fn [opts]
+                  (let [sw (java.io.StringWriter.)]
+                    (binding [*err* sw]
+                      (notice! opts "/proj/shiftlefter.edn" lints))
+                    (str sw)))]
+    (is (str/includes? (capture {}) "Config warning:"))
+    (is (str/includes? (capture {}) "[:runner :step-paths]"))
+    (is (str/includes? (capture {}) "[/proj/shiftlefter.edn]"))
+    (is (str/includes? (capture {:dry-run true}) "Config warning:")
+        "dry-run keeps the warning")
+    (is (= "" (capture {:edn true})) "suppressed in EDN mode")
+    (let [sw (java.io.StringWriter.)]
+      (binding [*err* sw] (notice! {} "/p" []))
+      (is (= "" (str sw)) "clean config: no output at all"))))
+
+(deftest test-misplaced-step-paths-warns-and-still-runs
+  ;; The sl-hlkz evidence case end-to-end: example 03's silent top-level
+  ;; :step-paths now produces a stderr warning; the run itself is unaffected
+  ;; (warning, never error — forward compat).
+  (let [tmp-dir (str (fs/create-temp-dir))
+        config-file (str (fs/path tmp-dir "shiftlefter.edn"))]
+    (try
+      (spit config-file "{:step-paths [\"nowhere/\"]}")
+      (let [err (java.io.StringWriter.)
+            result (binding [*err* err]
+                     (runner/execute! {:paths [simple-feature]
+                                       :step-paths [step-path]
+                                       :config-path config-file
+                                       :no-color true}))]
+        (is (= 0 (:exit-code result)) "warning never affects the exit code")
+        (is (str/includes? (str err) "Config warning:"))
+        (is (str/includes? (str err) "[:runner :step-paths]"))
+        (is (str/includes? (str err) config-file)
+            "the notice names the config file"))
+      (finally
+        (fs/delete-tree tmp-dir)))))
+
+(defn- run-edn-with-config
+  "Run execute! with a temp shiftlefter.edn holding `config-text`, capturing
+   stdout and stderr. Returns {:summary <parsed stdout EDN> :err <stderr str>
+   :result <execute! return>}."
+  [config-text opts]
+  (let [tmp-dir (str (fs/create-temp-dir))
+        config-file (str (fs/path tmp-dir "shiftlefter.edn"))]
+    (try
+      (spit config-file config-text)
+      (let [out (java.io.StringWriter.)
+            err (java.io.StringWriter.)
+            result (binding [*out* out *err* err]
+                     (runner/execute! (merge {:paths [simple-feature]
+                                              :step-paths [step-path]
+                                              :config-path config-file
+                                              :edn true}
+                                             opts)))]
+        {:summary (edn/read-string (str out))
+         :err (str err)
+         :result result})
+      (finally
+        (fs/delete-tree tmp-dir)))))
+
+(deftest test-edn-summary-carries-config-lints
+  ;; sl-lnj1 chartered acceptance: machine mode is no longer the silent
+  ;; corner — the same lints the human sees on stderr ride the EDN summary.
+  (let [{:keys [summary err result]}
+        (run-edn-with-config "{:step-paths [\"nowhere/\"]}" {})]
+    (is (= 0 (:exit-code result)) "warnings never affect the exit code")
+    (is (= 0 (:run/exit-code summary)))
+    (let [[lint :as lints] (get-in summary [:diagnostics :config-lints])]
+      (is (= 1 (count lints)))
+      (is (= :config/misplaced-key (:type lint)))
+      (is (= :step-paths (:key lint)))
+      (is (= [:runner :step-paths] (:suggested-path lint)))
+      (is (s/valid? ::config/lint-warnings lints)
+          "envelope field conforms to the sl-hlkz warning spec"))
+    (is (not (str/includes? err "Config warning:"))
+        "EDN mode stderr suppression (sl-hlkz) still holds")
+    (is (= summary (edn/read-string (pr-str summary))) "summary round-trips")))
+
+(deftest test-dry-run-edn-summary-carries-config-lints
+  (let [{:keys [summary]}
+        (run-edn-with-config "{:step-paths [\"nowhere/\"]}" {:dry-run true})]
+    (is (= :dry-run (:run/status summary)))
+    (is (= [:runner :step-paths]
+           (-> summary :diagnostics :config-lints first :suggested-path)))))
+
+(deftest test-planning-edn-summary-carries-config-lints
+  ;; a run that fails planning still had a lintable config
+  (let [{:keys [summary]}
+        (run-edn-with-config "{:step-paths [\"nowhere/\"]}"
+                             {:paths [undefined-feature]})]
+    (is (= 2 (:run/exit-code summary)))
+    (is (= :step-paths (-> summary :planning :config-lints first :key)))))
+
+(deftest test-clean-config-edn-summary-has-no-diagnostics
+  ;; byte-identity guard: the additive field is ABSENT on clean configs
+  (let [{:keys [summary]}
+        (run-edn-with-config "{:runner {:step-paths [\"steps/\"]}}" {})]
+    (is (= 0 (:run/exit-code summary)))
+    (is (not (contains? summary :diagnostics)))))
 
 (deftest test-max-parallel-invalid-boundary
   (testing "malformed :max-parallel at the execute! boundary is a planning error"
@@ -519,3 +640,15 @@
       (is (= 5 (get-in plain [:counts :scenarios])))
       (is (not (contains? plain :filtered-out))
           "no filter => summary shape unchanged"))))
+
+;; -----------------------------------------------------------------------------
+;; Exit code for :error scenarios (sl-esq)
+;; -----------------------------------------------------------------------------
+
+(deftest error-count-makes-the-run-red
+  (testing "scenario :error (hook threw) => exit 1, regardless of allow-pending"
+    (is (= 1 (#'runner/compute-exit-code {:counts {:passed 3 :error 1}} false)))
+    (is (= 1 (#'runner/compute-exit-code {:counts {:passed 3 :error 1}} true))))
+  (testing "absent :error count leaves historical semantics untouched"
+    (is (= 0 (#'runner/compute-exit-code {:counts {:passed 3}} false)))
+    (is (= 1 (#'runner/compute-exit-code {:counts {:failed 1}} false)))))

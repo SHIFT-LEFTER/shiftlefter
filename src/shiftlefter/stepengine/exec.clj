@@ -30,7 +30,9 @@
 ;; -----------------------------------------------------------------------------
 
 ;; invoke-step result — keys are :status, :scenario, :error
-(s/def ::status #{:passed :pending :failed :skipped})
+;; :error (sl-esq) is scenario-level only: a lifecycle hook threw. Steps
+;; never produce it — a hook failure is infrastructure, not a step outcome.
+(s/def ::status #{:passed :pending :failed :skipped :error})
 (s/def ::type keyword?)
 (s/def ::message string?)
 (s/def ::error (s/keys :req-un [::type ::message]))
@@ -58,9 +60,13 @@
 (s/def ::failed nat-int?)
 (s/def ::pending nat-int?)
 (s/def ::skipped nat-int?)
+;; :error count is ABSENT unless positive (sl-esq) — hook-less runs keep the
+;; historical four-key counts map byte-identical in --edn output.
+(s/def :shiftlefter.counts/error nat-int?)
 
 (s/def ::counts
-  (s/keys :req-un [::passed ::failed ::pending ::skipped]))
+  (s/keys :req-un [::passed ::failed ::pending ::skipped]
+          :opt-un [:shiftlefter.counts/error]))
 
 (s/def ::scenarios (s/coll-of map?))
 

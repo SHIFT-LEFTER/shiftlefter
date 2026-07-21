@@ -50,7 +50,16 @@
    ["edn-failing"           {:paths ["test/fixtures/features/failing.feature"]   :edn true}]
    ["edn-pending"           {:paths ["test/fixtures/features/pending.feature"]   :edn true}]
    ["edn-undefined"         {:paths ["test/fixtures/features/undefined.feature"] :edn true}]
-   ["edn-dry-run"           {:paths ["test/fixtures/features/basic.feature"]     :edn true :dry-run true}]])
+   ["edn-dry-run"           {:paths ["test/fixtures/features/basic.feature"]     :edn true :dry-run true}]
+   ;; sl-esq AC9: the dry-run hook preview — a project with a hooks.clj
+   ;; sibling lists each scenario's hooks in execution order (globals
+   ;; outermost, then @hook= tag order). Locks the preview format.
+   ["console-dry-run-hooks" {:paths ["test/fixtures/hooks-project/features/hooked.feature"]
+                             :config-path "test/fixtures/hooks-project/shiftlefter.edn"
+                             :no-color true :dry-run true}]
+   ["edn-dry-run-hooks"     {:paths ["test/fixtures/hooks-project/features/hooked.feature"]
+                             :config-path "test/fixtures/hooks-project/shiftlefter.edn"
+                             :edn true :dry-run true}]])
 
 (defn- capture
   "Run the pipeline with stdout/stderr captured, rendered in the golden format."
