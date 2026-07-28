@@ -54,7 +54,9 @@
                          (slurp (str base-url "/anything"))
                          (catch java.io.IOException _
                            ;; 404 throws IOException, check the response
-                           (let [conn (.openConnection (java.net.URL. (str base-url "/anything")))]
+                           ;; Connection: close on every fixture request (sl-7hb1)
+                           (let [conn (doto (.openConnection (java.net.URL. (str base-url "/anything")))
+                                        (.setRequestProperty "Connection" "close"))]
                              (.getResponseCode conn))))]
           (is (= 404 response) "Empty pages should return 404"))))))
 
@@ -73,7 +75,8 @@
       (fn [{:keys [base-url]}]
         (let [conn (doto (.openConnection (java.net.URL. (str base-url "/test")))
                      (.setRequestMethod "POST")
-                     (.setDoOutput true))
+                     (.setDoOutput true)
+                     (.setRequestProperty "Connection" "close"))
               response (slurp (.getInputStream conn))]
           (is (= "POST test page" response) "POST /test should work"))))))
 
@@ -93,7 +96,8 @@
     (server/with-fixture-server
       {:pages [:test-page]}
       (fn [{:keys [base-url]}]
-        (let [conn (.openConnection (java.net.URL. (str base-url "/unknown")))
+        (let [conn (doto (.openConnection (java.net.URL. (str base-url "/unknown")))
+                     (.setRequestProperty "Connection" "close"))
               status (.getResponseCode conn)]
           (is (= 404 status) "Unknown route should return 404"))))))
 

@@ -10,8 +10,8 @@
         clj-http/clj-http           {:mvn/version "3.13.0"}
         http-kit/http-kit           {:mvn/version "2.8.0"}
         org.clojars.quoll/asami     {:mvn/version "2.3.4"}
-        nrepl/nrepl                 {:mvn/version "1.5.0"}
-        cider/cider-nrepl           {:mvn/version "0.50.0"}}
+        nrepl/nrepl                 {:mvn/version "1.7.0"}
+        cider/cider-nrepl           {:mvn/version "0.62.2"}}
 
  :paths ["src" "resources"]
 

@@ -33,14 +33,42 @@
   (if (:el t) (:el t) (eta/query driver (:q t))))
 
 ;; -----------------------------------------------------------------------------
-;; Nearest-enclosing-instance pruning (§8.1, sl-h7h)
+;; WebDriver element refs (sl-kee)
 ;; -----------------------------------------------------------------------------
 
 (def ^:private web-element-identifier
-  "W3C WebDriver element key (etaoin's own private constant). A DOM node
-   returned from `js-execute` carries its element-id under this key; reading
-   it back yields exactly the id `query-all` would have produced."
+  "W3C WebDriver element key (etaoin's own copy is ^:private, hence this
+   re-declaration — the ONE place shiftlefter carries that coupling). A DOM
+   node returned from `js-execute` carries its element-id under this key;
+   reading it back yields exactly the id `query-all` would have produced."
   :element-6066-11e4-a52e-4f735466cecf)
+
+(defn script-result->handles
+  "Unwrap DOM elements returned from a `js-execute` script into shiftlefter
+   handle maps (`{:el <element-id>}`) — the OUTBOUND twin of etaoin's
+   `el->ref` (inbound wraps an id so a script receives a DOM node; etaoin
+   exposes no public unwrap for the return direction, its own is private).
+   Every fused IBrowser op that returns handles from a script goes through
+   here: `query-all-pruned` today, the sl-zi2 whole-walk batch tomorrow.
+
+   Throws structured ex-info {:type :webdriver/not-an-element} when a result
+   entry carries no element key — a script returning non-elements is a
+   programming error, surfaced loudly (same posture as etaoin's private
+   unwrap-webdriver-object)."
+  [result]
+  (mapv (fn [el-obj]
+          (let [id (get el-obj web-element-identifier ::missing)]
+            (if (= ::missing id)
+              (throw (ex-info "Script result entry is not a DOM element"
+                              {:type :webdriver/not-an-element
+                               :message "Script result entry is not a DOM element"
+                               :entry (pr-str el-obj)}))
+              {:el id})))
+        result))
+
+;; -----------------------------------------------------------------------------
+;; Nearest-enclosing-instance pruning (§8.1, sl-h7h)
+;; -----------------------------------------------------------------------------
 
 (def ^:private prune-script
   "Scoped querySelectorAll fused with the §8.1 boundary filter, in one round
@@ -305,7 +333,7 @@
       (let [scope-ref (when (target/el-target? scope) (eta/el->ref (:el scope)))
             css       (candidate-css locator)
             result    (eta/js-execute driver prune-script scope-ref css boundary-css)]
-        (mapv (fn [el-obj] {:el (get el-obj web-element-identifier)}) result)))))
+        (script-result->handles result)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Factory

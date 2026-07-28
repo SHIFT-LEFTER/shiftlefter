@@ -137,7 +137,7 @@
 (deftest roundtrip-toy-login-file
   (testing "toy-login.feature roundtrips"
     (let [path "examples/01-validate-and-format/login.feature"
-          result (printer/fmt-check path)]
+          result (printer/roundtrip-check path)]
       (is (= :ok (:status result))
           (str "Expected :ok but got " result)))))
 
@@ -156,7 +156,7 @@
 (deftest roundtrip-scenario-outline-file
   (testing "scenario_outline.feature roundtrips"
     (let [path "test/fixtures/gherkin/outlines/scenario_outline.feature"
-          result (printer/fmt-check path)]
+          result (printer/roundtrip-check path)]
       (is (= :ok (:status result))
           (str "Expected :ok but got " result)))))
 
@@ -171,7 +171,7 @@
           {:keys [errors]} (parser/parse tokens)]
       ;; Confirm this actually has parse errors
       (is (seq errors) "Test precondition: input should have parse errors")
-      ;; Now test via roundtrip (can't use fmt-check since we have a string)
+      ;; Now test via roundtrip (can't use roundtrip-check since we have a string)
       ;; But we can test the print-tokens still works
       (is (= input (printer/roundtrip input))
           "Even invalid input should roundtrip at token level"))))
@@ -516,18 +516,18 @@
 ;; IO1: UTF-8 enforcement in printer
 ;; -----------------------------------------------------------------------------
 
-(deftest fmt-check-invalid-utf8
-  (testing "fmt-check returns distinct error for invalid UTF-8 file (AC2)"
-    (let [result (printer/fmt-check "test/fixtures/gherkin/encoding/invalid-utf8.feature")]
+(deftest roundtrip-check-invalid-utf8
+  (testing "roundtrip-check returns distinct error for invalid UTF-8 file (AC2)"
+    (let [result (printer/roundtrip-check "test/fixtures/gherkin/encoding/invalid-utf8.feature")]
       (is (= :error (:status result)))
       (is (= :io/utf8-decode-failed (:reason result)))
       (is (string? (:message result)))
       ;; AC4: useful location
       (is (= 1 (get-in result [:location :line]))))))
 
-(deftest fmt-check-file-not-found
-  (testing "fmt-check returns error for missing file"
-    (let [result (printer/fmt-check "nonexistent/file.feature")]
+(deftest roundtrip-check-file-not-found
+  (testing "roundtrip-check returns error for missing file"
+    (let [result (printer/roundtrip-check "nonexistent/file.feature")]
       (is (= :error (:status result)))
       (is (= :io/file-not-found (:reason result))))))
 

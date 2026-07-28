@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Java 11+** — `java -version`
+- **Java 21+** — `java -version`
 - **Clojure CLI** — `clj --version` ([install guide](https://clojure.org/guides/install_clojure) or `brew install clojure`)
 - **Git**
 
@@ -79,4 +79,4 @@ release/                   # Release packaging (sl wrapper for distribution zip)
 
 ## What's Bundled
 
-ShiftLefter bundles 8 third-party Clojure libraries (Cheshire, babashka.fs, etaoin, core.async, spec.alpha, test.check, nREPL, CIDER middleware). See [docs/CAPABILITIES.md](docs/CAPABILITIES.md) for the full list with versions and examples.
+ShiftLefter bundles 8 third-party Clojure libraries (Cheshire, babashka.fs, etaoin, core.async, spec.alpha, test.check, nREPL, CIDER middleware). See [docs/INSTALL-TIERS.md](docs/INSTALL-TIERS.md) for the full list with versions and examples.

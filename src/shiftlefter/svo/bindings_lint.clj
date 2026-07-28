@@ -11,9 +11,16 @@
    - :bindings/consumed-without-producer  ERROR  (+ did-you-mean)
    - :bindings/invalid-pattern            ERROR  (bad regex, incl. Java's
                                                   duplicate-group-name)
-   - :bindings/unnamed-only-groups        NOTICE (matcher captures groups
-                                                  but names none — binds
-                                                  nothing)
+   - :bindings/unnamed-only-groups        frame-aware (sl-gwru): ERROR on
+                                          :capture (binds nothing — pointer
+                                          at should see ... matching);
+                                          silent on :see :matching (the
+                                          expected shape); NOTICE elsewhere
+                                          (SMS receives — legitimate
+                                          binding-free assertion)
+   - :bindings/named-groups-in-assert-only ERROR (a named group in
+                                          should see ... matching — pointer
+                                          at captures; clause 4)
    - :bindings/produced-never-consumed    NOTICE (step-produced names only;
                                                   hook :provides seeds are
                                                   exempt — custom stepdefs
@@ -52,12 +59,13 @@
       (map vector captures (concat slot-kinds (repeat nil))))))
 
 (defn- consumed-tokens
-  "Tokens this step consumes: whole-capture tokens in :value/:location
-   slots, embedded tokens in :matcher slots. Seq of {:name kw :token str}."
+  "Tokens this step consumes: whole-capture tokens in :value/:location/
+   :text slots, embedded tokens in :matcher slots. Seq of
+   {:name kw :token str}."
   [bound-step]
   (mapcat (fn [[capture kind]]
             (case kind
-              (:value :location)
+              (:value :location :text)
               (when (bindings/token? capture)
                 [{:name (:name (bindings/parse-token capture))
                   :token capture}])
@@ -77,6 +85,28 @@
   [bound-step]
   (keep (fn [[capture kind]] (when (= :matcher kind) capture))
         (capture-kind-pairs bound-step)))
+
+(defn- matcher-role
+  "How this step's frame treats its matcher slot (sl-gwru):
+
+   :assert-only — should see ... matching: all-unnamed is the expected
+                  shape (silent); a named group is a plan ERROR pointing
+                  at captures (clause 4: named groups are producers,
+                  everywhere — a frame that binds nothing cannot host a
+                  producer marker and quietly ignore it).
+   :capture     — the binding verb: all-unnamed is a plan ERROR pointing
+                  at should see ... matching (binding is this verb's
+                  entire identity). The symmetric teaching pair.
+   :generic     — the shared slot elsewhere (SMS receives): all-unnamed
+                  stays the :warn NOTICE — binding-free assertion is
+                  legitimate there, and the nudge is cheap when
+                  /(\\d+)/ plausibly meant /(?<code>\\d+)/."
+  [bound-step]
+  (let [{:keys [verb frame]} (-> bound-step :binding :metadata :svo)]
+    (cond
+      (and (= :see verb) (= :matching frame)) :assert-only
+      (= :capture verb) :capture
+      :else :generic)))
 
 ;; -----------------------------------------------------------------------------
 ;; Per-plan walk
@@ -111,18 +141,49 @@
                                   :severity :error)})))
              (matcher-captures bound-step))
         pattern-issues (keep :issue matcher-results)
-        unnamed-notices
+        role (matcher-role bound-step)
+        unnamed-issues
         (keep (fn [{:keys [info capture]}]
                 (when (and info
                            (pos? (:group-count info))
                            (empty? (:names info)))
-                  {:type :bindings/unnamed-only-groups
-                   :pattern capture
-                   :location location
-                   :severity :warn}))
+                  (case role
+                    ;; All-unnamed is this frame's expected shape.
+                    :assert-only nil
+                    ;; sl-gwru escalation: captures that bind nothing.
+                    :capture {:type :bindings/unnamed-only-groups
+                              :pattern capture
+                              :location location
+                              :severity :error
+                              :message (str "captures matcher binds nothing "
+                                            "(no named groups) — did you mean "
+                                            "'should see ... matching'?")}
+                    :generic {:type :bindings/unnamed-only-groups
+                              :pattern capture
+                              :location location
+                              :severity :warn})))
               matcher-results)
-        produced (into #{} (mapcat (comp :names :info)) matcher-results)]
-    {:issues (concat consumption-issues pattern-issues unnamed-notices)
+        named-in-assert-only
+        (when (= :assert-only role)
+          (keep (fn [{:keys [info capture]}]
+                  (when (seq (:names info))
+                    {:type :bindings/named-groups-in-assert-only
+                     :pattern capture
+                     :names (vec (sort (:names info)))
+                     :location location
+                     :severity :error
+                     :message (str "named groups produce bindings, and "
+                                   "'should see ... matching' binds nothing "
+                                   "— did you mean 'captures ... matching'?")}))
+                matcher-results))
+        ;; Defense-in-depth (sl-gwru): an assert-only frame's names never
+        ;; enter the produced set even though the error above makes this
+        ;; mostly unreachable — a false producer is the worst lint lie.
+        produced (if (= :assert-only role)
+                   #{}
+                   (into #{} (mapcat (comp :names :info)) matcher-results))]
+    {:issues (concat consumption-issues pattern-issues
+                     unnamed-issues named-in-assert-only)
      :produced produced
      :consumed (set (map :name consumed))}))
 

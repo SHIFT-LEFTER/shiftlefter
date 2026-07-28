@@ -53,10 +53,20 @@ Core commands:
 machine-readable feed for a planning or disposable sub-agent reasoning over the
 project's whole shape (coverage, negative space) rather than editing it.
 
+Costume custody (projects using `:wears`): the wardrobe
+(`.shiftlefter/wardrobe/`) holds live credentials — a costume is as sensitive
+as the user's own browser profile. It is gitignored; never commit, copy, or
+surface its contents, and it should be excluded from sync/backup tools. While
+a costume is worn, its session is drivable by any local same-user process
+(attachment is Chrome's debug port — structural). Recommend `sl costume
+destroy` for costumes no longer in use.
+
 Read next:
 
 - `sl agent-doc authoring`
+- `sl agent-doc grammar`
 - `sl agent-doc vocabulary`
+- `sl agent-doc examples`
 - `sl agent-doc builtins`
 - `sl agent-doc locators`
 - `sl agent-doc diagnostics`

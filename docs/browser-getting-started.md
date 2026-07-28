@@ -5,7 +5,7 @@ built-in steps. This is the fastest way to see ShiftLefter work.
 
 ## Prerequisites
 
-- **Java 11+** and the `sl` CLI on your PATH (see the [install guide](../README.md#install)).
+- **Java 21+** and the `sl` CLI on your PATH (see the [install guide](../README.md#install)).
 - **Chrome** installed, and a matching **ChromeDriver** — on your `PATH`, or pointed
   to by `:chromedriver-path` in your config (it doesn't have to be on `PATH`).
   `brew install chromedriver` on macOS puts it on `PATH`; keep its major version in
@@ -38,7 +38,7 @@ and the session (`:alice`). No "I" — every browser step has an explicit actor.
 ```
 
 That's the whole config for the default WebDriver backend. (To use Playwright
-instead, see [CAPABILITIES.md](CAPABILITIES.md#browser-backend-configuration).)
+instead, see [INSTALL-TIERS.md](INSTALL-TIERS.md#browser-backend-configuration).)
 
 ## 3. Run it
 

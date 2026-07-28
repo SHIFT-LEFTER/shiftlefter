@@ -88,6 +88,64 @@
             (remove str/blank? (str/split q #"&")))))
 
 ;; -----------------------------------------------------------------------------
+;; Literal resolution (sl-34ec)
+;; -----------------------------------------------------------------------------
+
+(s/def ::ok string?)
+(s/def ::type #{:url/unparseable :intent/missing-base-url
+                :intent/invalid-base-url})
+(s/def ::error (s/keys :req-un [::type ::message]))
+(s/def ::resolve-result (s/or :ok (s/keys :req-un [::ok])
+                              :error (s/keys :req-un [::error])))
+
+(defn resolve-literal
+  "Resolve a location-slot LITERAL per RFC 3986 relative resolution against
+   `base-url` (sl-34ec ruling): a scheme-ful literal passes through UNTOUCHED
+   (byte-identical); a schemeless literal resolves via java.net.URI/.resolve —
+   '/login' root-relative, 'Login' path-relative per the RFC merge (base
+   'http://h' + 'Login' -> 'http://h/Login').
+
+   Named refs never come here — their assembly stays in
+   intent.resolve/resolve-location (the sl-4mv8 single assembly point for
+   refs, string-concat with pinned join semantics). This fn is the assembly
+   point for literals; region assertions use neither (host is discarded
+   there by design).
+
+   Returns {:ok url} or {:error {:type ... :message ...}}:
+   - :url/unparseable — the literal itself doesn't parse
+   - :intent/missing-base-url — schemeless literal, no usable base-url;
+     message states both exits (configure :base-url / use an absolute URL)
+   - :intent/invalid-base-url — base-url present but doesn't parse"
+  [literal base-url]
+  (let [parsed (parse-url literal)]
+    (cond
+      (:error parsed) parsed
+
+      (some? (:scheme (:ok parsed)))
+      {:ok literal}
+
+      (str/blank? base-url)
+      {:error {:type :intent/missing-base-url
+               :message (str "Relative location literal '" literal "' has no "
+                             "base URL to resolve against - add :base-url to "
+                             "the :web interface config, or use an absolute "
+                             "URL")
+               :literal literal}}
+
+      :else
+      (try
+        {:ok (str (.resolve (URI. base-url) ^String literal))}
+        (catch URISyntaxException e
+          {:error {:type :intent/invalid-base-url
+                   :message (str "Interface :base-url \"" base-url "\" is not "
+                                 "a parseable URL (" (ex-message e) ")")
+                   :base-url base-url}})))))
+
+(s/fdef resolve-literal
+  :args (s/cat :literal string? :base-url (s/nilable string?))
+  :ret ::resolve-result)
+
+;; -----------------------------------------------------------------------------
 ;; Match fns
 ;; -----------------------------------------------------------------------------
 
@@ -146,8 +204,9 @@
           (or (nil? es) (nil? ea))
           {:reason :not-a-full-url
            :message (str "'should be on exactly' requires a full URL (scheme + "
-                         "host), got '" expected-url "' — for a region-level "
-                         "assertion use 'should be on'")
+                         "host), got '" expected-url "' — add :base-url to the "
+                         ":web interface config, or use an absolute URL; for a "
+                         "region-level assertion use 'should be on'")
            :expected expected-url}
 
           (or (not= es as) (not= ea aa))

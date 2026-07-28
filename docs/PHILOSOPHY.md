@@ -216,6 +216,6 @@ want more depth, it lives in the published docs, each owning its own corner:
 - [Would ShiftLefter work for my project?](FIT.md) — the practical fit check.
 - [SVO](SVO.md) — the Subject–Verb–Object model and glossary formats in detail.
 - [Add Domain Language](extending-vocabulary.md) — verbs, frames, intents, macros.
-- [Capabilities](CAPABILITIES.md) — exactly what each install tier unlocks.
+- [Capabilities](INSTALL-TIERS.md) — exactly what each install tier unlocks.
 
 You don't need any of it to use the tool. You needed the *why*, and that was the why.

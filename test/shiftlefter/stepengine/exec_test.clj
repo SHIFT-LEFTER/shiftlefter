@@ -6,6 +6,7 @@
             [shiftlefter.costume :as costume]
             [shiftlefter.runner.events :as events]
             [shiftlefter.sms.adapter-hooks :as sms-hooks]
+            [shiftlefter.stepengine.exec.cleanup :as exec-cleanup]
             [shiftlefter.test-helpers.adapter-registry :as mock]))
 
 ;; -----------------------------------------------------------------------------
@@ -774,24 +775,75 @@
         (is (= :closed (-> cap-cleanup :cleaned first :action)))))))
 
 (deftest test-cleanup-persistent-capabilities-skipped
-  (testing "Persistent capabilities are not cleaned up"
-    (let [cleanup-called (atom #{})
-          ;; Create a step that preserves ctx (returns nil)
+  (testing "Persistent capabilities survive the REAL cleanup path (execute-suite)"
+    ;; Rewritten for sl-8mz: the previous body called exec/execute-scenario
+    ;; directly — a path that never invokes capability cleanup at all — so its
+    ;; cleanup spy could never fire regardless of :mode. This version runs the
+    ;; full execute-suite pipeline. execute-scenario-with-cleanup hardcodes {}
+    ;; as the initial ctx; the supported seam for pre-populating a capability
+    ;; is a :before hook returning a ctx map (root-merged by run-befores!).
+    (let [cleanup-called (atom [])
+          sentinel {:type :persistent-browser :marker (Object.)}
+          seed-hook {:name "seed-persistent-cap"
+                     :registration {:path "/test/hooks.clj"}
+                     :tag-source {:file "features/x.feature" :line 1}
+                     :before (fn [_payload]
+                               (cap/assoc-capability {} :web sentinel :persistent))}
           bound-step (make-bound-step (fn [_ctx] nil) 1 [])
-          plan (make-plan [bound-step])
-          ;; Pre-provision a persistent capability in initial ctx (via execute-scenario directly)
-          initial-ctx (cap/assoc-capability {} :web {:type :persistent-browser} :persistent)
-          ;; Registry exists but should not be consulted for cleanup; persistent
-          ;; capabilities stay in ctx across scenarios. If it ever IS called,
-          ;; the assertion below catches the regression.
-          registry (mock/registry {:any {:cleanup (fn [impl]
-                                                    (swap! cleanup-called conj (:type impl))
+          plan (assoc (make-plan [bound-step]) :plan/hooks [seed-hook])
+          interfaces (mock/interfaces {:web {:adapter :web}})
+          registry (mock/registry {:web {:cleanup (fn [impl]
+                                                    (swap! cleanup-called conj impl)
                                                     {:ok :closed})}})
-          result (exec/execute-scenario plan initial-ctx {:adapter-registry registry})]
+          result (exec/execute-suite [plan] {:interfaces interfaces
+                                             :adapter-registry registry})
+          scenario (-> result :scenarios first)
+          cap-cleanup (:capability-cleanup scenario)]
       (is (= :passed (:status result)))
-      ;; The persistent capability should still be in ctx
-      (is (cap/capability-present? (:scenario-ctx result) :web))
-      (is (= :persistent (cap/get-capability-mode (:scenario-ctx result) :web))))))
+      ;; Cleanup ran (envelope present) but skipped the persistent cap.
+      (is (empty? @cleanup-called) "Adapter cleanup fn never invoked for persistent cap")
+      (is (empty? (:cleaned cap-cleanup)))
+      (is (= [:web] (:skipped cap-cleanup)))
+      ;; Same instance survives in the final ctx, mode intact.
+      (is (identical? sentinel (cap/get-capability (:scenario-ctx scenario) :web)))
+      (is (= :persistent (cap/get-capability-mode (:scenario-ctx scenario) :web))))))
+
+(deftest test-cleanup-selectivity-persistent-skipped-ephemeral-cleaned
+  (testing "Cleanup closes exactly the ephemeral cap and never the persistent one"
+    ;; The strongest form of sl-8mz AC2: selectivity, not mere skipping.
+    ;; A persistent :web cap is seeded via a before hook while an SVO step
+    ;; auto-provisions an ephemeral :api cap; cleanup must close the latter
+    ;; only, chosen by :mode, in the same scenario.
+    (let [cleanup-called (atom [])
+          sentinel {:type :persistent-browser :marker (Object.)}
+          api-impl {:type :api-client}
+          seed-hook {:name "seed-persistent-cap"
+                     :registration {:path "/test/hooks.clj"}
+                     :tag-source {:file "features/x.feature" :line 1}
+                     :before (fn [_payload]
+                               (cap/assoc-capability {} :web sentinel :persistent))}
+          bound-step (make-bound-step-with-svo
+                      (fn [ctx] (assoc ctx :saw true))
+                      1 []
+                      {:subject :alice :verb :fetch :interface :api})
+          plan (assoc (make-plan [bound-step]) :plan/hooks [seed-hook])
+          interfaces (mock/interfaces {:web {:adapter :web}
+                                       :api {:adapter :api}})
+          spy-cleanup (fn [impl] (swap! cleanup-called conj impl) {:ok :closed})
+          registry (mock/registry {:web {:cleanup spy-cleanup}
+                                   :api {:impl api-impl :cleanup spy-cleanup}})
+          result (exec/execute-suite [plan] {:interfaces interfaces
+                                             :adapter-registry registry})
+          scenario (-> result :scenarios first)
+          cap-cleanup (:capability-cleanup scenario)]
+      (is (= :passed (:status result)))
+      ;; Exactly one close, and it was the ephemeral api impl — never the sentinel.
+      (is (= [api-impl] @cleanup-called))
+      (is (= [:api.alice] (mapv :interface (:cleaned cap-cleanup))))
+      (is (= :closed (-> cap-cleanup :cleaned first :action)))
+      (is (= [:web] (:skipped cap-cleanup)))
+      ;; The persistent impl survives in the final ctx by identity.
+      (is (identical? sentinel (cap/get-capability (:scenario-ctx scenario) :web))))))
 
 (deftest test-cleanup-multiple-ephemeral-capabilities
   (testing "Multiple ephemeral subject-keyed capabilities are all cleaned up"
@@ -873,6 +925,66 @@
       (let [cap-cleanup (-> result :scenarios first :capability-cleanup)]
         (is (= :close-failed (-> cap-cleanup :cleaned first :action)))
         (is (string? (-> cap-cleanup :cleaned first :error)))))))
+
+(deftest test-cleanup-maps-returned-error-to-close-failed
+  ;; sl-c6wk: the browser adapters never throw — they catch and return the
+  ;; sl-9vag structured error. The framework must inspect the return value;
+  ;; previously any non-throwing cleanup read as :closed and a failed quit
+  ;; was invisible.
+  (testing "an adapter :cleanup RETURNING {:error ...} reads as :close-failed"
+    (let [interfaces (mock/interfaces {:web {:adapter :returns-error}})
+          registry (mock/registry
+                    {:returns-error
+                     {:impl    {:type :browser}
+                      :cleanup (fn [_]
+                                 {:error {:type :adapter/cleanup-failed
+                                          :adapter :returns-error
+                                          :message "quit failed"}})}})
+          bound-step (make-bound-step-with-svo
+                       (fn [ctx] (assoc ctx :done true))
+                       1 []
+                       {:subject :alice :verb :click :interface :web})
+          plan (make-plan [bound-step])
+          result (exec/execute-suite [plan] {:interfaces       interfaces
+                                             :adapter-registry registry})]
+      ;; Cleanup failure still never affects the scenario status
+      (is (= :passed (:status result)))
+      (let [cleaned (-> result :scenarios first :capability-cleanup :cleaned first)]
+        (is (= :close-failed (:action cleaned)))
+        (is (= "quit failed" (:error cleaned))
+            "the adapter's :message rides the :error field"))))
+  (testing "{:ok :closed} control: success still reads as :closed"
+    (let [interfaces (mock/interfaces {:web {:adapter :fine}})
+          registry (mock/registry {:fine {:impl    {:type :browser}
+                                          :cleanup (constantly {:ok :closed})}})
+          bound-step (make-bound-step-with-svo
+                       (fn [ctx] (assoc ctx :done true))
+                       1 []
+                       {:subject :alice :verb :click :interface :web})
+          plan (make-plan [bound-step])
+          result (exec/execute-suite [plan] {:interfaces       interfaces
+                                             :adapter-registry registry})]
+      (is (= :passed (:status result)))
+      (is (= :closed (-> result :scenarios first
+                         :capability-cleanup :cleaned first :action))))))
+
+(deftest test-cleanup-unknown-adapter-skips
+  ;; sl-kh5r F1 pin: an interface whose :adapter is absent from the registry
+  ;; reads as :skipped ("Unknown adapter: ..."), never :close-failed. The
+  ;; registry primitive reports this same case as {:error {:type
+  ;; :adapter/unknown}}, which the c6wk error inspection must NOT read as a
+  ;; failed close. Written and run green against the pre-reroute code first —
+  ;; the reroute through registry/cleanup-capability must preserve it.
+  ;; Direct call on the private fn: this state is unreachable through
+  ;; execute-suite (provisioning would have failed on the same lookup).
+  (testing "unknown adapter at cleanup time reads as :skipped"
+    (let [result (#'exec-cleanup/cleanup-capability!
+                  :web
+                  {:impl {:type :browser} :mode :ephemeral}
+                  (mock/interfaces {:web {:adapter :nope}})
+                  {})]
+      (is (= :skipped (:action result)))
+      (is (= "Unknown adapter: :nope" (:reason result))))))
 
 (deftest test-cleanup-no-capabilities
   (testing "No cleanup needed when no capabilities present"
@@ -1763,7 +1875,9 @@
 
 (deftest test-wears-is-persistent-and-survives-cleanup
   (testing "Costume-backed capability is :persistent and not torn down by cleanup"
-    (let [registry (mock/registry {:web {:impl {:browser-type :spawned}}})
+    (let [adapter-events (atom [])
+          registry (mock/registry {:web {:impl {:browser-type :spawned}
+                                         :events adapter-events}})
           interfaces (mock/interfaces {:web {:adapter :web}})
           captured-ctx (atom nil)
           bound-step (make-bound-step-with-svo
@@ -1784,7 +1898,11 @@
           (is (empty? (cap/ephemeral-capabilities ctx)) "No ephemeral cap was created")
           ;; survives cleanup (criterion 3) — never closed, only skipped
           (is (empty? (:cleaned cap-cleanup)) "Persistent costume session was NOT closed")
-          (is (seq (:skipped cap-cleanup)) "Costume session was skipped by cleanup"))))))
+          (is (seq (:skipped cap-cleanup)) "Costume session was skipped by cleanup")
+          ;; sl-8mz: the adapter saw NO lifecycle traffic at all — neither a
+          ;; fresh spawn nor a cleanup ran against anything adapter-side.
+          (is (empty? @adapter-events)
+              "Adapter never provisioned or cleaned anything for a worn costume"))))))
 
 (deftest test-wears-connect-failure-fails-scenario-cleanly
   (testing "A missing/locked costume surfaces a structured provisioning failure"

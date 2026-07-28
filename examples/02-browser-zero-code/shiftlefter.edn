@@ -1,10 +1,8 @@
-;; :prefs — the demo site's canned password is in public breach lists, so
-;; Chrome pops a native "password found in a data breach" warning after
-;; login. It's harmless to the test (native UI, not DOM — WebDriver reads
-;; the page underneath), just noisy; this pref turns leak detection off
-;; for the automation profile.
+;; The :etaoin adapter suppresses Chrome's native password popups (breach
+;; warnings, save prompts) by default — automation hygiene, so page-driving
+;; tests aren't narrated over by browser UI. Override via :adapter-opts
+;; {:prefs {...}} if a test ever needs them back (docs/INSTALL-TIERS.md
+;; § adapter-opts).
 
 {:interfaces {:web {:type :web
-                    :adapter :etaoin
-                    :config {:adapter-opts
-                             {:prefs {"profile.password_manager_leak_detection" false}}}}}}
+                    :adapter :etaoin}}}

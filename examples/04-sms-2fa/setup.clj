@@ -62,7 +62,7 @@
                      :pages    [:reset-password]
                      :sms      shared-sms
                      :sms-from "+15550000000"})
-        stop!      (http/run-server handler {:port port})]
+        stop!      (http/run-server handler {:ip "127.0.0.1" :port port})]
     {:adapter-registry
      (assoc reg/default-registry :sms-mock
             {:factory  (fn [_] {:ok shared-sms})

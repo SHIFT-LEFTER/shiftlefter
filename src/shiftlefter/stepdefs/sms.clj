@@ -281,7 +281,8 @@
    :requires-protocols [:shiftlefter.sms.protocol/ISMS]
    :svo {:subject :$1 :verb :send :frame :to
          :object nil
-         :args {:to-phone :$2 :body :$3}}}
+         :args {:to-phone :$2 :body :$3}}
+   :doc/example ":alice sends an SMS to '+15550100' saying 'On my way'"}
   [ctx subject-str to-phone body]
   (let [sms (get-sms-impl ctx subject-str)
         {:keys [error]} (sms-proto/send! sms {:to to-phone :body body})]
@@ -295,7 +296,8 @@
    :requires-protocols [:shiftlefter.sms.protocol/ISMS]
    :svo {:subject :$1 :verb :send-media :frame :to
          :object nil
-         :args {:to-phone :$2 :body :$3 :media-url :$4}}}
+         :args {:to-phone :$2 :body :$3 :media-url :$4}}
+   :doc/example ":alice sends an MMS to '+15550100' with caption 'Look' and media 'https://example.com/cat.png'"}
   [ctx subject-str to-phone body media-url]
   (let [sms (get-sms-impl ctx subject-str)
         ;; v1: generic content-type — sl-bnk introduces extension-based
@@ -312,7 +314,8 @@
    :requires-protocols [:shiftlefter.sms.protocol/ISMS]
    :svo {:subject :$1 :verb :receive :frame :default
          :object nil
-         :args {:to-phone :$2 :match :$3}}}
+         :args {:to-phone :$2 :match :$3}}
+   :doc/example ":alice receives an SMS to '+15550100' matching /your code is (?<code>\\d+)/"}
   [ctx subject-str to-phone match-str]
   (do-receive ctx subject-str to-phone match-str (smart-baseline-ts ctx)))
 
@@ -321,7 +324,8 @@
    :requires-protocols [:shiftlefter.sms.protocol/ISMS]
    :svo {:subject :$1 :verb :receive :frame :since-iso
          :object nil
-         :args {:to-phone :$2 :since-iso :$3 :match :$4}}}
+         :args {:to-phone :$2 :since-iso :$3 :match :$4}}
+   :doc/example ":alice receives an SMS to '+15550100' since '2026-01-01T00:00:00Z' matching /code (?<code>\\d+)/"}
   [ctx subject-str to-phone iso-str match-str]
   (do-receive ctx subject-str to-phone match-str (parse-iso-instant iso-str)))
 
@@ -330,7 +334,8 @@
    :requires-protocols [:shiftlefter.sms.protocol/ISMS]
    :svo {:subject :$1 :verb :receive :frame :within-last
          :object nil
-         :args {:to-phone :$2 :duration :$3 :match :$4}}}
+         :args {:to-phone :$2 :duration :$3 :match :$4}}
+   :doc/example ":alice receives an SMS to '+15550100' within the last 30 seconds matching /code (?<code>\\d+)/"}
   [ctx subject-str to-phone duration-str match-str]
   (let [duration (parse-duration duration-str)
         baseline (.minus (Instant/now) duration)]
@@ -341,7 +346,8 @@
    :requires-protocols [:shiftlefter.sms.protocol/ISMS]
    :svo {:subject :$1 :verb :see :frame :count
          :object nil
-         :args {:count :$2 :to-phone :$3}}}
+         :args {:count :$2 :to-phone :$3}}
+   :doc/example ":alice should see 2 messages to '+15550100'"}
   [ctx subject-str count-str to-phone]
   (let [expected (Long/parseLong count-str)
         sms      (get-sms-impl ctx subject-str)

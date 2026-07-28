@@ -55,7 +55,19 @@
       ;; + the @hook= tag's file:line.
       (:hook error) (assoc :hook (:hook error))
       (:registration error) (assoc :registration (:registration error))
-      (:tag-source error) (assoc :tag-source (:tag-source error)))))
+      (:tag-source error) (assoc :tag-source (:tag-source error))
+      ;; File attribution for parse/step-load sub-errors (sl-0n6t).
+      (:path error) (assoc :path (:path error))
+      ;; Group attribution for setup :start failures (sl-1h03) — which
+      ;; group's lifecycle failed, same additive lane as :path above.
+      (:group error) (assoc :group (:group error))
+      ;; Aggregate planning errors (intents/parse/step-load, sl-0n6t) carry
+      ;; their per-file/per-entry detail as nested :errors — recurse with the
+      ;; same projection so the detail survives without leaking extra keys.
+      ;; The projection also SHIELDS the EDN here: parse sub-errors carry
+      ;; Location/Token records that would print as unreadable tagged
+      ;; literals if passed through whole.
+      (:errors error) (assoc :errors (mapv serialize-error (:errors error))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Failure Extraction
@@ -136,6 +148,14 @@
              :uri (:source-file bound-step)
              :line (:line step-loc)
              :column (:column step-loc)}
+      ;; Grammar hint + interface filter info on undefined steps (sl-s04n /
+      ;; sl-563) — full machine-readable maps, additive to the EDN contract.
+      (:hint bound-step)
+      (assoc :hint (:hint bound-step))
+
+      (:filter-info bound-step)
+      (assoc :filter-info (:filter-info bound-step))
+
       (= :ambiguous issue-type)
       (assoc :alternatives (mapv #(select-keys % [:stepdef/id :pattern-src :source])
                                  (:alternatives bound-step)))
@@ -189,12 +209,15 @@
    byte-identical)."
   [diagnostics]
   (when diagnostics
-    (let [{:keys [svo-issues config-lints counts]} diagnostics]
+    (let [{:keys [svo-issues config-lints cleanup-failures counts]} diagnostics]
       (not-empty
        (cond-> {}
          (seq svo-issues)   (assoc :svo-issues svo-issues
                                    :counts (select-keys counts [:svo-issue-count]))
-         (seq config-lints) (assoc :config-lints (vec config-lints)))))))
+         (seq config-lints) (assoc :config-lints (vec config-lints))
+         ;; Capability-cleanup failures (sl-lbrc): a leaked driver on an
+         ;; otherwise-green run — warn-level truth, never the exit code.
+         (seq cleanup-failures) (assoc :cleanup-failures (vec cleanup-failures)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Summary Building
@@ -248,9 +271,13 @@
 
 (defn prn-summary
   "Print EDN summary to stdout.
-   This is the only output that should go to stdout."
+   This is the only output that should go to stdout.
+
+   Serialized via `reporter/pr-edn-str`, never bare `prn`: ambient printer
+   bindings (clojure.main binds *print-namespace-maps* true on every CLI
+   run) can make the output unreadable or truncated (sl-3ub4)."
   [summary]
-  (prn summary))
+  (println (reporter/pr-edn-str summary)))
 
 (defn print-edn-summary!
   "Build and print EDN summary to stdout.

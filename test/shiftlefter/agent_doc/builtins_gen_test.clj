@@ -21,22 +21,51 @@
       (is (str/includes? md "## Interface `:sms`"))
       (testing "verbs, frames, step patterns, and lane markers are present"
         (is (str/includes? md "#### `:click` — Click on an element"))
-        (is (str/includes? md "frame `:with`: `S fills O with VALUE`"))
+        (is (str/includes? md "frame `:with` — schema (not a step): S fills O with VALUE"))
         (is (str/includes? md "`:fill`/`:with` `[:web]`"))
         (is (str/includes? md "`:send`/`:to` `[:sms]`")))
+      (testing "every frame is paired with a quotable bind-with example (sl-bqo)"
+        (is (str/includes? md "  - bind with: `:alice opens the browser to '/login'`"))
+        (is (str/includes? md "  - bind with: `:alice sends an SMS to '+15550100' saying 'On my way'`"))
+        (is (not (str/includes? md "bind with: ``"))
+            "no bind-with line may render an empty example")
+        (is (not (re-find #"- frame `[^`]+`: `" md))
+            "the old code-formatted frame rendering must not reappear"))
       (testing "adapters and their provided protocols are present"
         (is (str/includes? md "`:etaoin`"))
         (is (str/includes? md ":shiftlefter.browser.protocol/IBrowser"))
         (is (str/includes? md "`:sms-mock`")))
+      (testing "not-bundled adapters carry the extra-dep pointer (sl-gcdu)"
+        (is (str/includes?
+             md
+             "(not bundled — add com.microsoft.playwright/playwright {:mvn/version \"1.50.0\"} to your deps.edn)"))
+        (is (not (str/includes? md "`:etaoin` — provides `:shiftlefter.browser.protocol/IBrowser` (not bundled"))
+            "bundled adapters gain no pointer"))
       (testing "capability lane (requires-protocols) is surfaced for gated steps"
         (is (str/includes? md "requires `:shiftlefter.sms.protocol/ISMS`")))
       (testing ":location slot kinds are rendered (sl-3jr4 / sl-q81m / sl-yh7)"
-        (is (str/includes? md "`S navigates to O` — O: intent ref (bare PascalCase name), literal URL, or `{binding}`"))
-        (is (str/includes? md "`S is on O` — O: intent ref (bare PascalCase name), literal URL, or `{binding}`"))
-        (is (str/includes? md "`S is on exactly O` — O: literal URL")))
+        (is (str/includes? md "S navigates to O — O: intent ref (bare PascalCase name), literal URL, or `{binding}`"))
+        (is (str/includes? md "S is on O — O: intent ref (bare PascalCase name), literal URL, or `{binding}`"))
+        (is (str/includes? md "S is on exactly O — O: literal URL")))
       (testing ":arg-kinds are rendered (sl-yh7 AC11 — regen is not a no-op)"
         (is (str/includes? md "`:value` (literal or `{binding}`)"))
         (is (str/includes? md "`:match` (regex; `(?<name>...)` produces `{name}` bindings)"))))))
+
+(deftest builtin-examples-bind-test
+  ;; sl-bqo AC 1, machine-checked: every built-in stepdef ships a
+  ;; :doc/example that BINDS — full-string re-matches, the binder's own
+  ;; match semantics (bind.clj). An agent that copies a quoted bind-with
+  ;; example from the generated doc can never author a non-binding step.
+  (testing "every built-in stepdef has a :doc/example that binds to its own pattern"
+    (let [stepdefs (:stepdefs (gen/live-sources))]
+      (is (seq stepdefs))
+      (doseq [{:keys [pattern pattern-src metadata]} stepdefs]
+        (let [example (:doc/example metadata)]
+          (testing pattern-src
+            (is (string? example) "built-in stepdef missing :doc/example")
+            (when (string? example)
+              (is (re-matches pattern example)
+                  ":doc/example does not full-match its own pattern"))))))))
 
 (deftest checked-in-resource-up-to-date-test
   (testing "the committed builtins.md equals fresh generation (drift guard, AC1/AC5)"
@@ -55,7 +84,8 @@
                          :frames {:default {:args [] :pattern "S clicks O"}}}}}
    :stepdefs [{:pattern-src ":(.+) clicks (.+)"
                :metadata {:interface :web
-                          :svo {:verb :click :frame :default}}}]
+                          :svo {:verb :click :frame :default}
+                          :doc/example ":alice clicks {:id \"x\"}"}}]
    :adapters {:etaoin {:provides [:shiftlefter.browser.protocol/IBrowser]}}})
 
 (deftest render-purity-test
@@ -88,7 +118,7 @@
           with-refs (locate {:args [] :pattern "S navigates to O"
                              :object-kind :location :location-refs? true})]
       (is (str/includes? (gen/render literal-only)
-                         "`S navigates to O` — O: literal URL"))
+                         "S navigates to O — O: literal URL"))
       (is (str/includes? (gen/render with-refs)
                          "— O: intent ref (bare PascalCase name), literal URL, or `{binding}`"))
       (is (not= (gen/render literal-only) (gen/render with-refs)))))

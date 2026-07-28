@@ -29,10 +29,10 @@ SVO validation helps catch errors in your Gherkin step definitions by:
 ```
 svo-demo/
 ├── shiftlefter.edn           # Configuration with interfaces and glossaries
-├── config/
-│   └── glossaries/
-│       ├── subjects.edn      # Who can perform actions (types and instances)
-│       └── verbs-web.edn     # Project-specific verbs (extends defaults)
+├── glossary/
+│   ├── subjects.edn          # Who can perform actions (types and instances)
+│   └── verbs/
+│       └── web.edn           # Project-specific verbs (extends defaults)
 ├── features/
 │   └── login.feature         # Feature file using SVO patterns
 └── src/
@@ -40,27 +40,37 @@ svo-demo/
         └── web.clj           # Step definitions with SVO metadata
 ```
 
+This is the canonical glossary layout — `glossary/` at the project root,
+`glossary/verbs/<interface>.edn` per interface — the same convention
+examples 04–06 and the docs use.
+
 ## Running the Example
 
-**Note**: This is a reference example showing the file structure and SVO
-patterns — it is **not runnable in place**. To run it, copy this directory
-to be your project root. (Release zip installs `sl`; in a checkout of this
-repo substitute `bin/sl`.)
+This is a **structure reference**, not an executable demo — the step
+definitions are deliberate stubs (`println`, no real browser). But the
+*planning* half runs in place: from this directory, the dry-run parses,
+binds, and SVO-validates all four scenarios against the glossaries.
+(Release zip installs `sl`; in a checkout of this repo substitute
+`bin/sl`.)
+
+```bash
+sl run --dry-run features/
+```
+
+That dry-run is where every validation experiment below happens — no
+browser, no copying required. (Older versions of this README said the
+example was "not runnable in place"; that predated the jar runner — a
+claim true in one deployment instantiation and false in another. See the
+project wiki's deployment-instantiations page for the doctrine.)
 
 For a real project, your directory would look like:
 
 ```
 my-project/
 ├── shiftlefter.edn           # Copy from this example
-├── config/glossaries/        # Your glossaries
+├── glossary/                 # Your glossaries (subjects.edn, verbs/, intents/)
 ├── features/                 # Your feature files
 └── src/stepdefs/             # Your step definitions
-```
-
-Then run from your project root:
-
-```bash
-sl run --dry-run features/
 ```
 
 ## Key Concepts

@@ -63,8 +63,13 @@
    :frames {:default {:args [] :pattern "S clears O"}}}
 
   :press
-  {:desc "Press a keyboard key or chord; the key is the object"
-   :frames {:default {:args [] :pattern "S presses O"}}}
+  {:desc "Press a single keyboard key; the key is the object"
+   ;; :object-kind :key (sl-2sj6): O is a structure slot — an unquoted
+   ;; W3C KeyboardEvent.key name validated at plan time against the
+   ;; closed set (svo.keys), or a quoted single character ('g').
+   ;; Chords/sequences: sl-eecq (parked).
+   :frames {:default {:args [] :pattern "S presses O"
+                      :object-kind :key}}}
 
   ;; ---------------------------------------------------------------------------
   ;; Action verbs with descriptive single frames (the verb's surface form
@@ -188,8 +193,20 @@
                                :pattern "S sees O disabled"}
             :count            {:args [:count]
                                :pattern "S sees COUNT O"}
+            ;; :matching (sl-gwru): assert-only regex observation — the
+            ;; should-see poll semantics of :capture with NO binding.
+            ;; All-unnamed groups are the expected shape here (silent at
+            ;; lint); a named group is a plan error pointing at captures
+            ;; (clause 4: a producer marker is never quietly ignored).
+            :matching         {:args [:match]
+                               :arg-kinds {:match :matcher}
+                               :pattern "S sees O matching MATCH"}
+            ;; :object-kind :text (sl-2sj6): O is free page text, a
+            ;; content-only slot — quoted literal or {binding} token,
+            ;; never an intent ref (the bead's strict-mode repro).
             :title            {:args []
-                               :pattern "S sees the title O"}
+                               :pattern "S sees the title O"
+                               :object-kind :text}
             :alert            {:args []
                                :pattern "S sees an alert"
                                :implicit-object :alert}

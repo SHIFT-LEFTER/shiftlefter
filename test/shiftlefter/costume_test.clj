@@ -1,6 +1,7 @@
 (ns shiftlefter.costume-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.string :as str]
+            [shiftlefter.core]
             [shiftlefter.costume :as costume]
             [shiftlefter.costume.wardrobe :as wardrobe]
             [shiftlefter.costume.browser :as cbrowser]
@@ -216,7 +217,52 @@
           (is (= :alive (:status alpha)))
           (is (= 9222 (:port alpha)))
           (is (= :dead (:status beta)))
-          (is (= 9223 (:port beta))))))))
+          (is (= 9223 (:port beta)))
+          ;; sl-cdrg: the save-time stamp rides :meta through list-costumes —
+          ;; the plumbing the CLI age column depends on.
+          (is (string? (get-in alpha [:meta :last-connected-at]))))))))
+
+;; -----------------------------------------------------------------------------
+;; Last-Connected Age (sl-cdrg — F8 posture 1: staleness made visible)
+;; -----------------------------------------------------------------------------
+
+(deftest age-label-test
+  ;; Literal clock injected — no wall-clock reaches any pinned expectation.
+  (let [now (java.time.Instant/parse "2026-07-28T10:00:00Z")]
+    (testing "unit boundaries, coarsest unit only"
+      (is (= "<1m" (costume/age-label "2026-07-28T09:59:01Z" now)))
+      (is (= "1m"  (costume/age-label "2026-07-28T09:59:00Z" now)))
+      (is (= "59m" (costume/age-label "2026-07-28T09:01:00Z" now)))
+      (is (= "1h"  (costume/age-label "2026-07-28T09:00:00Z" now)))
+      (is (= "23h" (costume/age-label "2026-07-27T11:00:00Z" now)))
+      (is (= "1d"  (costume/age-label "2026-07-27T10:00:00Z" now)))
+      (is (= "45d" (costume/age-label "2026-06-13T10:00:00Z" now))))
+    (testing "sub-second precision as save-costume-meta! actually writes it"
+      (is (= "3d" (costume/age-label "2026-07-25T09:59:59.123456Z" now))))
+    (testing "clock skew (future stamp) reads <1m, not negative"
+      (is (= "<1m" (costume/age-label "2026-07-28T10:05:00Z" now))))
+    (testing "nil and unparseable fail open to nil"
+      (is (nil? (costume/age-label nil now)))
+      (is (nil? (costume/age-label "not-a-timestamp" now))))))
+
+(deftest costume-list-cmd-age-column-test
+  (testing "the CLI listing renders the connected column, and - without a stamp"
+    (wardrobe/ensure-dirs! :stamped)
+    (wardrobe/save-costume-meta! :stamped full-meta)
+    ;; Bypass save-time stamping: a legacy/hand-written meta with no
+    ;; :last-connected-at is valid per ::costume-meta and must render "-".
+    (wardrobe/ensure-dirs! :bare)
+    (spit (str (fs/path *test-wardrobe* "bare" "browser-meta.edn"))
+          (pr-str full-meta))
+    (with-redefs [chrome/probe-cdp (constantly {:status :dead})]
+      (let [out (with-out-str (#'shiftlefter.core/costume-list-cmd))
+            [bare-line stamped-line] (->> (str/split-lines out)
+                                          (sort))]
+        (is (str/includes? stamped-line "stamped"))
+        ;; Fresh stamp, seconds old at most:
+        (is (str/includes? stamped-line "connected <1m ago"))
+        (is (str/includes? bare-line "bare"))
+        (is (str/ends-with? bare-line "connected -"))))))
 
 ;; -----------------------------------------------------------------------------
 ;; ChromeDriver Threading Tests (sl-sq4)

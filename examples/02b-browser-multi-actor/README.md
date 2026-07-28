@@ -1,6 +1,8 @@
 # Multi-Actor Browser Test
 
-Run browser tests with multiple users, each in their own browser session. Still zero custom code — just built-in steps, plus a two-line glossary that declares who exists.
+Run browser tests with multiple users, each in their own browser session. Still
+zero custom step definitions — just built-in steps, plus a two-line glossary
+that declares who exists.
 
 > **Mode: Shifted** — this is the first example on the advertised path.
 > `shiftlefter.edn` carries `:svo` and a subject glossary, so every scenario
@@ -8,16 +10,22 @@ Run browser tests with multiple users, each in their own browser session. Still 
 > browser opens (`sl orient` will say `Mode: Shifted`). A Vanilla config is
 > included for contrast — see [Vanilla contrast](#vanilla-contrast) below.
 
-> **Network note:** like example 02, the scenario drives
-> `the-internet.herokuapp.com`, a public demo site — internet access needed.
+> **Fully offline.** The app under test is ShiftLefter's bundled fixture
+> server — `setup.clj` starts it on `127.0.0.1` with two seeded users and
+> stops it after the run. No network, no third-party site. (See example
+> [`02`](../02-browser-zero-code/)'s README § "Zero code?" for what
+> `setup.clj` is.)
 
 ## What You Get
 
-Two browser windows opening simultaneously, each logged in as the same user but with completely independent sessions. This demonstrates:
+Two browser windows opening simultaneously, each logged in as its own seeded
+user — and the dashboard greets each session by name, so the isolation is
+visible as page text. This demonstrates:
 
 - Multiple actors (`:user/alice`, `:user/bob`) in one scenario
 - Automatic browser provisioning per actor
-- Session isolation — each actor has their own cookies, state, etc.
+- Session isolation — alice's window says `Welcome, alice!`, bob's says
+  `Welcome, bob!`; cookies and state never cross
 - Vocabulary validation — an actor the glossary doesn't declare is rejected before anything runs
 
 ## The Feature File
@@ -27,39 +35,37 @@ Two browser windows opening simultaneously, each logged in as the same user but 
 Feature: Multi-actor browser test
 
   Scenario: Two users login simultaneously
-    When :user/alice opens the browser to 'https://the-internet.herokuapp.com/login'
-    And :user/alice fills {:id "username"} with 'tomsmith'
-    And :user/alice fills {:id "password"} with 'SuperSecretPassword!'
+    When :user/alice opens the browser to 'http://127.0.0.1:9095/login'
+    And :user/alice fills {:id "username"} with 'alice'
+    And :user/alice fills {:id "password"} with 'secret1'
     And :user/alice clicks {:css "button[type='submit']"}
-    Then :user/alice should see 'You logged into a secure area!'
-    And :user/bob opens the browser to 'https://the-internet.herokuapp.com/login'
-    And :user/bob fills {:id "username"} with 'tomsmith'
-    And :user/bob fills {:id "password"} with 'SuperSecretPassword!'
+    Then :user/alice should see 'Welcome, alice!'
+    And :user/bob opens the browser to 'http://127.0.0.1:9095/login'
+    And :user/bob fills {:id "username"} with 'bob'
+    And :user/bob fills {:id "password"} with 'secret2'
     And :user/bob clicks {:css "button[type='submit']"}
-    And :user/bob should see 'You logged into a secure area!'
-    And :user/alice should be on '/secure'
-    And :user/bob should be on '/secure'
+    And :user/bob should see 'Welcome, bob!'
+    And :user/alice should see 'Welcome, alice!'
+    And :user/alice should be on '/dashboard'
+    And :user/bob should be on '/dashboard'
     And :user/alice waits 3 seconds
 ```
 
-The `:user/alice waits 3 seconds` at the end keeps both browsers open so you can see them side by side.
+The `:user/alice waits 3 seconds` at the end keeps both browsers open so you
+can see them side by side. Note the re-check of alice's greeting *after* bob
+logs in — if the sessions shared state, that step would fail.
 
 ## The Config and the Glossary
 
 ```clojure
 ;; shiftlefter.edn
 {:interfaces {:web {:type :web
-                    :adapter :etaoin
-                    :config {:adapter-opts
-                             {:prefs {"profile.password_manager_leak_detection" false}}}}}
+                    :adapter :etaoin}}
  :glossaries {:subjects "glossary/subjects.edn"}
  :svo {:unknown-subject :error
        :unknown-verb :warn
        :unknown-interface :error}}
 ```
-
-(The `:prefs` line suppresses Chrome's breach warning for the demo site's
-canned password — cosmetic only; see example 02's README for the story.)
 
 ```clojure
 ;; glossary/subjects.edn
@@ -83,12 +89,14 @@ The `:svo` levels are the recommended baseline (the same block examples 04–06 
   (macOS: `brew install chromedriver`) or pointed at via
   `~/.shiftlefter/config.edn` (`:chromedriver-path`)
 
+Nothing else — no network access needed.
+
 ## Try It
 
 From this directory (release zip installs `sl`; in a checkout of this repo substitute `bin/sl`):
 
 ```bash
-# Validate against the glossary — no browser opens
+# Validate against the glossary — no browser opens, no server starts
 sl run --dry-run features/
 
 # Run it: watch two Chrome windows open and fill forms independently

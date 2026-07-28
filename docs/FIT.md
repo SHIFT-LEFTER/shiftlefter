@@ -119,7 +119,7 @@ worth watching, not worth forcing.
   custom JS), or a new interface. Ordinary web/SMS behavior needs none.
 
 Most of this is **Java-only** to install — no Clojure toolchain. See the
-[capabilities tiers](CAPABILITIES.md#at-a-glance) for what each install unlocks.
+[capabilities tiers](INSTALL-TIERS.md#at-a-glance) for what each install unlocks.
 
 ## Going deeper
 

@@ -247,7 +247,12 @@
 ;; mode drifts from execution.
 
 (def ^:private location-ref-pattern
-  "Bare location-ref token: PascalCase name, optional dotted segments."
+  "Bare location-ref token: PascalCase name, optional dotted segments.
+
+   TWIN (sl-8bxt): must stay textually identical to the bare-ref branch of
+   stepdefs.browser/location-re (a regex splice that can't call this
+   classifier). Change both together; extract if a third consumer appears.
+   Drift guard: stepdefs/browser_test.clj."
   #"[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*")
 
 (defn location-ref?
@@ -294,7 +299,12 @@
 (defn resolve-location
   "Resolve a named-location ref to a full URL: the interface's `base-url` plus
    the intent's :location :path. The SINGLE URL-assembly point (sl-4mv8 guard) —
-   every caller that turns a named location into a URL goes through here.
+   every caller that turns a NAMED location into a URL goes through here. The
+   join is deliberate string concat with pinned exactly-one-slash semantics —
+   NOT RFC 3986 resolution (which would drop a base-url's own path segment).
+   Location-slot LITERALS have their own assembly point with RFC semantics:
+   `shiftlefter.browser.url-match/resolve-literal` (sl-34ec). Two points, two
+   rules, both pinned — do not merge them.
 
    Parameters:
    - intents: loaded intents map from loader/load-all-intents

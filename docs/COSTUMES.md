@@ -1,10 +1,13 @@
 # Costumes
 
-A **costume** is a named, durable, *authenticated* browser context that an actor
-wears to act through an interface. It survives JVM restarts, sleep/wake, and
-reruns — so a logged-in session is set up once and reused. Costumes are how you
-drive real, already-authenticated browsers: REPL development, long-running
-automation, and feature runs that need a real account.
+A **costume** is a named, durable browser context that an actor wears to act
+through an interface — the state the actor *brings from outside* the system
+under test: configuration, extensions, accessibility and language settings,
+and (the most load-bearing case today) an authenticated session. It survives
+JVM restarts, sleep/wake, and reruns — so a logged-in session is set up once
+and reused. Costumes are how you drive real, already-authenticated browsers:
+REPL development, long-running automation, and feature runs that need a real
+account.
 
 > **Subject vs. costume.** The *subject* is who acts (`:alice`, `:admin`); the
 > *costume* is the authenticated getup the subject wears to act (`:finance` = your
@@ -23,7 +26,7 @@ needed:
 
 ```bash
 sl costume init <name> [--chrome-path PATH]   # launch Chrome; log in once, by hand
-sl costume list                               # show costumes and status
+sl costume list                               # show costumes, status, last-connected age
 sl costume destroy <name>                     # kill Chrome, delete the costume
 ```
 
@@ -54,22 +57,34 @@ For interactive development against a live session, the REPL functions in
 (require '[shiftlefter.repl :as repl])
 (require '[shiftlefter.stepdefs.browser])   ; load built-in browser steps
 
-(repl/init-costume! :finance)               ; Chrome opens — log in, navigate
+;; 1. Launch-only: a pristine Chrome opens for YOU to log in. No WebDriver
+;;    session is attached yet, and steps cannot drive it.
+(repl/init-costume! :finance)
+;; => {:status :launched :costume :finance :port 9222 :pid 12345}
+
+;; 2. After logging in, attach a WebDriver session. This is what registers
+;;    the actor — `as` only works after a connect.
+(repl/connect-costume! :finance)
 ;; => {:status :connected :costume :finance :port 9222 :pid 12345 :browser <CostumeBrowser>}
 
-;; ...later, after a JVM restart — cookies/localStorage/history preserved:
-(repl/connect-costume! :finance)
-
-;; drive it via the actor:
+;; 3. Drive it via the actor:
 (repl/as :finance "opens the browser to 'https://app.example.com'")
 (repl/as :finance "clicks {:css \"button.submit\"}")
 (repl/as :finance "should see {:text \"Welcome\"}")
 
+;; ...later, after a JVM restart — cookies/localStorage/history preserved;
+;; connect-costume! reattaches (and relaunches Chrome if it died):
+(repl/connect-costume! :finance)
+
 (repl/destroy-costume! :finance)            ; kill Chrome, delete the costume
+;; => {:status :destroyed :costume :finance}
 ```
 
 `list-costumes` reports each costume as `:alive` (Chrome running), `:dead` (needs
-reconnect), or `:unknown` (metadata missing/corrupt).
+reconnect), or `:unknown` (metadata missing/corrupt). The CLI listing also shows
+each costume's last-connected age (`connected 45d ago`) — a costume nobody has
+connected to in weeks is a standing credential you've stopped watching; destroy
+it (see [Custody](#custody-a-costume-holds-live-credentials)).
 
 ## What gets persisted
 
@@ -87,7 +102,7 @@ data, localStorage/IndexedDB, history, cached credentials. **Not** persisted:
 WebDriver session IDs (ephemeral handles that die on sleep/wake), in-memory JS
 state, and unsaved form data.
 
-## A costume holds live credentials — keep it out of git
+## Custody: a costume holds live credentials
 
 The `chrome-profile/` holds live auth state. Treat the wardrobe like a `.env`
 file: **never commit it.** ShiftLefter self-protects:
@@ -96,6 +111,20 @@ file: **never commit it.** ShiftLefter self-protects:
 - `init` and `connect` **refuse** (hard error `:costume/git-tracked`) if they
   detect the costume dir is git-tracked. Add `.shiftlefter/wardrobe/` to
   `.gitignore`, `git rm --cached` the tracked files, and retry.
+
+Git is not the only leak path. The posture to hold:
+
+- **A costume is as sensitive as your own browser profile** — treat the
+  wardrobe like your own logged-in Chrome, because that's what it is.
+- **Exclude the wardrobe from sync and backup.** The wardrobe is gitignored,
+  but Dropbox, iCloud, and Time Machine happily capture project directories.
+  Add `.shiftlefter/wardrobe/` to their exclusion lists.
+- **A worn costume is drivable by any local process while it runs.** Attaching
+  goes through Chrome's debug port, and any process running as your user can
+  connect to it. This is structural, not a bug — don't wear costumes you care
+  about on a machine whose local processes you don't trust.
+- **Destroy costumes you stop using** (`sl costume destroy <name>`). A costume
+  you no longer wear is stored credentials with no job.
 
 ## Auto-reconnection
 

@@ -6,10 +6,25 @@
    `intent-state` defaulted to a hardcoded CWD-relative `glossary/intents`; a
    project's own intents never reached the browser step path. (sl-1ps)"
   (:require [babashka.fs :as fs]
-            [clojure.test :refer [deftest is testing]]
+            [clojure.edn :as edn]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [shiftlefter.intent.loader :as loader]
             [shiftlefter.intent.state :as intent-state]
             [shiftlefter.runner.core :as core]))
+
+;; These tests deliberately drive the GLOBAL intent-state cache through
+;; loaded/error/cleared states via load-intents-stage. Without cleanup, the
+;; seed-ordered namespace that runs next inherits whichever state the last
+;; test here left behind (a temp-dir glossary, or the loaded-with-:errors
+;; state where get-intents returns nil) — the sl-tkrx suspect-(a) order
+;; dependence (sl-s04n's bind_test blip was the victim side of this class).
+;; Clear after every test so later namespaces start from the pristine
+;; not-loaded baseline.
+(use-fixtures :each
+  (fn [f]
+    (intent-state/clear-intents!)
+    (try (f)
+         (finally (intent-state/clear-intents!)))))
 
 ;; load-intents-stage is private; exercise it through its var.
 (def ^:private load-intents-stage #'core/load-intents-stage)
@@ -61,8 +76,18 @@
                 "{:intent \"Dashboard\" :collections {:item {:intent \"Card\" :cardinality :many}}}"
                 "card.edn"
                 "{:intent \"Card\" :elements {:title {:bindings {:web {:css \".title\"}}}}}"})
-          [status result] (load-intents-stage "rid" (assoc (opts-for dir) :edn true)
-                                              {:glossaries {:intents "intents"}})]
+          out (java.io.StringWriter.)
+          [status result] (binding [*out* out]
+                            (load-intents-stage "rid" (assoc (opts-for dir) :edn true)
+                                                {:glossaries {:intents "intents"}}))]
       (is (= :exit status))
       (is (= :planning-failed (:status result)))
-      (is (= 2 (:exit-code result))))))
+      (is (= 2 (:exit-code result)))
+      (testing "the EDN summary carries the error with nested detail (sl-0n6t)"
+        (let [summary (edn/read-string (str out))
+              [err :as errs] (get-in summary [:planning :errors])]
+          (is (= 1 (count errs)))
+          (is (= :glossary/intents-load-failed (:type err)))
+          (is (seq (:errors err))
+              "per-entry sub-errors survive serialization")
+          (is (every? #(string? (:message %)) (:errors err))))))))

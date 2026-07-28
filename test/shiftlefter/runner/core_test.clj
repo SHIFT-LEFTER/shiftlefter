@@ -5,9 +5,11 @@
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [shiftlefter.adapters.registry :as adapters]
             [shiftlefter.project-context :as project-context]
             [shiftlefter.runner.config :as config]
             [shiftlefter.runner.core :as runner]
+            [shiftlefter.runner.events :as events]
             [shiftlefter.stepengine.registry :as registry]
             [shiftlefter.test-helpers.adapter-registry :as mock]))
 
@@ -589,6 +591,185 @@
         (run-edn-with-config "{:runner {:step-paths [\"steps/\"]}}" {})]
     (is (= 0 (:run/exit-code summary)))
     (is (not (contains? summary :diagnostics)))))
+
+;; -----------------------------------------------------------------------------
+;; Exit-2 EDN summaries carry the planning error (sl-0n6t)
+;; -----------------------------------------------------------------------------
+
+(deftest test-config-error-rides-planning-edn
+  ;; sl-0n6t: a malformed config used to produce :planning nil in --edn.
+  (let [tmp-dir (str (fs/create-temp-dir))
+        config-file (str (fs/path tmp-dir "shiftlefter.edn"))]
+    (try
+      (spit config-file "{:runner {")
+      (let [out (java.io.StringWriter.)
+            result (binding [*out* out]
+                     (runner/execute! {:paths [simple-feature]
+                                       :step-paths [step-path]
+                                       :config-path config-file
+                                       :edn true}))
+            summary (edn/read-string (str out))
+            [err :as errs] (get-in summary [:planning :errors])]
+        (is (= 2 (:exit-code result)))
+        (is (= 1 (count errs)))
+        (is (= :config/error (:type err)))
+        (is (string? (:message err))))
+      (finally
+        (fs/delete-tree tmp-dir)))))
+
+(deftest test-parse-failure-rides-planning-edn-with-sub-errors
+  ;; sl-0n6t AC2: the aggregate :parse/failed carries per-file detail —
+  ;; nested :errors survive serialize-error (with :path attribution), and
+  ;; the record-bearing keys (Location/Token) are projected away so the
+  ;; summary stays plain-EDN-readable.
+  (let [tmp-dir (str (fs/create-temp-dir))
+        bad-feature (str (fs/path tmp-dir "bad.feature"))]
+    (try
+      (spit bad-feature "Feature: Broken\n  Scenario broken syntax\n  Given nothing\n")
+      (let [out (java.io.StringWriter.)
+            result (binding [*out* out]
+                     (runner/execute! {:paths [bad-feature]
+                                       :step-paths [step-path]
+                                       :edn true}))
+            summary (edn/read-string (str out))
+            [err :as errs] (get-in summary [:planning :errors])]
+        (is (= 2 (:exit-code result)))
+        (is (= 1 (count errs)))
+        (is (= :parse/failed (:type err)))
+        (is (str/includes? (:message err) "parse error"))
+        (is (seq (:errors err)) "per-file sub-errors present")
+        (is (every? #(string? (:message %)) (:errors err)))
+        (is (str/ends-with? (str (:path (first (:errors err)))) "bad.feature")
+            "sub-errors carry file attribution")
+        (is (= summary (edn/read-string (pr-str summary))) "summary round-trips"))
+      (finally
+        (fs/delete-tree tmp-dir)))))
+
+(deftest test-max-parallel-error-rides-planning-edn
+  ;; The programmatic execute! boundary (CLI input is caught earlier by
+  ;; tools.cli validation, so this site is API-only).
+  (let [out (java.io.StringWriter.)
+        result (binding [*out* out]
+                 (runner/execute! {:paths [simple-feature]
+                                   :step-paths [step-path]
+                                   :max-parallel 0
+                                   :edn true}))
+        summary (edn/read-string (str out))
+        [err :as errs] (get-in summary [:planning :errors])]
+    (is (= 2 (:exit-code result)))
+    (is (= 1 (count errs)))
+    (is (= :max-parallel/invalid (:type err)))
+    (is (str/includes? (:message err) "positive integer"))))
+
+;; -----------------------------------------------------------------------------
+;; Bus lifecycle: closed on every exit path (sl-4tsi)
+;; -----------------------------------------------------------------------------
+
+(defn- run-with-captured-bus
+  "Run execute! with the bus captured; returns {:bus b :result r}. The
+   public-API probe for 'was the bus closed': publish! on a closed bus is a
+   counted drop (events_test/test-publish-after-close-counts-as-drop), so a
+   post-return probe publish must raise dropped-events from 0 to 1."
+  [opts]
+  (let [captured (atom nil)
+        make-bus events/make-memory-bus
+        result (with-redefs [events/make-memory-bus
+                             (fn [] (let [b (make-bus)]
+                                      (reset! captured b)
+                                      b))]
+                 (runner/execute! opts))]
+    {:bus @captured :result result}))
+
+(deftest test-bus-closed-on-dry-run-path
+  ;; sl-4tsi lifecycle half: dry-run used to return without ever closing the
+  ;; bus — the first real subscriber (sl-yia) would never drain.
+  (let [{:keys [bus result]} (run-with-captured-bus
+                              {:paths [simple-feature]
+                               :step-paths [step-path]
+                               :dry-run true
+                               :no-color true})]
+    (is (= :dry-run (:status result)))
+    (is (zero? (events/dropped-events bus)) "nothing dropped during the run")
+    (events/publish! bus {:type :probe/after-return :payload {}})
+    (is (= 1 (events/dropped-events bus))
+        "probe publish after return drops — the bus was closed")))
+
+(deftest test-bus-closed-on-planning-failure-path
+  ;; Planning-failure early exits used to escape without closing the bus.
+  (let [out (java.io.StringWriter.)
+        {:keys [bus result]} (binding [*out* out]
+                               (run-with-captured-bus
+                                {:paths [undefined-feature]
+                                 :step-paths [step-path]
+                                 :no-color true}))]
+    (is (= 2 (:exit-code result)) "undefined steps are a planning failure")
+    (events/publish! bus {:type :probe/after-return :payload {}})
+    (is (= 1 (events/dropped-events bus))
+        "probe publish after return drops — the bus was closed")))
+
+;; -----------------------------------------------------------------------------
+;; Adapter availability at config load (sl-gcdu)
+;; -----------------------------------------------------------------------------
+
+(deftest test-not-bundled-adapter-fails-at-config-load-edn
+  ;; sl-gcdu AC1: a dead-end :playwright config fails as a planning error
+  ;; (exit 2) with the EDN summary carrying the structured error — not as a
+  ;; per-scenario provisioning failure at run time. Absence of the dep is
+  ;; simulated by stubbing the probe (the test classpath has Playwright).
+  (with-redefs [adapters/class-available? (constantly false)]
+    (let [{:keys [summary result]}
+          (run-edn-with-config
+           "{:interfaces {:web {:type :web :adapter :playwright}}}" {})]
+      (is (= 2 (:exit-code result)))
+      (is (= 2 (:run/exit-code summary)))
+      (is (= :planning-failed (:run/status summary)))
+      (let [[err :as errs] (get-in summary [:planning :errors])]
+        (is (= 1 (count errs)))
+        (is (= :config/adapter-not-bundled (:type err)))
+        (is (str/includes? (:message err) ":etaoin")
+            "names the bundled remedy")
+        (is (str/includes? (:message err) "com.microsoft.playwright/playwright")
+            "names the dep coordinates remedy")))))
+
+(deftest test-not-bundled-adapter-stderr-reports-every-interface
+  ;; Tower condition on sl-gcdu: a config with several not-bundled
+  ;; interfaces reports them all on stderr, not just the first.
+  (with-redefs [adapters/class-available? (constantly false)]
+    (let [tmp-dir (str (fs/create-temp-dir))
+          config-file (str (fs/path tmp-dir "shiftlefter.edn"))]
+      (try
+        (spit config-file
+              (pr-str {:interfaces {:web {:type :web :adapter :playwright}
+                                    :admin-web {:type :web :adapter :playwright}}}))
+        (let [err (java.io.StringWriter.)
+              result (binding [*err* err]
+                       (runner/execute! {:paths [simple-feature]
+                                         :step-paths [step-path]
+                                         :config-path config-file
+                                         :no-color true}))]
+          (is (= 2 (:exit-code result)))
+          (is (= 2 (count (re-seq #"Config error:" (str err))))
+              "one stderr line per dead-end interface"))
+        (finally
+          (fs/delete-tree tmp-dir))))))
+
+(deftest test-playwright-config-passes-when-dep-present
+  ;; sl-gcdu AC2: the test classpath genuinely has Playwright, so the same
+  ;; config must clear config load — no false positive from the probe.
+  (let [tmp-dir (str (fs/create-temp-dir))
+        config-file (str (fs/path tmp-dir "shiftlefter.edn"))]
+    (try
+      (spit config-file "{:interfaces {:web {:type :web :adapter :playwright}}}")
+      (let [out (java.io.StringWriter.)
+            result (binding [*out* out]
+                     (runner/execute! {:paths [simple-feature]
+                                       :step-paths [step-path]
+                                       :config-path config-file
+                                       :no-color true}))]
+        (is (= 0 (:exit-code result))
+            "config load passes; the feature runs without touching :web"))
+      (finally
+        (fs/delete-tree tmp-dir)))))
 
 (deftest test-max-parallel-invalid-boundary
   (testing "malformed :max-parallel at the execute! boundary is a planning error"

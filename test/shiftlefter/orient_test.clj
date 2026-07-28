@@ -175,6 +175,8 @@
             (is (str/includes? out "No ShiftLefter project here yet"))
             (is (str/includes? out "Create shiftlefter.edn"))
             (is (str/includes? out "sl agent-doc overview"))
+            (is (str/includes? out "sl agent-doc examples")
+                "advertises the worked-examples topic (sl-c9qj)")
             (is (not (str/includes? out "config-required")))))
         (testing "--edn mode: machine discriminator :no-project, exit 0"
           (let [out (with-out-str

@@ -15,6 +15,9 @@
   [url]
   (let [conn (.openConnection (java.net.URL. url))]
     (.setInstanceFollowRedirects conn false)
+    ;; No keep-alive (sl-7hb1): a pooled socket can outlive its per-test
+    ;; server and hit a later server on a recycled port (EOF / wrong response).
+    (.setRequestProperty conn "Connection" "close")
     {:status (.getResponseCode conn)
      :headers (into {} (.getHeaderFields conn))
      :body (try (slurp (.getInputStream conn))
@@ -28,6 +31,7 @@
                 (.setRequestMethod "POST")
                 (.setDoOutput true)
                 (.setInstanceFollowRedirects false)
+                (.setRequestProperty "Connection" "close")
                 (.setRequestProperty "Content-Type" "application/x-www-form-urlencoded"))
          _ (when cookies
              (.setRequestProperty conn "Cookie" cookies))

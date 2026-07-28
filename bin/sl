@@ -170,7 +170,7 @@ handle_repl_clj() {
     # Build deps map — nREPL + CIDER are bundled in the JAR, but for clj mode
     # we pull them as deps so clj's classloader picks them up
     local sl_dep="{:deps {shiftlefter/shiftlefter {:local/root \"$JAR_FILE\"}"
-    sl_dep="$sl_dep nrepl/nrepl {:mvn/version \"1.5.0\"} cider/cider-nrepl {:mvn/version \"0.50.0\"}"
+    sl_dep="$sl_dep nrepl/nrepl {:mvn/version \"1.7.0\"} cider/cider-nrepl {:mvn/version \"0.62.2\"}"
     sl_dep="$sl_dep}}"
 
     local clj_args=("-Sdeps" "$sl_dep")

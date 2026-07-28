@@ -14,7 +14,8 @@
             [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [shiftlefter.runner.core :as core]))
+            [shiftlefter.runner.core :as core]
+            [shiftlefter.runner.events :as events]))
 
 ;; -----------------------------------------------------------------------------
 ;; Temp-project helpers
@@ -121,6 +122,73 @@
           (is (= 1 (:exit-code result)))
           (is (= [:start :stop] @lifecycle-events)
               ":stop must run even on scenario failure"))))))
+
+(deftest multi-group-run-keeps-bus-open-across-groups
+  ;; sl-4tsi lifecycle half: the bus used to be closed by group 1's
+  ;; execute-and-report-stage, so groups 2..N published into a closed channel
+  ;; (silent counted drops). Close is now hoisted to execute!'s suite-level
+  ;; finally. This is also the suite's first genuine N>1 group execution
+  ;; test — the groups loop was previously never exercised past N=1
+  ;; (sl-oobu deferred N>1 semantics; note for its eventual work: this
+  ;; scaffold exists).
+  (with-temp-project
+    (fn [dir]
+      (reset! lifecycle-events [])
+      (spit-file dir "shiftlefter.edn" (pr-str {:runner {:step-paths []}}))
+      (spit-file dir "features/one.feature"
+                 "Feature: One\n  Scenario: A\n    Given a trivial assertion\n")
+      (spit-file dir "features/two.feature"
+                 "Feature: Two\n  Scenario: B\n    Given a trivial assertion\n")
+      (spit-file dir "steps/probe.clj"
+                 "(ns probe-steps
+                    (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+                  (defstep #\"a trivial assertion\" [] nil)")
+      (spit-file dir "setup.clj"
+                 "(ns setup
+                    (:require [shiftlefter.runner.core-setup-test :as t]))
+                  (def setups
+                    [{:label \"group-one\"
+                      :start (fn [_] (t/record-event! :start-1)
+                               {:stop (fn [] (t/record-event! :stop-1))})
+                      :features [\"features/one.feature\"]}
+                     {:label \"group-two\"
+                      :start (fn [_] (t/record-event! :start-2)
+                               {:stop (fn [] (t/record-event! :stop-2))})
+                      :features [\"features/two.feature\"]}])")
+      (let [seen (atom [])
+            captured-bus (atom nil)
+            make-bus events/make-memory-bus
+            result (with-redefs [events/make-memory-bus
+                                 (fn []
+                                   (let [b (make-bus)]
+                                     (reset! captured-bus b)
+                                     (events/subscribe! b #(swap! seen conj %))
+                                     b))]
+                     (core/execute!
+                      {:paths       []
+                       :config-path (str (fs/path dir "shiftlefter.edn"))
+                       :step-paths  [(str (fs/path dir "steps"))]}))]
+        (is (= 0 (:exit-code result)) (str "both groups should pass; got " result))
+        (is (= [:start-1 :stop-1 :start-2 :stop-2] @lifecycle-events)
+            "groups run sequentially, each with its own lifecycle")
+        (testing "one tap sees BOTH groups' full streams (previously group 2 dropped)"
+          (is (= 2 (count (filter #(= :test-run/started (:type %)) @seen)))
+              "one :test-run/started pair per group (Tower R1 run-scope)")
+          (is (= 2 (count (filter #(= :test-run/finished (:type %)) @seen))))
+          (is (= 2 (count (filter #(= :scenario/finished (:type %)) @seen)))
+              "scenario events from both groups"))
+        (testing "run-scope pairs arrive in group order on one totally-ordered bus"
+          (is (= [:test-run/started :test-run/finished
+                  :test-run/started :test-run/finished]
+                 (->> @seen
+                      (map :type)
+                      (filter #{:test-run/started :test-run/finished})))))
+        (testing "zero drops — nothing published into a closed channel"
+          (is (zero? (events/dropped-events @captured-bus))))
+        (testing "the bus IS closed once execute! returns (suite finally)"
+          (events/publish! @captured-bus {:type :probe/after-return :payload {}})
+          (is (= 1 (events/dropped-events @captured-bus))
+              "publish after return is a counted drop — the bus was closed"))))))
 
 (deftest cli-path-not-declared-is-planning-error
   (testing "CLI path outside the declared union surfaces a planning error"
@@ -257,3 +325,277 @@
           (is (= 0 (:exit-code result))
               "No setup.clj → today's pipeline runs unchanged")
           (is (empty? @lifecycle-events) "No setup means no lifecycle"))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-1h03: :start failures must speak in EDN mode (the last known EDN-silence
+;; lie). Both branches ride report-planning-error!; the planning block carries
+;; :type + :group + :message under :planning :errors.
+;; -----------------------------------------------------------------------------
+
+(defn- write-throwing-start-project!
+  "Temp project whose single group's :start throws. Returns opts for execute!."
+  [dir]
+  (spit-file dir "shiftlefter.edn" (pr-str {:runner {:step-paths []}}))
+  (spit-file dir "features/probe.feature"
+             "Feature: P\n  Scenario: x\n    Given a trivial assertion\n")
+  (spit-file dir "steps/probe.clj"
+             "(ns probe-steps
+                (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+              (defstep #\"a trivial assertion\" [] nil)")
+  (spit-file dir "setup.clj"
+             "(ns setup)
+              (def setups
+                [{:label \"boom-group\"
+                  :start (fn [_] (throw (ex-info \"kaboom\" {})))
+                  :features [\"features/probe.feature\"]}])")
+  {:paths       []
+   :config-path (str (fs/path dir "shiftlefter.edn"))
+   :step-paths  [(str (fs/path dir "steps"))]})
+
+(deftest start-throw-emits-edn-planning-summary
+  (testing "a group whose :start throws emits an exit-2 planning summary in
+            EDN mode — previously NOTHING reached stdout (sl-1h03)"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-throwing-start-project! dir)
+              result-box (volatile! nil)
+              out (with-out-str
+                    (vreset! result-box (core/execute! (assoc opts :edn true))))]
+          (is (= 2 (:exit-code @result-box)))
+          (is (seq (str/trim out)) "EDN mode must not be silent (the lie)")
+          (let [summary (edn/read-string out)
+                errs (get-in summary [:planning :errors])]
+            (is (= 2 (:run/exit-code summary)))
+            (is (= :planning-failed (:run/status summary)))
+            (is (some #(and (= :setup/start-threw (:type %))
+                            (= "boom-group" (:group %))
+                            (str/includes? (or (:message %) "") "kaboom"))
+                      errs)
+                (str ":planning :errors carries type+group+message; got "
+                     (pr-str errs)))))))))
+
+(deftest invalid-start-result-emits-edn-planning-summary
+  (testing "an invalid :start return emits an exit-2 planning summary with a
+            real :message (previously the error map was bare, sl-1h03)"
+    (with-temp-project
+      (fn [dir]
+        (spit-file dir "shiftlefter.edn" (pr-str {:runner {:step-paths []}}))
+        (spit-file dir "features/probe.feature"
+                   "Feature: P\n  Scenario: x\n    Given a trivial assertion\n")
+        (spit-file dir "steps/probe.clj"
+                   "(ns probe-steps2
+                      (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+                    (defstep #\"a trivial assertion\" [] nil)")
+        (spit-file dir "setup.clj"
+                   "(ns setup)
+                    (def setups
+                      [{:label \"bad-shape\"
+                        :start (fn [_] 42)
+                        :features [\"features/probe.feature\"]}])")
+        (let [opts {:paths []
+                    :config-path (str (fs/path dir "shiftlefter.edn"))
+                    :step-paths [(str (fs/path dir "steps"))]}
+              result-box (volatile! nil)
+              out (with-out-str
+                    (vreset! result-box (core/execute! (assoc opts :edn true))))
+              summary (edn/read-string out)
+              errs (get-in summary [:planning :errors])]
+          (is (= 2 (:exit-code @result-box)))
+          (is (some #(and (= :setup/invalid-start-result (:type %))
+                          (= "bad-shape" (:group %))
+                          (str/includes? (or (:message %) "") "invalid shape"))
+                    errs)
+              (pr-str errs)))))))
+
+(deftest start-throw-console-parity
+  (testing "console mode: same stderr line as before the fix, no stdout EDN"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-throwing-start-project! dir)
+              err-w (java.io.StringWriter.)
+              out (with-out-str
+                    (binding [*err* err-w]
+                      (core/execute! opts)))]
+          (is (str/includes? (str err-w)
+                             "Setup group \"boom-group\" :start threw: kaboom")
+              "stderr wording unchanged (byte-parity claim)")
+          (is (not (str/includes? out ":run/exit-code"))
+              "no EDN on stdout in console mode"))))))
+
+(deftest multi-group-start-failure-and-healthy-group-both-speak
+  (testing "group 1's :start throws, group 2 runs: stdout carries BOTH the
+            planning form AND the healthy group's run summary (Tower rider —
+            the fix must not trade one silence for another)"
+    (with-temp-project
+      (fn [dir]
+        (reset! lifecycle-events [])
+        (spit-file dir "shiftlefter.edn" (pr-str {:runner {:step-paths []}}))
+        (spit-file dir "features/one.feature"
+                   "Feature: One\n  Scenario: A\n    Given a trivial assertion\n")
+        (spit-file dir "features/two.feature"
+                   "Feature: Two\n  Scenario: B\n    Given a trivial assertion\n")
+        (spit-file dir "steps/probe.clj"
+                   "(ns probe-steps3
+                      (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+                    (defstep #\"a trivial assertion\" [] nil)")
+        (spit-file dir "setup.clj"
+                   "(ns setup
+                      (:require [shiftlefter.runner.core-setup-test :as t]))
+                    (def setups
+                      [{:label \"boom-group\"
+                        :start (fn [_] (throw (ex-info \"kaboom\" {})))
+                        :features [\"features/one.feature\"]}
+                       {:label \"ok-group\"
+                        :start (fn [_] (t/record-event! :ok-start) {})
+                        :features [\"features/two.feature\"]}])")
+        (let [opts {:paths []
+                    :config-path (str (fs/path dir "shiftlefter.edn"))
+                    :step-paths [(str (fs/path dir "steps"))]}
+              result-box (volatile! nil)
+              out (with-out-str
+                    (vreset! result-box (core/execute! (assoc opts :edn true))))
+              forms (let [rdr (java.io.PushbackReader.
+                               (java.io.StringReader. out))]
+                      (loop [acc []]
+                        (let [form (edn/read {:eof ::eof} rdr)]
+                          (if (= ::eof form) acc (recur (conj acc form))))))]
+          (is (= 2 (:exit-code @result-box)) "suite exit aggregates the 2")
+          (is (= [:ok-start] @lifecycle-events)
+              "healthy group still executed after the failing one")
+          (is (= 2 (count forms)) (str "TWO EDN forms on stdout; got " out))
+          (is (some #(and (= 2 (:run/exit-code %))
+                          (some (fn [e] (= "boom-group" (:group e)))
+                                (get-in % [:planning :errors])))
+                    forms)
+              "the failing group's planning form is present")
+          (is (some #(and (= 0 (:run/exit-code %))
+                          (= 1 (get-in % [:counts :passed])))
+                    forms)
+              "the healthy group's run summary is present alongside"))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-lbrc: capability-cleanup failures surface as warn-level diagnostics —
+;; console stderr block / EDN :diagnostics :cleanup-failures — never the exit
+;; code. The leaky adapter comes from setup.clj's custom :adapter-registry
+;; (mock helper); a step seeds the ephemeral capability exec_test-style.
+;; -----------------------------------------------------------------------------
+
+(defn- write-leaky-cleanup-project!
+  "Temp project whose single group uses an adapter registry with a :cleanup
+   that fails. Returns opts for execute!."
+  [dir]
+  (spit-file dir "shiftlefter.edn"
+             (pr-str {:runner {:step-paths []}
+                      :interfaces {:web {:type :web :adapter :leaky}}}))
+  (spit-file dir "features/probe.feature"
+             "Feature: P\n  Scenario: leaves a browser behind\n    Given a step that opens a capability\n")
+  (spit-file dir "steps/probe.clj"
+             "(ns leaky-steps
+                (:require [shiftlefter.stepengine.registry :refer [defstep]]
+                          [shiftlefter.capabilities.ctx :as cap]))
+              (defstep #\"a step that opens a capability\" [ctx]
+                (cap/assoc-capability ctx :web {:fake :driver} :ephemeral))")
+  (spit-file dir "setup.clj"
+             "(ns setup
+                (:require [shiftlefter.test-helpers.adapter-registry :as mock]))
+              (def setups
+                [{:label \"leaky-group\"
+                  :start (fn [_]
+                           {:adapter-registry
+                            (mock/registry
+                             {:leaky {:cleanup (fn [_impl]
+                                                 {:error {:message \"chrome process tree still running\"}})}})})
+                  :features [\"features/probe.feature\"]}])")
+  {:paths       []
+   :config-path (str (fs/path dir "shiftlefter.edn"))
+   :step-paths  [(str (fs/path dir "steps"))]})
+
+(deftest cleanup-failure-surfaces-in-edn-diagnostics
+  (testing "a failed capability cleanup rides :diagnostics :cleanup-failures
+            on a GREEN run — exit stays 0 (truth via warning, c6wk/sl-lbrc)"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-leaky-cleanup-project! dir)
+              result-box (volatile! nil)
+              out (with-out-str
+                    (vreset! result-box (core/execute! (assoc opts :edn true))))
+              summary (edn/read-string out)
+              failures (get-in summary [:diagnostics :cleanup-failures])]
+          (is (= 0 (:exit-code @result-box)) "green run stays green")
+          (is (= 0 (:run/exit-code summary)))
+          (is (= 1 (count failures)) (pr-str (:diagnostics summary)))
+          (let [f (first failures)]
+            (is (= "leaves a browser behind" (:scenario f)))
+            (is (= :web (:capability f)))
+            (is (= :leaky (:adapter f)))
+            (is (str/includes? (:error f) "chrome process tree"))))))))
+
+(deftest cleanup-failure-prints-console-warning
+  (testing "console mode: stderr carries the cleanup-failure block; nothing
+            EDN-shaped reaches stdout"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-leaky-cleanup-project! dir)
+              err-w (java.io.StringWriter.)
+              result-box (volatile! nil)
+              out (with-out-str
+                    (binding [*err* err-w]
+                      (vreset! result-box (core/execute! opts))))]
+          (is (= 0 (:exit-code @result-box)))
+          (is (str/includes? (str err-w)
+                             "Capability cleanup failures (resources may have leaked):"))
+          (is (str/includes? (str err-w) "chrome process tree still running"))
+          (is (not (str/includes? out ":run/exit-code"))))))))
+
+(deftest cleanup-failure-attributes-to-its-own-group
+  (testing "multi-group: only the leaky group's summary carries
+            :cleanup-failures (Tower condition 3 — per-group attribution)"
+    (with-temp-project
+      (fn [dir]
+        (spit-file dir "shiftlefter.edn"
+                   (pr-str {:runner {:step-paths []}
+                            :interfaces {:web {:type :web :adapter :leaky}}}))
+        (spit-file dir "features/clean.feature"
+                   "Feature: Clean\n  Scenario: tidy\n    Given a trivial assertion\n")
+        (spit-file dir "features/leaky.feature"
+                   "Feature: Leaky\n  Scenario: leaves a browser behind\n    Given a step that opens a capability\n")
+        (spit-file dir "steps/probe.clj"
+                   "(ns leaky-steps2
+                      (:require [shiftlefter.stepengine.registry :refer [defstep]]
+                                [shiftlefter.capabilities.ctx :as cap]))
+                    (defstep #\"a trivial assertion\" [] nil)
+                    (defstep #\"a step that opens a capability\" [ctx]
+                      (cap/assoc-capability ctx :web {:fake :driver} :ephemeral))")
+        (spit-file dir "setup.clj"
+                   "(ns setup
+                      (:require [shiftlefter.test-helpers.adapter-registry :as mock]))
+                    (def leaky-registry
+                      (mock/registry
+                       {:leaky {:cleanup (fn [_impl]
+                                           {:error {:message \"leaked\"}})}}))
+                    (def setups
+                      [{:label \"clean-group\"
+                        :start (fn [_] {})
+                        :features [\"features/clean.feature\"]}
+                       {:label \"leaky-group\"
+                        :start (fn [_] {:adapter-registry leaky-registry})
+                        :features [\"features/leaky.feature\"]}])")
+        (let [opts {:paths []
+                    :config-path (str (fs/path dir "shiftlefter.edn"))
+                    :step-paths [(str (fs/path dir "steps"))]}
+              result-box (volatile! nil)
+              out (with-out-str
+                    (vreset! result-box (core/execute! (assoc opts :edn true))))
+              forms (let [rdr (java.io.PushbackReader.
+                               (java.io.StringReader. out))]
+                      (loop [acc []]
+                        (let [form (edn/read {:eof ::eof} rdr)]
+                          (if (= ::eof form) acc (recur (conj acc form))))))]
+          (is (= 0 (:exit-code @result-box)))
+          (is (= 2 (count forms)))
+          (is (= 1 (count (filter #(get-in % [:diagnostics :cleanup-failures])
+                                  forms)))
+              "exactly one group's summary carries cleanup failures")
+          (is (= "leaves a browser behind"
+                 (-> (some #(get-in % [:diagnostics :cleanup-failures]) forms)
+                     first :scenario))))))))

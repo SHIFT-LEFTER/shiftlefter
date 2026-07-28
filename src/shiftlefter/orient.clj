@@ -36,6 +36,7 @@
   []
   ["Create shiftlefter.edn at the project root (or sl/shiftlefter.edn)."
    "Read `sl agent-doc overview` to learn the operating model."
+   "Read `sl agent-doc examples` for worked config/glossary/feature file shapes."
    "Use `sl agent-doc sieve` for the vocabulary bootstrap workflow."])
 
 (defn- render-bootstrap

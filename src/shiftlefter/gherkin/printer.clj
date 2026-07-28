@@ -49,8 +49,11 @@
   :args (s/cat :tokens (s/coll-of :shiftlefter.gherkin.tokens/token))
   :ret string?)
 
-(defn fmt-check
-  "Check if file round-trips perfectly via lex -> print-tokens.
+(defn roundtrip-check
+  "Check if file round-trips perfectly via lex -> print-tokens — the
+   lossless-fidelity verification (was `fmt-check`, renamed sl-c1u8). Not
+   the canonical-style check backing `sl fmt --check` — that is
+   `shiftlefter.gherkin.api/fmt-check`.
 
    Returns:
    - {:status :ok :path path} if roundtrip matches exactly
@@ -84,7 +87,7 @@
                :original-length (count original)
                :reconstructed-length (count reconstructed)})))))))
 
-(s/fdef fmt-check
+(s/fdef roundtrip-check
   :args (s/cat :path ::path)
   :ret ::fmt-result)
 

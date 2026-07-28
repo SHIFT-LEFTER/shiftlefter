@@ -6,17 +6,21 @@ ShiftLefter works in tiers. Each tier adds capabilities without removing any fro
 
 | You have | You can |
 |---|---|
-| **Java 11+** | Run features, format files, start the REPL, use built-in browser steps |
-| **Java 11+ and write `.clj` files** | All of the above, plus write custom step definitions using the bundled libraries (HTTP, JSON, filesystem, browser, async, …) |
-| **Java 11+ and Clojure CLI** | All of the above, plus use your own `deps.edn`, add any Clojure library |
+| **Java 21+** | Run features, format files, start the REPL, use built-in browser steps |
+| **Java 21+ and write `.clj` files** | All of the above, plus write custom step definitions using the bundled libraries (HTTP, JSON, filesystem, browser, async, …) |
+| **Java 21+ and Clojure CLI** | All of the above, plus use your own `deps.edn`, add any Clojure library |
 
 ---
 
 ## Tier A: Run & Format (Java only)
 
-**Prerequisites:** Java 11 or later — nothing else for running and formatting.
+**Prerequisites:** Java 21 or later — nothing else for running and formatting.
 Driving a real browser additionally needs Chrome and a matching **ChromeDriver**
 (see the browser-steps note below).
+
+**Platforms:** macOS and Linux — the `sl` launcher and installer are bash
+scripts, so Windows is out of scope today (`java -jar` may work, but nothing
+is tested there).
 
 **What you can do:**
 
@@ -101,7 +105,7 @@ No `deps.edn`, no dependency management. Just write the file and point `sl run` 
 
 ## Tier C: Full Development (Java + Clojure CLI)
 
-**Prerequisites:** Java 11+ and [Clojure CLI](https://clojure.org/guides/install_clojure)
+**Prerequisites:** Java 21+ and [Clojure CLI](https://clojure.org/guides/install_clojure)
 
 **What's new:**
 
@@ -161,9 +165,39 @@ Use `:adapter-opts` in your interface config to pass options directly to the bac
                  :adapter-opts {:browser-type :firefox}}}}}
 ```
 
+### Default Automation-Hygiene Prefs (Etaoin)
+
+The `:etaoin` adapter sets three Chrome profile prefs by default so native
+password popups never interrupt an automation session — they're invisible
+to WebDriver (native UI, not DOM) but noisy in demos and headed runs:
+
+| Pref | Default | Suppresses |
+|------|---------|------------|
+| `"profile.password_manager_leak_detection"` | `false` | "Password found in a data breach" popup (fires on any test credential in public breach lists) |
+| `"credentials_enable_service"` | `false` | "Save password?" bubble |
+| `"profile.password_manager_enabled"` | `false` | Password-manager autofill offers |
+
+These merge **under** your `:adapter-opts` `:prefs`, key by key — anything
+you set wins, and setting one key back does not lose the other defaults:
+
+```edn
+{:interfaces
+ {:web {:adapter :etaoin
+        :config {:adapter-opts
+                 ;; opt back in to leak detection; the other two defaults stay
+                 {:prefs {"profile.password_manager_leak_detection" true}}}}}}
+```
+
+Only these password-popup prefs are defaulted — nothing that changes page
+feature behavior (notifications, autofill of forms, translate) is touched.
+
 ### Using Playwright
 
-Playwright is not bundled with ShiftLefter. To use it:
+Playwright is supported but not bundled with ShiftLefter — the driver jar
+alone is ~163MB, several times the size of the whole ShiftLefter jar. A
+config that selects `:adapter :playwright` without the dependency on the
+classpath fails at config load with instructions (it does not get as far as
+running scenarios). Wiring it up:
 
 1. Add the dependency to your project's `deps.edn`:
 
@@ -171,9 +205,34 @@ Playwright is not bundled with ShiftLefter. To use it:
 {:deps {com.microsoft.playwright/playwright {:mvn/version "1.50.0"}}}
 ```
 
-2. Playwright automatically downloads browser binaries on first use.
+The jar covers all platforms automatically — there are no platform-specific
+coordinates or instructions. Like any Maven dependency it is cached per-user
+in `~/.m2`, so multiple ShiftLefter projects share one copy.
 
-3. Set `:adapter :playwright` in your `shiftlefter.edn` (see above).
+2. Set `:adapter :playwright` in your `shiftlefter.edn` (see above).
+
+**Browsers.** Playwright drives its own patched browser builds, which are
+never inside the jar: on first use it downloads Chromium, Firefox, and
+WebKit (hundreds of MB) from Microsoft's CDN. Two things keep that cost
+small in practice:
+
+- **The download happens once per user, not per project.** Browsers live in
+  a single per-user cache — macOS `~/Library/Caches/ms-playwright`, Linux
+  `~/.cache/ms-playwright`, Windows `%USERPROFILE%\AppData\Local\ms-playwright` —
+  shared across all your projects *and* across Playwright language bindings
+  (Node, Python, Java, .NET use the same cache and build numbering). If any
+  prior Playwright project already fetched browsers, they are reused
+  automatically; only missing builds download.
+- **You can skip the download entirely.** Set the
+  `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` environment variable and pass a
+  `:channel` in `:adapter-opts` to drive your system-installed Chrome or
+  Edge with zero download.
+
+Two honest caveats: upgrading the Playwright version accumulates browser
+build generations in the cache — this costs disk but never conflicts
+(`playwright uninstall --all` resets it). And for CI or corporate layouts
+that need the cache somewhere specific, `PLAYWRIGHT_BROWSERS_PATH` is the
+explicit relocate/share lever.
 
 ---
 

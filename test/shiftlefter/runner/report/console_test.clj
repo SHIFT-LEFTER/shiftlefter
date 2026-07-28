@@ -110,6 +110,22 @@
       (is (str/includes? output "I do something undefined"))
       (is (str/includes? output "1 binding issue(s)")))))
 
+(deftest test-print-diagnostics-undefined-hints
+  (testing "Undefined steps render grammar hint and interface suggestion (sl-s04n / sl-563)"
+    (let [diagnostics {:undefined
+                       [{:step {:step/text "alice fills code with \"x\""}
+                         :hint {:type :grammar/double-quotes
+                                :suggestion "ShiftLefter literals use single quotes; double quotes are reserved."
+                                :repaired-text "alice fills code with 'x'"}
+                         :filter-info {:declared-interface :sms
+                                       :suggestion "No [:sms] stepdef matches, but [:web] does."}}]
+                       :ambiguous []
+                       :invalid-arity []
+                       :counts {:undefined-count 1 :ambiguous-count 0 :invalid-arity-count 0 :total-issues 1}}
+          output (with-err-str (console/print-diagnostics! diagnostics {:no-color true}))]
+      (is (str/includes? output "hint: ShiftLefter literals use single quotes"))
+      (is (str/includes? output "hint: No [:sms] stepdef matches, but [:web] does.")))))
+
 (deftest test-print-diagnostics-ambiguous
   (testing "Shows ambiguous steps with alternatives"
     (let [diagnostics {:undefined []

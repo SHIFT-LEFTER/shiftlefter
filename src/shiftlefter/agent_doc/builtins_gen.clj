@@ -64,44 +64,73 @@
     (str "`" arg "`")))
 
 (defn- frame-line
-  "Render one verb frame as a Markdown bullet: surface pattern, the arg slots
-   it introduces (with their value kinds, sl-yh7), any implicit object, and
+  "Render one verb frame as a Markdown bullet. The frame's surface pattern
+   is SCHEMA, not a step — rendered as plain text with an explicit marker so
+   an agent can never mistake it for quotable step text (sl-bqo; the only
+   code-formatted step-shaped strings in a verb entry are the bind-with
+   examples appended by verb-block). Also renders the arg slots the frame
+   introduces (with their value kinds, sl-yh7), any implicit object, and
    the O-slot kind when the frame declares one (sl-3jr4 — agents navigate by
    this doc, so a :location slot says whether it takes an intent ref, a
    literal URL, a {binding} token, or several)."
   [frame-kw {:keys [args pattern implicit-object object-kind location-refs?
                     arg-kinds]}]
-  (str "- frame `" frame-kw "`: `" pattern "`"
+  (str "- frame `" frame-kw "` — schema (not a step): " pattern
        (when (seq args)
          (str " — args " (str/join ", " (map #(arg-cell % arg-kinds) args))))
        (when implicit-object
          (str " — implicit object `" implicit-object "`"))
        (when object-kind
-         (str " — O: " (if (= object-kind :location)
-                         (if location-refs?
-                           "intent ref (bare PascalCase name), literal URL, or `{binding}`"
-                           "literal URL")
+         (str " — O: " (case object-kind
+                         :location (if location-refs?
+                                     "intent ref (bare PascalCase name), literal URL, or `{binding}`"
+                                     "literal URL")
+                         :text "text (quoted literal or `{binding}`)"
+                         :key "key name (closed W3C KeyboardEvent.key set) or quoted single character"
                          (str "`" object-kind "`"))))))
 
+(defn- bind-with-lines
+  "Render the bindable pairing for one frame: one nested bullet per built-in
+   stepdef implementing it, quoting its `:doc/example` — the only quotable
+   step text in a verb entry, guaranteed to bind by the builtins-gen test
+   (full-string re-matches, the binder's own semantics). A frame with no
+   built-in stepdef says so explicitly rather than being silently bare."
+  [stepdefs-for-frame]
+  (if (seq stepdefs-for-frame)
+    (map (fn [{:keys [metadata]}]
+           (str "  - bind with: `" (:doc/example metadata) "`"))
+         (sort-by :pattern-src stepdefs-for-frame))
+    ["  - no built-in step pattern — needs a project stepdef"]))
+
 (defn- verb-block
-  "Render one verb: its description heading and a bullet per frame."
-  [verb-kw {:keys [desc frames]}]
+  "Render one verb: its description heading, then per frame a schema bullet
+   paired with the bind-with example(s) of the stepdef(s) implementing it
+   (joined via stepdef :svo metadata, sl-bqo)."
+  [verb-kw {:keys [desc frames]} steps-by-verb-frame]
   (str/join
    "\n"
    (concat
     [(str "#### `" verb-kw "` — " desc)
      ""]
-    (map (fn [[frame-kw frame]] (frame-line frame-kw frame))
-         (sorted-by-name frames)))))
+    (mapcat (fn [[frame-kw frame]]
+              (cons (frame-line frame-kw frame)
+                    (bind-with-lines (get steps-by-verb-frame
+                                          [verb-kw frame-kw]))))
+            (sorted-by-name frames)))))
 
 (defn- adapter-line
-  "Render one adapter as a Markdown bullet listing the protocols it provides."
-  [adapter-kw provides]
+  "Render one adapter as a Markdown bullet listing the protocols it provides,
+   plus a not-bundled pointer when the registry entry declares an extra
+   dependency (`:requires-dep`, sl-gcdu) — so an agent reading only the
+   packaged doc learns the dep before configuring a dead-end adapter."
+  [adapter-kw {:keys [provides requires-dep]}]
   (str "- `" adapter-kw "`"
        (if (seq provides)
          (str " — provides " (str/join ", " (map #(str "`" % "`")
                                                   (sort-by str provides))))
-         " — provides nothing declared")))
+         " — provides nothing declared")
+       (when requires-dep
+         (str " (not bundled — add " requires-dep " to your deps.edn)"))))
 
 (defn- step-line
   "Render one built-in step pattern: its regex source, the verb/frame it maps
@@ -122,32 +151,42 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- interface-section
-  "Render the full section for one interface: its adapters, verbs, and the
-   concrete built-in step patterns, all sorted for stable output."
+  "Render the full section for one interface: its adapters, verbs (each
+   frame paired with its bind-with example), and the step grammar, all
+   sorted for stable output."
   [interface verbs adapters-for-iface stepdefs-for-iface]
-  (str/join
-   "\n"
-   (concat
-    [(str "## Interface `" interface "`")
-     ""
-     "### Adapters"
-     ""]
-    (if (seq adapters-for-iface)
-      (map (fn [[adapter-kw entry]] (adapter-line adapter-kw (:provides entry)))
-           (sorted-by-name adapters-for-iface))
-      ["_No built-in adapters._"])
-    [""
-     "### Verbs"
-     ""]
-    (interpose ""
-               (map (fn [[verb-kw entry]] (verb-block verb-kw entry))
-                    (sorted-by-name verbs)))
-    [""
-     "### Built-in step patterns"
-     ""]
-    (if (seq stepdefs-for-iface)
-      (map step-line (sort-by :pattern-src stepdefs-for-iface))
-      ["_No built-in step patterns._"]))))
+  (let [steps-by-verb-frame (group-by (fn [{:keys [metadata]}]
+                                        [(get-in metadata [:svo :verb])
+                                         (get-in metadata [:svo :frame])])
+                                      stepdefs-for-iface)]
+    (str/join
+     "\n"
+     (concat
+      [(str "## Interface `" interface "`")
+       ""
+       "### Adapters"
+       ""]
+      (if (seq adapters-for-iface)
+        (map (fn [[adapter-kw entry]] (adapter-line adapter-kw entry))
+             (sorted-by-name adapters-for-iface))
+        ["_No built-in adapters._"])
+      [""
+       "### Verbs"
+       ""]
+      (interpose ""
+                 (map (fn [[verb-kw entry]]
+                        (verb-block verb-kw entry steps-by-verb-frame))
+                      (sorted-by-name verbs)))
+      [""
+       "### Step grammar (regex source — not pasteable step text)"
+       ""
+       "Reference grammar for each built-in step. To author a step, copy a"
+       "`bind with:` example from the verb entries above — never this regex"
+       "source."
+       ""]
+      (if (seq stepdefs-for-iface)
+        (map step-line (sort-by :pattern-src stepdefs-for-iface))
+        ["_No built-in step patterns._"])))))
 
 ;; -----------------------------------------------------------------------------
 ;; Top-level render
@@ -170,8 +209,13 @@
     ""
     "Sections are grouped by interface for targeted subreads. Within each"
     "interface: the adapters that back it, the verbs and their frames (each"
-    "frame is one accepted argument shape), then the concrete built-in step"
-    "patterns and the verb/frame they map to."]))
+    "frame is one accepted argument shape), then the step grammar (regex"
+    "source) and the verb/frame each pattern maps to."
+    ""
+    "FRAMES ARE SCHEMA, NOT STEPS. A frame like `S navigates to O` names an"
+    "argument shape — writing it in a feature file will NOT bind. The only"
+    "step text this reference quotes is the `bind with:` example under each"
+    "frame; every one of those is machine-verified to bind. Copy those."]))
 
 (defn render
   "Render the built-in vocabulary Markdown from already-captured source data.

@@ -10,6 +10,7 @@ that entry point: it is the documented way in. Start with:
 
 - `sl agent-doc` — authoring rules and the operating model (`sl agent-doc --list` lists every topic).
 - `sl agent-doc builtins` — the built-in vocabulary (verbs, frames, step patterns, adapters) that lives in the jar and cannot be grepped from this repo.
+- `sl agent-doc examples` — complete worked file shapes (config, glossaries, intents, features, setup.clj) copied verbatim from real projects.
 - `sl orient` — resolved project context and static validation: what exists and "what would fail", with no side effects.
 
 For a planning or disposable research sub-agent that needs the whole project shape

@@ -87,7 +87,10 @@
 ;; changelog side: marker scan
 ;; ---------------------------------------------------------------------------
 
-(def ^:private bead-id-re #"sl-[a-z0-9]+")
+;; Hyphenated segments included, no trailing-hyphen match (sl-tzub): ids like
+;; sl-builtins-frame-pattern-bqo must extract WHOLE — the first hyphen-less
+;; version extracted the leading segment only and false-flagged long ids.
+(def ^:private bead-id-re #"sl-[a-z0-9]+(?:-[a-z0-9]+)*")
 
 (defn- covered-ids
   "IDs granted changelog coverage: every sl- id inside an
@@ -174,6 +177,18 @@
   (testing "comma-separated no-entry lines cover every listed id"
     (is (= #{"sl-f1" "sl-f2"}
            (covered-ids "<!-- no-entry: sl-f1, sl-f2 (release-process beads) -->"))))
+
+  (testing "hyphenated ids extract WHOLE (sl-tzub — the literal id that went
+            red on a clean close: the old regex stopped at the first hyphen
+            segment, extracted 'sl-builtins', and reported the full id missing)"
+    (is (= #{"sl-builtins-frame-pattern-bqo"}
+           (covered-ids "<!-- entry: sl-builtins-frame-pattern-bqo -->")))
+    (is (= #{"sl-long-hyphen-id"}
+           (covered-ids "<!-- no-entry: sl-long-hyphen-id (test infra) -->")))
+    (is (= #{"sl-f2"}
+           (covered-ids
+            "<!-- no-entry: sl-f2 (folded into the sl-esq-hooks-era entry) -->"))
+        "a hyphenated prose id inside the reason still grants nothing"))
 
   (testing "open beads and beads without the release label are not guarded"
     (is (not (contains? (:missing (guard-report fixture-issues "")) "sl-f3")))

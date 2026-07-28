@@ -14,8 +14,8 @@
     :runner {:step-paths [\"steps/\"]
              :allow-pending? false
              :macros {:enabled? false}}
-    :glossaries {:subjects \"config/glossaries/subjects.edn\"
-                 :verbs {:web \"config/glossaries/verbs-web.edn\"}}
+    :glossaries {:subjects \"glossary/subjects.edn\"
+                 :verbs {:web \"glossary/verbs/web.edn\"}}
     :interfaces {:web {:type :web
                        :adapter :etaoin
                        :config {:headless true}}}
@@ -106,7 +106,8 @@
 ;; Glossaries sub-config
 (s/def ::subjects (s/nilable string?))
 (s/def ::verbs (s/nilable (s/map-of keyword? string?)))
-(s/def ::glossaries (s/nilable (s/keys :opt-un [::subjects ::verbs])))
+(s/def ::intents (s/nilable string?))
+(s/def ::glossaries (s/nilable (s/keys :opt-un [::subjects ::verbs ::intents])))
 
 ;; Top-level config
 (s/def ::config
@@ -361,13 +362,14 @@
 ;; -----------------------------------------------------------------------------
 
 (def known-top-level-keys
-  "Top-level keys config consumers actually read: the `::config` spec set
-   plus the :webdriver/:webdriver-url pair `normalize` handles. Anything
-   else at the top level is silently ignored by every reader — exactly the
-   defect family sl-hlkz warns about (example 03 carried a top-level
-   :step-paths for its whole life and only worked by coinciding with the
-   default)."
-  #{:parser :runner :glossaries :interfaces :svo :webdriver :webdriver-url})
+  "Top-level keys config consumers actually read: the `::config` spec set.
+   Anything else at the top level is silently ignored by every reader —
+   exactly the defect family sl-hlkz warns about (example 03 carried a
+   top-level :step-paths for its whole life and only worked by coinciding
+   with the default). :webdriver/:webdriver-url are deliberately NOT here
+   (sl-7kct): `normalize` validates them on the projection path but nothing
+   consumes the result, so to `sl run` they are ignored keys like any other."
+  #{:parser :runner :glossaries :interfaces :svo})
 
 (def ^:private misplaced-key-paths
   ;; Known NESTED keys users plausibly write at the top level, mapped to the
@@ -491,80 +493,32 @@
               (validate-single-interface name def))
             interfaces))))
 
-(defn- normalize-webdriver-config
-  "Normalize webdriver configuration.
-
-   Accepts:
-   - {:webdriver-url \"http://host:port\"} — used as-is
-   - {:webdriver {:host \"...\" :port N}} — normalized to :webdriver-url
-
-   Returns [config' error] where error is nil if valid."
-  [config]
-  (let [webdriver-url (:webdriver-url config)
-        webdriver (:webdriver config)]
-    (cond
-      ;; Direct URL provided — use as-is
-      webdriver-url
-      [config nil]
-
-      ;; No webdriver config — valid (lazy validation)
-      (nil? webdriver)
-      [config nil]
-
-      ;; Map with host+port — normalize to URL
-      (and (map? webdriver)
-           (:host webdriver)
-           (:port webdriver))
-      (let [url (str "http://" (:host webdriver) ":" (:port webdriver))]
-        [(assoc config :webdriver-url url) nil])
-
-      ;; Map provided but incomplete
-      (map? webdriver)
-      [config {:type :webdriver/invalid-config
-               :message "webdriver config requires both :host and :port, or use :webdriver-url directly"
-               :data {:webdriver webdriver}}]
-
-      ;; Invalid type
-      :else
-      [config {:type :webdriver/invalid-config
-               :message "webdriver config must be a map with :host/:port"
-               :data {:webdriver webdriver
-                      :type (type webdriver)}}])))
-
 (defn normalize
   "Normalize and validate configuration.
 
    Takes a raw config map (already merged with defaults) and validates it.
 
    Returns:
-   - On success: the config map (possibly with :webdriver-url derived)
+   - On success: the config map unchanged
    - On failure: the config map with :errors vector added
 
    Validation rules:
    - If [:runner :macros :enabled?] is true, [:runner :macros :registry-paths]
      must be a non-empty vector, else error :macro/config-missing-registry-paths
-   - If :webdriver is provided, must have :host and :port (or use :webdriver-url)
    - Each interface must have :type and :adapter
    - Interface :type must be known (:web, :api, :sms, :email)
-   - Empty config is valid (no webdriver errors if not provided)"
+   - Empty config is valid
+
+   Top-level :webdriver/:webdriver-url are NOT validated or normalized here —
+   `sl run` ignores them and lint-config warns on them (sl-7kct); the
+   vestigial normalization was removed in sl-w9wp."
   [config]
-  (let [[config' webdriver-error] (normalize-webdriver-config config)
-        interface-errors (validate-interfaces-config config')
-        errors (concat (keep identity [(validate-macro-config config')
-                                       webdriver-error])
+  (let [interface-errors (validate-interfaces-config config)
+        errors (concat (keep identity [(validate-macro-config config)])
                        interface-errors)]
     (if (seq errors)
-      (assoc config' :errors (vec errors))
-      config')))
-
-;; -----------------------------------------------------------------------------
-;; WebDriver Config Accessors
-;; -----------------------------------------------------------------------------
-
-(defn get-webdriver-url
-  "Get the normalized webdriver URL from config, or nil if not configured."
-  [config]
-  (:webdriver-url config))
+      (assoc config :errors (vec errors))
+      config)))
 
 ;; -----------------------------------------------------------------------------
 ;; Glossary Config Accessors
@@ -578,8 +532,8 @@
    - :verbs — map of interface-type -> path (or nil)
 
    Example return:
-   {:subjects \"config/glossaries/subjects.edn\"
-    :verbs {:web \"config/glossaries/verbs-web.edn\"}}"
+   {:subjects \"glossary/subjects.edn\"
+    :verbs {:web \"glossary/verbs/web.edn\"}}"
   [config]
   (:glossaries config))
 

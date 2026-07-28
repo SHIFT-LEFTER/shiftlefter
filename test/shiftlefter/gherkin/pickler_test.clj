@@ -444,3 +444,50 @@ Feature: Test
             step-with-placeholder (second steps)]
         (is (= "I enter \"admin@test\" and \"secret123\"" (:step/text step-with-placeholder)))
         (is (= "I enter \"<username>\" and \"<password>\"" (:step/template-text step-with-placeholder)))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-v85e: description prose rides pickles as optional keys
+;; -----------------------------------------------------------------------------
+
+(defn- pickles-of
+  "Parse+pickle, asserting the fixture itself is valid Gherkin — a fixture
+   that fails to parse must fail loudly here, not surface as nil pickles.
+   NOTE: description prose must not start a line with a step keyword
+   (Given/When/Then/And/But) — the lexer takes those as steps, per Gherkin."
+  [feature-str]
+  (let [{:keys [ast errors]} (parser/parse (lexer/lex feature-str))]
+    (is (empty? errors) (pr-str errors))
+    (:pickles (pickler/pickles ast {} "test.feature"))))
+
+(deftest test-pickle-descriptions
+  (testing "feature + scenario prose stamped; multi-line preserved"
+    (let [[p] (pickles-of (str "Feature: F\n"
+                               "  Feature prose line one.\n"
+                               "  Second prose line.\n\n"
+                               "  Scenario: S\n"
+                               "    Scenario prose here.\n"
+                               "    Given a step\n"))]
+      (is (= "  Feature prose line one.\n  Second prose line."
+             (:pickle/feature-description p)))
+      (is (= "    Scenario prose here." (:pickle/description p)))))
+
+  (testing "absent prose stamps nil, never the empty string"
+    (let [[p] (pickles-of "Feature: F\n\n  Scenario: S\n    Given a step\n")]
+      (is (nil? (:pickle/description p)))
+      (is (nil? (:pickle/feature-description p)))
+      (is (contains? p :pickle/description) "key present, 40to nil-stamping")))
+
+  (testing "outline rows carry the template's prose VERBATIM — <placeholders>
+            are never substituted in descriptions"
+    (let [ps (pickles-of (str "Feature: F\n\n"
+                              "  Scenario Outline: O <x>\n"
+                              "    Prose mentioning <x> stays verbatim.\n"
+                              "    Given a step\n\n"
+                              "    Examples:\n"
+                              "      | x |\n"
+                              "      | 1 |\n"
+                              "      | 2 |\n"))]
+      (is (= 2 (count ps)))
+      (is (every? #(= "    Prose mentioning <x> stays verbatim."
+                      (:pickle/description %))
+                  ps)))))

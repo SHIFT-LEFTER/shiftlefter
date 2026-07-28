@@ -132,4 +132,4 @@ no Clojure toolchain is required (the jar loads `.clj` files directly):
 ```
 
 The bundled libraries available to step definitions (JSON, HTTP, filesystem, …) are
-listed in [CAPABILITIES.md](CAPABILITIES.md#tier-b-write-custom-steps-java-only).
+listed in [INSTALL-TIERS.md](INSTALL-TIERS.md#tier-b-write-custom-steps-java-only).

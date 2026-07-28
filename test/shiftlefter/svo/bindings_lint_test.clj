@@ -81,6 +81,60 @@
            (map (juxt :type :severity) issues)))
     (is (not (lint/blocking? issues)))))
 
+;; --- Frame-aware matcher roles (sl-gwru) ---
+
+(defn- mk-step-svo
+  "mk-step with :svo metadata so matcher-role can classify the frame."
+  [text captures kinds svo]
+  (assoc-in (mk-step text captures kinds) [:binding :metadata :svo] svo))
+
+(deftest capture-all-unnamed-escalates-to-error
+  (testing "captures with only unnamed groups binds nothing — plan ERROR
+            with the pointer at should see ... matching (sl-gwru)"
+    (let [issues (lint/check-plans
+                  [(mk-plan [(mk-step-svo "cap" ["El" "Order (\\d+)"] [nil :matcher]
+                                          {:verb :capture :frame :default})])])]
+      (is (= [[:bindings/unnamed-only-groups :error]]
+             (map (juxt :type :severity) issues)))
+      (is (re-find #"should see .* matching" (:message (first issues))))
+      (is (lint/blocking? issues)))))
+
+(deftest assert-only-all-unnamed-is-silent
+  (testing "should see ... matching with all-unnamed groups is the
+            expected shape — no issue"
+    (is (empty? (lint/check-plans
+                 [(mk-plan [(mk-step-svo "see" ["El" "Order (\\d+)"] [nil :matcher]
+                                         {:verb :see :frame :matching})])])))))
+
+(deftest assert-only-named-groups-error-with-pointer
+  (testing "a named group in the assert-only frame is a producer marker
+            the frame cannot honor — plan ERROR pointing at captures"
+    (let [issues (lint/check-plans
+                  [(mk-plan [(mk-step-svo "see" ["El" "(?<code>\\d+)"] [nil :matcher]
+                                          {:verb :see :frame :matching})])])]
+      (is (= [[:bindings/named-groups-in-assert-only [:code] :error]]
+             (map (juxt :type :names :severity) issues)))
+      (is (re-find #"captures" (:message (first issues))))
+      (is (lint/blocking? issues)))))
+
+(deftest assert-only-names-never-enter-produced-set
+  (testing "defense-in-depth: even alongside the error, an assert-only
+            frame's names never satisfy a downstream consumer"
+    (let [issues (lint/check-plans
+                  [(mk-plan [(mk-step-svo "see" ["El" "(?<code>\\d+)"] [nil :matcher]
+                                          {:verb :see :frame :matching})
+                             (mk-step "fill" ["Login.code" "{code}"] [nil :value])])])]
+      (is (some #(= :bindings/consumed-without-producer (:type %)) issues)))))
+
+(deftest sms-receive-unnamed-keeps-notice
+  (testing "the shared matcher slot outside captures keeps the :warn
+            notice — binding-free assertion is legitimate there"
+    (let [issues (lint/check-plans
+                  [(mk-plan [(mk-step-svo "recv" ["'p'" "code (\\d+)"] [:value :matcher]
+                                          {:verb :receive :frame :default})])])]
+      (is (= [[:bindings/unnamed-only-groups :warn]]
+             (map (juxt :type :severity) issues))))))
+
 (deftest produced-never-consumed-notice
   (let [issues (lint/check-plans
                 [(mk-plan [(mk-step "r" ["'p'" "(?<code>\\d+)"] [:value :matcher])])])]

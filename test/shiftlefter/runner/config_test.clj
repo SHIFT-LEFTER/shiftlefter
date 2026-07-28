@@ -19,6 +19,12 @@
       (is (= false (get-in cfg [:runner :allow-pending?])))
       (is (= false (get-in cfg [:runner :macros :enabled?]))))))
 
+(deftest glossaries-spec-admits-intents
+  ;; sl-7kct: runner/core reads [:glossaries :intents] and the lint suggests
+  ;; that path, but the spec omitted it.
+  (is (s/valid? ::config/glossaries {:subjects "g/s.edn" :intents "g/intents/"}))
+  (is (s/valid? ::config/config {:glossaries {:intents "g/intents/"}})))
+
 ;; -----------------------------------------------------------------------------
 ;; Config Lint Tests (sl-hlkz)
 ;; -----------------------------------------------------------------------------
@@ -58,11 +64,20 @@
                 :runner {:step-paths ["steps/"]}
                 :glossaries {:subjects "g/s.edn"}
                 :interfaces {:web {:type :web :adapter :etaoin}}
-                :svo {:unknown-verb :warn}
-                :webdriver-url "http://localhost:9515"
-                :webdriver {:host "localhost" :port 9515}}))))
+                :svo {:unknown-verb :warn}}))))
   (testing "empty config is clean"
     (is (= [] (config/lint-config {})))))
+
+(deftest lint-config-warns-on-top-level-webdriver-keys
+  ;; sl-7kct: formerly exempted because `normalize` handles them — but the
+  ;; normalized result has no consumer, so to `sl run` they are ignored keys
+  ;; like any other. No suggested path: nothing reads a canonical location.
+  (doseq [k [:webdriver :webdriver-url]]
+    (let [[w :as warnings] (config/lint-config {k "http://localhost:9515"})]
+      (is (= 1 (count warnings)) (str k))
+      (is (= :config/unknown-key (:type w)) (str k))
+      (is (= k (:key w)))
+      (is (nil? (:suggested-path w))))))
 
 (deftest lint-config-is-deterministic-and-never-blocks
   (testing "multiple offenders come back sorted by key"
@@ -329,79 +344,17 @@
           st (config/normalize cfg)]
       (is (= :macro/config-missing-registry-paths (-> st :errors first :type))))))
 
-;; -----------------------------------------------------------------------------
-;; WebDriver Config Normalization Tests (Task 2.5.5)
-;; -----------------------------------------------------------------------------
-
 (deftest test-normalize-empty-config-valid
   (testing "Empty config is valid (no browser errors)"
     (let [st (config/normalize {})]
       (is (nil? (:errors st))))))
 
-(deftest test-normalize-webdriver-url-direct
-  (testing "Direct :webdriver-url is used as-is"
-    (let [cfg {:webdriver-url "http://127.0.0.1:9515"}
-          st (config/normalize cfg)]
-      (is (nil? (:errors st)))
-      (is (= "http://127.0.0.1:9515" (:webdriver-url st))))))
-
-(deftest test-normalize-webdriver-host-port
-  (testing ":webdriver {:host :port} normalizes to :webdriver-url"
-    (let [cfg {:webdriver {:host "127.0.0.1" :port 9515}}
-          st (config/normalize cfg)]
-      (is (nil? (:errors st)))
-      (is (= "http://127.0.0.1:9515" (:webdriver-url st))))))
-
-(deftest test-normalize-webdriver-missing-port
-  (testing ":webdriver with missing :port produces error"
-    (let [cfg {:webdriver {:host "127.0.0.1"}}
-          st (config/normalize cfg)]
-      (is (seq (:errors st)))
-      (is (= :webdriver/invalid-config (-> st :errors first :type))))))
-
-(deftest test-normalize-webdriver-missing-host
-  (testing ":webdriver with missing :host produces error"
-    (let [cfg {:webdriver {:port 9515}}
-          st (config/normalize cfg)]
-      (is (seq (:errors st)))
-      (is (= :webdriver/invalid-config (-> st :errors first :type))))))
-
-(deftest test-normalize-webdriver-empty-map
-  (testing ":webdriver as empty map produces error"
-    (let [cfg {:webdriver {}}
-          st (config/normalize cfg)]
-      (is (seq (:errors st)))
-      (is (= :webdriver/invalid-config (-> st :errors first :type))))))
-
-(deftest test-normalize-webdriver-invalid-type
-  (testing ":webdriver as non-map produces error"
-    (let [cfg {:webdriver "not-a-map"}
-          st (config/normalize cfg)]
-      (is (seq (:errors st)))
-      (is (= :webdriver/invalid-config (-> st :errors first :type))))))
-
-(deftest test-get-webdriver-url
-  (testing "get-webdriver-url extracts normalized URL"
-    (let [cfg (config/normalize {:webdriver {:host "localhost" :port 4444}})]
-      (is (= "http://localhost:4444" (config/get-webdriver-url cfg))))
-    (is (nil? (config/get-webdriver-url {})))))
-
-;; -----------------------------------------------------------------------------
-;; Task 2.5.5 Acceptance Criteria
-;; -----------------------------------------------------------------------------
-
-(deftest test-acceptance-criteria-webdriver
-  (testing "Task 2.5.5 AC: empty config is valid"
-    (let [st (config/normalize {})]
-      (is (nil? (:errors st)))))
-
-  (testing "Task 2.5.5 AC: valid :webdriver normalizes to :webdriver-url"
-    (let [st (config/normalize {:webdriver {:host "127.0.0.1" :port 9515}})]
-      (is (= "http://127.0.0.1:9515" (:webdriver-url st)))))
-
-  (testing "Task 2.5.5 AC: invalid :webdriver produces error"
+(deftest test-normalize-passes-webdriver-keys-through
+  (testing ":webdriver/:webdriver-url are inert pass-through — no validation,
+            no derived key (sl-w9wp; lint-config owns the warning, sl-7kct)"
     (let [st (config/normalize {:webdriver {:host "127.0.0.1"}})]
-      (is (= :webdriver/invalid-config (-> st :errors first :type))))))
+      (is (nil? (:errors st)))
+      (is (nil? (:webdriver-url st))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Task 3.0.3: Config Schema Extension Tests
@@ -605,8 +558,8 @@
 
 (deftest test-acceptance-criteria-valid-config
   (testing "Task 3.0.3 AC: valid config passes"
-    (let [cfg {:glossaries {:subjects "config/glossaries/subjects.edn"
-                            :verbs {:web "config/glossaries/verbs-web.edn"}}
+    (let [cfg {:glossaries {:subjects "glossary/subjects.edn"
+                            :verbs {:web "glossary/verbs/web.edn"}}
                :interfaces {:web {:type :web
                                   :adapter :etaoin
                                   :config {:headless true}}}

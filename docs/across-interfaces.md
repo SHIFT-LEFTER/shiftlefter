@@ -31,8 +31,10 @@ The handoff is two tokens of Gherkin — no custom step definitions:
    scenario-scoped map of named bindings. Two built-in producers: the SMS
    receive step (above) and the web capture step (`captures
    Checkout.confirmation matching /.../`, below). Every named group that
-   participates in the match binds; unnamed groups bind nothing (the dry
-   run notices a pattern that captures groups but names none). Capture is
+   participates in the match binds; unnamed groups bind nothing (a web
+   `captures` pattern with *only* unnamed groups is a plan error pointing
+   at the assert-only `should see … matching`; SMS receive keeps a
+   non-blocking notice there). Capture is
    assert-plus-bind: if the pattern doesn't match within the step's
    window, the step fails — it fails as though the actor could not see
    that text.

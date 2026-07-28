@@ -1,5 +1,6 @@
 (ns shiftlefter.stepengine.bind-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [shiftlefter.intent.state :as intent-state]
             [shiftlefter.stepengine.bind :as bind]
             [shiftlefter.stepengine.registry :as registry]))
 
@@ -10,7 +11,11 @@
 (defn clean-registry-fixture [f]
   (registry/clear-registry!)
   (f)
-  (registry/clear-registry!))
+  (registry/clear-registry!)
+  ;; bind-suite reads the global intent-state for grammar hints (sl-s04n);
+  ;; at repo root that caches an empty intents map — clear it so no state
+  ;; leaks into later namespaces.
+  (intent-state/clear-intents!))
 
 (use-fixtures :each clean-registry-fixture)
 
@@ -928,3 +933,59 @@
         (is (= :sms (:declared-interface info)))
         (is (not (contains? info :other-interface-match-count)))
         (is (not (contains? info :other-interfaces)))))))
+
+;; -----------------------------------------------------------------------------
+;; Grammar hints on undefined steps (sl-s04n)
+;; -----------------------------------------------------------------------------
+
+(deftest test-undefined-step-gets-grammar-hint
+  (testing "Double-quoted value on an otherwise-matching step → hint with repair"
+    (registry/register! #"alice fills code with '([^']+)'"
+                        (fn [_v] nil)
+                        {:ns 't :file "t.clj" :line 1})
+    (let [step (make-step "alice fills code with \"x\"")
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :undefined (:status result)))
+      (is (= :grammar/double-quotes (-> result :hint :type)))
+      (is (= "alice fills code with 'x'" (-> result :hint :repaired-text))))))
+
+(deftest test-undefined-step-without-cue-has-no-hint
+  (testing "Cue-free undefined step carries no :hint key"
+    (registry/register! #"unrelated pattern"
+                        (fn [] nil)
+                        {:ns 't :file "t.clj" :line 1})
+    (let [step (make-step "alice does something else")
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :undefined (:status result)))
+      (is (not (contains? result :hint))))))
+
+(deftest test-hint-coexists-with-filter-info
+  (testing "Annotated undefined step can carry both :filter-info and :hint"
+    ;; Legacy-style double-quote pattern under :web — the annotated :sms text
+    ;; matches nothing, but :web would match it, producing filter-info; the
+    ;; double-quote cue independently produces a grammar hint.
+    (registry/register! #"alice pings \"([^\"]+)\""
+                        (fn [_v] nil)
+                        {:ns 't :file "t.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject "alice" :verb :ping :object :$1}})
+    (let [step (make-annotated-step "[:sms] alice pings \"x\"" :sms)
+          result (bind/bind-step step (registry/all-stepdefs))]
+      (is (= :undefined (:status result)))
+      (is (= "No [:sms] stepdef matches, but [:web] does."
+             (-> result :filter-info :suggestion)))
+      (is (= :grammar/double-quotes (-> result :hint :type)))
+      ;; No :sms candidate admits the repaired text, so no repair is claimed
+      (is (not (contains? (:hint result) :repaired-text))))))
+
+(deftest test-hint-rides-into-suite-diagnostics
+  (testing "bind-suite carries the hint into :diagnostics :undefined"
+    (registry/register! #"alice fills code with '([^']+)'"
+                        (fn [_v] nil)
+                        {:ns 't :file "t.clj" :line 1})
+    (let [pickle (make-pickle "p" ["alice fills code with \"x\""] "f.feature")
+          {:keys [runnable? diagnostics]} (bind/bind-suite [pickle]
+                                                           (registry/all-stepdefs))]
+      (is (false? runnable?))
+      (is (= :grammar/double-quotes
+             (-> diagnostics :undefined first :hint :type))))))

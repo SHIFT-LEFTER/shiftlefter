@@ -15,6 +15,8 @@
     :summary "Operating model and command map for fresh agents."}
    {:topic "authoring"
     :summary "Subjects, instances, Shifted syntax, and step authoring rules."}
+   {:topic "grammar"
+    :summary "The authored grammar: every marker, slot kinds, reserved forms, key names."}
    {:topic "vocabulary"
     :summary "Glossaries, interfaces, verbs, intents, and partial vocabulary."}
    {:topic "locators"
@@ -25,6 +27,8 @@
     :summary "Scenario lifecycle hooks: hooks.clj registry, @hook= tags, ordering, failure semantics."}
    {:topic "sieve"
     :summary "Vocabulary bootstrap and proposal reconciliation workflow."}
+   {:topic "examples"
+    :summary "Generated worked examples: config, glossaries, intents, features, setup.clj."}
    {:topic "builtins"
     :summary "Generated reference: built-in verbs, frames, step patterns, adapters."}])
 

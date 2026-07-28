@@ -108,3 +108,42 @@
 (deftest match-fns-never-throw-on-garbage
   (is (= :unparseable (:reason (um/region-match "http://[bad" "http://h/p"))))
   (is (= :unparseable (:reason (um/exact-match "http://h/p" "http://[worse")))))
+
+;; -----------------------------------------------------------------------------
+;; Literal resolution (sl-34ec): RFC 3986 relative resolution against :base-url
+;; -----------------------------------------------------------------------------
+
+(deftest resolve-literal-schemeless-forms
+  (testing "root-relative path"
+    (is (= "http://h:9092/login" (:ok (um/resolve-literal "/login" "http://h:9092")))))
+  (testing "bare word — RFC empty-path merge gives …/Login"
+    (is (= "http://h:9092/Login" (:ok (um/resolve-literal "Login" "http://h:9092"))))
+    (is (= "http://h:9092/Login" (:ok (um/resolve-literal "Login" "http://h:9092/")))))
+  (testing "base with a path: RFC merge semantics, not string concat"
+    (is (= "http://h/app/Login" (:ok (um/resolve-literal "Login" "http://h/app/"))))
+    (is (= "http://h/Login" (:ok (um/resolve-literal "Login" "http://h/app"))))
+    (is (= "http://h/login" (:ok (um/resolve-literal "/login" "http://h/app/")))))
+  (testing "query and fragment survive resolution"
+    (is (= "http://h/login?a=1#top" (:ok (um/resolve-literal "/login?a=1#top" "http://h")))))
+  (testing "'example.com' is a relative PATH under RFC 3986 — documented consequence"
+    (is (= "http://h/example.com" (:ok (um/resolve-literal "example.com" "http://h"))))))
+
+(deftest resolve-literal-absolute-passthrough
+  (testing "scheme-ful literals pass through byte-identical, base irrelevant"
+    (is (= "https://x.com/p?b=2" (:ok (um/resolve-literal "https://x.com/p?b=2" "http://h"))))
+    (is (= "https://x.com/p" (:ok (um/resolve-literal "https://x.com/p" nil))))
+    (is (= "about:blank" (:ok (um/resolve-literal "about:blank" "http://h"))))))
+
+(deftest resolve-literal-missing-base-url
+  (doseq [base [nil "" "  "]]
+    (let [{:keys [error]} (um/resolve-literal "/login" base)]
+      (is (= :intent/missing-base-url (:type error)))
+      (testing "message states both exits (Chair requirement, sl-34ec)"
+        (is (.contains ^String (:message error) "add :base-url"))
+        (is (.contains ^String (:message error) "absolute URL"))))))
+
+(deftest resolve-literal-unparseable-inputs
+  (testing "unparseable literal keeps the parse-url error shape"
+    (is (= :url/unparseable (-> (um/resolve-literal "http://[bad" "http://h") :error :type))))
+  (testing "unparseable base-url is its own error — config truth, not literal's fault"
+    (is (= :intent/invalid-base-url (-> (um/resolve-literal "/p" "http://[bad") :error :type)))))

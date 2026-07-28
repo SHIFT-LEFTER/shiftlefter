@@ -16,7 +16,7 @@ the resolved per-scenario firing list.
 ```gherkin
 @hook=reset-db
 Scenario: Purchase with a fresh account
-  Given alice opens the shop
+  Given alice opens the browser to 'https://shop.example.com'
 ```
 
 Tag inheritance follows Gherkin: a feature-level `@hook=` applies to every
@@ -59,12 +59,13 @@ defines `hooks` — an ordered vector, or a `(fn [config])` returning one:
 - `:requires-serial` — scenarios this hook applies to run exclusively under
   parallel execution; reports show the derived `@serial` annotation with the
   hook named as the reason.
-- `:provides` — optional vector of binding names (bare lowerCamel keywords,
-  e.g. `[:sessionToken]`) this hook's `:before` seeds into the scenario data
-  plane. A static declaration: it satisfies dry-run's
-  consumed-without-producer check for `{name}` tokens. Conforming
-  bare-lowerCamel contribution keys mirror into `:sl/bindings` at execution
-  whether declared or not.
+- `:provides` — optional vector of binding names this hook's `:before` seeds
+  into the scenario data plane. A binding name is a bare keyword, a letter
+  followed by letters/digits (lowerCamel by convention, e.g.
+  `[:sessionToken]`). A static declaration: it satisfies dry-run's
+  consumed-without-producer check for `{name}` tokens. Contribution keys
+  fitting that shape mirror into `:sl/bindings` at execution whether
+  declared or not.
 
 ## Execution order
 
@@ -96,6 +97,11 @@ capability cleanup.**
   steps, and unwinds only the frames whose Befores succeeded. A `:after`
   throw makes the scenario `:error` even when all steps passed — broken
   cleanup is a lying suite. One failing After does not stop the unwind.
+- A `:before` returning anything other than a map or nil is a hook error
+  (`:hook/invalid-return`) with the same shape: scenario `:error`, steps
+  skipped. Note the entry gets NO unwind frame even though its body fully
+  ran — its own `:after` will not run, so side effects the body made before
+  the bad return are not unwound by it.
 - Every hook that runs is stamped in the scenario envelope and rendered in
   JUnit system-out and the HTML transcript:
   `{:name .. :phase .. :status .. :duration-ms .. :contributed [..]}`.

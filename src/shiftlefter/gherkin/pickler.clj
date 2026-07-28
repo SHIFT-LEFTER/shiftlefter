@@ -97,6 +97,10 @@
 ;; Final pickle shape (output of scenario-plan->pickles)
 (s/def :pickle/id uuid?)
 (s/def :pickle/name string?)
+;; Gherkin description prose (sl-v85e): nil when the source had none —
+;; not-empty at stamp time, so "" never rides.
+(s/def :pickle/description (s/nilable string?))
+(s/def :pickle/feature-description (s/nilable string?))
 ;; Feature name (sl-40to): local extension for reporter grouping (JUnit
 ;; testsuite@name / testcase@classname). Nilable — an anonymous feature has none.
 (s/def :pickle/feature-name (s/nilable string?))
@@ -114,7 +118,8 @@
   (s/keys :req [:pickle/id :pickle/name :pickle/source-file
                 :pickle/location :pickle/tags :pickle/steps]
           :opt [:pickle/feature-name :pickle/template-name :pickle/row-index
-                :pickle/row-values :pickle/scenario-location :pickle/row-location]))
+                :pickle/row-values :pickle/scenario-location :pickle/row-location
+                :pickle/description :pickle/feature-description]))
 
 (s/def ::pickles (s/coll-of ::pickle))
 
@@ -201,6 +206,10 @@
                                   scenario-steps))
                      [])]
      {:name (:name scenario)
+      ;; Gherkin description prose (sl-v85e). The parser preserves it
+      ;; (newline-joined, blank-trimmed, "" when absent); the pickle stamps
+      ;; nil-or-string via not-empty at construction.
+      :description (:description scenario)
       :location (:location scenario)
       :tags (or (:tags scenario) [])
       :rule-tags (or rule-tags [])
@@ -252,6 +261,7 @@
         ;; Combine both (feature-level first, then rule scenarios)
         all-scenario-plans (vec (concat feature-scenario-plans rule-scenario-plans))]
     {:name (:name feature)
+     :description (:description feature)  ;; sl-v85e: feature prose for reports
      :tags (or (:tags feature) [])
      :scenarios all-scenario-plans}))
 
@@ -309,10 +319,13 @@
    - :pickle/template-name — scenario name before substitution
    - :pickle/row-index — 0-based index within the Examples block
    - :pickle/row-values — header→value map for the row"
-  [scenario-plan feature-tags source-file feature-name]
+  [scenario-plan feature-tags source-file feature-name feature-description]
   (let [rule-tags (:rule-tags scenario-plan)
         scenario-tags (:tags scenario-plan)
-        template-name (:name scenario-plan)]  ;; Store before substitution
+        template-name (:name scenario-plan)   ;; Store before substitution
+        ;; sl-v85e: description prose is stamped VERBATIM on every row's
+        ;; pickle — Cucumber never substitutes <placeholders> in descriptions.
+        description (not-empty (:description scenario-plan))]
     (mapcat (fn [example]
               (let [header (:table-header example)
                     ;; Use full TableRow records if available (for compliance), fall back to cell values
@@ -329,6 +342,8 @@
                                        row-location (:location table-row)]
                                    {:pickle/id (java.util.UUID/randomUUID)
                                     :pickle/name (replace-placeholders template-name row-map)
+                                    :pickle/description description              ;; sl-v85e
+                                    :pickle/feature-description (not-empty feature-description) ;; sl-v85e
                                     :pickle/feature-name feature-name   ;; sl-40to: reporter grouping
                                     :pickle/template-name template-name  ;; Outline provenance
                                     :pickle/row-index row-idx            ;; 0-based
@@ -346,6 +361,8 @@
                                  (let [row-map (zipmap header row-values)]
                                    {:pickle/id (java.util.UUID/randomUUID)
                                     :pickle/name (replace-placeholders template-name row-map)
+                                    :pickle/description description              ;; sl-v85e
+                                    :pickle/feature-description (not-empty feature-description) ;; sl-v85e
                                     :pickle/feature-name feature-name   ;; sl-40to: reporter grouping
                                     :pickle/template-name template-name  ;; Outline provenance
                                     :pickle/row-index row-idx            ;; 0-based
@@ -364,11 +381,12 @@
   "Convert a scenario-plan to pickle(s). Outlines expand to multiple pickles.
    Scenario Outlines without Examples are treated as regular scenarios.
    Tag order: feature → rule → scenario (with deduplication)."
-  [scenario-plan feature-tags source-file feature-name]
+  [scenario-plan feature-tags source-file feature-name feature-description]
   (if (and (= (:type scenario-plan) :scenario-outline)
            (seq (:examples scenario-plan)))
     ;; Outline with examples: expand to multiple pickles
-    (expand-outline-examples scenario-plan feature-tags source-file feature-name)
+    (expand-outline-examples scenario-plan feature-tags source-file feature-name
+                             feature-description)
     ;; Regular scenario OR outline without examples: single pickle
     ;; Outline provenance fields are nil for non-outline scenarios
     (let [rule-tags (:rule-tags scenario-plan)
@@ -376,6 +394,8 @@
           all-tags (dedupe-tags (vec (concat feature-tags rule-tags scenario-tags)))]
       [{:pickle/id (java.util.UUID/randomUUID)
         :pickle/name (:name scenario-plan)
+        :pickle/description (not-empty (:description scenario-plan))  ;; sl-v85e
+        :pickle/feature-description (not-empty feature-description)   ;; sl-v85e
         :pickle/feature-name feature-name   ;; sl-40to: reporter grouping
         :pickle/template-name nil      ;; Not an outline
         :pickle/row-index nil          ;; Not an outline
@@ -399,7 +419,8 @@
   (let [source-file (:source-file pickle-plan)]
     {:pickles (mapcat (fn [feature-plan]
                         (mapcat #(scenario-plan->pickles % (:tags feature-plan)
-                                                         source-file (:name feature-plan))
+                                                         source-file (:name feature-plan)
+                                                         (:description feature-plan))
                                 (:scenarios feature-plan)))
                       (:features pickle-plan))
      :errors []}))

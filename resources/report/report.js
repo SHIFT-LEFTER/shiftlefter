@@ -482,6 +482,14 @@ function renderScenario(scenario, allowPending) {
   summary.appendChild(el("span", "duration", fmtMs(k(scenario, ":duration-ms"))));
   details.appendChild(summary);
 
+  // Scenario description prose (sl-v85e): first block of the expanded body,
+  // above any error detail and the transcript. Absent key renders nothing —
+  // pre-v85e islands and hand-built envelopes are unchanged.
+  const scenarioDesc = k(pickle, ":pickle/description");
+  if (scenarioDesc) {
+    details.appendChild(el("p", "scenario-description", scenarioDesc));
+  }
+
   // Scenario-level hook failure (sl-esq): the :error lives on the scenario,
   // not on any step — render its attributed detail block above the steps.
   const scenarioError = k(scenario, ":error");
@@ -542,6 +550,16 @@ function renderFeatures(runCtx, scenarios) {
     const heading = el("h2", "feature-name", "Feature: " + group.name);
     section.appendChild(heading);
     section.appendChild(el("span", "feature-path", relativePath(projectRoot, file)));
+    // Feature description prose (sl-v85e) — from the group's first pickle;
+    // textContent via el() keeps arbitrary feature-file prose inert.
+    const featureDesc = kIn(group.scenarios[0], [
+      ":plan",
+      ":plan/pickle",
+      ":pickle/feature-description",
+    ]);
+    if (featureDesc) {
+      section.appendChild(el("p", "feature-description", featureDesc));
+    }
     let hasRed = false;
     for (const scenario of group.scenarios) {
       if (isRed(scenario, allowPending)) hasRed = true;

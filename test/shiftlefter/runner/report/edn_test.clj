@@ -102,7 +102,12 @@
                                                :counts {:svo-issue-count 1}
                                                :config-lints [step-paths-lint]})]
       (is (= [step-paths-lint] (:config-lints d)))
-      (is (= [{:severity :warn}] (:svo-issues d))))))
+      (is (= [{:severity :warn}] (:svo-issues d)))))
+  (testing "cleanup failures ride :cleanup-failures (sl-lbrc); empty = absent"
+    (let [failure {:scenario "s" :capability :web :adapter :leaky :error "leaked"}]
+      (is (= {:cleanup-failures [failure]}
+             (report-edn/execution-diagnostics {:cleanup-failures [failure]})))
+      (is (nil? (report-edn/execution-diagnostics {:cleanup-failures []}))))))
 
 (deftest test-config-lints-in-summaries
   (testing "exit 0: :diagnostics :config-lints rides the summary and round-trips"
@@ -128,6 +133,19 @@
                    (str sw))]
       (is (not (empty? stdout)) "Should output to stdout")
       (is (empty? stderr) "Should not output to stderr"))))
+
+(deftest test-prn-summary-immune-to-ambient-printer-bindings
+  (testing "the --edn artifact reads back even under clojure.main's ambient
+            bindings (sl-3ub4: pnm=true turns shared digit-leading-namespace
+            map keys into unreadable #:0a{...}; print-length would truncate)"
+    (let [summary {:run/id "r" :run/exit-code 1 :run/status :failed
+                   :failures [{:error {:data {(keyword "0a" "A") nil}}}]}
+          stdout (binding [*print-namespace-maps* true
+                           *print-length* 2
+                           *print-level* 2]
+                   (with-out-str (report-edn/prn-summary summary)))]
+      (is (= summary (edn/read-string stdout))
+          "round-trips byte-for-byte regardless of ambient printer state"))))
 
 (deftest test-prn-summary-is-valid-edn
   (testing "prn-summary output is valid EDN"
@@ -206,6 +224,25 @@
       ;; Invalid arity includes arity info
       (let [bad-arity (first (filter #(= :invalid-arity (:type %)) issues))]
         (is (= 5 (-> bad-arity :arity :actual)))))))
+
+(deftest test-planning-diagnostics-hint-passthrough
+  (testing "Undefined issues carry the machine-readable :hint and :filter-info maps (sl-s04n)"
+    (let [hint {:type :grammar/quoted-ref
+                :suggestion "Quoted values are always literals, but Login.code resolves as a glossary ref. Did you mean Login.code (unquoted)?"
+                :repaired-text "alice clicks Login.code"
+                :did-you-mean "Login.code"}
+          diagnostics {:undefined [{:step {:step/id #uuid "00000000-0000-0000-0000-000000000004"
+                                           :step/text "alice clicks 'Login.code'"}
+                                    :hint hint
+                                    :filter-info {:declared-interface :sms}}]
+                       :ambiguous []
+                       :invalid-arity []
+                       :counts {:undefined-count 1 :ambiguous-count 0
+                                :invalid-arity-count 0 :total-issues 1}}
+          summary (report-edn/build-summary "run" 2 nil {:diagnostics diagnostics})
+          issue (-> summary :planning :issues first)]
+      (is (= hint (:hint issue)))
+      (is (= {:declared-interface :sms} (:filter-info issue))))))
 
 (deftest test-planning-diagnostics-full-location
   (testing "Planning diagnostics include full location (uri, line, column)"
@@ -305,6 +342,30 @@
              (-> summary :planning :errors first :message)))
       ;; EDN-safe: round-trips through pr-str/read-string
       (is (= summary (read-string (pr-str summary)))))))
+
+(deftest test-nested-sub-errors-survive-serialization
+  (testing "aggregate errors (intents/parse/step-load, sl-0n6t) keep nested
+            :errors — recursively projected, records and extra keys dropped"
+    (let [diagnostics {:errors [{:type :parse/failed
+                                 :message "2 parse error(s) in feature file(s)"
+                                 :errors [{:type :unexpected-token
+                                           :message "Unexpected token: :step-line"
+                                           :path "features/bad.feature"
+                                           :token {:not "edn-safe records in prod"}
+                                           :location {:line 3}}
+                                          {:type :unexpected-eof
+                                           :message "Unexpected EOF"
+                                           :path "features/worse.feature"}]}]}
+          summary (report-edn/build-summary "run" 2 nil {:diagnostics diagnostics})
+          err (-> summary :planning :errors first)]
+      (is (= :parse/failed (:type err)))
+      (is (= 2 (count (:errors err))) "sub-errors survive")
+      (is (= "features/bad.feature" (-> err :errors first :path))
+          ":path is kept for file attribution")
+      (is (nil? (-> err :errors first :token))
+          "non-projected keys (record carriers) are dropped")
+      (is (nil? (-> err :errors first :location)))
+      (is (= summary (read-string (pr-str summary))) "round-trips"))))
 
 (deftest test-annotation-and-macro-errors-in-exit-2
   (testing "Exit 2 includes annotation and macro errors"

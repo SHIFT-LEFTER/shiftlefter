@@ -8,7 +8,8 @@ interfaces, **zero custom code**.
 > **Mode: Shifted** — the config carries `:svo`, a subject glossary, and a
 > `Login` intent, so the scenario validates against the project vocabulary
 > at planning time (`sl orient` will say `Mode: Shifted`). This is also the
-> first example with `setup.clj` orchestration — see
+> first example where you write `setup.clj` orchestration of your own —
+> 02/02b ship a ready-made one — see
 > [the examples index](../README.md) for where it sits on the path.
 
 ## The Punchline
@@ -98,9 +99,9 @@ Two non-obvious bits worth highlighting:
 
 ## Running It
 
-Needs a local ChromeDriver matching your Chrome — on PATH
-(`brew install chromedriver` on macOS) or via `~/.shiftlefter/config.edn`
-(`:chromedriver-path`).
+Needs a local ChromeDriver matching your Chrome — resolved via
+`~/.shiftlefter/config.edn` (`:chromedriver-path`), no PATH setup needed
+(PATH is the fallback).
 
 ```bash
 cd examples/04-sms-2fa

@@ -1,5 +1,7 @@
 (ns shiftlefter.stepdefs.browser-test
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing use-fixtures]]
+            [shiftlefter.intent.resolve :as intent-resolve]
             [shiftlefter.stepengine.bind :as bind]
             [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.stepengine.registry :as registry]
@@ -7,6 +9,7 @@
             [shiftlefter.browser.protocol :as bp]
             [shiftlefter.browser.intent :as browser-intent]
             [shiftlefter.intent.state :as intent-state]
+            [etaoin.keys]
             [shiftlefter.stepdefs.browser]))
 
 ;; -----------------------------------------------------------------------------
@@ -146,6 +149,11 @@
 (use-fixtures :each
   (fn [f]
     (registry/clear-registry!)
+    ;; Tests here that exercise intent-aware locators without with-redefs hit
+    ;; the real global intent-state cache; clear it so a foreign glossary left
+    ;; by an earlier-ordered namespace can't change behavior (sl-tkrx
+    ;; suspect (a); same victim-side defense as bind_test's s04n fix).
+    (intent-state/clear-intents!)
     ;; Load browser stepdefs
     (require 'shiftlefter.stepdefs.browser :reload)
     (f)))
@@ -235,13 +243,15 @@
         (is (= [{:op :open-to :url "http://localhost:9092/feed"}]
                (get-calls browser)))))
 
-    (testing "QUOTED is always a literal — even a quoted intent name (AC 2)"
+    (testing "QUOTED is always a literal — a quoted intent name is a relative
+              PATH, RFC-resolved against :base-url (sl-34ec; no ref resolution)"
       (let [browser (make-fake-browser)
             ctx (-> (make-ctx-with-subject :user browser)
                     (ctx-with-base-url "http://localhost:9092"))]
         (invoke-step ":user opens the browser to 'Feed'" ctx)
-        (is (= [{:op :open-to :url "Feed"}] (get-calls browser))
-            "quotes stripped, no resolution attempted")))
+        (is (= [{:op :open-to :url "http://localhost:9092/Feed"}]
+               (get-calls browser))
+            "literal, not a ref — but resolved to a full URL, not verbatim")))
 
     (testing "Quoted literal URLs pass through with quotes stripped"
       (let [browser (make-fake-browser)
@@ -282,6 +292,42 @@
         (is (= :intent/missing-base-url (:type (ex-data e))))
         (is (re-find #"base-url" (ex-message e))
             "Error message names the config key")))))
+
+(deftest test-open-to-literal-resolution
+  (testing "sl-34ec: schemeless literal path resolves against :base-url"
+    (let [browser (make-fake-browser)
+          ctx (-> (make-ctx-with-subject :user browser)
+                  (ctx-with-base-url "http://localhost:9092"))]
+      (invoke-step ":user opens the browser to '/login'" ctx)
+      (is (= [{:op :open-to :url "http://localhost:9092/login"}]
+             (get-calls browser)))))
+
+  (testing "query and fragment survive resolution"
+    (let [browser (make-fake-browser)
+          ctx (-> (make-ctx-with-subject :user browser)
+                  (ctx-with-base-url "http://localhost:9092"))]
+      (invoke-step ":user opens the browser to '/login?next=%2Fsecure#top'" ctx)
+      (is (= [{:op :open-to :url "http://localhost:9092/login?next=%2Fsecure#top"}]
+             (get-calls browser)))))
+
+  (testing "schemeless literal without :base-url is the teaching error, not a
+            raw WebDriver crash — same condition, same error type as bare refs"
+    (let [browser (make-fake-browser)
+          ctx (make-ctx-with-subject :user browser)
+          e (try (invoke-step ":user opens the browser to '/login'" ctx)
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (some? e))
+      (is (= :intent/missing-base-url (:type (ex-data e))))
+      (is (re-find #"add :base-url" (ex-message e)) "first exit named")
+      (is (re-find #"absolute URL" (ex-message e)) "second exit named")
+      (is (empty? (get-calls browser)) "no navigation attempted")))
+
+  (testing "absolute literal without :base-url still works (passthrough)"
+    (let [browser (make-fake-browser)
+          ctx (make-ctx-with-subject :user browser)]
+      (invoke-step ":user opens the browser to 'https://x.com/p'" ctx)
+      (is (= [{:op :open-to :url "https://x.com/p"}] (get-calls browser))))))
 
 (deftest test-should-be-on-named-location
   (testing "sl-q81m/sl-iseq: 'should be on' resolves a BARE named-location ref
@@ -468,45 +514,45 @@
         (is (= {:id "dropdown"} (-> call :locator :q)))
         (is (= "Option A" (:text call)))))))
 
-(deftest test-presses-single-key
-  (testing ":alice presses enter sends key"
+;; :press is :object-kind :key (sl-2sj6): unquoted W3C KeyboardEvent.key
+;; names, quoted single chars. The old lowercase dialect and + chords no
+;; longer match the pattern (chords parked as sl-eecq).
+
+(deftest test-presses-w3c-key
+  (testing ":alice presses Enter sends the W3C-named key"
     (let [browser (make-fake-browser)
           ctx (make-ctx-with-subject :alice browser)
-          result (invoke-step ":alice presses enter" ctx)]
+          result (invoke-step ":alice presses Enter" ctx)]
       (is (map? result))
       (let [call (first (get-calls browser))]
         (is (= :press-key (:op call)))
-        (is (string? (:key-str call)))))))
+        (is (= (str etaoin.keys/enter) (:key-str call)))))))
 
-(deftest test-presses-chord
-  (testing ":alice presses shift+control+t sends chord"
+(deftest test-presses-quoted-single-char
+  (testing ":alice presses 'g' sends the character g"
     (let [browser (make-fake-browser)
           ctx (make-ctx-with-subject :alice browser)
-          result (invoke-step ":alice presses shift+control+t" ctx)]
+          result (invoke-step ":alice presses 'g'" ctx)]
       (is (map? result))
       (let [call (first (get-calls browser))]
         (is (= :press-key (:op call)))
-        (is (string? (:key-str call)))
-        ;; Chord string should be longer than a single character
-        (is (> (count (:key-str call)) 1))))))
+        (is (= "g" (:key-str call)))))))
 
-(deftest test-presses-single-char
-  (testing ":alice presses a sends character 'a'"
-    (let [browser (make-fake-browser)
-          ctx (make-ctx-with-subject :alice browser)
-          result (invoke-step ":alice presses a" ctx)]
-      (is (map? result))
-      (let [call (first (get-calls browser))]
-        (is (= :press-key (:op call)))
-        (is (= "a" (:key-str call)))))))
-
-(deftest test-presses-unknown-key-throws
-  (testing ":alice presses unknownkey throws"
+(deftest test-presses-quoted-multi-char-throws
+  (testing ":alice presses 'abc' throws toward fills (runtime backstop)"
     (let [browser (make-fake-browser)
           ctx (make-ctx-with-subject :alice browser)]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                            #"Unknown key name"
-                            (invoke-step ":alice presses unknownkey" ctx))))))
+                            #"single key, not text"
+                            (invoke-step ":alice presses 'abc'" ctx))))))
+
+(deftest test-presses-old-dialect-no-match
+  (testing "old lowercase names, bare chars, and chords no longer match"
+    (doseq [text [":alice presses enter"
+                  ":alice presses a"
+                  ":alice presses shift+control+t"]]
+      (is (nil? (find-stepdef text))
+          (str "expected no stepdef match for: " text)))))
 
 ;; =============================================================================
 ;; Alert Action Tests (0.3.6)
@@ -854,13 +900,76 @@
                               #"Expected exactly query"
                               (invoke-step ":alice should be on exactly 'http://h:9092/p?a=1&a=2'" ctx))))))
 
-  (testing "a non-full-URL expectation fails loudly, pointing at the region frame"
+  (testing "a non-full-URL expectation without :base-url fails loudly, teaching
+            both exits and pointing at the region frame (sl-34ec message)"
     (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 100]
       (let [browser (make-fake-browser {:url "http://h:9092/p"})
-            ctx (make-ctx-with-subject :alice browser)]
+            ctx (make-ctx-with-subject :alice browser)
+            e (try (invoke-step ":alice should be on exactly '/p'" ctx)
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (= :not-a-full-url (:reason (ex-data e))))
+        (is (re-find #"requires a full URL" (ex-message e)))
+        (is (re-find #"add :base-url" (ex-message e)) "first exit named")
+        (is (re-find #"absolute URL" (ex-message e)) "second exit named")))))
+
+(deftest test-should-be-on-exactly-literal-resolution
+  (testing "sl-34ec: relative exact expectation resolves against :base-url —
+            expressible without hardcoding a host"
+    (let [browser (make-fake-browser {:url "http://h:9092/login?a=1"})
+          ctx (-> (make-ctx-with-subject :alice browser)
+                  (ctx-with-base-url "http://h:9092"))]
+      (is (map? (invoke-step ":alice should be on exactly '/login?a=1'" ctx)))))
+
+  (testing "resolved relative expectation still compares structurally (mismatch throws)"
+    (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 100]
+      (let [browser (make-fake-browser {:url "http://h:9092/login?a=2"})
+            ctx (-> (make-ctx-with-subject :alice browser)
+                    (ctx-with-base-url "http://h:9092"))]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                              #"requires a full URL"
-                              (invoke-step ":alice should be on exactly '/p'" ctx)))))))
+                              #"Expected exactly query"
+                              (invoke-step ":alice should be on exactly '/login?a=1'" ctx))))))
+
+  (testing "a bare-word literal resolves too — 'Login' compares as …/Login, no
+            teaching error when :base-url is configured (wiki row 18b amended)"
+    (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 100]
+      (let [browser (make-fake-browser {:url "http://h:9092/Login"})
+            ctx (-> (make-ctx-with-subject :alice browser)
+                    (ctx-with-base-url "http://h:9092"))]
+        (is (map? (invoke-step ":alice should be on exactly 'Login'" ctx))))))
+
+  (testing "absolute expectation ignores :base-url (passthrough)"
+    (let [browser (make-fake-browser {:url "https://x.com/p"})
+          ctx (-> (make-ctx-with-subject :alice browser)
+                  (ctx-with-base-url "http://h:9092"))]
+      (is (map? (invoke-step ":alice should be on exactly 'https://x.com/p'" ctx))))))
+
+(deftest test-location-token-resolution
+  (testing "sl-34ec AC 2: a captured RELATIVE path in a location slot gets the
+            same resolution treatment as a hand-typed literal"
+    (let [browser (make-fake-browser)
+          ctx (-> (make-ctx-with-subject :alice browser)
+                  (ctx-with-base-url "http://h:9092")
+                  (bindings/merge-bindings {:nextPath "/reset?token=abc"}))]
+      (invoke-step ":alice opens the browser to {nextPath}" ctx)
+      (is (= [{:op :open-to :url "http://h:9092/reset?token=abc"}]
+             (get-calls browser)))))
+
+  (testing "a captured ABSOLUTE URL passes through untouched — magic-link
+            regression (sl-34ec AC 2)"
+    (let [browser (make-fake-browser)
+          ctx (-> (make-ctx-with-subject :alice browser)
+                  (ctx-with-base-url "http://h:9092")
+                  (bindings/merge-bindings {:resetLink "https://app.test/reset?token=abc123"}))]
+      (invoke-step ":alice opens the browser to {resetLink}" ctx)
+      (is (= [{:op :open-to :url "https://app.test/reset?token=abc123"}]
+             (get-calls browser)))))
+
+  (testing "captured relative path in the exactly slot resolves as well"
+    (let [browser (make-fake-browser {:url "http://h:9092/reset?token=abc"})
+          ctx (-> (make-ctx-with-subject :alice browser)
+                  (ctx-with-base-url "http://h:9092")
+                  (bindings/merge-bindings {:nextPath "/reset?token=abc"}))]
+      (is (map? (invoke-step ":alice should be on exactly {nextPath}" ctx))))))
 
 ;; sl-ka80: the at-exactly object slot joins the data plane properly — the
 ;; capture keeps its quotes so exec normalization sees what the user wrote.
@@ -1057,7 +1166,7 @@
                             ;; Form actions
                             ":alice clears {:id \"email\"}"
                             ":alice selects 'Option A' from {:id \"dropdown\"}"
-                            ":alice presses enter"
+                            ":alice presses Enter"
                             ;; Alert actions
                             ":alice accepts the alert"
                             ":alice dismisses the alert"
@@ -1334,3 +1443,92 @@
       (is (= [nil nil :matcher]
              (bind/default-slot-kinds (:metadata stepdef) 3))
           "subject and locator are plain captures; the pattern is a :matcher slot — its named groups are statically enumerable"))))
+
+;; --- :see :matching — assert-only regex observation (sl-gwru) ---
+
+(deftest test-should-see-matching-asserts-without-binding
+  (testing ":alice should see {locator} matching /.../ asserts and binds NOTHING"
+    (let [browser (make-fake-browser {:page-text "Order XK-42 confirmed"})
+          ctx (make-ctx-with-subject :alice browser)
+          result (invoke-step
+                  ":alice should see {:id \"order\"} matching /Order [A-Z]+-\\d+/"
+                  ctx)]
+      (is (map? result))
+      (is (empty? (get result bindings/bindings-key))
+          "assert-only: the data plane is untouched")
+      (is (= :get-text (:op (first (get-calls browser))))))))
+
+(deftest test-should-see-matching-failure-is-structured
+  (testing "no match within the retry budget = structured assertion failure
+            with pattern, actual text, locator"
+    (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 250]
+      (let [browser (make-fake-browser {:page-text "nothing relevant"})
+            ctx (make-ctx-with-subject :alice browser)
+            e (try (invoke-step
+                    ":alice should see {:id \"order\"} matching /Order \\d+/"
+                    ctx)
+                   (catch clojure.lang.ExceptionInfo e e))
+            data (ex-data e)]
+        (is (= :browser/assertion-failed (:type data)))
+        (is (= "Order \\d+" (:pattern data)))
+        (is (= "nothing relevant" (:actual data)))
+        (is (= "{:id \"order\"}" (:locator data)))
+        (is (> (count (get-calls browser)) 1)
+            "the miss polls (wait-then-assert) before surfacing")))))
+
+(deftest test-should-see-matching-retries-until-text-appears
+  (testing "same poll semantics as capture — late-arriving text passes"
+    (let [browser (make-fake-browser
+                   {:page-texts ["Loading…" "Your code is 123456"]})
+          ctx (make-ctx-with-subject :alice browser)
+          result (invoke-step
+                  ":alice should see {:id \"msg\"} matching /code is \\d{6}/"
+                  ctx)]
+      (is (map? result)))))
+
+(deftest test-should-see-matching-embedded-token-interpolates
+  (testing "embedded {binding} tokens interpolate regex-quoted, same shared
+            matcher plumbing as capture; the plane is read, not written"
+    (let [browser (make-fake-browser {:page-text "Order XK-42 shipped"})
+          ctx (-> (make-ctx-with-subject :alice browser)
+                  (bindings/merge-bindings {:orderNumber "XK-42"}))
+          result (invoke-step
+                  ":alice should see {:id \"order\"} matching /Order {orderNumber} shipped/"
+                  ctx)]
+      (is (= {:orderNumber "XK-42"} (get result bindings/bindings-key))
+          "pre-existing bindings pass through; nothing new binds"))))
+
+(deftest test-should-see-matching-match-slot-is-stamped-matcher
+  (testing "the default web glossary declares the :matching frame's :match slot :matcher"
+    (let [stepdef (find-stepdef ":alice should see {:id \"x\"} matching /\\d+/")]
+      (is (= :matching (-> stepdef :metadata :svo :frame)))
+      (is (= [nil nil :matcher]
+             (bind/default-slot-kinds (:metadata stepdef) 3))))))
+
+;; -----------------------------------------------------------------------------
+;; Drift guard: location-re bare-ref branch <-> location-ref-pattern (sl-8bxt)
+;; -----------------------------------------------------------------------------
+;;
+;; The bare PascalCase location-ref alternation lives in TWO places that
+;; cannot share code (the step pattern needs a regex-fragment splice, the
+;; classifier needs a whole-string Pattern):
+;;
+;;   - shiftlefter.stepdefs.browser/location-re — LAST branch of the
+;;     step-admission :location-slot alternation
+;;   - shiftlefter.intent.resolve/location-ref-pattern — the shared
+;;     planning/runtime classifier behind location-ref?
+;;
+;; Rule: change both together; extract a shared def if a third consumer
+;; appears (same doctrine as the gen-roadmap/changelog-guard twin note).
+;; If they drift, steps bind text the classifier calls literal — or stop
+;; binding refs it accepts — silent planning/runtime divergence
+;; (Warden sl-hx8j finding).
+
+(deftest test-location-re-bare-branch-pins-location-ref-pattern
+  (testing "step-admission bare-ref branch is textually identical to the classifier pattern"
+    (let [location-re @#'shiftlefter.stepdefs.browser/location-re
+          bare-branch (subs location-re (inc (str/last-index-of location-re "|")))
+          classifier-source (.pattern ^java.util.regex.Pattern
+                                      @#'intent-resolve/location-ref-pattern)]
+      (is (= classifier-source bare-branch)
+          "location-re's bare-ref branch drifted from intent.resolve/location-ref-pattern — change both together (sl-8bxt)"))))

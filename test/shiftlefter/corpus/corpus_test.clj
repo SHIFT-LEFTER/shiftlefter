@@ -47,14 +47,14 @@
 (deftest default-profile-end-to-end
   ;; Explicit-nil knobs: the AC8 seam. :tag-filter is live (sl-i608, nil =
   ;; unfiltered); :max-parallel stays inert until sl-q9wp wires it.
-  (let [{:keys [manifest junit-file edn-summary result]}
+  (let [{:keys [manifest junit-file html-file edn-summary result]}
         (harness/run-corpus! {:seed seed :profile :default
-                              :tag-filter nil :max-parallel nil})
+                              :tag-filter nil :max-parallel nil :html? true})
         entries (:scenarios manifest)
         statuses (set (map :expected-status entries))]
     (testing "corpus shape: tag matrix, statuses, Background (AC2)"
       (is (<= 30 (count entries)) "~40 scenarios")
-      (is (= #{:passed :failed :error :pending} statuses))
+      (is (= #{:passed :failed :error :pending :hook-error} statuses))
       (is (some #(seq (:tags %)) entries) "tagged scenarios exist")
       (is (some #(empty? (:tags %)) entries) "untagged scenarios exist")
       (is (some #(= ["@corpus-outline" "@corpus-row"] (:tags %)) entries)
@@ -68,6 +68,17 @@
           "both-levels inheritance")
       (is (some #(= ["@corpus-rule"] (:tags %)) entries)
           "Rule-level inheritance (sl-i608 addendum 2a)"))
+    (testing "hooked scenarios exist and carry the designed outcomes (sl-9009)"
+      (is (some #(and (= ["@hook=corpus-audit"] (:tags %))
+                      (= :passed (:expected-status %)))
+                entries)
+          "a passing scenario with one named hook")
+      (is (some #(and (= ["@hook=corpus-audit" "@hook=corpus-cleanup-fails"]
+                         (:tags %))
+                      (= :hook-error (:expected-status %))
+                      (nil? (:expected-fail-step %)))
+                entries)
+          "a two-hook scenario whose After throws — scenario-level :error"))
     (testing "run executed and failed as designed (fail/error scenarios exist)"
       (is (= 1 (:exit-code result)))
       (is (fs/exists? junit-file)))
@@ -76,7 +87,16 @@
     (testing "--edn aggregate counts + failure identities (AC3)"
       (ok? (verifier/verify-edn manifest edn-summary)))
     (testing "serial-hazard machinery: non-interleaving + control (AC5)"
-      (ok? (verifier/verify-serial-hazard manifest)))))
+      (ok? (verifier/verify-serial-hazard manifest)))
+    (testing "HTML report island carries the hook lines (sl-9009 — the site
+              sample's actual surface)"
+      (let [html (slurp html-file)]
+        (is (str/includes? html "corpus-audit") "hook records present")
+        (is (str/includes? html "corpus-cleanup-fails"))
+        (is (str/includes? html "hook/after-failed")
+            "scenario-level hook error with its hook-typed :type")
+        (is (str/includes? html "corpusSeeded")
+            ":contributed data-plane marker")))))
 
 ;; -----------------------------------------------------------------------------
 ;; AC6 -- @broken quarantine: excluded by default, exit 2 when included

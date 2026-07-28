@@ -128,6 +128,17 @@ Unknown subject :user/alcie in step "When :user/alcie clicks the button"
 
 ## Concepts
 
+### The step text is a grammar
+
+Every marker in step text carries meaning: `'quoted'` is always a literal,
+an unquoted `Capitalized.name` is always a glossary reference that must
+resolve, `{name}` is a value carried from an earlier step, `/…/` is a
+pattern. The complete reference — every marker, every slot kind, the
+reserved forms, the key-name list, and why `should be on` takes names while
+`should be on exactly` takes only URL values — is the **grammar** doc: run
+`sl agent-doc grammar`, or read it inline in
+[AGENT.md](AGENT.md#the-authored-grammar).
+
 ### The three roles, three homes
 
 | Role | Lives in | Vocabulary |

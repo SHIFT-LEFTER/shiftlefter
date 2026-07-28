@@ -89,6 +89,11 @@
     :error (when-not (and (= :error outcome)
                           (= "clojure.lang.ExceptionInfo" outcome-type))
              {:expected :error :actual outcome :type outcome-type})
+    ;; a lifecycle hook threw (sl-esq/sl-9009): scenario-level :error with a
+    ;; hook-typed type attribute -- the fifth outcome shape
+    :hook-error (when-not (and (= :error outcome)
+                               (= "hook/after-failed" outcome-type))
+                  {:expected :hook-error :actual outcome :type outcome-type})
     :pending (when-not (and (= :skipped outcome)
                             (= (str "pending: " pending-step) outcome-message))
                {:expected :pending :actual outcome :message outcome-message})))
@@ -163,18 +168,27 @@
   [manifest summary]
   (let [entries (:scenarios manifest)
         by-status (frequencies (map :expected-status entries))
-        expected-counts {:passed (get by-status :passed 0)
-                         ;; scenario status is :failed for both corpus
-                         ;; fail (invalid return) and error (throw)
-                         :failed (+ (get by-status :failed 0)
-                                    (get by-status :error 0))
-                         :pending (get by-status :pending 0)
-                         :skipped 0
-                         :scenarios (count entries)}
+        hook-errors (get by-status :hook-error 0)
+        expected-counts (cond-> {:passed (get by-status :passed 0)
+                                 ;; scenario status is :failed for both corpus
+                                 ;; fail (invalid return) and error (throw)
+                                 :failed (+ (get by-status :failed 0)
+                                            (get by-status :error 0))
+                                 :pending (get by-status :pending 0)
+                                 :skipped 0
+                                 :scenarios (count entries)}
+                          ;; :error (hook threw, sl-esq) is only-when-positive
+                          ;; in the EDN counts; mirror that absence here so a
+                          ;; hook-less filtered subset still compares equal
+                          (pos? hook-errors) (assoc :error hook-errors))
         actual-counts (select-keys (:counts summary)
-                                   [:passed :failed :pending :skipped :scenarios])
+                                   [:passed :failed :pending :skipped
+                                    :error :scenarios])
+        ;; hook-error scenarios contribute a SCENARIO-level failure entry
+        ;; with no :step/text (extract-scenario-error) -- identity [name nil]
         expected-failures (set (map (juxt :name :expected-fail-step)
-                                    (filter #(#{:failed :error} (:expected-status %))
+                                    (filter #(#{:failed :error :hook-error}
+                                              (:expected-status %))
                                             entries)))
         actual-failures (set (map (juxt :scenario/name :step/text)
                                   (:failures summary)))

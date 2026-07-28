@@ -29,7 +29,9 @@
    - `:subject scrolls to the top|bottom`
    - `:subject clears {<locator>}`
    - `:subject selects '<text>' from {<locator>}`
-   - `:subject presses <key>` (supports chords: `shift+control+t`)
+   - `:subject presses <Key>` (W3C KeyboardEvent.key name, e.g. `Enter`,
+     `ArrowUp`; or a quoted single character: `presses 'g'`. Chords were
+     removed at sl-2sj6 — parked as sl-eecq)
    - `:subject accepts the alert`
    - `:subject dismisses the alert`
    - `:subject maximizes the window`
@@ -53,6 +55,8 @@
    - `:subject should see {<locator>} disabled`
    - `:subject should see an alert`
    - `:subject should see an alert with '<text>'`
+   - `:subject should see {<locator>} matching /<regex>/` (assert-only:
+     binds nothing; named groups are a plan error pointing at captures)
 
    ## Capture Steps (sl-zgna)
 
@@ -127,7 +131,7 @@
             [shiftlefter.intent.resolve :as intent-resolve]
             [clojure.edn :as edn]
             [clojure.string :as str]
-            [etaoin.keys :as k]))
+            [shiftlefter.svo.keys :as svo-keys]))
 
 ;; -----------------------------------------------------------------------------
 ;; Locator Pattern
@@ -156,7 +160,12 @@
   "Regex pattern string for :location-slot captures (sl-iseq/sl-3jr4/sl-yh7):
    quoted literal URL | {binding} token | bare PascalCase named-location ref.
    Tokens resolve at exec (quote-wrapped, so resolve-location-object's
-   literal path handles them); bare refs resolve via :base-url."
+   literal path handles them); bare refs resolve via :base-url.
+
+   TWIN (sl-8bxt): the bare-ref branch (last alternation) must stay
+   textually identical to intent.resolve/location-ref-pattern — a regex
+   splice can't call the classifier. Change both together; extract if a
+   third consumer appears. Drift guard: stepdefs/browser_test.clj."
   (str "'[^']+'|" bindings/token-re-fragment
        "|[A-Z][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_-]+)*"))
 
@@ -221,6 +230,13 @@
 ;; SMS receive surface.
 (def ^:private capture-pattern
   (re-pattern (str ":([\\w./-]+) captures (" locator-re ") matching /(.+)/")))
+
+;; :see :matching (sl-gwru): assert-only twin of :capture — same matcher
+;; slot, same poll semantics, binds nothing. Surface is "should see"
+;; (family consistency with every other :see assertion; the bead's
+;; "sees ... matching" was discussion shorthand, Chair-confirmed).
+(def ^:private should-see-matching-pattern
+  (re-pattern (str ":([\\w./-]+) should see (" locator-re ") matching /(.+)/")))
 
 ;; --- :hover and :wait patterns (sl-jsn) ---
 
@@ -359,78 +375,40 @@
                (recur (:error result))))))))))
 
 ;; -----------------------------------------------------------------------------
-;; Key Name Resolution (for press-key step)
+;; Key Resolution (for press-key step)
 ;; -----------------------------------------------------------------------------
 
-(def ^:private key-map
-  "Map of human-readable key names to etaoin key constants.
-   Used by the 'presses' step to resolve key names like 'enter', 'tab', etc."
-  {"enter"     k/enter
-   "return"    k/return
-   "tab"       k/tab
-   "escape"    k/escape
-   "backspace" k/backspace
-   "delete"    k/delete
-   "space"     k/space
-   "up"        k/arrow-up
-   "down"      k/arrow-down
-   "left"      k/arrow-left
-   "right"     k/arrow-right
-   "home"      k/home
-   "end"       k/end
-   "pageup"    k/pageup
-   "pagedown"  k/pagedown
-   "f1"        k/f1
-   "f2"        k/f2
-   "f3"        k/f3
-   "f4"        k/f4
-   "f5"        k/f5
-   "f6"        k/f6
-   "f7"        k/f7
-   "f8"        k/f8
-   "f9"        k/f9
-   "f10"       k/f10
-   "f11"       k/f11
-   "f12"       k/f12
-   ;; Modifiers (used in chords as prefixes)
-   "shift"     k/shift-left
-   "control"   k/control-left
-   "ctrl"      k/control-left
-   "alt"       k/alt-left
-   "command"   k/command
-   "cmd"       k/command
-   "meta"      k/meta-left})
+(def ^:private key-re
+  "Regex fragment for the :key O slot (sl-2sj6): an unquoted W3C
+   KeyboardEvent.key name (PascalCase ref, validated at plan time against
+   the closed set in svo.keys) or a quoted capture ('g' presses that
+   character; multi-char is admitted by the pattern so plan validation
+   can reject it with a pointer at fills, not a bare no-match).
+   Chords/sequences: removed at sl-2sj6, parked as sl-eecq."
+  "[A-Z][A-Za-z0-9]*|'[^']+'")
 
-(defn- resolve-key-name
-  "Resolve a single key name string to its etaoin key constant.
-   Throws on unknown key names."
-  [name-str]
-  (let [lower (str/lower-case (str/trim name-str))]
-    (if-let [key-val (get key-map lower)]
-      key-val
-      ;; Single character keys (a-z, 0-9, etc.) pass through as-is
-      (if (= 1 (count lower))
-        lower
-        (throw (ex-info (str "Unknown key name: '" name-str
-                             "'. Known keys: " (str/join ", " (sort (keys key-map))))
-                        {:type :browser/unknown-key
-                         :key name-str
-                         :known-keys (sort (keys key-map))}))))))
-
-(defn- resolve-key-expression
-  "Resolve a key expression like 'enter', 'shift+control+t', or 'a' to an
-   etaoin key string suitable for fill-active.
-
-   For single keys: returns the key character.
-   For chords (modifier+key): uses etaoin.keys/chord to produce a modifier sequence."
-  [expr]
-  (let [parts (str/split expr #"\+")
-        resolved (mapv #(resolve-key-name (str/trim %)) parts)]
-    (if (= 1 (count resolved))
-      ;; Single key — just the character
-      (str (first resolved))
-      ;; Chord — apply k/chord with modifiers + final key
-      (apply k/chord resolved))))
+(defn- resolve-key-capture
+  "Resolve a :key-slot capture (raw, WITH quotes — :key slots are not
+   engine-normalized) to an etaoin key string. Quoted single char = that
+   character; unquoted = W3C name via svo.keys. Plan validation
+   (validate-key-object, always-on) catches bad shapes first — the
+   throws here are the runtime backstop for direct invocation."
+  [capture]
+  (if (str/starts-with? capture "'")
+    (let [inner (subs capture 1 (dec (count capture)))]
+      (if (= 1 (count inner))
+        inner
+        (throw (ex-info (str "presses takes a single key, not text: " capture
+                             " — to enter text, use fills")
+                        {:type :browser/invalid-key-literal
+                         :key capture}))))
+    (if-let [key-val (get svo-keys/w3c-key->etaoin capture)]
+      (str key-val)
+      (throw (ex-info (str "Unknown key name: '" capture
+                           "'. Known keys: " (str/join ", " svo-keys/key-names))
+                      {:type :browser/unknown-key
+                       :key capture
+                       :known-keys svo-keys/key-names})))))
 
 ;; -----------------------------------------------------------------------------
 ;; Debug / Utility Steps
@@ -569,21 +547,40 @@
 
 (defn- resolve-location-object
   "Resolve a :location-slot object under the authored rule (sl-iseq):
-   QUOTED = LITERAL, ALWAYS ('…' is stripped and passed through verbatim);
-   BARE = REF — a bare PascalCase token (per `intent-resolve/location-ref?`,
-   the classifier shared with SVO validation) resolves via the intent's
-   :location :path + the :web interface's :config :base-url. All URL assembly
-   delegates to `intent-resolve/resolve-location` — the single assembly point.
-   Throws structured ex-info when a ref doesn't resolve."
-  [ctx object-str]
-  (if-not (intent-resolve/location-ref? object-str)
-    (unquote-literal object-str)
-    (let [base-url (:base-url (cap/get-run-interface-config ctx :web))
-          result (intent-resolve/resolve-location (intent-state/get-intents)
-                                                  object-str :web base-url)]
-      (if (:error result)
-        (throw (ex-info (get-in result [:error :message]) (:error result)))
-        (:ok result)))))
+   QUOTED = LITERAL, ALWAYS ('…' is stripped); BARE = REF — a bare PascalCase
+   token (per `intent-resolve/location-ref?`, the classifier shared with SVO
+   validation) resolves via the intent's :location :path + the :web
+   interface's :config :base-url through `intent-resolve/resolve-location` —
+   the assembly point for REFS (sl-4mv8).
+
+   opts (sl-34ec):
+   - :resolve-literals? — when true, a stripped SCHEMELESS literal resolves
+     per RFC 3986 against :base-url via `url-match/resolve-literal` (the
+     assembly point for LITERALS); absolute literals pass through untouched.
+     Navigation sets this (it needs a full URL). The region assertion does
+     NOT: region-match discards scheme/host by design, so literals there
+     stay verbatim — resolution would be a no-op when it works and a
+     breakage when no :base-url is configured (Chair ruling 2026-07-23).
+
+   Throws structured ex-info when a ref or literal doesn't resolve."
+  ([ctx object-str]
+   (resolve-location-object ctx object-str nil))
+  ([ctx object-str {:keys [resolve-literals?]}]
+   (if-not (intent-resolve/location-ref? object-str)
+     (let [literal (unquote-literal object-str)]
+       (if-not resolve-literals?
+         literal
+         (let [base-url (:base-url (cap/get-run-interface-config ctx :web))
+               result (url-match/resolve-literal literal base-url)]
+           (if (:error result)
+             (throw (ex-info (get-in result [:error :message]) (:error result)))
+             (:ok result)))))
+     (let [base-url (:base-url (cap/get-run-interface-config ctx :web))
+           result (intent-resolve/resolve-location (intent-state/get-intents)
+                                                   object-str :web base-url)]
+       (if (:error result)
+         (throw (ex-info (get-in result [:error :message]) (:error result)))
+         (:ok result))))))
 
 ;; =============================================================================
 ;; Subject-Extracting Action Steps
@@ -593,36 +590,43 @@
 
 (defstep (re-pattern (str ":([\\w./-]+) opens the browser to (" location-re ")"))
   {:interface :web
-   :svo {:subject :$1 :verb :navigate :frame :to :object :$2}}
+   :svo {:subject :$1 :verb :navigate :frame :to :object :$2}
+   :doc/example ":alice opens the browser to '/login'"}
   [ctx subject-str url]
-  (let [url' (resolve-location-object ctx url)]
+  ;; Navigation needs a full URL: schemeless literals resolve against
+  ;; :base-url (sl-34ec); refs and absolute literals as before.
+  (let [url' (resolve-location-object ctx url {:resolve-literals? true})]
     (with-subject-browser ctx subject-str
       (fn [browser] (bp/open-to! browser url')))))
 
 (defstep click-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :click :frame :default :object :$2}}
+   :svo {:subject :$1 :verb :click :frame :default :object :$2}
+   :doc/example ":alice clicks {:id \"login\"}"}
   [ctx subject-str locator-str]
   (with-subject-locator ctx subject-str locator-str (:interface step-meta)
     (fn [browser resolved] (bp/click! browser resolved))))
 
 (defstep doubleclick-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :doubleclick :frame :default :object :$2}}
+   :svo {:subject :$1 :verb :doubleclick :frame :default :object :$2}
+   :doc/example ":alice double-clicks {:id \"row\"}"}
   [ctx subject-str locator-str]
   (with-subject-locator ctx subject-str locator-str (:interface step-meta)
     (fn [browser resolved] (bp/doubleclick! browser resolved))))
 
 (defstep rightclick-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :rightclick :frame :default :object :$2}}
+   :svo {:subject :$1 :verb :rightclick :frame :default :object :$2}
+   :doc/example ":alice right-clicks {:id \"file\"}"}
   [ctx subject-str locator-str]
   (with-subject-locator ctx subject-str locator-str (:interface step-meta)
     (fn [browser resolved] (bp/rightclick! browser resolved))))
 
 (defstep move-to-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :move :frame :default :object :$2}}
+   :svo {:subject :$1 :verb :move :frame :default :object :$2}
+   :doc/example ":alice moves to {:id \"menu\"}"}
   [ctx subject-str locator-str]
   (with-subject-locator ctx subject-str locator-str (:interface step-meta)
     (fn [browser resolved] (bp/move-to! browser resolved))))
@@ -632,14 +636,16 @@
 ;; The verb-level distinction is for human-readable feature text.
 (defstep hover-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :hover :frame :default :object :$2}}
+   :svo {:subject :$1 :verb :hover :frame :default :object :$2}
+   :doc/example ":alice hovers over {:id \"menu\"}"}
   [ctx subject-str locator-str]
   (with-subject-locator ctx subject-str locator-str (:interface step-meta)
     (fn [browser resolved] (bp/move-to! browser resolved))))
 
 (defstep drag-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :drag :frame :to :object :$2 :args {:target :$3}}}
+   :svo {:subject :$1 :verb :drag :frame :to :object :$2 :args {:target :$3}}
+   :doc/example ":alice drags {:id \"card\"} to {:id \"done-column\"}"}
   [ctx subject-str from-str to-str]
   (let [interface (:interface step-meta)]
     (with-subject-browser ctx subject-str
@@ -650,7 +656,8 @@
 
 (defstep fill-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :fill :frame :with :object :$2 :args {:value :$3}}}
+   :svo {:subject :$1 :verb :fill :frame :with :object :$2 :args {:value :$3}}
+   :doc/example ":alice fills {:id \"email\"} with 'alice@example.com'"}
   [ctx subject-str locator-str text]
   (with-subject-locator ctx subject-str locator-str (:interface step-meta)
     (fn [browser resolved] (bp/fill! browser resolved text))))
@@ -659,21 +666,24 @@
 
 (defstep #":([\w./-]+) goes back"
   {:interface :web
-   :svo {:subject :$1 :verb :navigate-back :frame :default :object nil}}
+   :svo {:subject :$1 :verb :navigate-back :frame :default :object nil}
+   :doc/example ":alice goes back"}
   [ctx subject-str]
   (with-subject-browser ctx subject-str
     (fn [browser] (bp/go-back! browser))))
 
 (defstep #":([\w./-]+) goes forward"
   {:interface :web
-   :svo {:subject :$1 :verb :navigate-forward :frame :default :object nil}}
+   :svo {:subject :$1 :verb :navigate-forward :frame :default :object nil}
+   :doc/example ":alice goes forward"}
   [ctx subject-str]
   (with-subject-browser ctx subject-str
     (fn [browser] (bp/go-forward! browser))))
 
 (defstep #":([\w./-]+) refreshes the page"
   {:interface :web
-   :svo {:subject :$1 :verb :refresh :frame :default :object nil}}
+   :svo {:subject :$1 :verb :refresh :frame :default :object nil}
+   :doc/example ":alice refreshes the page"}
   [ctx subject-str]
   (with-subject-browser ctx subject-str
     (fn [browser] (bp/refresh! browser))))
@@ -682,7 +692,8 @@
 
 (defstep scroll-to-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :scroll :frame :to-element :object :$2}}
+   :svo {:subject :$1 :verb :scroll :frame :to-element :object :$2}
+   :doc/example ":alice scrolls to {:id \"footer\"}"}
   [ctx subject-str locator-str]
   (with-subject-locator ctx subject-str locator-str (:interface step-meta)
     (fn [browser resolved] (bp/scroll-to! browser resolved))))
@@ -690,7 +701,8 @@
 (defstep #":([\w./-]+) scrolls to the (top|bottom)"
   {:interface :web
    :svo {:subject :$1 :verb :scroll :frame :to-position
-         :object nil :args {:position :$2}}}
+         :object nil :args {:position :$2}}
+   :doc/example ":alice scrolls to the bottom"}
   [ctx subject-str position-str]
   (with-subject-browser ctx subject-str
     (fn [browser] (bp/scroll-to-position! browser (keyword position-str)))))
@@ -699,7 +711,8 @@
 
 (defstep clear-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :clear :frame :default :object :$2}}
+   :svo {:subject :$1 :verb :clear :frame :default :object :$2}
+   :doc/example ":alice clears {:id \"search\"}"}
   [ctx subject-str locator-str]
   (with-subject-locator ctx subject-str locator-str (:interface step-meta)
     (fn [browser resolved] (bp/clear! browser resolved))))
@@ -707,16 +720,18 @@
 (defstep select-from-pattern
   {:interface :web
    :svo {:subject :$1 :verb :select :frame :from
-         :object :$3 :args {:value :$2}}}
+         :object :$3 :args {:value :$2}}
+   :doc/example ":alice selects 'Blue' from {:id \"color\"}"}
   [ctx subject-str text locator-str]
   (with-subject-locator ctx subject-str locator-str (:interface step-meta)
     (fn [browser resolved] (bp/select! browser resolved text))))
 
-(defstep #":([\w./-]+) presses (.+)"
+(defstep (re-pattern (str ":([\\w./-]+) presses (" key-re ")"))
   {:interface :web
-   :svo {:subject :$1 :verb :press :frame :default :object :$2}}
-  [ctx subject-str key-expr]
-  (let [key-str (resolve-key-expression key-expr)]
+   :svo {:subject :$1 :verb :press :frame :default :object :$2}
+   :doc/example ":alice presses Enter"}
+  [ctx subject-str key-capture]
+  (let [key-str (resolve-key-capture key-capture)]
     (with-subject-browser ctx subject-str
       (fn [browser] (bp/press-key! browser key-str)))))
 
@@ -724,14 +739,16 @@
 
 (defstep #":([\w./-]+) accepts the alert"
   {:interface :web
-   :svo {:subject :$1 :verb :accept-alert :frame :default :object nil}}
+   :svo {:subject :$1 :verb :accept-alert :frame :default :object nil}
+   :doc/example ":alice accepts the alert"}
   [ctx subject-str]
   (with-subject-browser ctx subject-str
     (fn [browser] (bp/accept-alert! browser))))
 
 (defstep #":([\w./-]+) dismisses the alert"
   {:interface :web
-   :svo {:subject :$1 :verb :dismiss-alert :frame :default :object nil}}
+   :svo {:subject :$1 :verb :dismiss-alert :frame :default :object nil}
+   :doc/example ":alice dismisses the alert"}
   [ctx subject-str]
   (with-subject-browser ctx subject-str
     (fn [browser] (bp/dismiss-alert! browser))))
@@ -740,7 +757,8 @@
 
 (defstep #":([\w./-]+) maximizes the window"
   {:interface :web
-   :svo {:subject :$1 :verb :maximize :frame :default :object nil}}
+   :svo {:subject :$1 :verb :maximize :frame :default :object nil}
+   :doc/example ":alice maximizes the window"}
   [ctx subject-str]
   (with-subject-browser ctx subject-str
     (fn [browser] (bp/maximize-window! browser))))
@@ -748,7 +766,8 @@
 (defstep #":([\w./-]+) resizes the window to (\d+)x(\d+)"
   {:interface :web
    :svo {:subject :$1 :verb :resize :frame :dimensions
-         :object nil :args {:width :$2 :height :$3}}}
+         :object nil :args {:width :$2 :height :$3}}
+   :doc/example ":alice resizes the window to 1280x800"}
   [ctx subject-str width-str height-str]
   (with-subject-browser ctx subject-str
     (fn [browser] (bp/set-window-size! browser
@@ -757,7 +776,8 @@
 
 (defstep #":([\w./-]+) switches to the next window"
   {:interface :web
-   :svo {:subject :$1 :verb :switch-window :frame :default :object nil}}
+   :svo {:subject :$1 :verb :switch-window :frame :default :object nil}
+   :doc/example ":alice switches to the next window"}
   [ctx subject-str]
   (with-subject-browser ctx subject-str
     (fn [browser] (bp/switch-to-next-window! browser))))
@@ -766,14 +786,16 @@
 
 (defstep switch-frame-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :switch-frame :frame :into :object :$2}}
+   :svo {:subject :$1 :verb :switch-frame :frame :into :object :$2}
+   :doc/example ":alice switches to frame {:id \"payment\"}"}
   [ctx subject-str locator-str]
   (with-subject-locator ctx subject-str locator-str (:interface step-meta)
     (fn [browser resolved] (bp/switch-to-frame! browser resolved))))
 
 (defstep #":([\w./-]+) switches to the main frame"
   {:interface :web
-   :svo {:subject :$1 :verb :switch-frame :frame :main :object nil}}
+   :svo {:subject :$1 :verb :switch-frame :frame :main :object nil}
+   :doc/example ":alice switches to the main frame"}
   [ctx subject-str]
   (with-subject-browser ctx subject-str
     (fn [browser] (bp/switch-to-main-frame! browser))))
@@ -786,7 +808,8 @@
 
 (defstep #":([\w./-]+) should see '([^']+)'"
   {:interface :web
-   :svo {:subject :$1 :verb :see :frame :on-page :object :$2}}
+   :svo {:subject :$1 :verb :see :frame :on-page :object :$2}
+   :doc/example ":alice should see 'Welcome'"}
   [ctx subject-str expected-text]
   (let [[ctx' browser] (with-subject-query ctx subject-str)
         body-locator (locators/resolve-locator {:tag "body"})]
@@ -805,7 +828,8 @@
 (defstep should-see-count-pattern
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :count
-         :object :$3 :args {:count :$2}}}
+         :object :$3 :args {:count :$2}}
+   :doc/example ":alice should see 3 {:css \".row\"} elements"}
   [ctx subject-str count-str locator-str]
   (let [expected (parse-long count-str)
         [ctx' browser] (with-subject-query ctx subject-str)]
@@ -826,7 +850,8 @@
 (defstep should-see-text-pattern
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :text
-         :object :$2 :args {:text :$3}}}
+         :object :$2 :args {:text :$3}}
+   :doc/example ":alice should see {:id \"banner\"} with text 'Success'"}
   [ctx subject-str locator-str expected-text]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
@@ -857,7 +882,8 @@
 (defstep capture-pattern
   {:interface :web
    :svo {:subject :$1 :verb :capture :frame :default
-         :object :$2 :args {:match :$3}}}
+         :object :$2 :args {:match :$3}}
+   :doc/example ":alice captures {:id \"total\"} matching /(?<amount>[0-9.]+)/"}
   [ctx subject-str locator-str match-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
@@ -875,10 +901,42 @@
                                 e))
                 (throw e)))))))))
 
+;; :see :matching (sl-gwru) — assert-only: the :capture exec verbatim
+;; (same attempt-capture core, so the two frames can never drift into a
+;; second matcher path) with the bound ctx DISCARDED — asserts, binds
+;; nothing. Format assertions (order-number shapes, prices, dates) get a
+;; frame that doesn't pollute the binding namespace. Named groups in
+;; this slot are rejected at plan time by the bindings lint (clause 4:
+;; a producer marker is never quietly ignored); all-unnamed is the
+;; expected shape. Embedded {binding} tokens still interpolate — an
+;; unresolved one fails fast, non-retryable, exactly like :capture.
+(defstep should-see-matching-pattern
+  {:interface :web
+   :svo {:subject :$1 :verb :see :frame :matching
+         :object :$2 :args {:match :$3}}
+   :doc/example ":alice should see {:id \"total\"} matching /\\d+ items/"}
+  [ctx subject-str locator-str match-str]
+  (let [[ctx' browser] (with-subject-query ctx subject-str)]
+    (with-retry
+      (fn []
+        (let [resolved (target/ensure-single
+                        (resolve-target* browser locator-str (:interface step-meta))
+                        locator-str)
+              actual (bp/get-text browser resolved)]
+          (when-not (bindings/attempt-capture ctx' match-str actual)
+            (throw (ex-info (str "Expected element text to match /" match-str
+                                 "/ but it did not")
+                            {:type :browser/assertion-failed
+                             :pattern match-str
+                             :actual actual
+                             :locator locator-str}))))))
+    ctx'))
+
 (defstep should-see-value-pattern
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :value
-         :object :$2 :args {:value :$3}}}
+         :object :$2 :args {:value :$3}}
+   :doc/example ":alice should see {:id \"qty\"} with value '3'"}
   [ctx subject-str locator-str expected-value]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
@@ -899,7 +957,8 @@
 (defstep should-see-attr-pattern
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :attribute
-         :object :$2 :args {:attribute :$3 :value :$4}}}
+         :object :$2 :args {:attribute :$3 :value :$4}}
+   :doc/example ":alice should see {:id \"link\"} with attribute 'href' equal to '/home'"}
   [ctx subject-str locator-str attr-name expected-value]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
@@ -920,7 +979,8 @@
 
 (defstep should-see-enabled-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :see :frame :enabled :object :$2}}
+   :svo {:subject :$1 :verb :see :frame :enabled :object :$2}
+   :doc/example ":alice should see {:id \"submit\"} enabled"}
   [ctx subject-str locator-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
@@ -936,7 +996,8 @@
 
 (defstep should-see-disabled-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :see :frame :disabled :object :$2}}
+   :svo {:subject :$1 :verb :see :frame :disabled :object :$2}
+   :doc/example ":alice should see {:id \"submit\"} disabled"}
   [ctx subject-str locator-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
@@ -952,7 +1013,8 @@
 
 (defstep should-see-locator-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :see :frame :visible :object :$2}}
+   :svo {:subject :$1 :verb :see :frame :visible :object :$2}
+   :doc/example ":alice should see {:id \"profile\"}"}
   [ctx subject-str locator-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
@@ -968,7 +1030,8 @@
 
 (defstep should-not-see-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :not-see :frame :invisible :object :$2}}
+   :svo {:subject :$1 :verb :not-see :frame :invisible :object :$2}
+   :doc/example ":alice should not see {:id \"error\"}"}
   [ctx subject-str locator-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)
         resolved (try
@@ -995,7 +1058,8 @@
 ;; structural full-URL equality use "should be on exactly".
 (defstep (re-pattern (str ":([\\w./-]+) should be on (" location-re ")"))
   {:interface :web
-   :svo {:subject :$1 :verb :be :frame :at :object :$2}}
+   :svo {:subject :$1 :verb :be :frame :at :object :$2}
+   :doc/example ":alice should be on '/dashboard'"}
   [ctx subject-str expected]
   (let [expected-url (resolve-location-object ctx expected)
         [ctx' browser] (with-subject-query ctx subject-str)]
@@ -1018,9 +1082,27 @@
 ;; deferred: exotic matching = custom step assertion.
 (defstep (re-pattern (str ":([\\w./-]+) should be on exactly (" value-re ")"))
   {:interface :web
-   :svo {:subject :$1 :verb :be :frame :at-exactly :object :$2}}
+   :svo {:subject :$1 :verb :be :frame :at-exactly :object :$2}
+   :doc/example ":alice should be on exactly '/dashboard?tab=1'"}
   [ctx subject-str expected]
-  (let [expected-url (unquote-literal expected)
+  ;; sl-34ec: a schemeless literal resolves against :base-url first, making
+  ;; relative exact expectations expressible ('/login?a=1' without hardcoding
+  ;; a host). Without a usable :base-url the RAW literal goes to exact-match,
+  ;; whose :not-a-full-url mismatch teaches the exits; a configured-but-
+  ;; unparseable :base-url is a config error and throws.
+  (let [literal (unquote-literal expected)
+        base-url (:base-url (cap/get-run-interface-config ctx :web))
+        resolved (url-match/resolve-literal literal base-url)
+        expected-url (cond
+                       (:ok resolved)
+                       (:ok resolved)
+
+                       (= :intent/invalid-base-url
+                          (get-in resolved [:error :type]))
+                       (throw (ex-info (get-in resolved [:error :message])
+                                       (:error resolved)))
+
+                       :else literal)
         [ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
       (fn []
@@ -1030,9 +1112,17 @@
                             (assoc mismatch :type :browser/assertion-failed)))))))
     ctx'))
 
-(defstep #":([\w./-]+) should see the title '([^']+)'"
+;; The title O slot is :object-kind :text (sl-2sj6): captured WITH its
+;; quotes via value-re — quoted literal or {binding} token — and
+;; normalized by the engine's :text slot-kind (strip quotes / resolve
+;; token), so expected-title arrives here as plain text. The old pattern
+;; stripped quotes in the capture group, which destroyed the marker
+;; before the engine saw it (the clause-4 violation behind the
+;; strict-mode false positive).
+(defstep (re-pattern (str ":([\\w./-]+) should see the title (" value-re ")"))
   {:interface :web
-   :svo {:subject :$1 :verb :see :frame :title :object :$2}}
+   :svo {:subject :$1 :verb :see :frame :title :object :$2}
+   :doc/example ":alice should see the title 'Home'"}
   [ctx subject-str expected-title]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
@@ -1050,7 +1140,8 @@
 (defstep (re-pattern (str ":([\\w./-]+) should see an alert with (" value-re ")"))
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :alert-with-text
-         :object nil :args {:text :$2}}}
+         :object nil :args {:text :$2}}
+   :doc/example ":alice should see an alert with 'Are you sure?'"}
   [ctx subject-str expected-text]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
@@ -1066,7 +1157,8 @@
 
 (defstep #":([\w./-]+) should see an alert"
   {:interface :web
-   :svo {:subject :$1 :verb :see :frame :alert :object nil}}
+   :svo {:subject :$1 :verb :see :frame :alert :object nil}
+   :doc/example ":alice should see an alert"}
   [ctx subject-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
@@ -1088,7 +1180,8 @@
 (defstep wait-duration-pattern
   {:interface :web
    :svo {:subject :$1 :verb :wait :frame :duration
-         :object nil :args {:duration :$2}}}
+         :object nil :args {:duration :$2}}
+   :doc/example ":alice waits 2 seconds"}
   [ctx _subject-str seconds-str]
   (Thread/sleep (long (* 1000 (Double/parseDouble seconds-str))))
   ctx)
@@ -1096,7 +1189,8 @@
 ;; :wait :for-element — block until element becomes visible (mirror of :see :visible).
 (defstep wait-for-element-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :wait :frame :for-element :object :$2}}
+   :svo {:subject :$1 :verb :wait :frame :for-element :object :$2}
+   :doc/example ":alice waits for {:id \"spinner\"}"}
   [ctx subject-str locator-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
@@ -1116,7 +1210,8 @@
 (defstep wait-for-text-pattern
   {:interface :web
    :svo {:subject :$1 :verb :wait :frame :for-text
-         :object :$2 :args {:text :$3}}}
+         :object :$2 :args {:text :$3}}
+   :doc/example ":alice waits for {:id \"status\"} to show 'Done'"}
   [ctx subject-str locator-str expected-text]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
     (with-retry
@@ -1139,7 +1234,8 @@
 (defstep wait-for-count-pattern
   {:interface :web
    :svo {:subject :$1 :verb :wait :frame :for-count
-         :object :$3 :args {:count :$2}}}
+         :object :$3 :args {:count :$2}}
+   :doc/example ":alice waits for 3 {:css \".result\"}"}
   [ctx subject-str count-str locator-str]
   (let [expected (parse-long count-str)
         [ctx' browser] (with-subject-query ctx subject-str)]

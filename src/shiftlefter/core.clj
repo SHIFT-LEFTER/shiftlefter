@@ -712,13 +712,23 @@
 
 (defn- costume-list-cmd
   []
-  (let [costumes (costume/list-costumes)]
+  (let [costumes (costume/list-costumes)
+        ;; One clock read for the whole listing — ages are relative to the
+        ;; same instant.
+        now (java.time.Instant/now)]
     (if (empty? costumes)
       (println "No costumes. Create one with: sl costume init <name>")
       (doseq [c costumes]
-        (println (format "  %-16s %-8s port %s  pid %s"
+        ;; sl-cdrg (F8 posture 1): staleness made visible. "connected" is
+        ;; exactly what the datum means — the last init/connect/reconnect
+        ;; stamp, not last use.
+        (println (format "  %-16s %-8s port %-6s pid %-8s connected %s"
                          (str (:name c)) (name (:status c))
-                         (or (:port c) "-") (or (:pid c) "-")))))
+                         (or (:port c) "-") (or (:pid c) "-")
+                         (if-let [age (costume/age-label
+                                       (get-in c [:meta :last-connected-at]) now)]
+                           (str age " ago")
+                           "-")))))
     0))
 
 (defn- costume-destroy-cmd
@@ -798,9 +808,10 @@
       (require 'nrepl.server 'cider.nrepl)
       (let [start-server (resolve 'nrepl.server/start-server)
             default-handler (resolve 'nrepl.server/default-handler)
-            ;; cider-middleware is a vector of middleware vars — spread with apply
+            ;; cider-middleware is a vector of SYMBOLS — nREPL 1.7's
+            ;; default-handler requires resolved middleware vars
             cider-mw-vec @(resolve 'cider.nrepl/cider-middleware)
-            handler (apply default-handler cider-mw-vec)
+            handler (apply default-handler (map requiring-resolve cider-mw-vec))
             server (start-server :port nrepl-port :handler handler)
             actual-port (:port server)
             port-file (java.io.File. ".nrepl-port")]

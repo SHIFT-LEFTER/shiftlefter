@@ -74,7 +74,7 @@ work (canvas, custom JS), or contributing a new interface. See
 | add my own domain language | [Extend the vocabulary](extending-vocabulary.md) |
 | drive authenticated / real-account sessions | [Costumes](COSTUMES.md) |
 | seed data or run code around scenarios | [Hooks — and when not to use them](hooks.md) |
-| know what I can run (Java vs Clojure) | [What can I do?](CAPABILITIES.md) |
+| know what I can run (Java vs Clojure) | [What can I do?](INSTALL-TIERS.md) |
 | look up a term | [Glossary](GLOSSARY.md) |
 | bring existing Gherkin (preview) | [Adoption](adoption.md) |
 

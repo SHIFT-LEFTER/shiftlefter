@@ -85,7 +85,11 @@
 ;; means :intent (validated as an intent ref); :location accepts literal URLs.
 ;; :location-refs? (sl-3jr4): a :location frame that also accepts bare
 ;; PascalCase named-location intent refs (the navigate slot today).
-(s/def ::object-kind #{:intent :location})
+;; :text (sl-2sj6): a content-only free-text slot — quoted literal or
+;; {binding} token, never an intent ref (the see-title slot). :key
+;; (sl-2sj6): a structure slot validated against the closed W3C
+;; KeyboardEvent.key set (svo.keys), plus quoted single characters.
+(s/def ::object-kind #{:intent :location :text :key})
 (s/def ::location-refs? boolean?)
 ;; :arg-kinds (sl-yh7): per-arg slot value kinds. :value = a literal-admitting
 ;; slot (quoted literal or {binding} token; the engine strips quotes/resolves

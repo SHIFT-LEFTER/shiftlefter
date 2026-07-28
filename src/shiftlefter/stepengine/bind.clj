@@ -47,7 +47,9 @@
   (:require [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
             [clojure.string :as str]
+            [shiftlefter.intent.state :as intent-state]
             [shiftlefter.stepengine.annotations :as annotations]
+            [shiftlefter.stepengine.hints :as hints]
             [shiftlefter.svo.extract :as extract]
             [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.svo.validate :as validate]))
@@ -77,9 +79,15 @@
 (s/def ::binding (s/nilable ::binding-map))
 (s/def ::alternatives (s/coll-of map?))
 
+(s/def ::hint ::hints/hint)
+
 (s/def ::bound-step
   (s/keys :req-un [::status ::step]
-          :opt-un [::binding ::alternatives]))
+          :opt-un [::binding ::alternatives ::hint]))
+
+;; Options threaded from bind-suite down to bind-step (sl-s04n)
+(s/def ::intents (s/nilable map?))
+(s/def ::bind-opts (s/nilable (s/keys :opt-un [::intents])))
 
 ;; Run plan
 (s/def :plan/id uuid?)
@@ -192,6 +200,13 @@
         :other-interface-match-count N   ;; only on :undefined
         :other-interfaces [:web ...]     ;; only on :undefined
         :suggestion \"...\"}             ;; only when :other-interfaces present (sl-563)
+   - :hint - on :undefined, at most one grammar hint classifying why the text
+     matched nothing (sl-s04n; see shiftlefter.stepengine.hints). Computed on
+     the annotation-stripped text against the narrowed candidates, so it
+     composes with :filter-info.
+
+   opts (optional):
+   - :intents - loaded intents map for glossary-aware hints (nil degrades)
 
    Synthetic steps (macro wrappers with :step/synthetic? true) are auto-bound
    with :status :synthetic and no binding - they exist for events/reporting only.
@@ -201,84 +216,89 @@
    annotation prefix is stripped from step text only at the moment of regex
    matching; the step map itself retains :step/text with annotation intact so
    reporters and events can surface it."
-  [pickle-step stepdefs]
-  ;; Synthetic steps (macro wrappers) don't need binding
-  (if (:step/synthetic? pickle-step)
-    {:status :synthetic
-     :step pickle-step
-     :binding nil
-     :alternatives []}
-    ;; Regular steps need stepdef matching
-    (let [raw-text (:step/text pickle-step)
-          declared (:step/declared-interface pickle-step)
-          ;; Strip annotation for regex matching when declared
-          match-text (if declared
-                       (annotations/strip-annotation raw-text)
-                       raw-text)
-          ;; Narrow candidates when an interface is declared.
-          ;; Stepdefs without :interface metadata are excluded from annotated
-          ;; binding — the annotation is an assertion, and an interface-less
-          ;; stepdef has no claim to any particular interface.
-          candidates (if declared
-                       (filter #(= declared (stepdef-interface %)) stepdefs)
-                       stepdefs)
-          matches (find-all-matches match-text candidates)
-          ;; Level-2 diagnostic: when annotated and undefined, surface
-          ;; matches under other interfaces (they were filtered out).
-          ;; sl-563: include an explicit human-readable :suggestion when
-          ;; other interfaces had matches.
-          filter-info
-          (when declared
-            (let [others-matching
-                  (when (zero? (count matches))
-                    (find-all-matches
-                     match-text
-                     (remove #(= declared (stepdef-interface %)) stepdefs)))
-                  other-ifaces (vec (distinct
-                                     (keep #(stepdef-interface (:stepdef %))
-                                           others-matching)))]
-              (cond-> {:declared-interface declared}
-                (seq others-matching)
-                (assoc :other-interface-match-count (count others-matching)
-                       :other-interfaces other-ifaces
-                       :suggestion
-                       (let [verb (if (= 1 (count other-ifaces)) "does" "do")
-                             listed (str/join " "
-                                              (map #(str "[" % "]") other-ifaces))]
-                         (str "No [" declared "] stepdef matches, but "
-                              listed " " verb "."))))))]
-      (case (count matches)
-        ;; No matches - undefined
-        0 (cond-> {:status :undefined
-                   :step pickle-step
-                   :binding nil
-                   :alternatives []}
-            filter-info (assoc :filter-info filter-info))
+  ([pickle-step stepdefs]
+   (bind-step pickle-step stepdefs nil))
+  ([pickle-step stepdefs opts]
+   ;; Synthetic steps (macro wrappers) don't need binding
+   (if (:step/synthetic? pickle-step)
+     {:status :synthetic
+      :step pickle-step
+      :binding nil
+      :alternatives []}
+     ;; Regular steps need stepdef matching
+     (let [raw-text (:step/text pickle-step)
+           declared (:step/declared-interface pickle-step)
+           ;; Strip annotation for regex matching when declared
+           match-text (if declared
+                        (annotations/strip-annotation raw-text)
+                        raw-text)
+           ;; Narrow candidates when an interface is declared.
+           ;; Stepdefs without :interface metadata are excluded from annotated
+           ;; binding — the annotation is an assertion, and an interface-less
+           ;; stepdef has no claim to any particular interface.
+           candidates (if declared
+                        (filter #(= declared (stepdef-interface %)) stepdefs)
+                        stepdefs)
+           matches (find-all-matches match-text candidates)
+           ;; Level-2 diagnostic: when annotated and undefined, surface
+           ;; matches under other interfaces (they were filtered out).
+           ;; sl-563: include an explicit human-readable :suggestion when
+           ;; other interfaces had matches.
+           filter-info
+           (when declared
+             (let [others-matching
+                   (when (zero? (count matches))
+                     (find-all-matches
+                      match-text
+                      (remove #(= declared (stepdef-interface %)) stepdefs)))
+                   other-ifaces (vec (distinct
+                                      (keep #(stepdef-interface (:stepdef %))
+                                            others-matching)))]
+               (cond-> {:declared-interface declared}
+                 (seq others-matching)
+                 (assoc :other-interface-match-count (count others-matching)
+                        :other-interfaces other-ifaces
+                        :suggestion
+                        (let [verb (if (= 1 (count other-ifaces)) "does" "do")
+                              listed (str/join " "
+                                               (map #(str "[" % "]") other-ifaces))]
+                          (str "No [" declared "] stepdef matches, but "
+                               listed " " verb "."))))))]
+       (case (count matches)
+         ;; No matches - undefined; classify why with a grammar hint (sl-s04n)
+         0 (let [hint (hints/undefined-hint match-text candidates
+                                            (:intents opts))]
+             (cond-> {:status :undefined
+                      :step pickle-step
+                      :binding nil
+                      :alternatives []}
+               filter-info (assoc :filter-info filter-info)
+               hint (assoc :hint hint)))
 
-        ;; Single match - check arity and extract SVO
-        1 (let [{:keys [stepdef captures]} (first matches)
-                arity-info (validate-arity (count captures) (:arity stepdef))
-                metadata (:metadata stepdef)
-                svo (extract/extract-svo metadata captures)]
-            (cond-> {:status :matched
-                     :step pickle-step
-                     :binding (merge (stepdef-summary stepdef)
-                                     {:captures captures
-                                      :fn (:fn stepdef)
-                                      :arity (:arity stepdef)
-                                      :metadata metadata
-                                      :svo svo}
-                                     arity-info)
-                     :alternatives []}
-              filter-info (assoc :filter-info filter-info)))
+         ;; Single match - check arity and extract SVO
+         1 (let [{:keys [stepdef captures]} (first matches)
+                 arity-info (validate-arity (count captures) (:arity stepdef))
+                 metadata (:metadata stepdef)
+                 svo (extract/extract-svo metadata captures)]
+             (cond-> {:status :matched
+                      :step pickle-step
+                      :binding (merge (stepdef-summary stepdef)
+                                      {:captures captures
+                                       :fn (:fn stepdef)
+                                       :arity (:arity stepdef)
+                                       :metadata metadata
+                                       :svo svo}
+                                      arity-info)
+                      :alternatives []}
+               filter-info (assoc :filter-info filter-info)))
 
-        ;; Multiple matches - ambiguous
-        (let [summaries (mapv #(stepdef-summary (:stepdef %)) matches)]
-          (cond-> {:status :ambiguous
-                   :step pickle-step
-                   :binding nil
-                   :alternatives summaries}
-            filter-info (assoc :filter-info filter-info)))))))
+         ;; Multiple matches - ambiguous
+         (let [summaries (mapv #(stepdef-summary (:stepdef %)) matches)]
+           (cond-> {:status :ambiguous
+                    :step pickle-step
+                    :binding nil
+                    :alternatives summaries}
+             filter-info (assoc :filter-info filter-info))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Pickle Binding (Run Plan Generation)
@@ -291,10 +311,14 @@
    - :plan/id - UUID for this plan
    - :plan/pickle - the original pickle
    - :plan/steps - seq of bound steps
-   - :plan/runnable? - true iff all steps matched with valid arity (or synthetic)"
-  [pickle stepdefs]
-  (let [bound-steps (mapv #(bind-step % stepdefs) (:pickle/steps pickle))
-        runnable? (every? (fn [bs]
+   - :plan/runnable? - true iff all steps matched with valid arity (or synthetic)
+
+   opts are passed through to bind-step (see there)."
+  ([pickle stepdefs]
+   (bind-pickle pickle stepdefs nil))
+  ([pickle stepdefs opts]
+   (let [bound-steps (mapv #(bind-step % stepdefs opts) (:pickle/steps pickle))
+         runnable? (every? (fn [bs]
                             (or (= :synthetic (:status bs))  ; macro wrappers
                                 (and (= :matched (:status bs))
                                      (:arity-ok? (:binding bs)))))
@@ -302,7 +326,7 @@
     {:plan/id (java.util.UUID/randomUUID)
      :plan/pickle pickle
      :plan/steps bound-steps
-     :plan/runnable? runnable?}))
+     :plan/runnable? runnable?})))
 
 ;; -----------------------------------------------------------------------------
 ;; Suite Binding (All Pickles + Diagnostics)
@@ -365,12 +389,19 @@
   "Compute severity for an SVO issue based on config.
    Returns :error or :warn (default :warn if not configured).
 
+   Issues that arrive with a :severity keep it — framework-owned closed
+   sets (:key slots, sl-2sj6) are always-on errors with no config knob:
+   project-owned vocabulary gets a leniency knob because an unresolved
+   ref may be tomorrow's glossary entry; a typo'd key name has no such
+   future, so it doesn't get one.
+
    For object enforcement, maps :strict to :error."
   [issue svo-config]
-  (let [config-key (issue-type->config-key (:type issue))
-        level (get svo-config config-key :warn)]
-    ;; Map :strict to :error for object enforcement
-    (if (= level :strict) :error level)))
+  (or (:severity issue)
+      (let [config-key (issue-type->config-key (:type issue))
+            level (get svo-config config-key :warn)]
+        ;; Map :strict to :error for object enforcement
+        (if (= level :strict) :error level))))
 
 (defn- collect-svo-issues
   "Collect SVO validation issues from all bound steps.
@@ -437,8 +468,9 @@
    each capture position, nil for plain captures (sl-yh7).
 
    Kinds come from the verb glossary frame: :arg-kinds maps frame arg
-   names to #{:value :matcher}; an :object-kind :location O slot marks
-   its capture :location. The stepdef's :svo metadata (:$N placeholders)
+   names to #{:value :matcher}; an :object-kind :location/:text/:key O
+   slot marks its capture with that kind (sl-rlxa/sl-2sj6). The
+   stepdef's :svo metadata (:$N placeholders)
    maps frame args back to capture positions. Returns nil when the frame
    can't be resolved — plain-capture behavior, no token admission."
   [metadata glossary interfaces capture-count]
@@ -456,11 +488,11 @@
                                      (extract/placeholder-index capture-ref))]
                            (if (in-range? idx) (assoc acc idx kind) acc)))
                        base (or args {}))
-            obj-idx (when (and (= :location (:object-kind frame-map))
-                               (extract/placeholder? object))
+            obj-kind (#{:location :text :key} (:object-kind frame-map))
+            obj-idx (when (and obj-kind (extract/placeholder? object))
                       (extract/placeholder-index object))]
         (if (in-range? obj-idx)
-          (assoc with-args obj-idx :location)
+          (assoc with-args obj-idx obj-kind)
           with-args)))))
 
 (def ^:private default-stamp-glossary
@@ -525,11 +557,14 @@
    (bind-suite pickles stepdefs nil))
   ([pickles stepdefs opts]
    (let [{:keys [glossary interfaces svo]} opts
+         ;; Intent glossary for grammar hints on undefined steps (sl-s04n).
+         ;; Same degradation as svo.validate: not loaded -> nil, hints degrade.
+         intents (try (intent-state/get-intents) (catch Exception _ nil))
          ;; Bind, then stamp each SVO with the costume its subject :wears
          ;; (sl-rnm) — the runtime provisioning path reads (:wears svo) —
          ;; and each binding with its :slot-kinds (sl-yh7) — the exec path
          ;; reads them to normalize value/location captures.
-         plans (-> (mapv #(bind-pickle % stepdefs) pickles)
+         plans (-> (mapv #(bind-pickle % stepdefs {:intents intents}) pickles)
                    (stamp-costumes glossary)
                    (stamp-slot-kinds glossary interfaces))
          binding-issues (collect-issues plans)

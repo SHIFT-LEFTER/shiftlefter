@@ -25,7 +25,7 @@
    - pickles         — generate pickles from AST
    - print-tokens    — lossless reconstruction from tokens
    - roundtrip-ok?   — check if string round-trips exactly
-   - fmt-check       — check roundtrip + parse (returns status map)
+   - fmt-check       — check string is in canonical format (returns status map)
    - fmt-canonical   — canonical formatting (normalizes whitespace)"
   (:require [clojure.spec.alpha :as s]
             [shiftlefter.gherkin.lexer :as lexer]
@@ -182,7 +182,10 @@
     (= s reconstructed)))
 
 (defn fmt-check
-  "Check if string is already in canonical format.
+  "Check if string is already in canonical format. Not the
+   lossless-roundtrip verification — that is
+   `shiftlefter.gherkin.printer/roundtrip-check` (renamed from its old
+   colliding name `fmt-check`, sl-c1u8).
 
    Returns {:status :ok/:comments/:error ...}
    - On success (already canonical): {:status :ok}

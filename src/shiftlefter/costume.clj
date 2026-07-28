@@ -28,11 +28,15 @@
    - `:costume/connect-failed` — connection to existing Chrome failed
    - `:costume/destroy-failed` — cleanup failed
    - `:costume/git-tracked` — costume dir is git-tracked (refuses to operate)"
-  (:require [shiftlefter.browser.chrome :as chrome]
+  (:require [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen]
+            [shiftlefter.browser.chrome :as chrome]
             [shiftlefter.config.user :as user-config]
             [shiftlefter.costume.wardrobe :as wardrobe]
             [shiftlefter.costume.browser :as cbrowser]
-            [shiftlefter.webdriver.etaoin.session :as session]))
+            [shiftlefter.webdriver.etaoin.session :as session])
+  (:import [java.time Duration Instant]
+           [java.time.format DateTimeParseException]))
 
 ;; -----------------------------------------------------------------------------
 ;; Error Helpers
@@ -348,6 +352,39 @@
          :port debug-port
          :pid chrome-pid
          :meta meta}))))
+
+;; with-gen so spec-health can exercise the specs (predicate-only specs have
+;; no built-in generator).
+(s/def ::iso-instant
+  (s/with-gen (s/and string?
+                     #(try (Instant/parse %) true
+                           (catch DateTimeParseException _ false)))
+    #(gen/elements ["2026-07-25T10:00:00Z" "2026-07-28T09:59:01.123456Z"])))
+(s/def ::instant
+  (s/with-gen #(instance? Instant %)
+    #(gen/fmap (fn [s] (Instant/parse s))
+               (gen/elements ["2026-07-28T10:00:00Z" "2026-01-01T00:00:00Z"]))))
+
+(defn age-label
+  "Coarsest-unit age of an ISO-8601 instant string relative to `now` (an
+   Instant): \"<1m\", \"12m\", \"5h\", \"3d\" — days uncapped (\"45d\").
+   nil for nil or unparseable input (the CLI renders that as \"-\"); a
+   timestamp at-or-after `now` (clock skew) reads \"<1m\". Pure: `now` is
+   an argument so tests inject a literal clock."
+  [iso-instant now]
+  (when iso-instant
+    (when-let [then (try (Instant/parse iso-instant)
+                         (catch DateTimeParseException _ nil))]
+      (let [minutes (.toMinutes (Duration/between ^Instant then ^Instant now))]
+        (cond
+          (< minutes 1) "<1m"
+          (< minutes 60) (str minutes "m")
+          (< minutes 1440) (str (quot minutes 60) "h")
+          :else (str (quot minutes 1440) "d"))))))
+
+(s/fdef age-label
+  :args (s/cat :iso-instant (s/nilable string?) :now ::instant)
+  :ret (s/nilable string?))
 
 (defn list-costumes
   "List all costumes with their status.

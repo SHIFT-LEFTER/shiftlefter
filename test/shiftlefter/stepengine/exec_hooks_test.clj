@@ -163,11 +163,34 @@
         ":after return is IGNORED (reserved for the attachments era)")))
 
 (deftest invalid-before-return-is-hook-error
-  (let [plan (make-plan [(make-bound-step (fn [] nil))]
-                        :hooks [{:name "bad" :before (fn [_] :not-a-map)}])
+  (let [events (atom [])
+        plan (make-plan [(make-bound-step (fn [] nil))]
+                        :hooks [(hook events "ok" :before true :after true)
+                                (merge (hook events "bad" :after true)
+                                       {:before (fn [_] :not-a-map)})])
         result (first-scenario (run-suite [plan]))]
     (is (= :error (:status result)))
-    (is (= :hook/invalid-return (-> result :error :type)))))
+    (is (= :hook/invalid-return (-> result :error :type)))
+    (is (= [[:before "ok"] [:after "ok"]] @events)
+        "sl-7kct: the invalid-returning entry gets NO unwind frame — its own
+         :after never runs even though its :before body fully ran; earlier
+         succeeded frames still unwind")))
+
+(deftest before-npe-message-hints-at-unprovisioned-capabilities
+  ;; sl-7kct: a Before reaching for a capability finds nil (Befores run
+  ;; before provisioning) and NPEs — the bare wrap needed the why.
+  (let [plan (make-plan [(make-bound-step (fn [] nil))]
+                        :hooks [{:name "grabby"
+                                 :before (fn [{:keys [ctx]}]
+                                           ;; :cap/browser.alice does not exist yet
+                                           (.toString ^Object (:cap/browser.alice ctx)))}])
+        result (first-scenario (run-suite [plan]))
+        err (:error result)]
+    (is (= :error (:status result)))
+    (is (= :hook/before-failed (:type err)))
+    (is (= "java.lang.NullPointerException" (:exception-class err)))
+    (is (re-find #"Befores run before capability provisioning" (:message err))
+        "the NPE wrap carries the provisioning-order hint")))
 
 ;; -----------------------------------------------------------------------------
 ;; AC4/AC5 — failure semantics + execution sequence

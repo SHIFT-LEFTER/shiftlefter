@@ -14,8 +14,8 @@
       ;; After macro completes, server should have run
       (is (some? @received-ctx) "Test fn should have been called")
       (is (string? (:base-url @received-ctx)) "base-url should be a string")
-      (is (str/starts-with? (:base-url @received-ctx) "http://localhost:")
-          "base-url should be http://localhost:PORT")
+      (is (str/starts-with? (:base-url @received-ctx) "http://127.0.0.1:")
+          "base-url should be http://127.0.0.1:PORT (loopback-specific, sl-7hb1)")
       (is (integer? (:port @received-ctx)) "port should be an integer")
       (is (pos? (:port @received-ctx)) "port should be positive"))))
 
@@ -24,7 +24,9 @@
     (server/with-fixture-server
       {}
       (fn [{:keys [base-url]}]
-        (let [conn (.openConnection (java.net.URL. base-url))
+        ;; Connection: close on every fixture request (sl-7hb1)
+        (let [conn (doto (.openConnection (java.net.URL. base-url))
+                     (.setRequestProperty "Connection" "close"))
               status (.getResponseCode conn)]
           (is (= 404 status) "Empty config should return 404"))))))
 

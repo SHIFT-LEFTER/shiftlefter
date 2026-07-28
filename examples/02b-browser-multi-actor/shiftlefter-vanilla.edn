@@ -2,10 +2,8 @@
 ;; is accepted; ShiftLefter behaves like a standard Gherkin runner.
 ;; Run with: sl run -c shiftlefter-vanilla.edn --dry-run features/
 ;;
-;; :prefs — see shiftlefter.edn (suppresses Chrome's breach warning for
-;; the demo site's canned password).
+;; Chrome's native password popups are suppressed by the :etaoin adapter's
+;; defaults (see shiftlefter.edn).
 
 {:interfaces {:web {:type :web
-                    :adapter :etaoin
-                    :config {:adapter-opts
-                             {:prefs {"profile.password_manager_leak_detection" false}}}}}}
+                    :adapter :etaoin}}}

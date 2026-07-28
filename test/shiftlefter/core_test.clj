@@ -628,7 +628,7 @@
           stop-server (resolve 'nrepl.server/stop-server)
           default-handler (resolve 'nrepl.server/default-handler)
           cider-mw-vec @(resolve 'cider.nrepl/cider-middleware)
-          handler (apply default-handler cider-mw-vec)
+          handler (apply default-handler (map requiring-resolve cider-mw-vec))
           server (start-server :port 0 :handler handler)
           port (:port server)]
       (try
@@ -650,7 +650,7 @@
           nrepl-connect (resolve 'nrepl.core/connect)
           nrepl-client (resolve 'nrepl.core/client)
           nrepl-message (resolve 'nrepl.core/message)
-          handler (apply default-handler cider-mw-vec)
+          handler (apply default-handler (map requiring-resolve cider-mw-vec))
           server (start-server :port 0 :handler handler)
           port (:port server)]
       (try
@@ -672,7 +672,7 @@
           nrepl-connect (resolve 'nrepl.core/connect)
           nrepl-client (resolve 'nrepl.core/client)
           nrepl-message (resolve 'nrepl.core/message)
-          handler (apply default-handler cider-mw-vec)
+          handler (apply default-handler (map requiring-resolve cider-mw-vec))
           server (start-server :port 0 :handler handler)
           port (:port server)]
       (try

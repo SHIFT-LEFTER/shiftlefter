@@ -820,8 +820,10 @@
           (is (true? (:valid? result)) "literals always pass")))
 
       (testing "QUOTED captures never classify as refs (sl-iseq: quoted =
-                literal, always) — even a quoted intent name or typo"
-        (doseq [object ["'Feed'" "'Feeed'" "'http://h/feed'" "'/feed'"]]
+                literal, always) — even a quoted typo or URL"
+        ;; 'Feed' moved out of this list when sl-s04n added the ref-shaped
+        ;; location-literal warning: still a literal, but no longer silent.
+        (doseq [object ["'Feeed'" "'http://h/feed'" "'/feed'"]]
           (let [result (validate/validate-svo
                         location-glossary test-interfaces
                         {:subject :alice :verb :be :frame :at
@@ -829,6 +831,17 @@
                         {:unknown-object :strict})]
             (is (true? (:valid? result))
                 (str object " is quoted → literal → passes strict")))))
+
+      (testing "Quoted 'Feed' in the region slot gets the sl-s04n warning too
+                (any ref-accepting :location frame, not just navigate)"
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :be :frame :at
+                       :object "'Feed'" :interface :web}
+                      {:unknown-object :strict})
+              issue (first (:issues result))]
+          (is (= :svo/ref-shaped-location-literal (:type issue)))
+          (is (= :warn (:severity issue)))))
 
       (testing "typo'd ref errors WITH a did-you-mean suggestion (AC 4)"
         (let [result (validate/validate-svo
@@ -865,3 +878,90 @@
                         {:unknown-object :strict})]
             (is (true? (:valid? result))
                 (str object " in at-exactly slot must pass (literal-only slot)"))))))))
+
+;; -----------------------------------------------------------------------------
+;; Ref-shaped quoted literal in a :location slot — case 4 of sl-s04n
+;; -----------------------------------------------------------------------------
+
+(deftest ref-shaped-quoted-location-literal-warns
+  (with-location-intents
+    (fn []
+      (testing "Quoted 'Feed' where Feed is a named location -> :warn did-you-mean"
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :navigate :frame :to
+                       :object "'Feed'" :interface :web}
+                      {:unknown-object :strict})
+              issue (first (:issues result))]
+          (is (= :svo/ref-shaped-location-literal (:type issue)))
+          (is (= :warn (:severity issue))
+              "advisory only — must never block")
+          (is (str/includes? (:message issue) "Did you mean Feed (unquoted)?"))))
+
+      (testing "Quoted ref-shape that is NOT a located intent stays silent
+                (asserts nothing about literal runtime semantics — sl-34ec)"
+        (doseq [object ["'ProductCard'" "'Missing'"]]
+          (let [result (validate/validate-svo
+                        location-glossary test-interfaces
+                        {:subject :alice :verb :navigate :frame :to
+                         :object object :interface :web}
+                        {:unknown-object :strict})]
+            (is (true? (:valid? result)) (str object " must stay silent")))))
+
+      (testing "Quoted non-ref-shaped literals stay silent"
+        (doseq [object ["'/feed'" "'http://localhost:9090/feed'" "'about:blank'"]]
+          (let [result (validate/validate-svo
+                        location-glossary test-interfaces
+                        {:subject :alice :verb :navigate :frame :to
+                         :object object :interface :web}
+                        {:unknown-object :strict})]
+            (is (true? (:valid? result)) (str object " must stay silent")))))
+
+      (testing "Behind the enforcement knob: silent at :off (Chair ruling 07-22)"
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :navigate :frame :to
+                       :object "'Feed'" :interface :web}
+                      {:unknown-object :off})]
+          (is (true? (:valid? result))))))))
+
+;; -----------------------------------------------------------------------------
+;; Did-you-mean widened to :no-location errors — case 5 of sl-s04n
+;; -----------------------------------------------------------------------------
+
+(defn- with-near-name-intents
+  "Located Feed + unlocated Feod (edit distance 1), for the widened
+   did-you-mean on :no-location errors."
+  [f]
+  (let [dir (fs/create-temp-dir {:prefix "svo-nearname-"})]
+    (try
+      (spit (fs/file dir "feed.edn")
+            (pr-str {:intent "Feed"
+                     :location {:web {:path "/feed"}}
+                     :elements {:title {:bindings {:web {:css "h1"}}}}}))
+      (spit (fs/file dir "feod.edn")
+            (pr-str {:intent "Feod"
+                     :elements {:x {:bindings {:web {:css ".x"}}}}}))
+      (intent-state/reload-intents! (str dir))
+      (f)
+      (finally
+        (intent-state/clear-intents!)
+        (fs/delete-tree dir)))))
+
+(deftest no-location-error-gets-near-name-suggestion
+  (with-near-name-intents
+    (fn []
+      (testing "Ref to an unlocated intent with a near-name LOCATED intent ->
+                the pinned :no-location message plus a did-you-mean"
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :navigate :frame :to
+                       :object "Feod" :interface :web}
+                      {:unknown-object :strict})
+              issue (first (:issues result))]
+          (is (= :svo/unknown-object (:type issue)))
+          (is (str/includes? (:message issue)
+                             "Intent \"Feod\" declares no :location")
+              "the test-pinned error text is unchanged")
+          (is (= :Feed (:suggestion issue)))
+          (is (str/includes? (:message issue) "Did you mean: :Feed?")))))))

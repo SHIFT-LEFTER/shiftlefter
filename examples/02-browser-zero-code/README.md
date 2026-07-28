@@ -1,6 +1,8 @@
 # Browser Test — Zero Custom Code
 
-Run browser automation tests without writing any Clojure. ShiftLefter includes built-in steps for common web interactions.
+Run browser automation tests without writing any step definitions. ShiftLefter
+includes built-in steps for common web interactions — the feature file below is
+the *entire* test.
 
 > **Mode: Vanilla** — deliberately. There is no `:svo` in the config, so any
 > subject name is accepted and ShiftLefter behaves like a standard Gherkin
@@ -8,9 +10,19 @@ Run browser automation tests without writing any Clojure. ShiftLefter includes b
 > next example, [`02b`](../02b-browser-multi-actor/), adds the glossary and
 > runs Shifted.
 
-> **Network note:** the scenario drives `the-internet.herokuapp.com`, a
-> public demo site — so this example needs internet access. It's kept
-> external on purpose: zero code *and* zero local setup.
+> **Fully offline.** The app under test is ShiftLefter's bundled fixture
+> server — `setup.clj` starts it on `127.0.0.1` before the run and stops it
+> after. No network, no third-party site.
+
+## "Zero code"?
+
+Zero **custom step definitions** — every step below is a built-in. There is
+one small Clojure file here, `setup.clj`, and it's *orchestration*, not test
+code: it starts the app the test drives, using classes already inside the
+ShiftLefter jar (no Clojure toolchain needed). That's the framework's
+run-level orchestration convention — a `setup.clj` next to `shiftlefter.edn`
+is loaded automatically; see `ARCHITECTURE.md` § Test Orchestration and
+example [`04`](../04-sms-2fa/), where you first write one of your own.
 
 ## What You Get
 
@@ -31,39 +43,36 @@ All in plain Gherkin — no step definitions to write.
 Feature: Login page
 
   Scenario: Page loads with expected elements
-    When :user opens the browser to 'https://the-internet.herokuapp.com/login'
-    Then :user should see the title 'The Internet'
+    When :user opens the browser to 'http://127.0.0.1:9094/login'
+    Then :user should see the title 'Login'
     And :user should see {:id "username"}
     And :user should see {:id "password"}
     And :user should see {:css "button[type='submit']"}
 
   Scenario: Successful login
-    When :user opens the browser to 'https://the-internet.herokuapp.com/login'
-    And :user fills {:id "username"} with 'tomsmith'
-    And :user fills {:id "password"} with 'SuperSecretPassword!'
+    When :user opens the browser to 'http://127.0.0.1:9094/login'
+    And :user fills {:id "username"} with 'alice'
+    And :user fills {:id "password"} with 'secret1'
     And :user clicks {:css "button[type='submit']"}
-    Then :user should see 'You logged into a secure area!'
-    And :user should be on '/secure'
+    Then :user should see 'Welcome, alice!'
+    And :user should be on '/dashboard'
 ```
+
+The credentials are seeded by `setup.clj` — the fixture server starts with
+user `alice` / password `secret1` and a login + dashboard page pair.
 
 ## The Config File
 
 ```clojure
 ;; shiftlefter.edn
 {:interfaces {:web {:type :web
-                    :adapter :etaoin
-                    :config {:adapter-opts
-                             {:prefs {"profile.password_manager_leak_detection" false}}}}}}
+                    :adapter :etaoin}}}
 ```
 
-This tells ShiftLefter to auto-provision a Chrome browser when steps need one.
-The `:prefs` line is cosmetic: the demo site's canned password is in public
-breach lists, so without it Chrome shows a native "password found in a data
-breach" warning after login. That warning is harmless to the test — it's
-browser UI, not page content, so WebDriver reads the page underneath it —
-but it's noisy, so the config turns leak detection off for the automation
-profile. (`:adapter-opts` passes options straight through to the backend —
-see `docs/CAPABILITIES.md`.)
+This tells ShiftLefter to auto-provision a Chrome browser when steps need
+one. (The `:etaoin` adapter suppresses Chrome's native password popups by
+default — automation hygiene; override via `:adapter-opts {:prefs {...}}`,
+see `docs/INSTALL-TIERS.md`.)
 
 ## Prerequisites
 
@@ -72,13 +81,15 @@ see `docs/CAPABILITIES.md`.)
   (macOS: `brew install chromedriver`) or pointed at via
   `~/.shiftlefter/config.edn` (`:chromedriver-path`)
 
+Nothing else — no network access needed.
+
 ## Try It
 
 From this directory (release zip installs `sl`; in a checkout of this repo
 substitute `bin/sl`):
 
 ```bash
-# Check that steps bind correctly — no browser opens
+# Check that steps bind correctly — no browser opens, no server starts
 sl run --dry-run features/
 
 # Run the tests (watch Chrome open and fill forms!)

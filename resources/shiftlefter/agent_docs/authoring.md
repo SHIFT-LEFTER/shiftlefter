@@ -14,6 +14,11 @@ Step definitions bind text to code. Prefer steps that describe user intent and
 project vocabulary over implementation detail. Custom steps should match the
 accepted subject, verb, and object language already present in the project.
 
+The step text itself follows one marker grammar — quotes mean literal,
+unquoted Capitalized names mean glossary, `{name}` means a carried value,
+`/…/` means a pattern. The full rule set, slot by slot, with every reserved
+form: `sl agent-doc grammar`.
+
 If a needed subject, verb, object, or intent is missing, report the gap and use
 the bootstrap/reconciliation workflow. Do not make the vocabulary look accepted
 just because a plausible phrase exists.

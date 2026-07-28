@@ -548,11 +548,11 @@
 ;; => true
 
 ;; File-based check with parse validation (Policy B)
-(printer/fmt-check "resources/features/toy-login.feature")
+(printer/roundtrip-check "resources/features/toy-login.feature")
 ;; => {:status :ok, :path "resources/features/toy-login.feature"}
 
 ;; Parse errors block formatting (Policy B enforcement)
-(printer/fmt-check "test/resources/testdata/bad/gpt-tokenizer-stress.feature")
+(printer/roundtrip-check "test/resources/testdata/bad/gpt-tokenizer-stress.feature")
 ;; => {:status :error, :reason :parse-errors, :path "...", :details [...]}
 ;; This file has intentional edge cases (inline tag comments, Rule keyword)
 ;; Token-level roundtrip still works:

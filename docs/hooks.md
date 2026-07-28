@@ -23,7 +23,7 @@ First, the part that is *not* like Cucumber: hooks here are named, not ambient.
 ```gherkin
 @hook=reset-db
 Scenario: Purchase with a fresh account
-  Given alice opens the shop
+  Given alice opens the browser to 'https://shop.example.com'
 ```
 
 A scenario carries `@hook=` tags (inherited from feature/rule/examples level,
@@ -110,8 +110,9 @@ data flow legible rather than ambient:
 - A `:before` returning a map merges it into the scenario context, and the
   report records which keys came from which hook — "where did this value come
   from" stays a mechanical query.
-- A hook can declare `:provides` — the binding names (bare lowerCamel
-  keywords, e.g. `[:sessionToken]`) it seeds into the scenario's
+- A hook can declare `:provides` — the binding names (bare keywords, a
+  letter then letters/digits — lowerCamel by convention, e.g.
+  `[:sessionToken]`) it seeds into the scenario's
   [data plane](across-interfaces.md#passing-a-value-between-interfaces-named-bindings).
   Declared names satisfy the dry run's consumed-without-producer check, so a
   step consuming `{sessionToken}` plans cleanly against a hook-seeded value.
@@ -140,7 +141,9 @@ the result status:
 {:name "failure-screenshot"
  :after (fn [{:keys [ctx result]}]
           (when (= :failed (:status result))
-            ;; capabilities still live here — capture away
+            ;; capabilities are still live here — unless provisioning itself
+            ;; failed, in which case Afters run WITHOUT them: check for the
+            ;; capability you want, don't assume it
             ))}
 ```
 

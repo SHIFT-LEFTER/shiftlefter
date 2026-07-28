@@ -51,10 +51,19 @@
 
 (defn- hook-error
   "EDN-safe hook failure with dual attribution: the hook's name +
-   registration home, and the @hook= tag's file:line (absent for globals)."
+   registration home, and the @hook= tag's file:line (absent for globals).
+
+   An NPE in a :before very likely means the hook body reached for a
+   capability — which cannot exist yet (Befores run before provisioning) —
+   so the message carries that hint (sl-7kct)."
   [entry phase t]
   (cond-> {:type (keyword "hook" (str (name phase) "-failed"))
-           :message (ex-message t)
+           :message (cond-> (ex-message t)
+                      (and (= :before phase)
+                           (instance? NullPointerException t))
+                      (str " (note: Befores run before capability"
+                           " provisioning — :ctx has no live capabilities"
+                           " in a :before)"))
            :exception-class (.getName (class t))
            :hook (:name entry)}
     (:registration entry) (assoc :registration (:registration entry))

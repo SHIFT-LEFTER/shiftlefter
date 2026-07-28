@@ -1,5 +1,6 @@
 (ns shiftlefter.adapters.registry-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [shiftlefter.adapters.registry :as registry]
             [shiftlefter.adapters.etaoin :as etaoin]
             [shiftlefter.adapters.playwright :as playwright]
@@ -128,6 +129,51 @@
           result (registry/cleanup-capability :mock {:browser :fake} mock-registry)]
       (is (= {:ok :closed} result))
       (is (= {:browser :fake} @captured-capability)))))
+
+;; -----------------------------------------------------------------------------
+;; Adapter availability (sl-gcdu)
+;; -----------------------------------------------------------------------------
+
+(def ^:private pinned-playwright-not-bundled-message
+  "The exact user-facing remedy text, byte-pinned (Tower condition on
+   sl-gcdu) so message-template refactors can't drift the two remedies or
+   the sizing clause."
+  (str "Playwright is supported but not bundled (the driver alone is ~163MB)"
+       " — use :etaoin (bundled), or add com.microsoft.playwright/playwright"
+       " {:mvn/version \"1.50.0\"} to your deps.edn"))
+
+(deftest test-playwright-declares-not-bundled-data
+  (testing ":playwright carries the not-bundled registry keys"
+    (let [pw (:playwright registry/default-registry)]
+      (is (= "com.microsoft.playwright.Playwright" (:requires-class pw)))
+      (is (str/includes? (:requires-dep pw) "com.microsoft.playwright/playwright"))))
+  (testing "bundled adapters declare no :requires-class"
+    (is (nil? (:requires-class (:etaoin registry/default-registry))))
+    (is (nil? (:requires-class (:sms-mock registry/default-registry))))
+    (is (nil? (:requires-class (:sms-twilio registry/default-registry))))))
+
+(deftest test-adapter-unavailable-error-when-dep-absent
+  ;; The unit-test classpath always has Playwright, so absence is simulated
+  ;; by stubbing the probe — the only seam that can exercise this path.
+  (with-redefs [registry/class-available? (constantly false)]
+    (let [err (registry/adapter-unavailable-error :web :playwright)]
+      (is (= :config/adapter-not-bundled (:type err)))
+      (is (= pinned-playwright-not-bundled-message (:message err)))
+      (is (= {:interface :web
+              :adapter :playwright
+              :requires-class "com.microsoft.playwright.Playwright"}
+             (:data err))))))
+
+(deftest test-adapter-unavailable-error-nil-cases
+  (testing "bundled adapters: nil even when the probe reports absent"
+    (with-redefs [registry/class-available? (constantly false)]
+      (is (nil? (registry/adapter-unavailable-error :web :etaoin)))
+      (is (nil? (registry/adapter-unavailable-error :sms :sms-mock)))))
+  (testing "unknown adapter: nil — availability is not an existence check"
+    (is (nil? (registry/adapter-unavailable-error :web :no-such-adapter))))
+  (testing "no false positive: playwright IS on the test classpath (AC2)"
+    (is (true? (registry/class-available? "com.microsoft.playwright.Playwright")))
+    (is (nil? (registry/adapter-unavailable-error :web :playwright)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Task 3.0.8 Acceptance Criteria

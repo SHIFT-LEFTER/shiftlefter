@@ -1,0 +1,169 @@
+;; Canonical test data for the ratified grammar-markers table (sl-2sj6).
+;;
+;; Provenance: _docs/wiki/decisions/grammar-markers.md (the LAW, ratified
+;; by Chair 2026-07-21/22) — the :text and :key slot sections (sl-2sj6),
+;; the matcher-slot roles (sl-gwru), the element/value slot sections with
+;; their no-match hint rows (sl-s04n), and the location-slot section
+;; (completed by sl-34ec once its rows went RAT — the table's machine twin
+;; now mirrors every section).
+;; This EDN is the canonical fixture tests run on (deterministic on
+;; every checkout, CI included); grammar_table_test's wiki-sync drift test
+;; compares it against the wiki file when _docs resolves and self-skips
+;; when it doesn't (bare CI checkout). Update BOTH when the law changes.
+;;
+;; :example/:status mirror the wiki table cells (backticks stripped).
+;; :case keys the behavioral assertion in grammar_table_test.
+
+{:source "_docs/wiki/decisions/grammar-markers.md"
+ :sections
+ {:element-slot
+  {:wiki-heading "Element slot"
+   :rows
+   [{:example "fills Login.code with '123456'"
+     :status "RAT" :case :ref-resolves
+     :step-text ":alice fills Login.code with '123456'"}
+    {:example "fills Login.cdoe with 'x'"
+     :status "RAT" :case :typo-ref-matches
+     :step-text ":alice fills Login.cdoe with 'x'"}
+    {:example "fills 'Login.code' with 'x'"
+     :status "RAT (surface confirmed 2026-07-22: undefined-step diagnostic; hints = sl-s04n); hints landed sl-s04n"
+     :case :quoted-ref-hint
+     :step-text ":alice fills 'Login.code' with 'x'"
+     :repaired ":alice fills Login.code with 'x'"}]}
+
+  :value-slot
+  {:wiki-heading "Value slot"
+   :rows
+   [{:example "fills Login.code with {code}"
+     :status "RAT" :case :value-token
+     :step-text ":alice fills Login.code with {code}"}
+    {:example "(no producer)"
+     :status "RAT" :case :token-no-producer
+     :step-text ":alice fills Login.code with {code}"}
+    {:example "fills Login.code with '{code}'"
+     :status "RAT" :case :quoted-token-literal
+     :step-text ":alice fills Login.code with '{code}'"
+     :normalized "{code}"}
+    {:example "fills Login.code with 'say \"hi\"'"
+     :status "RAT" :case :double-quote-inside-literal
+     :step-text ":alice fills Login.code with 'say \"hi\"'"
+     :normalized "say \"hi\""}
+    {:example "fills Login.code with \"x\""
+     :status "RAT" :case :double-quotes-hint
+     :step-text ":alice fills Login.code with \"x\""
+     :repaired ":alice fills Login.code with 'x'"}
+    {:example "fills Login.code with 'x"
+     :status "RAT" :case :unbalanced-quote-hint
+     :step-text ":alice fills Login.code with 'x"
+     :repaired ":alice fills Login.code with 'x'"}
+    {:example "fills Login.code with ''"
+     :status "RAT; hint points at clears (sl-s04n)" :case :empty-literal
+     :step-text ":alice fills Login.code with ''"}
+    {:example "… with {order-number}"
+     :status "RAT" :case :hyphen-token
+     :step-text ":alice fills Login.code with {order-number}"}
+    {:example "… with {OrderNumber}"
+     :status "RAT" :case :uppercase-token
+     :step-text ":alice fills Login.code with {OrderNumber}"}
+    {:example "… with Welcome"
+     :status "RAT" :case :bare-value-reserved
+     :step-text ":alice fills Login.code with Welcome"}]}
+
+  :location-slot
+  {:wiki-heading "Location slots"
+   :rows
+   [{:example "opens the browser to Login"
+     :status "RAT" :case :named-ref-navigate
+     :step-text ":alice opens the browser to Login"}
+    {:example "should be on Widget (intent exists, no :location)"
+     :status "RAT" :case :no-location-ref
+     :step-text ":alice should be on Widget"}
+    {:example "opens the browser to '/login'"
+     :status "RAT (A5, landed sl-34ec)" :case :nav-root-relative
+     :step-text ":alice opens the browser to '/login'"
+     :literal "/login"
+     :resolved "http://h:9092/login"}
+    {:example "opens the browser to 'Login'"
+     :status "RAT (A5, landed sl-34ec)" :case :nav-bare-word-literal
+     :step-text ":alice opens the browser to 'Login'"
+     :literal "Login"
+     :resolved "http://h:9092/Login"}
+    {:example "opens the browser to {resetLink}"
+     :status "RAT" :case :nav-token
+     :step-text ":alice opens the browser to {resetLink}"}
+    {:example "should be on Feed / should be on exactly Dashboard.home"
+     :status "RAT" :case :region-ref-exactly-reserved
+     :step-text ":alice should be on Feed"
+     :reserved-text ":alice should be on exactly Dashboard.home"}
+    {:example "should be on exactly '{myUrl}'"
+     :status "RAT" :case :exactly-quoted-token
+     :step-text ":alice should be on exactly '{myUrl}'"}
+    {:example "should be on exactly 'Login'"
+     :status "RAT (amended A5; was unconditional :not-a-full-url)"
+     :case :exactly-bare-word
+     :step-text ":alice should be on exactly 'Login'"
+     :literal "Login"
+     :resolved "http://h:9092/Login"}]}
+
+  :text-slot
+  {:wiki-heading "Text slot"
+   :rows
+   [{:example "should see title 'Welcome'"
+     :status "RAT" :case :quoted-literal
+     :step-text ":alice should see the title 'Welcome'"
+     :normalized "Welcome"}
+    {:example "should see title 'Dashboard.home'"
+     :status "RAT" :case :ref-shaped-literal
+     :step-text ":alice should see the title 'Dashboard.home'"
+     :normalized "Dashboard.home"}
+    {:example "should see title {orderNumber}"
+     :status "RAT" :case :token
+     :step-text ":alice should see the title {orderNumber}"}
+    {:example "should see title Welcome"
+     :status "RAT" :case :bare-reserved
+     :step-text ":alice should see the title Welcome"}]}
+  :matcher-slot
+  {:wiki-heading "Matcher slot"
+   :rows
+   [{:example "captures El matching /Order (?<orderNumber>[A-Z0-9-]+)/"
+     :status "RAT" :case :capture-named-binds
+     :step-text ":alice captures {:id \"order\"} matching /Order (?<orderNumber>[A-Z0-9-]+)/"}
+    {:example "captures El matching /Order [A-Z0-9-]+/ (all-unnamed)"
+     :status "RAT" :case :capture-all-unnamed-error
+     :step-text ":alice captures {:id \"order\"} matching /Order ([A-Z0-9-]+)/"}
+    {:example "should see El matching /Order [A-Z0-9-]+/"
+     :status "RAT" :case :assert-only-silent
+     :step-text ":alice should see {:id \"order\"} matching /Order ([A-Z0-9-]+)/"}
+    {:example "should see El matching /(?<code>\\d+)/"
+     :status "RAT" :case :assert-only-named-error
+     :step-text ":alice should see {:id \"order\"} matching /(?<code>\\d+)/"}
+    {:example "receives … matching /code (\\d+)/ (SMS, all-unnamed)"
+     :status "RAT" :case :receives-unnamed-notice
+     :step-text ":alice receives an SMS to '+15550001111' matching /code (\\d+)/"}
+    {:example "… matching /code (?<c>\\d+) was {prev}/"
+     :status "RAT" :case :embedded-token-consumes
+     :step-text ":alice captures {:id \"m\"} matching /code (?<c>\\d+) was {prev}/"}
+    {:example "… matching /Order (?<c>[/"
+     :status "RAT" :case :malformed-pattern-error
+     :step-text ":alice captures {:id \"m\"} matching /Order (?<c>[/"}]}
+
+  :key-slot
+  {:wiki-heading "Key slot"
+   :rows
+   [{:example "presses Enter"
+     :status "RAT" :case :w3c-name
+     :step-text ":alice presses Enter"}
+    {:example "presses Entr"
+     :status "RAT" :case :typo
+     :step-text ":alice presses Entr"
+     :suggestion :Enter}
+    {:example "presses 'g'"
+     :status "RAT" :case :quoted-single
+     :step-text ":alice presses 'g'"
+     :key-sent "g"}
+    {:example "presses 'abc'"
+     :status "RAT" :case :quoted-multi
+     :step-text ":alice presses 'abc'"}
+    {:example "Cmd+A sequences/chords"
+     :status "RAT (park)" :case :chords-parked
+     :step-text ":alice presses Cmd+A"}]}}}

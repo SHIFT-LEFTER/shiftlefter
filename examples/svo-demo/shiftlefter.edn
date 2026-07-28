@@ -14,12 +14,13 @@
  :runner {:step-paths ["src/stepdefs/"]
           :allow-pending? true}
 
- ;; Glossary configuration
- ;; - subjects: path to subject glossary
- ;; - verbs: map of interface-type -> verb glossary path
+ ;; Glossary configuration (canonical layout: glossary/ at the project root —
+ ;; same convention as examples 04-06 and docs)
+ ;; - subjects: path to subject glossary (glossary/subjects.edn)
+ ;; - verbs: map of interface-type -> verb glossary path (glossary/verbs/<iface>.edn)
  ;; Project glossaries extend (don't replace) framework defaults
- :glossaries {:subjects "config/glossaries/subjects.edn"
-              :verbs {:web "config/glossaries/verbs-web.edn"}}
+ :glossaries {:subjects "glossary/subjects.edn"
+              :verbs {:web "glossary/verbs/web.edn"}}
 
  ;; Interface definitions
  ;; Each interface NAME maps to:

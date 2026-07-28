@@ -133,7 +133,7 @@
 ;;
 ;; 1. SUBJECT VALIDATION
 ;;    Subjects like "Alice", "Bob", "Admin", "Guest" are validated against
-;;    config/glossaries/subjects.edn. Typos like "Alcie" will be caught.
+;;    glossary/subjects.edn. Typos like "Alcie" will be caught.
 ;;
 ;; 2. VERB VALIDATION
 ;;    Verbs like :fill, :click, :see are validated against the verb glossary

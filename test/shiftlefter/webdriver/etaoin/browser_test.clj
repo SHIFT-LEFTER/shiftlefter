@@ -35,6 +35,32 @@
       (is (satisfies? bp/IBrowser browser)))))
 
 ;; -----------------------------------------------------------------------------
+;; script-result->handles (sl-kee) — the outbound element-key unwrap
+;; -----------------------------------------------------------------------------
+;;
+;; The literal W3C keyword is hardcoded here ON PURPOSE: a typo in the
+;; namespace's private constant must fail these tests, not silently unwrap
+;; nothing against a live browser.
+
+(deftest script-result->handles-unwraps
+  (testing "each script-returned element becomes a {:el id} handle"
+    (is (= [{:el "e-1"} {:el "e-2"}]
+           (browser/script-result->handles
+            [{:element-6066-11e4-a52e-4f735466cecf "e-1"}
+             {:element-6066-11e4-a52e-4f735466cecf "e-2" :other "noise"}]))))
+  (testing "empty script result -> empty vector"
+    (is (= [] (browser/script-result->handles [])))))
+
+(deftest script-result->handles-rejects-non-elements
+  (testing "an entry with no element key is a loud structured error"
+    (let [e (try (browser/script-result->handles [{:foo 1}])
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (some? e))
+      (is (= :webdriver/not-an-element (:type (ex-data e))))
+      (is (some? (:entry (ex-data e)))))))
+
+;; -----------------------------------------------------------------------------
 ;; query-all + handle round-trip (live; SHIFTLEFTER_LIVE_CHROME=1)
 ;; -----------------------------------------------------------------------------
 ;;

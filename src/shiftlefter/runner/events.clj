@@ -142,7 +142,8 @@
       ;; Dispatch loop: runs until sub-chan closes AND its buffer is empty,
       ;; then reports itself drained — bus-close! awaits this, so events the
       ;; bus accepted are handled before close returns (sl-q9wp fit-pass;
-      ;; the sl-4tsi drop-at-close fix).
+      ;; the drop-at-close HALF of sl-4tsi — the lifecycle half, close
+      ;; hoisted to the suite finally, landed separately).
       (go-loop []
         (if-let [event (<! sub-chan)]
           (do
@@ -173,8 +174,8 @@
     ;; and this counter says so.
     (let [dropped (.get dropped-counter)]
       (when (pos? dropped)
-        (log/warn (str dropped " observe-plane event(s) dropped (bus full);"
-                       " results unaffected"))))
+        (log/warn (str dropped " observe-plane event(s) dropped (bus full or"
+                       " closed); results unaffected"))))
     ;; DRAIN, don't destroy (sl-q9wp fit-pass; kills the sl-4tsi close race):
     ;; close ONLY the input channel and let core.async finish the job — the
     ;; mult distributes its remaining buffer to the taps and then closes
@@ -219,7 +220,14 @@
    Uses core.async mult/tap for efficient fan-out.
 
    Input buffer is 1024 (sl-q9wp: 256 -> 1024, absorbs parallel-emit
-   bursts); when even that is full, publish! drops and counts (R5)."
+   bursts); when even that is full, publish! drops and counts (R5).
+
+   Lifetime (sl-4tsi): one bus per runner invocation, created by `execute!`
+   and closed once in its suite-level finally — on every exit path. Under
+   setup.clj orchestration each group is its own run-scope (Tower R1) and
+   emits its OWN :test-run/started/:test-run/finished pair, so a multi-group
+   run carries N pairs on this one bus in total :seq order. Subscribers must
+   key run boundaries on those pairs, never on bus open/close."
   []
   (let [input-chan (chan 1024)
         mult-ref (atom (mult input-chan))]

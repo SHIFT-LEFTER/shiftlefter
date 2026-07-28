@@ -14,7 +14,7 @@
 (defn- start-feed
   [_config]
   (let [handler (fh/build-handler {:pages [:feed]})
-        stop!   (http/run-server handler {:port port})]
+        stop!   (http/run-server handler {:ip "127.0.0.1" :port port})]
     {:stop (fn [] (stop! :timeout 100))}))
 
 (def setups

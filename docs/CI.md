@@ -2,8 +2,8 @@
 
 Wire `sl run` into a CI pipeline: JUnit XML into your CI's test widget,
 tag-filtered subsets for merge-request pipelines, and exit codes designed for
-gating. Everything on this page is Tier A — a Java 11+ image and the `sl` CLI,
-no Clojure toolchain (see [What can I do?](CAPABILITIES.md)).
+gating. Everything on this page is Tier A — a Java 21+ image and the `sl` CLI,
+no Clojure toolchain (see [What can I do?](INSTALL-TIERS.md)).
 
 The worked examples target GitLab CI and GitHub Actions, but the pieces —
 install, run, collect the report, gate on the exit code — translate to any CI
@@ -34,9 +34,41 @@ Canonical table for all commands: [README → Return Codes](../README.md#return-
 Background on the no-file decision and the JUnit format itself:
 [ERRATA E009](../ERRATA.md#e009-junit-xml-has-no-official-spec--we-target-the-consumer-subset).
 
+## The run results directory
+
+Every executing run in a configured project creates a standing output home:
+
+```text
+<config-root>/results/<stamp>/     # sl/results/… under the sl/ layout
+```
+
+- **`<stamp>`** is the run's start time (UTC), compacted filesystem-safe:
+  `20260712T153042Z` — no colons, Windows-safe, sortable. Two runs in the
+  same second: the second gets a short run-id suffix
+  (`20260712T153042Z-a1b2c3d4`).
+- **One directory per `sl run` invocation** — with a `setup.clj` declaring
+  multiple groups, all groups share the invocation's directory.
+- **Gitignored by itself**: the framework writes `results/.gitignore`
+  containing `*` when it first creates the directory, so run outputs never
+  show up in `git status` — repo hygiene, no `.gitignore` edits needed on
+  your side.
+- Runs without a `shiftlefter.edn` (ad-hoc `sl run some.feature`) create
+  nothing — the convention is a project convention. Dry runs and planning
+  failures (exit 2) create nothing either.
+
+Today the directory is created empty — it is the standing home that
+attachments (screenshots, console captures) and future run artifacts land
+in. `--junit-xml` and `--html` are unchanged: they write exactly where you
+point them. Whether their *defaults* later move into the run directory is
+an open question, deliberately not decided here.
+
+In CI, jobs usually archive the files you pointed `--junit-xml`/`--html`
+at; the results directory matters once attachment capture exists — archive
+the whole `results/<stamp>/` directory then.
+
 ## Picking an image
 
-Any image with **Java 11 or later** runs ShiftLefter — a JRE is enough, e.g.
+Any image with **Java 21 or later** runs ShiftLefter — a JRE is enough, e.g.
 `eclipse-temurin:21-jre`. Two caveats:
 
 - The installer script needs `curl` and `unzip`. Slim JRE images often ship
@@ -51,7 +83,7 @@ The installer drops a runnable `sl` + jar into `./sl/`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh \
-  | bash -s -- --version 0.5.1 --no-breadcrumb
+  | bash -s -- --version 0.5.3 --no-breadcrumb
 ```
 
 - **Pin `--version`** to the release your team is on, so CI doesn't silently
@@ -75,12 +107,12 @@ image: eclipse-temurin:21-jre
 stages: [test]
 
 cache:
-  key: "sl-0.5.1"
+  key: "sl-0.5.3"
   paths: [sl/]
 
 .install-sl: &install-sl
   - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl unzip
-  - '[ -x sl/sl ] || curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash -s -- --version 0.5.1 --no-breadcrumb'
+  - '[ -x sl/sl ] || curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash -s -- --version 0.5.3 --no-breadcrumb'
 
 smoke:
   stage: test
@@ -150,7 +182,7 @@ jobs:
       - name: Install sl
         run: |
           curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh \
-            | bash -s -- --version 0.5.1 --no-breadcrumb
+            | bash -s -- --version 0.5.3 --no-breadcrumb
       - name: Run features
         # PRs run the @smoke subset; main runs everything.
         run: |
@@ -224,7 +256,7 @@ Built-in browser steps work in CI with three additions to the basic job:
 
 For the Playwright backend, add the dependency and let it fetch its own
 browsers — see
-[Browser Backend Configuration](CAPABILITIES.md#browser-backend-configuration).
+[Browser Backend Configuration](INSTALL-TIERS.md#browser-backend-configuration).
 
 ## Cheap early gates: formatting and dry-run
 

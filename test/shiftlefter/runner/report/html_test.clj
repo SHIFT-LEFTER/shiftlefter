@@ -367,7 +367,15 @@
                 {:actual status :exception-class ex-class})
       :error (when-not (and (= :failed status)
                             (= "clojure.lang.ExceptionInfo" ex-class))
-               {:actual status :exception-class ex-class}))))
+               {:actual status :exception-class ex-class})
+      ;; a lifecycle hook threw (sl-esq/sl-9009): scenario-level :error with
+      ;; hook attribution, no failed step (the corpus after-throw case)
+      :hook-error (when-not (and (= :error status)
+                                 (nil? failing)
+                                 (= :hook/after-failed
+                                    (get-in env [:error :type])))
+                    {:actual status
+                     :error-type (get-in env [:error :type])}))))
 
 (deftest corpus-island-vs-manifest
   (let [{:keys [manifest html-file result]}
@@ -393,15 +401,36 @@
               :let [env (get by-name (:name entry))]]
         (is (>= (:duration-ms env) (:duration-floor-ms entry))
             (pr-str (:name entry)))))
+    (testing "description prose rides the island (sl-v85e — the sl-9009
+              head start: 10_hooks.feature planted feature+scenario prose
+              precisely so this pins the real corpus text)"
+      (let [hook-env (some #(when (= "10_hooks.feature"
+                                     (-> % :plan :plan/pickle :pickle/source-file
+                                         (str/split #"/") last))
+                              %)
+                           envs)
+            pickle (-> hook-env :plan :plan/pickle)]
+        (is (some? hook-env) "a 10_hooks scenario is in the island")
+        (is (str/includes? (or (:pickle/feature-description pickle) "")
+                           "Scenarios name their lifecycle hooks with @hook= value-tags"))
+        (is (some #(str/includes?
+                    (or (-> % :plan :plan/pickle :pickle/description) "")
+                    "A named Before seeds a value into the scenario data plane")
+                  envs)
+            "the hooked scenario's own prose is present")))
     (testing "island summary counts consistent with the manifest"
       (let [by-status (frequencies (map :expected-status entries))
             expected {:passed (get by-status :passed 0)
                       :failed (+ (get by-status :failed 0)
                                  (get by-status :error 0))
                       :pending (get by-status :pending 0)
-                      :skipped 0}]
+                      :skipped 0
+                      ;; hook threw (sl-esq/sl-9009) — present in the corpus,
+                      ;; so assert it rather than excluding it
+                      :error (get by-status :hook-error 0)}]
         (is (= expected (select-keys (-> island :summary :counts)
-                                     [:passed :failed :pending :skipped])))))
+                                     [:passed :failed :pending :skipped
+                                      :error])))))
     (testing "island run-ctx is the enriched ctx (DP1)"
       (let [ctx (:run-ctx island)]
         (is (string? (:version ctx)))

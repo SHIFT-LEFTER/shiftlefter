@@ -36,6 +36,7 @@
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [shiftlefter.svo.glossary :as glossary]
+            [shiftlefter.svo.keys :as keys]
             [shiftlefter.intent.resolve :as intent-resolve]
             [shiftlefter.intent.state :as intent-state]))
 
@@ -46,9 +47,13 @@
 (s/def ::type #{:svo/missing-subject :svo/unknown-subject :svo/unknown-verb
                 :svo/unknown-interface :svo/provisioning-failed
                 :svo/unknown-object :svo/raw-locator-disallowed
+                ;; :key slots (sl-2sj6) — framework-owned closed set
+                :svo/unknown-key :svo/invalid-key-literal
                 ;; Scenario data plane (sl-yh7) — ride the same issue channel
                 :bindings/consumed-without-producer :bindings/invalid-pattern
-                :bindings/unnamed-only-groups :bindings/produced-never-consumed})
+                :bindings/unnamed-only-groups :bindings/produced-never-consumed
+                ;; sl-gwru: producer marker in the assert-only matcher frame
+                :bindings/named-groups-in-assert-only})
 (s/def ::subject keyword?)
 (s/def ::verb keyword?)
 (s/def ::interface keyword?)
@@ -201,6 +206,85 @@
    (when (and interface-type verb frame)
      (get-in glossary [:verbs interface-type verb :frames frame :location-refs?]))))
 
+(defn- quoted-capture?
+  "True when the capture is a quoted literal ('…') — captured WITH its
+   quotes (sl-yh7 capture-with-quotes; the exec seam strips them)."
+  [s]
+  (and (string? s)
+       (>= (count s) 2)
+       (str/starts-with? s "'")
+       (str/ends-with? s "'")))
+
+(defn- validate-key-object
+  "Validate a :key-slot object (sl-2sj6). ALWAYS-ON — no leniency knob.
+
+   The :unknown-object knob exists for PROJECT-owned vocabulary: while an
+   app is being built, an unresolved intent ref may be tomorrow's glossary
+   entry, so leniency has a purpose. The key set is FRAMEWORK-owned and
+   closed — there is no world in which `Entr` becomes valid by editing a
+   project — so unconditional error is the only honest behavior (same
+   rationale as malformed-matcher errors; Chair ruling, sl-2sj6).
+   Framework-owned closed sets → always-on; project-owned vocabulary →
+   knobbed. Issues carry :severity :error directly for the same reason.
+
+   Quoted single char = press that character (the shortcut case). Quoted
+   multi-char = plan error pointing at fills (text entry is not a
+   key-press). Unquoted = must be in the closed W3C set, did-you-mean on
+   miss."
+  [object-str]
+  (if (quoted-capture? object-str)
+    (when (not= 3 (count object-str))
+      {:type :svo/invalid-key-literal
+       :object object-str
+       :severity :error
+       :message (str "presses takes a single key, not text: " object-str
+                     " — to enter text, use fills (S fills O with '…')")})
+    (when-not (keys/known-key? object-str)
+      (let [suggestion (suggest-similar (keyword object-str)
+                                        (map keyword keys/key-names) 2)]
+        (cond-> {:type :svo/unknown-key
+                 :object object-str
+                 :known (mapv keyword keys/key-names)
+                 :severity :error
+                 :message (cond-> (str "Unknown key name: " object-str
+                                       ". Key names are W3C KeyboardEvent.key values"
+                                       " (Enter, Tab, ArrowUp, …); single characters"
+                                       " must be quoted ('g')")
+                            suggestion (str ". Did you mean: " (name suggestion) "?"))}
+          suggestion (assoc :suggestion suggestion))))))
+
+(defn- ref-shaped-location-literal
+  "Case-4 warning of the sl-s04n hint family: a QUOTED capture in a
+   ref-accepting :location slot whose interior provably names a located
+   intent — the author almost certainly meant the named location, unquoted.
+
+   Deliberately silent unless the interior resolves: quoted = literal,
+   always, and what a location literal DOES at runtime is sl-34ec's ruling —
+   this warning asserts nothing about literal semantics, it only flags the
+   provable authored-a-ref-in-quotes case. Sits behind the enforcement knob
+   with its :location-slot siblings (Chair ruling 07-22: project-owned
+   vocabulary is knobbed; :off is an explicit decline of ref-resolution
+   services). Carries :severity :warn directly — never blocks.
+
+   Returns a :warn issue map or nil."
+  [object-str interface]
+  (let [interior (subs object-str 1 (dec (count object-str)))]
+    (when (intent-resolve/location-ref? interior)
+      (try
+        (let [intents (intent-state/get-intents)]
+          (when (nil? (intent-resolve/validate-location-static
+                       intents interior interface))
+            {:type :svo/ref-shaped-location-literal
+             :object object-str
+             :interface interface
+             :severity :warn
+             :message (str "'" interior "' is a quoted literal, but " interior
+                           " is a named location. Did you mean " interior
+                           " (unquoted)?")}))
+        (catch Exception _
+          ;; If intents not loaded yet, skip the warning
+          nil)))))
+
 (defn- validate-object
   "Validate object (locator) against intent glossary.
 
@@ -218,69 +302,95 @@
    quoted = literal, always (sl-iseq). Frames without :location-refs?
    (the exactly assertion) keep the skip-everything behavior.
 
+   :text slots (sl-2sj6) are content-only — quoted literal or {binding}
+   token, admitted by the stepdef pattern; nothing here to validate (token
+   plumbing is the bindings lint's job). :key slots validate against the
+   framework-owned closed set UNCONDITIONALLY — see validate-key-object.
+
    Returns issue map or nil if valid."
   [object-str interface enforcement kind location-refs?]
-  (when (and object-str (string? object-str)
-             (not= enforcement :off))
-    (if (= kind :location)
-      ;; :location slot — literals always pass; bare-name refs validate only
-      ;; on ref-accepting frames.
-      (when (and location-refs? (intent-resolve/location-ref? object-str))
-        (try
-          (let [intents (intent-state/get-intents)
-                loc-error (intent-resolve/validate-location-static
-                           intents object-str interface)]
-            (when loc-error
-              ;; Did-you-mean (sl-q81m): suggest the nearest LOCATED intent —
-              ;; suggesting an unlocated one would just be a second error.
-              (let [suggestion (when (= :unknown-intent (:type loc-error))
-                                 (suggest-similar
-                                  (keyword object-str)
-                                  (map keyword (intent-resolve/located-intents
-                                                intents interface))
-                                  2))]
-                (cond-> {:type :svo/unknown-object
-                         :object object-str
-                         :interface interface
-                         :message (cond-> (:message loc-error)
-                                    suggestion
-                                    (str ". Did you mean: " suggestion "?"))}
-                  suggestion (assoc :suggestion suggestion)))))
-          (catch Exception _
-            ;; If intents not loaded yet, skip validation
-            nil)))
-      (cond
-        ;; Raw locator check (strict mode only)
-        (and (= enforcement :strict) (raw-locator? object-str))
-        {:type :svo/raw-locator-disallowed
-         :object object-str
-         :message "Raw locators are not allowed in strict mode. Use intent references instead."}
+  (when (and object-str (string? object-str))
+    (cond
+      ;; :text — content-only slot, nothing to validate statically.
+      (= kind :text)
+      nil
 
-        ;; Intent reference check — supports flat AND nested (multi-segment) refs.
-        (not (raw-locator? object-str))
-        (let [parse-result (intent-resolve/parse-intent-ref object-str)]
-          (if (:error parse-result)
-            ;; Invalid intent reference syntax
-            {:type :svo/unknown-object
-             :object object-str
-             :message (-> parse-result :error :message)}
-            ;; Valid syntax — statically walk the path against the schema (no browser):
-            ;; intent known -> each non-last name is a collection -> last is a
-            ;; collection or an element with a binding for this interface.
-            (try
-              (let [intents (intent-state/get-intents)
-                    path-error (intent-resolve/validate-path-static
-                                intents (:ok parse-result) interface)]
-                (when path-error
-                  {:type :svo/unknown-object
-                   :object object-str
-                   :interface interface
-                   :message (:message path-error)}))
-              (catch Exception _
-                ;; If intents not loaded yet, skip validation
-                nil))))
+      ;; :key — framework-owned closed set, always-on (no enforcement gate).
+      (= kind :key)
+      (validate-key-object object-str)
 
-        :else nil))))
+      (= enforcement :off)
+      nil
+
+      ;; :location slot — literals pass (but see the ref-shaped-literal warn
+      ;; below); bare-name refs validate only on ref-accepting frames.
+      (= kind :location)
+      (when location-refs?
+        (cond
+          (intent-resolve/location-ref? object-str)
+          (try
+            (let [intents (intent-state/get-intents)
+                  loc-error (intent-resolve/validate-location-static
+                             intents object-str interface)]
+              (when loc-error
+                ;; Did-you-mean (sl-q81m): suggest the nearest LOCATED intent —
+                ;; suggesting an unlocated one would just be a second error.
+                ;; Fires for all three static location error types (sl-s04n
+                ;; widened it from :unknown-intent only): a near-name located
+                ;; intent is the likely fix for :no-location* too.
+                (let [suggestion (when (#{:unknown-intent :no-location
+                                          :no-location-for-interface}
+                                        (:type loc-error))
+                                   (suggest-similar
+                                    (keyword object-str)
+                                    (map keyword (intent-resolve/located-intents
+                                                  intents interface))
+                                    2))]
+                  (cond-> {:type :svo/unknown-object
+                           :object object-str
+                           :interface interface
+                           :message (cond-> (:message loc-error)
+                                      suggestion
+                                      (str ". Did you mean: " suggestion "?"))}
+                    suggestion (assoc :suggestion suggestion)))))
+            (catch Exception _
+              ;; If intents not loaded yet, skip validation
+              nil))
+
+          (quoted-capture? object-str)
+          (ref-shaped-location-literal object-str interface)))
+
+      ;; Raw locator check (strict mode only)
+      (and (= enforcement :strict) (raw-locator? object-str))
+      {:type :svo/raw-locator-disallowed
+       :object object-str
+       :message "Raw locators are not allowed in strict mode. Use intent references instead."}
+
+      ;; Intent reference check — supports flat AND nested (multi-segment) refs.
+      (not (raw-locator? object-str))
+      (let [parse-result (intent-resolve/parse-intent-ref object-str)]
+        (if (:error parse-result)
+          ;; Invalid intent reference syntax
+          {:type :svo/unknown-object
+           :object object-str
+           :message (-> parse-result :error :message)}
+          ;; Valid syntax — statically walk the path against the schema (no browser):
+          ;; intent known -> each non-last name is a collection -> last is a
+          ;; collection or an element with a binding for this interface.
+          (try
+            (let [intents (intent-state/get-intents)
+                  path-error (intent-resolve/validate-path-static
+                              intents (:ok parse-result) interface)]
+              (when path-error
+                {:type :svo/unknown-object
+                 :object object-str
+                 :interface interface
+                 :message (:message path-error)}))
+            (catch Exception _
+              ;; If intents not loaded yet, skip validation
+              nil))))
+
+      :else nil)))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API
@@ -306,6 +416,10 @@
    - :svo/unknown-interface — interface not defined in config
    - :svo/unknown-object — intent reference not found
    - :svo/raw-locator-disallowed — raw locator used in strict mode
+   - :svo/unknown-key — :key-slot name outside the closed W3C set
+     (always-on, carries :severity :error — sl-2sj6)
+   - :svo/invalid-key-literal — quoted multi-char in a :key slot
+     (always-on, carries :severity :error — sl-2sj6)
 
    Each issue includes :known (alternatives) and :suggestion (typo fix)."
   ([glossary interfaces svo]
@@ -667,6 +781,17 @@
          (when step-text (str " in step \"" step-text "\""))
          (when (and uri line) (str "\n       at " uri ":" line)))))
 
+(defn format-message-only
+  "Format an issue whose detail is fully carried in :message (the key-slot
+   family and the ref-shaped location-literal warning) — message plus
+   step/location suffix in the house style."
+  [issue]
+  (let [{:keys [message location]} issue
+        {:keys [step-text uri line]} location]
+    (str message
+         (when step-text (str "\n       in step \"" step-text "\""))
+         (when (and uri line) (str "\n       at " uri ":" line)))))
+
 (defn format-svo-issue
   "Format any SVO issue by dispatching on :type.
 
@@ -689,6 +814,9 @@
     :svo/provisioning-failed (format-provisioning-failed issue)
     :svo/unknown-object (format-unknown-object issue)
     :svo/raw-locator-disallowed (format-raw-locator-disallowed issue)
+    :svo/ref-shaped-location-literal (format-message-only issue)
+    :svo/invalid-key-literal (format-message-only issue)
+    :svo/unknown-key (format-message-only issue)
     :bindings/consumed-without-producer (format-consumed-without-producer issue)
     :bindings/invalid-pattern (format-bindings-invalid-pattern issue)
     :bindings/unnamed-only-groups (format-unnamed-only-groups issue)

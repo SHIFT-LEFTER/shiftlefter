@@ -94,8 +94,22 @@
   ;; sl-27uh: keywords/symbols whose NAMES may not survive pr-str/read-string.
   ;; sl-48n6's original generators never produced these — the exact blind spot
   ;; behind its "no gaps found in edn-safe?" claim, which this bead corrects.
+  ;; sl-7kct: namespaced variants added — readable-token? checks the NAMESPACE
+  ;; part too ((keyword "a b" "c") prints as :a b/c), previously unfuzzed.
   (gen/one-of [(gen/fmap keyword gen-hostile-name)
-               (gen/fmap symbol gen-hostile-name)]))
+               (gen/fmap symbol gen-hostile-name)
+               (gen/fmap (fn [[ns n]] (keyword ns n))
+                         (gen/tuple gen-hostile-name gen/string-alphanumeric))
+               (gen/fmap (fn [[ns n]] (keyword ns n))
+                         (gen/tuple gen/string-alphanumeric gen-hostile-name))
+               (gen/fmap (fn [[ns n]] (keyword ns n))
+                         (gen/tuple gen-hostile-name gen-hostile-name))
+               (gen/fmap (fn [[ns n]] (symbol ns n))
+                         (gen/tuple gen-hostile-name gen/string-alphanumeric))
+               (gen/fmap (fn [[ns n]] (symbol ns n))
+                         (gen/tuple gen/string-alphanumeric gen-hostile-name))
+               (gen/fmap (fn [[ns n]] (symbol ns n))
+                         (gen/tuple gen-hostile-name gen-hostile-name))]))
 
 (def ^:private gen-nasty-leaf
   ;; The actual danger, per invariant 3 — plus the two shapes that LOOK like
@@ -137,9 +151,13 @@
 (defspec edn-safe?-accepted-values-actually-round-trip 200
   ;; The docstring's claim, verbatim: admit ⇒ round-trip. Also exercises
   ;; "reject, don't throw" — a throw from edn-safe? fails the property.
+  ;; Serialization goes through pr-edn-str, the writer seam invariant 3
+  ;; actually guarantees (sl-3ub4): bare pr-str under clojure.main's ambient
+  ;; *print-namespace-maps*=true emits #:0a{...} literals EDN can't re-read,
+  ;; which made both round-trip properties flake at ~7.5%/suite-run.
   (prop/for-all [x gen-mixed-value]
     (if (reporter/edn-safe? x)
-      (= x (edn/read-string (pr-str x)))
+      (= x (edn/read-string (reporter/pr-edn-str x)))
       true)))
 
 (defspec edn-safe?-rejects-a-nasty-leaf-at-any-depth 200
@@ -148,11 +166,34 @@
 
 (defspec scrub-output-is-always-edn-safe-and-round-trips 200
   ;; scrub is the seam that enforces invariant 3; whatever it emits must be
-  ;; admissible and genuinely round-trip.
+  ;; admissible and genuinely round-trip — through pr-edn-str (see the
+  ;; sibling property above for why bare pr-str is wrong here).
   (prop/for-all [x gen-mixed-value]
     (let [scrubbed (reporter/scrub x)]
       (and (reporter/edn-safe? scrubbed)
-           (= scrubbed (edn/read-string (pr-str scrubbed)))))))
+           (= scrubbed (edn/read-string (reporter/pr-edn-str scrubbed)))))))
+
+(deftest pinned-writer-survives-hostile-ambient-bindings
+  ;; sl-3ub4 regression, replaying the overnight hunt's evidence: under
+  ;; clojure.main's ambient *print-namespace-maps*=true, bare pr-str of a
+  ;; map whose keys share the digit-leading namespace "0a" emits #:0a{...},
+  ;; which edn/read-string rejects (NumberFormatException "Invalid number:
+  ;; 0a") — even though every token round-trips and edn-safe? admits it.
+  ;; Pre-fix this exact shape fell out of (tc/quick-check 2000 prop :seed 1)
+  ;; as the shrunk counterexample; the wild strikes are the fail-laneC-*
+  ;; logs in the sl-tkrx evidence. pr-edn-str must be immune to the ambient
+  ;; bindings; the bare-pr-str breakage is asserted too so this test fails
+  ;; loudly if a Clojure upgrade ever changes the underlying behavior.
+  (let [shrunk [{nil {{{(keyword "0a" "A") nil} nil} nil}}]
+        scrubbed (reporter/scrub shrunk)]
+    (binding [*print-namespace-maps* true
+              *print-length* 2
+              *print-level* 2]
+      (is (= scrubbed (edn/read-string (reporter/pr-edn-str scrubbed)))
+          "pinned writer round-trips under hostile ambient bindings")
+      (is (thrown? NumberFormatException
+                   (edn/read-string (pr-str {(keyword "0a" "A") nil})))
+          "bare pr-str under pnm=true still emits the unreadable literal"))))
 
 (deftest scrub-coerces-to-edn-native-data
   (testing "identity fast path: already-safe data is returned untouched"
@@ -182,6 +223,10 @@
     (is (not (reporter/edn-safe? (symbol "-1")))
         "prints as the NUMBER -1: type lost on re-read"))
 
+  (testing "a hostile NAMESPACE is rejected even when the name is clean (sl-7kct)"
+    (is (not (reporter/edn-safe? (keyword "a b" "c"))))
+    (is (not (reporter/edn-safe? (symbol "a b" "c")))))
+
   (testing "hostile tokens are caught at any depth, key or value"
     (is (not (reporter/edn-safe? {:k [(symbol "a b")]})))
     (is (not (reporter/edn-safe? {(keyword "a b") 1}))))
@@ -202,7 +247,9 @@
     ;; slow path and are correctly admitted; the island emitter's integrity
     ;; guard (html.clj, sl-27uh) is the defense layer for the `</` corner.
     (is (reporter/edn-safe? (keyword "<script")))
-    (is (reporter/edn-safe? (keyword "1a")))))
+    (is (reporter/edn-safe? (keyword "1a")))
+    (is (reporter/edn-safe? (keyword "<script" "ok"))
+        "suspicious-looking but readable NAMESPACE takes the slow path too")))
 
 (deftest error-envelope-pr-strs-value-exactly-once
   (testing "R2: :value is an arbitrary runtime value, stringified here and only here"

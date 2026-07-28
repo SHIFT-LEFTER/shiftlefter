@@ -599,11 +599,12 @@
       (is (contains? verbs :navigate))
       (is (contains? verbs :resize)))
 
-    (testing ":see has the 11 declared frames (sl-rch extracted :url to :be/:at)"
+    (testing ":see has the 12 declared frames (sl-rch extracted :url to
+              :be/:at; sl-gwru added the assert-only :matching)"
       (let [see-frames (set (keys (get-in verbs [:see :frames])))]
-        (is (= 11 (count see-frames)))
+        (is (= 12 (count see-frames)))
         (is (= #{:visible :on-page :text :value :attribute :enabled
-                 :disabled :count :title :alert :alert-with-text}
+                 :disabled :count :title :alert :alert-with-text :matching}
                see-frames))))
 
     (testing ":be verb has the :at and :at-exactly frames (sl-rch, sl-q81m)"

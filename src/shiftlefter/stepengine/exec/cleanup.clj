@@ -6,7 +6,8 @@
    Internal: external callers should go through
    `shiftlefter.stepengine.exec` (the facade) which re-exports
    `execute-suite` from this ns."
-  (:require [shiftlefter.adapters.registry :as registry]
+  (:require [clojure.tools.logging :as log]
+            [shiftlefter.adapters.registry :as registry]
             [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.stepengine.exec.hooks :as hooks]
             [shiftlefter.stepengine.exec.provisioning :as prov]
@@ -31,9 +32,17 @@
    - registry: adapter registry (nil → default); same registry used at
      provisioning so a custom-registry impl is closed by its custom cleanup.
 
+   The adapter invocation itself goes through
+   `registry/cleanup-capability` — the single low-level cleanup seam
+   (sl-kh5r). This fn keeps only run-path enrichment: handle selection,
+   subject-key parsing, and mapping the raw result to an action.
+
    Returns:
    - {:action :closed :interface <name>} on success
-   - {:action :close-failed :interface <name> :error <msg>} on failure
+   - {:action :close-failed :interface <name> :error <msg>} on failure —
+     either the adapter THREW, or it returned a structured
+     {:error {:message ...}} (the browser adapters never throw; they catch
+     and return, so the return value must be inspected — sl-c6wk)
    - {:action :skipped :interface <name> :reason <msg>} if can't clean up"
   [cap-name capability-entry interfaces registry]
   (let [;; Cleanup receives the handle, not the step-facing impl: wrapping
@@ -48,26 +57,45 @@
       {:action :skipped
        :interface cap-name
        :reason "No interface config"}
-      (let [adapter-name (:adapter interface-config)
-            ;; 2-arity for default registry, 3-arity when custom — same
-            ;; backward-compat reasoning as provision-capability above.
-            adapter (if registry
-                      (registry/get-adapter adapter-name registry)
-                      (registry/get-adapter adapter-name))]
-        (if (:error adapter)
-          {:action :skipped
-           :interface cap-name
-           :reason (str "Unknown adapter: " adapter-name)}
-          (try
-            ((:cleanup adapter) handle)
-            {:action :closed
-             :interface cap-name
-             :adapter adapter-name}
-            (catch Exception e
-              {:action :close-failed
+      (let [adapter-name (:adapter interface-config)]
+        (try
+          ;; 2-arity for default registry, 3-arity when custom — same
+          ;; backward-compat reasoning as provision-capability above.
+          (let [result (if registry
+                         (registry/cleanup-capability adapter-name handle registry)
+                         (registry/cleanup-capability adapter-name handle))
+                err    (:error result)]
+            (cond
+              ;; :adapter/unknown comes only from the registry lookup, never
+              ;; from an adapter's :cleanup — it means no adapter ran, so it
+              ;; reads as :skipped, not :close-failed.
+              (= :adapter/unknown (:type err))
+              {:action :skipped
                :interface cap-name
-               :adapter adapter-name
-               :error (ex-message e)})))))))
+               :reason (str "Unknown adapter: " adapter-name)}
+
+              err
+              ;; :message is the sl-9vag adapter contract; pr-str is a
+              ;; fallback so a message-less error map still reads as text.
+              (let [msg (or (:message err) (pr-str err))]
+                (log/warn "Capability cleanup failed for" cap-name
+                          "(" adapter-name "):" msg)
+                {:action :close-failed
+                 :interface cap-name
+                 :adapter adapter-name
+                 :error msg})
+
+              :else
+              {:action :closed
+               :interface cap-name
+               :adapter adapter-name}))
+          (catch Exception e
+            (log/warn "Capability cleanup threw for" cap-name
+                      "(" adapter-name "):" (ex-message e))
+            {:action :close-failed
+             :interface cap-name
+             :adapter adapter-name
+             :error (ex-message e)}))))))
 
 (defn- cleanup-ephemeral-capabilities!
   "Clean up all ephemeral capabilities in scenario context.

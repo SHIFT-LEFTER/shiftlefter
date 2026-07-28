@@ -30,8 +30,16 @@
       :seq — reporters get determinism, observers get truth.
 
    3. PURE DATA. Every value handed to a reporter is pure, immutable,
-      EDN-NATIVE data: it round-trips through `pr-str`/`read-string` with
-      the default data readers. Maps, vectors, sets, strings, numbers,
+      EDN-NATIVE data: it round-trips through `pr-edn-str`/`read-string`
+      with the default data readers. The round-trip is guaranteed under
+      `pr-edn-str`'s PINNED printer bindings, not arbitrary ambient ones:
+      clojure.main (every CLI run, `clj -M`, any REPL/nREPL eval) binds
+      `*print-namespace-maps*` true, under which a map whose keys share a
+      digit-leading namespace prints as `#:0a{...}` — a literal EDN's
+      reader cannot re-read (sl-3ub4); an ambient `*print-length*` would
+      silently truncate. Every envelope-serializing seam must print
+      through `pr-edn-str` (report/edn.clj `prn-summary` and report/html.clj
+      `island-edn` do). Maps, vectors, sets, strings, numbers,
       booleans, nil, and UUIDs (`#uuid` tagged literals) qualify; keywords
       and symbols qualify when their printed form re-reads to an equal
       value — names that break EDN's token grammar (sl-27uh) are
@@ -160,13 +168,35 @@
 ;; Envelope construction — the seam where non-data dies (invariant 3)
 ;; -----------------------------------------------------------------------------
 
+(defn pr-edn-str
+  "Serialize envelope data to an EDN string under PINNED printer bindings —
+   the writer half of invariant 3's round-trip guarantee.
+
+   Ambient bindings are NOT ours (sl-3ub4): clojure.main binds
+   `*print-namespace-maps*` true, under which `{:0a/A nil}` prints as the
+   `#:0a{...}` namespace-map literal that `clojure.edn` cannot re-read
+   (digit-leading namespace reads as a number: NumberFormatException), even
+   though the bare token `:0a/A` round-trips fine — so `edn-safe?` rightly
+   admits it and the break only appears at print time. A REPL can also bind
+   `*print-length*`/`*print-level*`, which would truncate output silently.
+   Pinning makes emission context-independent; every envelope-serializing
+   seam must print through this fn, never bare `pr-str`/`prn`."
+  [x]
+  (binding [*print-length* nil
+            *print-level* nil
+            *print-namespace-maps* false
+            *print-readably* true
+            *print-meta* false
+            *print-dup* false]
+    (pr-str x)))
+
 (defn scrub
   "Coerce x to EDN-native data.
 
    Values that already satisfy `edn-safe?` are returned UNTOUCHED — an
    identity fast path, so map type and key order survive and downstream
    `pr-str` output is unchanged. Defrecords are flattened to plain maps.
-   Anything else is rendered with `pr-str`."
+   Anything else is rendered with `pr-edn-str`."
   [x]
   (cond
     (edn-safe? x) x
@@ -175,13 +205,17 @@
     (vector? x)   (mapv scrub x)
     (set? x)      (into #{} (map scrub) x)
     (seq? x)      (mapv scrub x)
-    :else         (pr-str x)))
+    ;; pr-edn-str, not pr-str: an ambient *print-length* (REPL) would
+    ;; silently truncate the rendered leaf (sl-3ub4's sibling lie).
+    :else         (pr-edn-str x)))
 
 (defn error-envelope
   "Project a raw step error onto the report/observe planes.
 
    `:value` (the only producer is the :step/invalid-return path) holds an
-   arbitrary runtime value, so it is `pr-str`'d here EXACTLY ONCE — downstream
+   arbitrary runtime value, so it is rendered here EXACTLY ONCE (via
+   `pr-edn-str`, so ambient printer bindings can't truncate it — sl-3ub4);
+   downstream
    serializers must pass it through, never re-encode it. `:data` is raw
    `ex-data` and may carry anything, so it is scrubbed. Falsy `:value`/`:data`
    are omitted, preserving the historical cond-> shape."
@@ -190,7 +224,7 @@
     (cond-> {:type (:type error) :message (:message error)}
       (:exception-class error) (assoc :exception-class (:exception-class error))
       (:data error)            (assoc :data (scrub (:data error)))
-      (:value error)           (assoc :value (pr-str (:value error)))
+      (:value error)           (assoc :value (pr-edn-str (:value error)))
       ;; Hook failure attribution (sl-esq): hook name + registration home
       ;; + the @hook= tag's file:line — all EDN-native by construction.
       (:hook error)            (assoc :hook (:hook error))
@@ -203,7 +237,9 @@
    ALLOWLIST, not denylist: only what reporters read survives, so a future key
    on the raw result cannot leak a live object through this seam. Dropped:
    `:scenario-ctx` (live drivers/capabilities), `:plan/steps` (its `:binding`
-   carries `:fn`), and `:capability-cleanup` (nothing reads it).
+   carries `:fn`), and `:capability-cleanup` (consumed UPSTREAM of this seam:
+   runner core scans the raw results and rides failures into the diagnostics
+   lifecycle as `:cleanup-failures`, sl-lbrc — envelopes still don't carry it).
 
    The projection is then scrubbed, which flattens the gherkin Location records
    riding along in `:step/location`.

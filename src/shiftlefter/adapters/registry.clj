@@ -57,7 +57,8 @@
    (cleanup-capability :etaoin capability)
    ;; => {:ok :closed}
    ```"
-  (:require [shiftlefter.adapters.etaoin :as etaoin]
+  (:require [clojure.string :as str]
+            [shiftlefter.adapters.etaoin :as etaoin]
             [shiftlefter.adapters.playwright :as playwright]
             [shiftlefter.adapters.sms-mock :as sms-mock]
             [shiftlefter.adapters.twilio :as twilio]
@@ -86,7 +87,15 @@
    :playwright {:factory  playwright/create-browser
                 :cleanup  playwright/close-browser
                 :impl-key :browser
-                :provides [:shiftlefter.browser.protocol/IBrowser]}
+                :provides [:shiftlefter.browser.protocol/IBrowser]
+                ;; Supported but NOT bundled in the run classpath/uberjar
+                ;; (sl-gcdu): config load probes :requires-class and fails
+                ;; with a not-bundled error naming :requires-dep. Keep the
+                ;; version in :requires-dep in step with the :test alias
+                ;; pin in deps.edn.
+                :requires-class "com.microsoft.playwright.Playwright"
+                :requires-dep "com.microsoft.playwright/playwright {:mvn/version \"1.50.0\"}"
+                :not-bundled-note "the driver alone is ~163MB"}
    :sms-mock   {:factory      sms-mock/create-sms
                 :cleanup      sms-mock/close-sms
                 :provides     [:shiftlefter.sms.protocol/ISMS
@@ -153,6 +162,68 @@
   ([adapter-name registry]
    (let [entry (get registry adapter-name)]
      (set (:provides entry)))))
+
+(defn class-available?
+  "True when `class-name` (a string) is loadable on the current classpath.
+
+   The probe behind adapter availability checks (sl-gcdu). Tests redef this
+   to simulate an adapter's extra dependency being absent — the unit-test
+   classpath always has Playwright, so the negative path can't be exercised
+   for real."
+  [class-name]
+  (try
+    (Class/forName class-name)
+    true
+    (catch Throwable _ false)))
+
+(defn- bundled-alternatives
+  "Adapter names in `registry` that provide any of the same protocols as
+   `entry` without requiring an extra dependency — the 'use X instead'
+   remedy for a not-bundled adapter. Sorted for stable messages."
+  [registry adapter-name entry]
+  (let [wanted (set (:provides entry))]
+    (->> registry
+         (keep (fn [[k e]]
+                 (when (and (not= k adapter-name)
+                            (nil? (:requires-class e))
+                            (some wanted (:provides e)))
+                   k)))
+         (sort-by name)
+         vec)))
+
+(defn adapter-unavailable-error
+  "Config-load availability check for one interface's adapter (sl-gcdu).
+
+   When the adapter's registry entry declares `:requires-class` and that
+   class is not on the current classpath, returns a structured
+   `:config/adapter-not-bundled` error naming both remedies: switch to a
+   bundled alternative providing the same protocols, or add the
+   `:requires-dep` coordinates. Returns nil when the adapter is unknown,
+   fully bundled, or its dependency is present — callers treat nil as
+   'nothing wrong here'.
+
+   Fires at config load (runner's Stage 1) so a dead-end config fails as a
+   planning error (exit 2) instead of at first capability provisioning."
+  ([interface-name adapter-name]
+   (adapter-unavailable-error interface-name adapter-name default-registry))
+  ([interface-name adapter-name registry]
+   (let [entry (get registry adapter-name)
+         cls (:requires-class entry)]
+     (when (and cls (not (class-available? cls)))
+       (let [alternatives (bundled-alternatives registry adapter-name entry)]
+         {:type :config/adapter-not-bundled
+          :message (str (str/capitalize (name adapter-name))
+                        " is supported but not bundled"
+                        (when-let [note (:not-bundled-note entry)]
+                          (str " (" note ")"))
+                        " — "
+                        (when (seq alternatives)
+                          (str "use " (str/join " or " alternatives)
+                               " (bundled), or "))
+                        "add " (:requires-dep entry) " to your deps.edn")
+          :data {:interface interface-name
+                 :adapter adapter-name
+                 :requires-class cls}})))))
 
 (defn on-provision
   "Return the adapter's `:on-provision` hook fn, or nil.

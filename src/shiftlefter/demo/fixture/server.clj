@@ -42,26 +42,37 @@
 ;; Server Lifecycle
 ;; -----------------------------------------------------------------------------
 
-(defn- find-free-port
-  "Find an available port by binding to port 0 and reading the assigned port."
-  []
-  (with-open [socket (java.net.ServerSocket. 0)]
-    (.getLocalPort socket)))
-
 (defn start-server
   "Start an http-kit server on an auto-assigned port with the given handler.
-   Returns {:server <stop-fn> :port <assigned-port>}."
+   Returns {:server <server-object> :port <assigned-port>}.
+
+   Binds 127.0.0.1 SPECIFICALLY, port 0 DIRECTLY — both halves matter
+   (sl-7hb1, the fixture-family suite flake):
+
+   - A wildcard 0.0.0.0 bind with SO_REUSEADDR silently COEXISTS with an
+     existing 127.0.0.1-specific listener on the same port (macOS), and
+     `:port 0` can be assigned exactly such a port. Loopback connections
+     then route to the most-specific listener — a live ChromeDriver
+     answered our tests' requests with WebDriver 404s (demonstrated
+     2026-07-24: chromedriver held 127.0.0.1:61505, run-server bound
+     0.0.0.0:61505 without error, every request reached chromedriver).
+     A specific 127.0.0.1 bind cannot be assigned an occupied port and
+     fails EADDRINUSE loudly if given one.
+   - Direct :port 0 (modern http-kit return value + `server-port`) instead
+     of the old probe-close-rebind find-free-port, whose window let the OS
+     hand the probed port to anyone else."
   [handler]
-  (let [port (find-free-port)
-        server (http/run-server handler {:port port})]
+  (let [server (http/run-server handler {:ip "127.0.0.1"
+                                         :port 0
+                                         :legacy-return-value? false})]
     {:server server
-     :port port}))
+     :port (http/server-port server)}))
 
 (defn stop-server
-  "Stop an http-kit server. Takes the stop function from start-server."
-  [server-fn]
-  (when server-fn
-    (server-fn :timeout 100)))
+  "Stop an http-kit server. Takes the server object from start-server."
+  [server]
+  (when server
+    (http/server-stop! server {:timeout 100})))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API
@@ -71,22 +82,24 @@
   "Start a configured fixture server, run test-fn, stop server.
 
    config — Map with :users, :pages, :behaviors (all optional for now)
-   test-fn — Function taking {:base-url \"http://localhost:PORT\"}
+   test-fn — Function taking {:base-url \"http://127.0.0.1:PORT\"}
 
    Example:
    ```clojure
    (with-fixture-server
      {:users {\"alice\" \"secret\"}}
      (fn [{:keys [base-url]}]
-       (is (str/starts-with? base-url \"http://localhost:\"))))
+       (is (str/starts-with? base-url \"http://127.0.0.1:\"))))
    ```
 
-   The server starts on port 0 (auto-assigned) to avoid conflicts.
+   The server binds 127.0.0.1 on an auto-assigned port; base-url dials
+   127.0.0.1 — not localhost — so the client can never resolve to an
+   address family / listener the server didn't bind (sl-7hb1).
    Server is guaranteed to stop even if test-fn throws."
   [config test-fn]
   `(let [handler# (build-handler ~config)
          {:keys [~'server ~'port]} (start-server handler#)
-         base-url# (str "http://localhost:" ~'port)]
+         base-url# (str "http://127.0.0.1:" ~'port)]
      (try
        (~test-fn {:base-url base-url#
                   :port ~'port

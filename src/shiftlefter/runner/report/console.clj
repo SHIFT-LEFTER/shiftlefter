@@ -264,15 +264,21 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- format-undefined-step
-  "Format an undefined step for diagnostics with location."
+  "Format an undefined step for diagnostics with location, followed by the
+   grammar hint (sl-s04n) and/or interface suggestion (sl-563) when present."
   [bound-step use-color?]
   (let [step (:step bound-step)
         step-loc (:step/location step)
         loc {:file (:source-file bound-step)
              :line (:line step-loc)
-             :column (:column step-loc)}]
-    (str "  - " (colorize (:step/text step) :yellow use-color?)
-         " (" (format-location loc) ")")))
+             :column (:column step-loc)}
+        hint (-> bound-step :hint :suggestion)
+        filter-suggestion (-> bound-step :filter-info :suggestion)]
+    (cond-> (str "  - " (colorize (:step/text step) :yellow use-color?)
+                 " (" (format-location loc) ")")
+      hint (str "\n      hint: " (colorize hint :cyan use-color?))
+      filter-suggestion
+      (str "\n      hint: " (colorize filter-suggestion :cyan use-color?)))))
 
 (defn- format-ambiguous-step
   "Format an ambiguous step for diagnostics."
@@ -400,19 +406,28 @@
         (println (colorize (str total " binding issue(s) found. Cannot execute.") :red use-color?))))))
 
 (defn print-warnings!
-  "Print warn-level SVO issues that did not block the run (success paths:
-   dry-run and execute). No-op when diagnostics carry none — no noise on
-   clean runs.
+  "Print warn-level diagnostics that did not block the run (success paths:
+   dry-run and execute): SVO issues, and capability-cleanup failures
+   (sl-lbrc — a leaked driver on an otherwise-green run). No-op when
+   diagnostics carry none — no noise on clean runs.
    Outputs to stderr."
   [diagnostics opts]
   (let [use-color? (colors-enabled? opts)
-        warns (filter #(= :warn (:severity %)) (:svo-issues diagnostics))]
+        warns (filter #(= :warn (:severity %)) (:svo-issues diagnostics))
+        cleanup-failures (:cleanup-failures diagnostics)]
     (when (seq warns)
       (binding [*out* *err*]
         (println (colorize "\nSVO validation warnings:" :yellow use-color?))
         (doseq [issue warns]
           (println (format-svo-issue issue use-color?))
-          (println))))))
+          (println))))
+    (when (seq cleanup-failures)
+      (binding [*out* *err*]
+        (println (colorize "\nCapability cleanup failures (resources may have leaked):"
+                           :yellow use-color?))
+        (doseq [{:keys [scenario capability adapter error]} cleanup-failures]
+          (println (str "  " scenario " — " capability
+                        " (" adapter "): " error)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Summary Output

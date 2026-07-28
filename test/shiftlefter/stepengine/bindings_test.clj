@@ -1,14 +1,9 @@
 (ns shiftlefter.stepengine.bindings-test
   "Scenario data plane core (sl-yh7): token grammar, capture!, resolution,
-   merge semantics. Named-group scanner (sl-qzhn): fixed edge cases +
-   generative cross-check against the real Pattern.namedGroups on JDK 20+."
-  (:require [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]
-            [clojure.test.check.clojure-test :refer [defspec]]
-            [clojure.test.check.generators :as gen]
-            [clojure.test.check.properties :as prop]
-            [shiftlefter.stepengine.bindings :as b])
-  (:import [java.util.regex Pattern PatternSyntaxException]))
+   merge semantics. Named-group detection (sl-qzhn shim, retired sl-k7gl):
+   fixed edge cases through the public pattern-binding-names seam."
+  (:require [clojure.test :refer [deftest is testing]]
+            [shiftlefter.stepengine.bindings :as b]))
 
 ;; -----------------------------------------------------------------------------
 ;; Token grammar
@@ -150,31 +145,42 @@
                 (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))))
 
 ;; -----------------------------------------------------------------------------
-;; Named-group scanner (Java-floor shim — sl-qzhn, retirement sl-k7gl)
+;; Named-group detection (Pattern.namedGroups(), JDK 20+ — sl-k7gl)
 ;; -----------------------------------------------------------------------------
 
-(deftest scanner-fixed-edge-cases
-  (testing "plain groups, in source order"
-    (is (= ["a" "b"] (b/named-group-names "(?<a>x)(?<b>y)?")))
-    (is (= [] (b/named-group-names "just (positional) x?"))))
+;; These fixed cases pin OUR integration seam — neutralize embedded tokens,
+;; compile, read the compiled pattern's named groups, keywordize — through the
+;; public `pattern-binding-names`. Historical note: until sl-k7gl these
+;; semantics came from a hand-rolled scanner (Java-floor shim, sl-qzhn) pinned
+;; against the real API by a generative cross-check; the floor raise to 21
+;; (sl-yqgv) made Pattern.namedGroups() the implementation, so the cross-check's
+;; oracle comparison became vacuous and was retired with the scanner.
+
+(deftest named-group-fixed-edge-cases
+  (testing "plain groups"
+    (is (= #{:a :b} (b/pattern-binding-names "(?<a>x)(?<b>y)?")))
+    (is (= #{} (b/pattern-binding-names "just (positional) x?"))))
   (testing "lookaround is not a named group"
-    (is (= ["a"] (b/named-group-names "(?<=x)(?<a>y)(?<!z)"))))
+    (is (= #{:a} (b/pattern-binding-names "(?<=x)(?<a>y)(?<!z)"))))
   (testing "escapes"
-    (is (= [] (b/named-group-names "\\(?<a>x")) "escaped paren")
-    (is (= ["a"] (b/named-group-names "\\\\(?<a>x)")) "escaped backslash, then a real group"))
+    (is (= #{} (b/pattern-binding-names "\\(?<a>x")) "escaped paren")
+    (is (= #{:a} (b/pattern-binding-names "\\\\(?<a>x)")) "escaped backslash, then a real group"))
   (testing "character classes"
-    (is (= [] (b/named-group-names "[(?<a>)]")) "class members are literal")
-    (is (= [] (b/named-group-names "[a[(?<b>]]")) "nested class")
-    (is (= [] (b/named-group-names "[](?<a>x)]")) "leading ] is a literal member")
-    (is (= ["a"] (b/named-group-names "[]](?<a>x)")) "class {]} closes, then a group")
-    (is (= ["a"] (b/named-group-names "[^]](?<a>x)")) "negated leading-] class"))
+    (is (= #{} (b/pattern-binding-names "[(?<a>)]")) "class members are literal")
+    (is (= #{} (b/pattern-binding-names "[a[(?<b>]]")) "nested class")
+    (is (= #{} (b/pattern-binding-names "[](?<a>x)]")) "leading ] is a literal member")
+    (is (= #{:a} (b/pattern-binding-names "[]](?<a>x)")) "class {]} closes, then a group")
+    (is (= #{:a} (b/pattern-binding-names "[^]](?<a>x)")) "negated leading-] class"))
   (testing "\\Q..\\E quoting"
-    (is (= [] (b/named-group-names "\\Q(?<a>x)\\E")) "quoted group text is literal")
-    (is (= ["a"] (b/named-group-names "\\Q(\\E(?<a>x)")) "group after quote ends")
-    (is (= ["a"] (b/named-group-names "[\\Q\\E]](?<a>x)"))
+    (is (= #{} (b/pattern-binding-names "\\Q(?<a>x)\\E")) "quoted group text is literal")
+    (is (= #{:a} (b/pattern-binding-names "\\Q(\\E(?<a>x)")) "group after quote ends")
+    (is (= #{:a} (b/pattern-binding-names "[\\Q\\E]](?<a>x)"))
         "empty quote preserves the leading-] literal slot")
-    (is (= ["a"] (b/named-group-names "[\\Qz\\E]](?<a>x)"))
-        "quoted content consumes the leading-] literal slot")))
+    (is (= #{:a} (b/pattern-binding-names "[\\Qz\\E]](?<a>x)"))
+        "quoted content consumes the leading-] literal slot"))
+  (testing "(?x) COMMENTS mode — fixed by scanner retirement (sl-k7gl)"
+    (is (= #{:a} (b/pattern-binding-names "(?x)(?<a>x) # (?<b>y)"))
+        "a #-commented group is not a group; the shim reported a phantom :b")))
 
 (deftest capture-with-hostile-interpolated-value
   (testing "exec path: a Pattern/quote'd binding value containing group syntax"
@@ -182,38 +188,8 @@
           res (b/attempt-capture ctx "num (?<n>\\d+) {order}" "num 9 (?<evil>x)[")]
       (is (= {:n "9"} (:bindings res)) "only the real group binds"))))
 
-;; Pattern.namedGroups() — public on JDK 20+, absent before. nil on the
-;; documented Java 11+ floor, where the cross-check self-skips (the fixed
-;; cases above still run everywhere).
-(def ^:private jdk-named-groups-method
-  (try (.getMethod Pattern "namedGroups" (make-array Class 0))
-       (catch NoSuchMethodException _ nil)))
-
-(defn- jdk-named-group-names [^Pattern p]
-  (set (keys (.invoke jdk-named-groups-method p (object-array 0)))))
-
-(def ^:private scanner-fragment-gen
-  "Regex fragments whose concatenations exercise every scanner state:
-   literals/metachars, escapes, character classes (nested, leading-]),
-   \\Q..\\E quoting with hostile content, named groups, lookaround."
-  (gen/one-of
-   [(gen/elements ["abc" "x 1" "-" "." "+" "\\d" "\\w+" "\\(" "\\[" "\\]"
-                   "x?" "(?:y)" "(?=z)" "(?<=z)" "(?<!q)" "|"])
-    (gen/elements ["[abc]" "[^a-z]" "[]]" "[^]]" "[a[b]]" "[(?<c>)]"
-                   "[a&&[b]]" "[\\]]" "[a-fA-F0-9]"])
-    (gen/elements ["\\Q(?<q>x)\\E" "\\Q[(\\E" "\\Q\\E" "\\Q+*?\\E"])
-    (gen/fmap (fn [[nm inner]] (str "(?<" nm ">" inner ")"))
-              (gen/tuple (gen/elements ["a" "b2" "code" "orderNum" "X"])
-                         (gen/elements ["x" "\\d+" "[a-z]*" "y|z"])))]))
-
-(def ^:private scanner-pattern-gen
-  (gen/fmap str/join (gen/vector scanner-fragment-gen 0 8)))
-
-(defspec scanner-agrees-with-jdk-named-groups 500
-  (prop/for-all [pattern-str scanner-pattern-gen]
-    (let [compiled (try (Pattern/compile pattern-str)
-                        (catch PatternSyntaxException _ nil))]
-      (or (nil? jdk-named-groups-method) ;; JDK < 20 — no API to cross-check
-          (nil? compiled)                ;; invalid pattern — out of scanner scope
-          (= (set (b/named-group-names pattern-str))
-             (jdk-named-group-names compiled))))))
+(deftest capture-in-comments-mode
+  (testing "exec path: (?x) with a commented-out group binds without crashing"
+    ;; Pre-sl-k7gl the shim reported the phantom group and Matcher.group threw
+    ;; IllegalArgumentException here.
+    (is (= {:n "42"} (:bindings (b/attempt-capture {} "(?x)(?<n>\\d+) # (?<phantom>y)" "num 42"))))))

@@ -12,7 +12,7 @@
             [clojure.java.shell :as shell]))
 
 (def lib 'com.shiftlefter/shiftlefter)
-(def version "0.5.2")
+(def version "0.5.3")
 (def class-dir "target/classes")
 (def uber-file "target/shiftlefter.jar")
 (def logback-version "1.5.16")
@@ -60,6 +60,37 @@
   [_]
   (write-builtins-doc! builtins-doc-resource))
 
+(def examples-doc-resource
+  "Checked-in, classpath-visible home of the generated worked-examples topic
+   (sl-c9qj). Committed for the same reason as builtins.md: `sl agent-doc
+   examples` behaves identically in a dev run and from the distributed jar."
+  "resources/shiftlefter/agent_docs/examples.md")
+
+(defn- write-examples-doc!
+  "Generate the worked-examples topic to `out-path`. Shells out to
+   `clojure -X` for the same classpath reason as `write-builtins-doc!`."
+  [out-path]
+  (let [result (shell/sh "clojure" "-X"
+                         "shiftlefter.agent-doc.examples-gen/write-doc!"
+                         ":out" (pr-str out-path))]
+    (print (:out result))
+    (binding [*out* *err*]
+      (print (:err result)))
+    (when-not (zero? (:exit result))
+      (throw (ex-info "Worked-examples topic generation failed"
+                      {:exit (:exit result) :err (:err result)})))))
+
+(defn gen-examples
+  "Regenerate the checked-in worked-examples agent-doc topic (sl-c9qj).
+
+   Usage: clojure -T:build gen-examples
+
+   Writes resources/shiftlefter/agent_docs/examples.md verbatim from the
+   shipped `examples/` files named in `examples-gen/manifest`. Run after
+   changing any of those example files; the drift test fails until you do."
+  [_]
+  (write-examples-doc! examples-doc-resource))
+
 (def agent-md-doc-path
   "Repo-root derived agent guide (sl-b06). Not packaged — single-sourced from the
    `sl agent-doc` topics for repo/GitHub readers."
@@ -84,10 +115,14 @@
 
    Usage: clojure -T:build gen-agent-md
 
-   Run after editing any topic in resources/shiftlefter/agent_docs/. Because the
-   `builtins` topic is itself generated, run `gen-builtins` first when built-in
-   vocabulary changed; the drift test fails until docs/AGENT.md is regenerated."
+   Run after editing any topic in resources/shiftlefter/agent_docs/ or changing
+   built-in vocabulary. The `builtins` and `examples` topics are themselves
+   generated, so this chains `gen-builtins` (sl-hq30) and `gen-examples`
+   (sl-c9qj) first — one command, never a stale generated topic; the drift
+   tests fail until docs/AGENT.md is regenerated."
   [_]
+  (gen-builtins nil)
+  (gen-examples nil)
   (write-agent-md-doc! agent-md-doc-path))
 
 (def dev-jar-link
@@ -142,6 +177,10 @@
   (let [builtins-class-file (io/file class-dir "shiftlefter" "agent_docs" "builtins.md")]
     (.mkdirs (.getParentFile builtins-class-file))
     (write-builtins-doc! (str builtins-class-file)))
+  ;; Same drift-proofing for the worked-examples topic: regenerate from the
+  ;; examples/ tree being packaged, independent of the checked-in copy (sl-c9qj).
+  (let [examples-class-file (io/file class-dir "shiftlefter" "agent_docs" "examples.md")]
+    (write-examples-doc! (str examples-class-file)))
   (b/compile-clj {:basis @basis
                   :ns-compile '[shiftlefter.core]
                   :class-dir class-dir})
@@ -150,7 +189,11 @@
   ;; daemon and boots in ~30ms (no Clojure init). bin/sl runs it via -cp.
   (b/javac {:src-dirs ["src/java"]
             :class-dir class-dir
-            :basis @basis})
+            :basis @basis
+            ;; Pin bytecode to the documented Java floor (21) — without this the
+            ;; class inherits the building JDK's version (dev = 26) and dies with
+            ;; UnsupportedClassVersionError on the floor (sl-yqgv).
+            :javac-opts ["--release" "21"]})
   (println "Building uberjar...")
   (b/uber {:class-dir class-dir
            :uber-file uber-file

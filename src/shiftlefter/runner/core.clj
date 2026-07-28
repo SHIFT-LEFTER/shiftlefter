@@ -23,6 +23,7 @@
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
+            [shiftlefter.adapters.registry :as adapters]
             [shiftlefter.gherkin.api :as api]
             [shiftlefter.gherkin.io :as io]
             [shiftlefter.costume.wardrobe :as wardrobe]
@@ -37,6 +38,7 @@
             [shiftlefter.runner.report.html :as report-html]
             [shiftlefter.runner.report.junit :as report-junit]
             [shiftlefter.runner.reporter :as reporter]
+            [shiftlefter.runner.results :as results]
             [shiftlefter.runner.schedule :as schedule]
             [shiftlefter.runner.setup :as setup]
             [shiftlefter.runner.step-loader :as step-loader]
@@ -129,7 +131,10 @@
    Returns {:status :ok/:error :features [...] :all-pickles [...] :errors [...]}"
   [paths]
   (let [results (mapv parse-feature-file paths)
-        errors (mapcat :errors (filter #(= :error (:status %)) results))
+        ;; Attach each file's :path to its flattened errors (sl-0n6t) —
+        ;; the aggregate loses file attribution otherwise.
+        errors (mapcat (fn [r] (map #(assoc % :path (:path r)) (:errors r)))
+                       (filter #(= :error (:status %)) results))
         features (filter #(= :ok (:status %)) results)
         all-pickles (mapcat :pickles features)]
     (if (seq errors)
@@ -291,13 +296,13 @@
    (sl-muq9 DP1): :selection is present only when a filter was active
    (non-nil filtered-count, the tag-filter-stage convention), so ctx shape
    without a filter is unchanged."
-  [run-id opts config selected-count filtered-count]
+  [run-id opts config selected-count filtered-count started-at]
   (let [project-root (get-in opts [:project-context :project-root])]
     (cond-> {:run-id run-id
              :version (version/version)
              ;; Presence of :svo in loaded config == Shifted mode (sl-ieie).
              :mode (if (:svo config) :shifted :vanilla)
-             :started-at (run-start-timestamp)
+             :started-at started-at
              :project-root project-root
              :project-name (or (some-> project-root fs/file-name) "shiftlefter")
              ;; D2: the JUnit reporter mirrors exit code — pending is <skipped> when
@@ -357,6 +362,22 @@
         (println (str "Config warning: " message
                       (when config-path (str " [" config-path "]"))))))))
 
+(defn- adapter-availability-errors
+  "Probe every configured interface's adapter for classpath availability
+   (sl-gcdu). An adapter that is supported-but-not-bundled (registry declares
+   `:requires-class`, e.g. :playwright) with its dependency absent is a
+   dead-end config: it would load clean and only fail per-scenario at
+   provisioning. Returns a vector of `:config/adapter-not-bundled` errors
+   (empty when all adapters are available), sorted by interface name for
+   stable output."
+  [config]
+  (->> (config/get-interfaces config)
+       (sort-by (comp name key))
+       (into []
+             (keep (fn [[iface-name iface-cfg]]
+                     (adapters/adapter-unavailable-error
+                      iface-name (:adapter iface-cfg)))))))
+
 (defn- load-config-stage
   "Stage 1: Load configuration.
    Returns [:continue {:config ... :step-paths ... :allow-pending? ...}]
@@ -365,17 +386,28 @@
   (let [project-context (:project-context opts)
         config-result (config/load-config-safe {:project-context project-context})]
     (if (= :error (:status config-result))
-      [:exit (report-planning-error! run-id opts
-               {:error {:type :config/error :message (:message config-result)}
-                :stderr-msg #(println "Config error:" (:message config-result))})]
-      (let [config (resolve-config-declared-paths project-context (:config config-result))]
+      (let [err {:type :config/error :message (:message config-result)}]
+        [:exit (report-planning-error! run-id opts
+                 {:error err
+                  :diagnostics {:errors [err]}
+                  :stderr-msg #(println "Config error:" (:message config-result))})])
+      (let [config (resolve-config-declared-paths project-context (:config config-result))
+            adapter-errs (adapter-availability-errors config)]
         (print-config-lint-notices! opts (:config-path project-context)
                                     (config/lint-config config))
-        [:continue {:config config
-                    :step-paths (or (some->> (:step-paths opts)
-                                             (project-context/resolve-cli-paths project-context))
-                                    (config/get-step-paths config))
-                    :allow-pending? (config/allow-pending? config)}]))))
+        (if (seq adapter-errs)
+          ;; :diagnostics {:errors ...} is what makes the EDN summary carry
+          ;; the error on exit 2 — build-summary ignores :error there.
+          [:exit (report-planning-error! run-id opts
+                   {:error (first adapter-errs)
+                    :diagnostics {:errors adapter-errs}
+                    :stderr-msg #(doseq [{:keys [message]} adapter-errs]
+                                   (println (str "Config error: " message)))})]
+          [:continue {:config config
+                      :step-paths (or (some->> (:step-paths opts)
+                                               (project-context/resolve-cli-paths project-context))
+                                      (config/get-step-paths config))
+                      :allow-pending? (config/allow-pending? config)}])))))
 
 (defn- load-intents-stage
   "Stage 1b: Load the intents glossary into the global intent-state from config.
@@ -405,13 +437,15 @@
           (intent-state/reload-intents! dir)
           [:continue nil]
           (catch clojure.lang.ExceptionInfo e
-            [:exit (report-planning-error! run-id opts
-                     {:error {:type :glossary/intents-load-failed
-                              :message (str "Failed to load intents from " dir)
-                              :errors (:errors (ex-data e))}
-                      :stderr-msg #(do (println "Intents load error:" (ex-message e))
-                                       (doseq [err (:errors (ex-data e))]
-                                         (println " " (:message err))))})]))))))
+            (let [err {:type :glossary/intents-load-failed
+                       :message (str "Failed to load intents from " dir)
+                       :errors (:errors (ex-data e))}]
+              [:exit (report-planning-error! run-id opts
+                       {:error err
+                        :diagnostics {:errors [err]}
+                        :stderr-msg #(do (println "Intents load error:" (ex-message e))
+                                         (doseq [sub (:errors (ex-data e))]
+                                           (println " " (:message sub))))})])))))))
 
 (defn- discover-features-stage
   "Stage 2: Discover feature files.
@@ -421,9 +455,11 @@
         paths (project-context/resolve-cli-paths project-context (:paths opts))
         discover-result (discover/discover-feature-files-or-error paths)]
     (if (= :error (:status discover-result))
-      [:exit (report-planning-error! run-id opts
-               {:error {:type (:type discover-result) :message (:message discover-result)}
-                :stderr-msg #(println "Discovery error:" (:message discover-result))})]
+      (let [err {:type (:type discover-result) :message (:message discover-result)}]
+        [:exit (report-planning-error! run-id opts
+                 {:error err
+                  :diagnostics {:errors [err]}
+                  :stderr-msg #(println "Discovery error:" (:message discover-result))})])
       [:continue {:feature-paths (:files discover-result)}])))
 
 (defn- parse-features-stage
@@ -432,13 +468,18 @@
   [run-id opts feature-paths]
   (let [parse-result (parse-all-features feature-paths)]
     (if (= :error (:status parse-result))
-      [:exit (merge
-              (report-planning-error! run-id opts
-                {:error {:type :parse/failed :errors (:errors parse-result)}
-                 :stderr-msg #(do (println "Parse errors:")
-                                  (doseq [err (:errors parse-result)]
-                                    (println " " (:message err))))})
-              {:errors (:errors parse-result)})]
+      (let [err {:type :parse/failed
+                 :message (str (count (:errors parse-result))
+                               " parse error(s) in feature file(s)")
+                 :errors (:errors parse-result)}]
+        [:exit (merge
+                (report-planning-error! run-id opts
+                  {:error err
+                   :diagnostics {:errors [err]}
+                   :stderr-msg #(do (println "Parse errors:")
+                                    (doseq [sub (:errors parse-result)]
+                                      (println " " (:message sub))))})
+                {:errors (:errors parse-result)})])
       [:continue {:all-pickles (:all-pickles parse-result)
                   :features (:features parse-result)}])))
 
@@ -487,6 +528,7 @@
       (nil? rules) [:continue {:all-pickles all-pickles :filtered-count nil}]
       err [:exit (report-planning-error! run-id opts
                    {:error err
+                    :diagnostics {:errors [err]}
                     :stderr-msg #(println "Tag filter error:" (:message err))})]
       :else
       (let [{:keys [selected filtered-out]} (tagd/apply-dispositions rules all-pickles)]
@@ -499,13 +541,25 @@
   [run-id opts step-paths]
   (let [load-result (step-loader/load-step-paths! step-paths)]
     (if (= :error (:status load-result))
-      [:exit (merge
-              (report-planning-error! run-id opts
-                {:error {:type :step-load/failed :errors (:errors load-result)}
-                 :stderr-msg #(do (println "Step load errors:")
-                                  (doseq [err (:errors load-result)]
-                                    (println " " (:path err) "-" (-> err :error :message))))})
-              {:errors (:errors load-result)})]
+      ;; Step-load sub-errors are {:path ... :error {...}} — flatten each for
+      ;; the diagnostics copy so serialize-error's projection (:type :message
+      ;; :path) has something to keep. The result-map merge keeps the raw
+      ;; shape for programmatic callers.
+      (let [flat-errs (mapv (fn [{:keys [path error]}] (assoc error :path path))
+                            (:errors load-result))
+            err {:type :step-load/failed
+                 :message (str (count flat-errs)
+                               " step definition file(s) failed to load")
+                 :errors flat-errs}]
+        [:exit (merge
+                (report-planning-error! run-id opts
+                  {:error err
+                   :diagnostics {:errors [err]}
+                   :stderr-msg #(do (println "Step load errors:")
+                                    (doseq [sub (:errors load-result)]
+                                      (println " " (:path sub) "-"
+                                               (-> sub :error :message))))})
+                {:errors (:errors load-result)})])
       (do
         ;; Load built-in step definitions AFTER step-loader clears registry
         (load-built-in-steps!)
@@ -742,9 +796,46 @@
 
    One run-scope. Under setup.clj orchestration this is called once per group,
    so each group is its own run-scope (Tower ruling R1). `filtered-count` is
-   nil unless a tag filter was active (sl-muq9 DP1 selection story)."
+   nil unless a tag filter was active (sl-muq9 DP1 selection story).
+
+   Does NOT close the bus (sl-4tsi lifecycle half): run-scope governs event
+   SEMANTICS (each group emits its own :test-run/started/:finished pair), but
+   the bus TRANSPORT lives for the whole runner invocation — `execute!` closes
+   it in a suite-level finally, after all groups and on every exit path.
+   Closing here would kill groups 2..N's events on the shared bus."
   [run-id opts bus config features all-pickles filtered-count plans diagnostics allow-pending? report-opts]
   (let [ctx {:reporters (make-reporters opts report-opts config) :bus bus :run-id run-id}
+        started-at (run-start-timestamp)
+        ;; sl-y3wd: the run-results dir, stamped from this run-scope's
+        ;; started-at (first executing group creates; later groups share the
+        ;; invocation's cached dir). nil in a no-config (:defaults) context.
+        ;; :results-dir? is an internal seam (never CLI-exposed) so the
+        ;; framework's own test suite can opt out of littering fixtures.
+        results-dir (when (get opts :results-dir? true)
+                      (results/ensure-run-dir! (or (:results-state opts) (atom nil))
+                                               (:project-context opts)
+                                               started-at run-id))
+        ;; sl-lbrc: cleanup failures are read off the RAW exec-result here —
+        ;; reporters only ever see post-allowlist envelopes, which drop
+        ;; :capability-cleanup — and ride the :diagnostics lifecycle as
+        ;; warn-level :cleanup-failures (console print-warnings! stderr block;
+        ;; EDN :diagnostics; never the exit code — truth via warning, c6wk).
+        ;; SCOPE BOUNDARY: per-scenario cleanup skips :persistent capabilities
+        ;; by design and the runner has no suite-end cleanup site — persistent
+        ;; capability lifecycle belongs to the REPL/daemon surfaces
+        ;; (sl-tss7/sl-1qet). This scan is complete for the runner's surface,
+        ;; not a claim about REPL coverage.
+        collect-cleanup-failures
+        (fn [exec-result]
+          (vec (for [scenario (:scenarios exec-result)
+                     {:keys [action] :as cleaned} (-> scenario
+                                                      :capability-cleanup
+                                                      :cleaned)
+                     :when (= :close-failed action)]
+                 {:scenario (-> scenario :plan :plan/pickle :pickle/name)
+                  :capability (:interface cleaned)
+                  :adapter (:adapter cleaned)
+                  :error (:error cleaned)})))
         max-parallel (resolve-max-parallel opts config)
         parallel? (> max-parallel 1)
         ;; sl-q9wp R1: under parallel execution completions arrive out of
@@ -758,7 +849,8 @@
     (when parallel?
       (print-auto-serial-notice! opts plans))
     (emit-lifecycle! ctx :run-start (run-start-ctx run-id opts config
-                                                   (count all-pickles) filtered-count)
+                                                   (count all-pickles) filtered-count
+                                                   started-at)
                      {:bus-event :test-run/started
                       :bus-payload {:feature-count (count features)
                                     :scenario-count (count all-pickles)}})
@@ -777,7 +869,11 @@
           exec-result (exec/execute-suite plans exec-opts)
           ;; Invariant 4: the exit code is a pure function of the execution
           ;; result; reporting (which already ran) cannot change it.
-          exit-code (compute-exit-code exec-result allow-pending?)]
+          exit-code (compute-exit-code exec-result allow-pending?)
+          cleanup-failures (collect-cleanup-failures exec-result)
+          diagnostics (cond-> diagnostics
+                        (seq cleanup-failures)
+                        (assoc :cleanup-failures cleanup-failures))]
       ;; Warn-level SVO issues didn't block execution but must still reach a
       ;; human (sl-qk8l/sl-6h4r) — EDN output already carries them.
       (emit-lifecycle! ctx :diagnostics (reporter/diagnostics-envelope diagnostics) nil)
@@ -788,14 +884,17 @@
                         :status (if (zero? exit-code) :passed :failed)}
                        {:bus-event :test-run/finished
                         :bus-payload {:exit-code exit-code :counts (:counts exec-result)}})
-      (events/bus-close! bus)
-      {:exit-code exit-code
-       :run-id run-id
-       :status (if (zero? exit-code) :passed :failed)
-       :counts (:counts exec-result)
-       ;; The RAW exec-result, deliberately: envelopes are a projection for the
-       ;; report/observe planes only; programmatic callers keep full fidelity.
-       :result exec-result})))
+      (cond-> {:exit-code exit-code
+               :run-id run-id
+               :status (if (zero? exit-code) :passed :failed)
+               :counts (:counts exec-result)
+               ;; The RAW exec-result, deliberately: envelopes are a projection
+               ;; for the report/observe planes only; programmatic callers keep
+               ;; full fidelity.
+               :result exec-result}
+        ;; sl-y3wd: where this run's outputs live. Not in run-ctx (reporter
+        ;; output stays byte-identical); sl-l9nj adds reporter visibility.
+        results-dir (assoc :results-dir results-dir)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Setup-Aware Execution (sl-dbu)
@@ -819,6 +918,7 @@
       (if error
         [:exit (report-planning-error! run-id opts
                  {:error error
+                  :diagnostics {:errors [error]}
                   :stderr-msg #(println "Setup error:" (:message error))})]
         [:loaded {:setups ok :path setup-path}]))
     [:none nil]))
@@ -873,24 +973,32 @@
                          (catch Throwable t
                            {::start-throw t})))]
     (cond
+      ;; Both :start failure branches ride report-planning-error! like every
+      ;; sibling failure path in this fn (parse/filter/compile) — before
+      ;; sl-1h03 they printed a console-only stderr line, so EDN mode emitted
+      ;; NOTHING for the group and the suite aggregated its exit-2 silently.
       (::start-throw start-result)
-      (let [t (::start-throw start-result)]
-        (when-not (:edn opts)
-          (binding [*out* *err*]
-            (println (str "Setup group " (pr-str label) " :start threw: "
-                          (ex-message t)))))
-        {:exit-code 2 :run-id run-id :status :planning-failed
-         :group-label label
-         :error {:type :setup/start-threw :message (ex-message t)}})
+      (let [t (::start-throw start-result)
+            err {:type :setup/start-threw
+                 :group label
+                 :message (str "Setup group " (pr-str label) " :start threw: "
+                               (ex-message t))}]
+        (-> (report-planning-error! run-id opts
+              {:error err
+               :diagnostics {:errors [err]}
+               :stderr-msg #(println (:message err))})
+            (assoc :group-label label :error err)))
 
       (and start-result (not (s/valid? :shiftlefter.runner.setup/start-result start-result)))
-      (do (when-not (:edn opts)
-            (binding [*out* *err*]
-              (println (str "Setup group " (pr-str label)
-                            " :start returned an invalid shape; expected {:adapter-registry? :stop?}"))))
-          {:exit-code 2 :run-id run-id :status :planning-failed
-           :group-label label
-           :error {:type :setup/invalid-start-result}})
+      (let [err {:type :setup/invalid-start-result
+                 :group label
+                 :message (str "Setup group " (pr-str label)
+                               " :start returned an invalid shape; expected {:adapter-registry? :stop?}")}]
+        (-> (report-planning-error! run-id opts
+              {:error err
+               :diagnostics {:errors [err]}
+               :stderr-msg #(println (:message err))})
+            (assoc :group-label label :error err)))
 
       :else
       (let [{:keys [adapter-registry stop]} start-result
@@ -951,6 +1059,7 @@
     (if-let [err (:error cli-result)]
       (report-planning-error! run-id opts
         {:error err
+         :diagnostics {:errors [err]}
          :stderr-msg #(println "Setup error:" (:message err))})
       (let [filtered (setup/filter-setups-by-cli-paths setups (:ok cli-result) setup-base-dir)
             results  (mapv #(run-group! run-id opts config % bus report-opts allow-pending?)
@@ -1001,6 +1110,10 @@
                              (cond-> {}
                                (:config-path opts) (assoc :config-path (:config-path opts)))))
         opts (assoc opts :project-context project-context)
+        ;; sl-y3wd: one results dir per INVOCATION — the atom is the
+        ;; create-once seam shared by all setup groups.
+        opts (cond-> opts
+               (nil? (:results-state opts)) (assoc :results-state (atom nil)))
         run-id (str (java.util.UUID/randomUUID))
         bus (events/make-memory-bus)
         report-opts (select-keys opts [:verbose :no-color])]
@@ -1012,6 +1125,7 @@
                         ;; path, like :tag-filter.
                         [:exit (report-planning-error! run-id opts
                                  {:error mp-err
+                                  :diagnostics {:errors [mp-err]}
                                   :stderr-msg #(println "Max-parallel error:"
                                                         (:message mp-err))})]
                         (load-config-stage run-id opts))]
@@ -1094,8 +1208,14 @@
                 (println "Runner crash:" (ex-message t))
                 (when (:verbose opts)
                   (.printStackTrace t *err*))))
-            (events/bus-close! bus)
             {:exit-code exit-code
              :run-id run-id
              :status :crashed
-             :error error}))))))
+             :error error}))
+        ;; sl-4tsi lifecycle half: the bus lives for the whole invocation and
+        ;; is closed HERE, once, on every exit path — normal, dry-run, every
+        ;; planning-failure early return, setup-branch exits, and crash. A
+        ;; finally (not per-path closes) so unenumerated future exits are
+        ;; covered too. bus-close! drains subscribers before returning (q9wp).
+        (finally
+          (events/bus-close! bus))))))

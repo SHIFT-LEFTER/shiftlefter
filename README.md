@@ -4,7 +4,7 @@
 
 An agent can write you a passing browser test in one shot today. That's not the hard part anymore. The hard part is the **second** shot, and the tenth: each regeneration re-derives your app from scratch — its own selectors, its own names, its own idea of who "the user" is — and the suite drifts faster the more agents (and models) touch it. ShiftLefter gives that loop something stable to stand on: a typed vocabulary you define once, shared by every agent and every human on the team, and validated before anything runs. ([The full problem statement and fit check →](docs/FIT.md))
 
-## Status: v0.5.2
+## Status: v0.5.3
 
 ShiftLefter is an early, openly-scoped foundation for driving real software behavior from Gherkin — multiple users, multiple interfaces, all checked before anything runs. The core — driving a browser with multiple independent actors over a typed glossary you control — is solid and meant to be built on. The surrounding test-suite machinery and the traceability graph are on the way.
 
@@ -56,7 +56,7 @@ ShiftLefter runs in two modes. **Vanilla** is a plain Gherkin runner — parse, 
 
 ### Quick Start (Java only — most users)
 
-**Requirements:** Java 11 or later
+**Requirements:** Java 21 or later
 
 One-line installer — drops a runnable `sl` + jar into `./sl/` and prints the
 agent on-ramp breadcrumb (see below):
@@ -103,11 +103,11 @@ exists it will place the breadcrumb for you.)
 
 ### Writing Custom Step Definitions
 
-Same Java-only install. Write `.clj` step definition files and ShiftLefter loads them automatically. 8 libraries are bundled (JSON, filesystem, browser automation, async, specs, and more) — see [What Can I Do?](docs/CAPABILITIES.md) for the full list.
+Same Java-only install. Write `.clj` step definition files and ShiftLefter loads them automatically. 8 libraries are bundled (JSON, filesystem, browser automation, async, specs, and more) — see [What Can I Do?](docs/INSTALL-TIERS.md) for the full list.
 
 ### From Source (Contributors)
 
-**Requirements:** Java 11+ and [Clojure CLI](https://clojure.org/guides/install_clojure)
+**Requirements:** Java 21+ and [Clojure CLI](https://clojure.org/guides/install_clojure)
 
 ```bash
 git clone https://github.com/SHIFT-LEFTER/shiftlefter.git
@@ -415,7 +415,7 @@ ShiftLefter looks for `shiftlefter.edn` in the current directory. Copy `shiftlef
                  :adapter-opts {:browser-type :firefox}}}}}
 ```
 
-See [Browser Backend Configuration](docs/CAPABILITIES.md#browser-backend-configuration) for full details and option passthrough examples.
+See [Browser Backend Configuration](docs/INSTALL-TIERS.md#browser-backend-configuration) for full details and option passthrough examples.
 
 **Precedence:**
 1. CLI flags (e.g., `--step-paths`) override config file
@@ -443,9 +443,10 @@ For framework integration, use `shiftlefter.gherkin.api`:
 ;; Lossless roundtrip (reconstructs original byte-for-byte)
 (api/print-tokens (:tokens (api/lex-string content)))
 
-;; Check roundtrip fidelity
+;; Check canonical formatting (backs `sl fmt --check`)
 (api/fmt-check content)
-;; => {:status :ok} or {:status :error :reason :parse-errors ...}
+;; => {:status :ok} | {:status :comments :comments [...]}
+;;    | {:status :error :reason :needs-formatting} (or :parse-errors)
 
 ;; Canonical formatting
 (api/fmt-canonical content)
@@ -604,7 +605,7 @@ no browser features, but everything else works.
 - `print-tokens(lex(input)) == input` byte-for-byte for all valid Gherkin
 - Preserves exact line endings (LF, CRLF, CR, mixed)
 - Preserves original whitespace, indentation, and tag spacing
-- Use `fmt-check` or `roundtrip-ok?` to verify
+- Use `printer/roundtrip-check` (file) or `roundtrip-ok?` (string) to verify
 
 ### Canonical Formatting
 When using `fmt --canonical` or `api/fmt-canonical`:
@@ -638,7 +639,7 @@ isn't), plus a task-based index of every guide. Highlights:
 - [docs/CI.md](docs/CI.md) — Running ShiftLefter in CI: worked GitLab & GitHub Actions pipelines, JUnit report wiring, exit-code gating
 - [docs/SVO.md](docs/SVO.md) — SVO validation guide (glossaries, defstep metadata, incremental adoption)
 - [docs/AGENT.md](docs/AGENT.md) — the agent surface: operating doctrine + built-in vocabulary (also packaged: `sl agent-doc`)
-- [docs/CAPABILITIES.md](docs/CAPABILITIES.md) — What you can do at each installation tier, bundled libraries, browser backend config
+- [docs/INSTALL-TIERS.md](docs/INSTALL-TIERS.md) — What you can do at each installation tier, bundled libraries, browser backend config
 - [docs/LOCATORS.md](docs/LOCATORS.md) — Choosing web locators that survive refactors
 - [docs/COSTUMES.md](docs/COSTUMES.md) — Costumes & wardrobe: durable authenticated browser sessions actors wear
 - [docs/multiple-actors.md](docs/multiple-actors.md), [docs/across-interfaces.md](docs/across-interfaces.md), [docs/extending-vocabulary.md](docs/extending-vocabulary.md) — capability guides

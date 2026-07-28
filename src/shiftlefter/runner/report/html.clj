@@ -176,20 +176,15 @@
 (defn island-edn
   "Sanitize and serialize the island data to escaped EDN text.
 
-   Printer dynvars are pinned because the ambient bindings are NOT ours:
-   clojure.main (every `sl` CLI invocation, `clj -M -m`, and any REPL/nREPL
-   eval) binds *print-namespace-maps* true, which prints #:pickle{...}
-   namespace-map syntax the embedded JS parser deliberately doesn't expand;
-   a REPL can also bind *print-length*/*print-level*, which would TRUNCATE
-   the island silently. Pinning makes emission context-independent."
+   Printer dynvars are pinned (via `reporter/pr-edn-str`, the shared writer
+   seam — sl-3ub4) because the ambient bindings are NOT ours: clojure.main
+   (every `sl` CLI invocation, `clj -M -m`, and any REPL/nREPL eval) binds
+   *print-namespace-maps* true, which prints #:pickle{...} namespace-map
+   syntax the embedded JS parser deliberately doesn't expand; a REPL can
+   also bind *print-length*/*print-level*, which would TRUNCATE the island
+   silently. Pinning makes emission context-independent."
   [island-data]
-  (binding [*print-length* nil
-            *print-level* nil
-            *print-namespace-maps* false
-            *print-readably* true
-            *print-meta* false
-            *print-dup* false]
-    (-> island-data clean-strings pr-str escape-island assert-island-integrity)))
+  (-> island-data clean-strings reporter/pr-edn-str escape-island assert-island-integrity))
 
 (defn build-document
   "Pure: build the self-contained HTML document string from the island data

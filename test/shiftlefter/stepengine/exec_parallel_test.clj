@@ -211,6 +211,45 @@
           "and they wait for the pool to drain (phase 2)"))))
 
 ;; -----------------------------------------------------------------------------
+;; Hook auto-serial gate, end to end (sl-esq via sl-7kct)
+;; -----------------------------------------------------------------------------
+
+(deftest requires-serial-hook-scenarios-never-overlap
+  (testing "two plans carrying a :requires-serial hook ride gate -> facet ->
+            scheduler and never overlap at N>1"
+    ;; The hook entry has no :before/:after fns, so it is a no-op at
+    ;; execution — this test is about scheduling, not the hook weave
+    ;; (exec_hooks_test.clj owns that). Facet derivation alone was already
+    ;; covered in schedule_test.clj; this closes the loop through the
+    ;; executor's serial phase.
+    (let [log (atom [])
+          hook-plan (fn [tag]
+                      (assoc (sleeping-plan log tag 60)
+                             :plan/hooks [{:name "reset-db"
+                                           :requires-serial true}]))
+          plans (schedule/attach-schedules
+                 [(hook-plan :h1)
+                  (sleeping-plan log :filler 120)
+                  (hook-plan :h2)]
+                 nil)
+          result (exec/execute-suite plans {:max-parallel 3})
+          events @log
+          index-of (fn [ev] (.indexOf ^java.util.List events ev))]
+      (is (= :passed (:status result)))
+      (is (= [{:serial? true :reason [:hook "reset-db"]}
+              nil
+              {:serial? true :reason [:hook "reset-db"]}]
+             (mapv :plan/schedule plans))
+          "the hook gate produced the facet, filler untouched")
+      (is (< (index-of [:begin :h1])
+             (index-of [:end :h1])
+             (index-of [:begin :h2])
+             (index-of [:end :h2]))
+          "hook-serial scenarios are mutually exclusive, in plan order")
+      (is (< (index-of [:end :filler]) (index-of [:begin :h1]))
+          "and they wait for the pool to drain (phase 2)"))))
+
+;; -----------------------------------------------------------------------------
 ;; Ordered release buffer (R1)
 ;; -----------------------------------------------------------------------------
 

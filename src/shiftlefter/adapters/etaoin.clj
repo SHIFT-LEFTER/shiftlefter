@@ -20,12 +20,51 @@
 ;; Factory
 ;; -----------------------------------------------------------------------------
 
+(def automation-hygiene-prefs
+  "Chrome profile prefs every automation session wants off by default
+   (sl-0fco): the password trio. Chrome's native popups are invisible to
+   WebDriver (not DOM) but scary/noisy in demos — the breach popup fires
+   on any credential in public breach lists (Chair saw it live in 02b).
+
+   Merged UNDER user :adapter-opts :prefs in `build-driver-opts`, so any
+   user-provided pref wins per-key (set one `true` to opt back in).
+   Deliberately ONLY password-popup prefs — nothing that changes page
+   *feature* behavior (notifications, autofill, translate); ratified by
+   Chair 2026-07-21. SIEVE launch parity: sl-u85t; playwright: sl-x7ec."
+  {"profile.password_manager_leak_detection" false
+   "credentials_enable_service" false
+   "profile.password_manager_enabled" false})
+
+(defn build-driver-opts
+  "Build the Etaoin driver options map from adapter config — pure, so the
+   prefs merge is testable without launching Chrome.
+
+   Merge layers, later wins: base {:type :chrome :headless} < user
+   :adapter-opts; then `automation-hygiene-prefs` merges UNDER the result's
+   :prefs (per-key — user prefs override defaults key-by-key, and defaults
+   survive when the user supplies unrelated prefs).
+
+   `:path-driver` (chromedriver discovery) is resolved by the caller and
+   passed in — it reads ~/.shiftlefter/config.edn, so it stays out of the
+   pure path."
+  [config path-driver]
+  (let [headless? (get config :headless false)
+        adapter-opts (get config :adapter-opts {})
+        adapter-opts (if path-driver
+                       (assoc adapter-opts :path-driver path-driver)
+                       adapter-opts)]
+    (-> (merge {:type :chrome
+                :headless headless?}
+               adapter-opts)
+        (update :prefs #(merge automation-hygiene-prefs %)))))
+
 (defn create-browser
   "Create a new browser instance from configuration.
 
    Config options:
    - :headless — if true, run headless (default: false)
-   - :adapter-opts — map merged into Etaoin options (e.g., :size, :prefs, :user-agent)
+   - :adapter-opts — map merged into Etaoin options (e.g., :size, :prefs, :user-agent).
+     `automation-hygiene-prefs` merges under :prefs; user prefs win per-key.
    - :webdriver-url — URL of WebDriver server (optional, uses default if not provided)
 
    Returns:
@@ -43,17 +82,10 @@
    ```"
   [config]
   (try
-    (let [headless? (get config :headless false)
-          adapter-opts (get config :adapter-opts {})
-          ;; Chromedriver discovery: adapter-opts :path-driver > config.edn > PATH.
+    (let [;; Chromedriver discovery: adapter-opts :path-driver > config.edn > PATH.
           ;; Shared resolver — single source of truth with the costume path.
-          path-driver (user-config/resolve-chromedriver-path adapter-opts)
-          adapter-opts (if path-driver
-                         (assoc adapter-opts :path-driver path-driver)
-                         adapter-opts)
-          opts (merge {:type :chrome
-                       :headless headless?}
-                      adapter-opts)
+          path-driver (user-config/resolve-chromedriver-path (get config :adapter-opts {}))
+          opts (build-driver-opts config path-driver)
           ;; Create session via Etaoin
           eta-driver (eta/chrome opts)
           ;; Create EtaoinBrowser for protocol operations

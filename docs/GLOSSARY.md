@@ -13,7 +13,7 @@ only defines terms.
 
 - **SVO, subjects, verbs, objects, intent references, enforcement** → [SVO.md](SVO.md)
 - **Costumes, wardrobe, `:wears`, sessions** → [COSTUMES.md](COSTUMES.md)
-- **Install tiers, browser backends, bundled libraries** → [CAPABILITIES.md](CAPABILITIES.md)
+- **Install tiers, browser backends, bundled libraries** → [INSTALL-TIERS.md](INSTALL-TIERS.md)
 
 Interfaces, adapters, and capabilities are defined just below.
 

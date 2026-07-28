@@ -189,16 +189,20 @@
    :value    — quoted literal: strip quotes (quoted is ALWAYS literal,
                sl-iseq — a quoted '{code}' stays the text {code});
                whole token: resolve, stringified.
+   :text     — same as :value (sl-2sj6): a content-only O slot (the
+               see-title text).
    :location — whole token: resolve and QUOTE-WRAP so the stepdef's
                literal/ref classifier takes its literal path unchanged.
-   :matcher / nil — untouched (matcher-embedded tokens are interpolated
-               inside capture!, where Pattern/quote lives)."
+   :key / :matcher / nil — untouched (:key slots admit no tokens; the
+               stepdef classifies quoted-vs-ref itself. Matcher-embedded
+               tokens are interpolated inside capture!, where
+               Pattern/quote lives)."
   [capture kind scenario-ctx]
   (case kind
-    :value (cond
-             (quoted-literal? capture) (strip-quotes capture)
-             (token? capture) (str (resolve-token scenario-ctx capture))
-             :else capture)
+    (:value :text) (cond
+                     (quoted-literal? capture) (strip-quotes capture)
+                     (token? capture) (str (resolve-token scenario-ctx capture))
+                     :else capture)
     :location (if (token? capture)
                 (str "'" (resolve-token scenario-ctx capture) "'")
                 capture)
@@ -252,89 +256,6 @@
                          :pattern pattern-str}
                         e))))))
 
-;; -----------------------------------------------------------------------------
-;; Named-group scanning (Java-floor shim)
-;; -----------------------------------------------------------------------------
-
-;; DISMISSAL CANDIDATE (sl-k7gl): Pattern.namedGroups() is public only since
-;; Java 20 and the documented floor is Java 11, so group names are hand-scanned
-;; from the pattern source instead. When the documented floor rises to Java 21+,
-;; delete `named-group-names` (and its helpers) and call the real API at both
-;; call sites — retirement trigger and rationale live on sl-k7gl.
-
-(defn- ascii-letter? [c]
-  (or (<= (int \a) (int c) (int \z))
-      (<= (int \A) (int c) (int \Z))))
-
-(defn- ascii-alnum? [c]
-  (or (ascii-letter? c)
-      (<= (int \0) (int c) (int \9))))
-
-(defn- scan-group-name
-  "When index i in s starts a named group `(?<name>`, returns
-   [name index-after-close-angle]; nil otherwise — a following `=`/`!`
-   (lookbehind) fails the leading-letter check. Assumes (.charAt s i) is
-   an open paren."
-  [^String s i]
-  (let [n (.length s)
-        start (+ i 3)]
-    (when (and (< start n)
-               (= \? (.charAt s (inc i)))
-               (= \< (.charAt s (+ i 2)))
-               (ascii-letter? (.charAt s start)))
-      (let [end (loop [j (inc start)]
-                  (if (and (< j n) (ascii-alnum? (.charAt s j)))
-                    (recur (inc j))
-                    j))]
-        (when (and (< end n) (= \> (.charAt s end)))
-          [(subs s start end) (inc end)])))))
-
-(defn named-group-names
-  "The named-group names of a VALID pattern source string, in source
-   order: `(?<name>` occurrences outside character classes and \\Q..\\E
-   quoting. Both call sites compile the string first, so malformed input
-   cannot reach this scanner. Semantics pinned against the real parser:
-   `]` immediately after `[`/`[^` (even across an empty \\Q\\E) is a
-   literal member, `[` inside a class nests. Known non-goal: (?x)
-   COMMENTS mode, where a #-comment can swallow a group — matcher slots
-   are single-line in practice."
-  [^String s]
-  (let [n (.length s)]
-    (loop [i 0 quoting? false depth 0 opened? false names []]
-      (if (>= i n)
-        names
-        (let [c (.charAt s i)
-              next-c (when (< (inc i) n) (.charAt s (inc i)))]
-          (cond
-            ;; Inside \Q..\E: only \E exits; quoted content clears opened?.
-            quoting?
-            (if (and (= \\ c) (= \E next-c))
-              (recur (+ i 2) false depth opened? names)
-              (recur (inc i) true depth false names))
-
-            (= \\ c)
-            (if (= \Q next-c)
-              (recur (+ i 2) true depth opened? names)
-              (recur (+ i 2) false depth false names))
-
-            (= \[ c)
-            (recur (inc i) false (inc depth) true names)
-
-            ;; ^ directly after [ keeps the class in its just-opened state.
-            (and (= \^ c) opened?)
-            (recur (inc i) false depth true names)
-
-            (and (= \] c) (pos? depth) (not opened?))
-            (recur (inc i) false (dec depth) false names)
-
-            (and (= \( c) (zero? depth))
-            (if-let [[nm after] (scan-group-name s i)]
-              (recur (long after) false depth false (conj names nm))
-              (recur (inc i) false depth false names))
-
-            :else
-            (recur (inc i) false depth false names)))))))
-
 (defn match-named
   "Match a compiled pattern against text (find semantics). On a hit,
    returns {:full <match> :bindings {name value}} with one entry per
@@ -348,7 +269,7 @@
                        (keep (fn [^String nm]
                                (when-some [v (.group m nm)]
                                  [(keyword nm) v])))
-                       (named-group-names (.pattern pattern)))})))
+                       (keys (.namedGroups pattern)))})))
 
 (defn pattern-group-info
   "Static (plan-time) analysis of a matcher pattern string: the binding
@@ -369,8 +290,8 @@
                                   :message (.getMessage e)
                                   :pattern pattern-str}
                                  e))))]
-    {:names (set (map keyword (named-group-names (.pattern p))))
-     :group-count (-> p (.matcher "") .groupCount)}))
+    {:names (set (map keyword (keys (.namedGroups ^Pattern p))))
+     :group-count (-> ^Pattern p (.matcher "") .groupCount)}))
 
 (defn pattern-binding-names
   "The binding names a pattern string would produce — see
