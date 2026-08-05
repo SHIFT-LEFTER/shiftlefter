@@ -4,6 +4,7 @@
             [clojure.spec.alpha :as s]
             [clojure.test :refer [deftest is testing]]
             [shiftlefter.paths :as paths]
+            [shiftlefter.project-context :as project-context]
             [shiftlefter.runner.config :as config]
             [shiftlefter.runner.reporter :as reporter]))
 
@@ -16,8 +17,73 @@
     (let [cfg config/default-config]
       (is (= "en" (get-in cfg [:parser :dialect])))
       (is (= ["steps/"] (get-in cfg [:runner :step-paths])))
+      (is (= ["features/"] (get-in cfg [:runner :features])))
       (is (= false (get-in cfg [:runner :allow-pending?])))
       (is (= false (get-in cfg [:runner :macros :enabled?]))))))
+
+(deftest get-features-default-test
+  (is (= ["features/"] (config/get-features {})))
+  (is (= ["custom/"] (config/get-features {:runner {:features ["custom/"]}}))))
+
+;; -----------------------------------------------------------------------------
+;; Conventional glossary defaults (sl-fcjm) — whole-map, existence-probed,
+;; real-config path only
+;; -----------------------------------------------------------------------------
+
+(defn- with-sl-project
+  "Temp project in sl/ layout: writes config-text at sl/shiftlefter.edn plus
+   the given relative files under sl/, calls (f resolved-context), cleans up."
+  [config-text rel-files f]
+  (let [dir (str (fs/create-temp-dir))]
+    (try
+      (fs/create-dirs (fs/path dir "sl"))
+      (spit (str (fs/path dir "sl" "shiftlefter.edn")) config-text)
+      (doseq [[rel content] rel-files]
+        (let [p (fs/path dir "sl" rel)]
+          (fs/create-dirs (fs/parent p))
+          (spit (str p) content)))
+      (f (project-context/resolve {:invocation-root dir}))
+      (finally
+        (fs/delete-tree dir)))))
+
+(deftest conventional-glossaries-probed-when-unset
+  (with-sl-project "{}"
+    {"glossary/subjects.edn" "{:subjects {}}"
+     "glossary/verbs/web.edn" "{}"
+     "glossary/intents/Login.edn" "{:intent \"Login\" :elements {}}"}
+    (fn [ctx]
+      (is (= {:subjects "glossary/subjects.edn"
+              :verbs {:web "glossary/verbs/web.edn"}
+              :intents "glossary/intents"}
+             (:glossaries (config/load-config {:project-context ctx})))))))
+
+(deftest conventional-glossaries-partial-probe
+  (with-sl-project "{}"
+    {"glossary/subjects.edn" "{:subjects {}}"}
+    (fn [ctx]
+      (is (= {:subjects "glossary/subjects.edn"}
+             (:glossaries (config/load-config {:project-context ctx})))))))
+
+(deftest conventional-glossaries-nil-when-no-files
+  (with-sl-project "{}" {}
+    (fn [ctx]
+      (is (nil? (:glossaries (config/load-config {:project-context ctx})))))))
+
+(deftest explicit-glossaries-win-whole-map
+  ;; Explicit :glossaries is used exactly as written — conventions never fill
+  ;; absent keys (Chair ruling 2026-08-03).
+  (with-sl-project "{:glossaries {:subjects \"custom.edn\"}}"
+    {"glossary/subjects.edn" "{:subjects {}}"
+     "glossary/verbs/web.edn" "{}"}
+    (fn [ctx]
+      (is (= {:subjects "custom.edn"}
+             (:glossaries (config/load-config {:project-context ctx})))))))
+
+(deftest explicit-nil-glossaries-respected
+  (with-sl-project "{:glossaries nil}"
+    {"glossary/subjects.edn" "{:subjects {}}"}
+    (fn [ctx]
+      (is (nil? (:glossaries (config/load-config {:project-context ctx})))))))
 
 (deftest glossaries-spec-admits-intents
   ;; sl-7kct: runner/core reads [:glossaries :intents] and the lint suggests
@@ -42,6 +108,7 @@
   (testing "other known-nested keys get their canonical path suggested"
     (doseq [[k path] {:dialect [:parser :dialect]
                       :junit-xml [:runner :report :junit-xml]
+                      :capture [:runner :capture]
                       :verbs [:glossaries :verbs]
                       :unknown-verb [:svo :unknown-verb]}]
       (let [[w] (config/lint-config {k :whatever})]
@@ -134,14 +201,15 @@
   (testing "find-default-config resolves shiftlefter.edn against SL_USER_CWD"
     (let [tmp (str (fs/create-temp-dir))]
       (try
-        ;; No shiftlefter.edn in the user dir yet -> nil even though one may
+        ;; No sl/shiftlefter.edn in the user dir yet -> nil even though one may
         ;; exist at the raw process CWD.
         (with-redefs [paths/user-cwd (constantly tmp)]
           (is (nil? (config/find-default-config))))
-        ;; Drop a config in the user dir -> discovered as an absolute path.
-        (spit (str (fs/path tmp "shiftlefter.edn")) "{}")
+        ;; Drop a config in the user dir's sl/ -> discovered as an absolute path.
+        (fs/create-dirs (fs/path tmp "sl"))
+        (spit (str (fs/path tmp "sl" "shiftlefter.edn")) "{}")
         (with-redefs [paths/user-cwd (constantly tmp)]
-          (is (= (str (fs/real-path (fs/path tmp "shiftlefter.edn")))
+          (is (= (str (fs/real-path (fs/path tmp "sl" "shiftlefter.edn")))
                  (config/find-default-config))))
         (finally
           (fs/delete-tree tmp))))))
@@ -287,6 +355,47 @@
                                    {:step-paths ["s/"] :allow-pending? false :provisioning :lazy}))
     (is (not (s/valid? :shiftlefter.runner.config/runner
                                         {:step-paths ["s/"] :allow-pending? false :provisioning :nope})))))
+
+(deftest test-capture-policy
+  (testing "capture-policy extracts the map with {} as default (sl-3q9r)"
+    (is (= {} (config/capture-policy {})))
+    (is (= {} (config/capture-policy {:runner {}})))
+    (is (= {:screenshot :on-failure}
+           (config/capture-policy {:runner {:capture {:screenshot :on-failure}}}))))
+  (testing ":runner spec accepts policy values, rejects garbage"
+    (let [base {:step-paths ["s/"] :allow-pending? false}]
+      (doseq [policy [:never :on-failure :every-step]]
+        (is (s/valid? :shiftlefter.runner.config/runner
+                      (assoc base :capture {:screenshot policy}))
+            (str policy)))
+      (is (s/valid? :shiftlefter.runner.config/runner
+                    (assoc base :capture {:message-log :on-failure}))
+          "kinds are OPEN — adapter-contributed keywords all pass")
+      (is (not (s/valid? :shiftlefter.runner.config/runner
+                         (assoc base :capture {:screenshot :sometimes}))))
+      (is (not (s/valid? :shiftlefter.runner.config/runner
+                         (assoc base :capture {"screenshot" :never}))))
+      (is (not (s/valid? :shiftlefter.runner.config/runner
+                         (assoc base :capture [:screenshot :never])))))))
+
+(deftest test-parse-capture-spec
+  (testing "the happy grammar"
+    (is (= {:screenshot :on-failure} (config/parse-capture-spec "screenshot=on-failure")))
+    (is (= {:screenshot :on-failure :console :never}
+           (config/parse-capture-spec "screenshot=on-failure,console=never")))
+    (is (= {:screenshot :every-step}
+           (config/parse-capture-spec ":screenshot=:every-step"))
+        "leading colons tolerated on either side (agents write keywords)"))
+  (testing "unknown KINDS are legal (open set) — the warn happens at resolution"
+    (is (= {:message-log :on-failure} (config/parse-capture-spec "message-log=on-failure"))))
+  (testing "malformed input parses to nil (tools.cli rejects the flag, exit 1)"
+    (doseq [bad ["screenshot" "screenshot=" "=on-failure" ""
+                 "screenshot=sometimes" "screenshot=on-failure,,console=never"
+                 "screenshot=on-failure,console" "screenshot=on=failure"]]
+      (is (nil? (config/parse-capture-spec bad)) (pr-str bad))))
+  (testing "the validate pair"
+    (is (config/valid-capture-spec? {:screenshot :never}))
+    (is (not (config/valid-capture-spec? nil)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Normalize / Validation Tests

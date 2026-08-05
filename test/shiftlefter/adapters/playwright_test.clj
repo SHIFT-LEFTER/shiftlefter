@@ -34,6 +34,15 @@
     (testing "skipped - no SHIFTLEFTER_LIVE_PLAYWRIGHT=1"
       (is true))))
 
+(deftest test-invalid-pruning-strategy-is-a-structured-error
+  (testing "an unknown :pruning value errors before any browser launches (sl-tnx)"
+    (let [result (playwright/create-browser {:headless true :pruning :turbo})]
+      (is (= :adapter/create-failed (-> result :error :type)))
+      (is (re-find #":pruning" (-> result :error :message))
+          "the error names the offending key")
+      (is (re-find #":fast \(default\) or :safe" (-> result :error :message))
+          "the error teaches the valid values"))))
+
 (deftest test-close-browser-rejects-a-browserless-capability
   (testing "wrong shape (e.g. the wrapped {:ok {...}} map) is an error, not silent green (sl-9vag)"
     (doseq [bad-shape [{:ok {:browser :fake}} {} nil]]

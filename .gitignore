@@ -22,7 +22,7 @@ bin/shiftlefter.jsa
 .shiftlefter/
 
 # User config (use shiftlefter.edn.example as template)
-/shiftlefter.edn
+/sl/shiftlefter.edn
 
 # Testing infrastructure
 _docs/testing/node_modules/

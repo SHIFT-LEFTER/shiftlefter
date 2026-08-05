@@ -57,17 +57,21 @@ In Shifted mode, attach `:svo` metadata so the step resolves to a typed triple.
 
 ## Minimal config
 
-`shiftlefter.edn` in the project root. Note `:step-paths` lives **under
-`:runner`** — a top-level `:step-paths` is ignored (since 0.5.2 the runner
-prints a `Config warning:` with the correct path; older versions ignore it
-silently):
+`sl/shiftlefter.edn` — the ONLY discovered location; everything ShiftLefter
+(config, features, glossaries, steps) lives in the project's `sl/` directory,
+and config-declared paths resolve from it (so `"steps/"` means `sl/steps/`).
+Note `:step-paths` lives **under `:runner`** — a top-level `:step-paths` is
+ignored (since 0.5.2 the runner prints a `Config warning:` with the correct
+path; older versions ignore it silently):
 
 ```clojure
 {:runner {:step-paths ["steps/"]}
 
  ;; Shifted mode (optional) — enabled by the presence of :svo
  :interfaces {:web {:type :web :adapter :etaoin}}
- :glossaries {:subjects "glossary/subjects.edn"}
+ ;; Glossaries: sl/glossary/{subjects.edn,verbs/<type>.edn,intents/} are
+ ;; discovered automatically when :glossaries is unset; an explicit map
+ ;; overrides the convention wholesale.
  :svo {:unknown-subject :warn}}
 ```
 
@@ -97,6 +101,40 @@ Anything more exotic — percent-encoding normalization, host-case rules,
 byte-exact string comparison — is deliberately not built in. Write a custom
 step assertion (`defstep` + the browser's current URL) for the case at hand,
 or petition for a third frame if the need is general.
+
+## Recording why: the provenance convention
+
+A scenario or glossary entry may carry a pointer to the reason it exists —
+the ticket, decision, or conversation that motivated it. Two forms:
+
+- a value-shaped tag: `@because=CHK-4412`
+- a comment on its own line, directly above the thing it explains:
+  `# why: <free text>`
+
+```gherkin
+@because=CHK-4412
+Scenario: Guest checkout survives an expired session
+  # why: carts were lost on session expiry twice in 2025 — CHK-4412
+  Given alice opens the browser to Checkout
+```
+
+In EDN glossary files, the same convention is an EDN comment above the
+entry: `;; why: renamed from "basket" — PROD-88`.
+
+The pointer is opaque. `@because=` is an ordinary tag and `# why:` is an
+ordinary comment: nothing parses, validates, or resolves either one, and
+planning never checks the pointer against anything. This is a documented
+convention, not a schema — it exists so rationale accretes in the corpus
+from day one, and it may be promoted to a first-class annotation when
+use-case artifacts land. Until then, write the pointer for the next
+reader, not for the machine.
+
+Comment placement matters: put `# why:` on the line above the step or
+scenario it explains. The canonical formatter attaches every comment to the
+construct that *follows* it, so a comment above a step travels with that
+step through `sl fmt` — while a comment after a scenario's last step
+belongs to the next scenario. One current limit: don't place a comment
+between a step and its data-table rows — the parser rejects it there.
 
 ## Worked examples
 

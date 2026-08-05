@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# beads-graph — regenerate filterable standalone graph(s) into board/
+#
+# Usage: ./bin/beads-graph [scope ...]
+#
+#   scope forms:
+#     0-5-4, track-teaching, p:chair   label scope  (-l <label>)
+#     sl-8k5m                          root scope   (--graph-root <id>, gate closure)
+#     (no args)                        whole board  -> board/graph.html
+#
+#   Each scope writes board/graph-<scope>.html (":" and "/" sanitized to "-").
+#   Cheap by design: rerun anytime, refresh the open browser tab.
+#   e.g.  ./bin/beads-graph 0-5-4 track-teaching track-outreach p:chair
+set -e
+cd "$(dirname "$0")/.."
+
+gen() {
+  local scope="$1" out title
+  if [[ -z "$scope" ]]; then
+    out="board/graph.html"; title="ShiftLefter — whole board"
+    bv --export-graph "$out" --graph-title "$title"
+  elif [[ "$scope" == sl-* ]]; then
+    # bv's --graph-root only composes with --robot-graph, NOT --export-graph
+    # (verified 08-03). Label == gate closure by the roadmap lint, so scope
+    # by the release label instead (e.g. 0-5-4 for sl-8k5m's closure).
+    echo "beads-graph: root-scoping unsupported by bv --export-graph;" >&2
+    echo "  use the release label instead (label == closure by lint): $0 0-5-4" >&2
+    return 1
+  else
+    out="board/graph-$(echo "$scope" | tr ':/' '--').html"; title="ShiftLefter — $scope"
+    bv -l "$scope" --export-graph "$out" --graph-title "$title"
+  fi
+}
+
+if [[ $# -eq 0 ]]; then gen ""; else for s in "$@"; do gen "$s"; done; fi

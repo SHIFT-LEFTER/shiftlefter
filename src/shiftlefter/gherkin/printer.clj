@@ -130,6 +130,89 @@
   [level]
   (apply str (repeat level indent-unit)))
 
+;; -----------------------------------------------------------------------------
+;; Comment attachment (sl-lg8v)
+;; -----------------------------------------------------------------------------
+;;
+;; Interior comments never enter the AST (the parser skips them), so the
+;; canonical formatter re-attaches comment TOKENS to AST anchors by source
+;; line: each comment binds to the FIRST anchor whose line is greater than
+;; its own (following-node attachment); comments past the last anchor form
+;; the trailing bucket, emitted at end of output. Comments before the
+;; Feature anchor emit at the very top, before the language header — the
+;; position top-of-file comments always had. Emission indentation is the
+;; anchor's canonical indent: canonical style owns comment placement like
+;; everything else. Known, deliberate cost: a trailing note after scenario
+;; A's last step rides forward to the next block's header (decision record:
+;; _docs/wiki/decisions/parser.md).
+
+(defn- examples-anchors
+  "Anchors for one Examples block: the block itself, then its rows. Examples
+   under a scenario are plain maps (not Examples records), so this is
+   matched by shape, not type."
+  [ex]
+  (concat [ex]
+          (when (:table-header-row ex) [(:table-header-row ex)])
+          (:table-body-rows ex)))
+
+(defn- anchors-of
+  "Emission anchors under an AST node, in document order, the node itself
+   first. Anchors are every node the formatter can emit comments above:
+   blocks, steps, and table rows. Docstrings are deliberately not anchors —
+   a comment between a step and its docstring fence attaches past it."
+  [node]
+  (cond
+    (or (instance? shiftlefter.gherkin.parser.Feature node)
+        (instance? shiftlefter.gherkin.parser.Rule node))
+    (cons node (mapcat anchors-of (:children node)))
+
+    (instance? shiftlefter.gherkin.parser.Background node)
+    (cons node (mapcat anchors-of (:steps node)))
+
+    (or (instance? shiftlefter.gherkin.parser.Scenario node)
+        (instance? shiftlefter.gherkin.parser.ScenarioOutline node))
+    (concat [node]
+            (mapcat anchors-of (:steps node))
+            (mapcat examples-anchors (:examples node)))
+
+    (instance? shiftlefter.gherkin.parser.Step node)
+    (cons node (when (instance? shiftlefter.gherkin.parser.DataTable (:argument node))
+                 (:rows (:argument node))))
+
+    :else nil))
+
+(defn- comment-attachments
+  "Assign comment tokens to anchors by the following-node rule. Returns
+   {:by-anchor {location [text ...]} :trailing [text ...]} — keyed by the
+   anchor node's :location (unique within one parse), texts in source
+   order, trimmed with their leading #."
+  [ast comment-tokens]
+  (let [anchors (->> ast
+                     (mapcat anchors-of)
+                     (remove nil?)
+                     (map (fn [n] [(-> n :location :line) (:location n)]))
+                     (sort-by first))]
+    (loop [comments (sort-by #(-> % :location :line) comment-tokens)
+           by-anchor {}
+           trailing []]
+      (if-let [{:keys [value location]} (first comments)]
+        (let [[[_ anchor-loc] :as remaining]
+              (drop-while (fn [[line _]] (<= line (:line location))) anchors)]
+          (if (seq remaining)
+            (recur (rest comments)
+                   (update by-anchor anchor-loc (fnil conj []) value)
+                   trailing)
+            (recur (rest comments) by-anchor (conj trailing value))))
+        {:by-anchor by-anchor :trailing trailing}))))
+
+(defn- attached-comments-block
+  "Formatted comment lines attached to node, one per line at indent-level,
+   newline-terminated for splicing directly above the node's first line.
+   nil when the node has no attached comments."
+  [att node indent-level]
+  (when-let [texts (seq (get att (:location node)))]
+    (str (str/join "\n" (map #(str (indent indent-level) %) texts)) "\n")))
+
 (defn- max-col-widths
   "Calculate max width for each column across all rows."
   [rows]
@@ -149,13 +232,15 @@
     (str indent-str "| " (str/join " | " padded) " |")))
 
 (defn- format-data-table
-  "Format a DataTable with aligned columns."
-  [table indent-level]
+  "Format a DataTable with aligned columns. Attached comments emit above
+   their row at the table's indent (sl-lg8v)."
+  [table indent-level att]
     (let [rows (:rows table)
         col-widths (max-col-widths rows)
         indent-str (indent indent-level)]
     (->> rows
-         (map #(format-table-row (:cells %) col-widths indent-str))
+         (map #(str (attached-comments-block att % indent-level)
+                    (format-table-row (:cells %) col-widths indent-str)))
          (str/join "\n"))))
 
 (defn- format-docstring
@@ -176,18 +261,19 @@
 (defn- format-step
   "Format a Step.
    Uses :keyword-text (original language keyword with trailing space) when available."
-  [step indent-level]
+  [step indent-level att]
   (let [indent-str (indent indent-level)
         keyword-str (or (:keyword-text step) (str (:keyword step) " "))
         text (:text step)
-        step-line (str indent-str keyword-str text)
+        step-line (str (attached-comments-block att step indent-level)
+                       indent-str keyword-str text)
         arg (:argument step)]
     (cond
       (nil? arg)
       step-line
 
       (instance? shiftlefter.gherkin.parser.DataTable arg)
-      (str step-line "\n" (format-data-table arg (inc indent-level)))
+      (str step-line "\n" (format-data-table arg (inc indent-level) att))
 
       (instance? shiftlefter.gherkin.parser.Docstring arg)
       (str step-line "\n" (format-docstring arg (inc indent-level)))
@@ -197,9 +283,9 @@
 
 (defn- format-steps
   "Format a sequence of steps."
-  [steps indent-level]
+  [steps indent-level att]
   (->> steps
-       (map #(format-step % indent-level))
+       (map #(format-step % indent-level att))
        (str/join "\n")))
 
 (defn- format-tags
@@ -245,38 +331,41 @@
       (str/join "\n" (map #(if (str/blank? %) "" (str indent-str %)) lines)))))
 
 (defn- format-examples
-  "Format an Examples table."
-  [examples indent-level]
+  "Format an Examples table. Renders from the full TableRow records
+   (:table-header-row/:table-body-rows) so between-row comments have
+   anchors (sl-lg8v); cells are identical to :table-header/:table-body."
+  [examples indent-level att]
   (let [indent-str (indent indent-level)
         kw (or (:keyword-text examples) "Examples")
         name-str (if (str/blank? (:name examples)) "" (str ": " (:name examples)))
         tags-line (format-tags (:tags examples) indent-level)
         header (str indent-str kw ":" name-str)
         desc (format-description (:description examples) (inc indent-level))
-        ;; Examples uses :table-header and :table-body, not :table
-        table-header (:table-header examples)
-        table-body (:table-body examples)
-        ;; Build aligned table from header + body rows
-        all-rows (cons table-header table-body)
+        header-row (:table-header-row examples)
+        body-rows (:table-body-rows examples)
+        all-rows (remove nil? (cons header-row body-rows))
         col-widths (when (seq all-rows)
                      (apply map (fn [& col-vals]
                                   (apply max (map #(count (str %)) col-vals)))
-                            all-rows))
-        table-indent (indent (inc indent-level))
-        format-row (fn [cells]
+                            (map :cells all-rows)))
+        table-indent-level (inc indent-level)
+        table-indent (indent table-indent-level)
+        format-row (fn [row]
                      (let [padded (map (fn [cell width]
                                          (let [cell-str (str cell)]
                                            (str cell-str (apply str (repeat (- width (count cell-str)) " ")))))
-                                       cells col-widths)]
-                       (str table-indent "| " (str/join " | " padded) " |")))]
-    (str (when tags-line (str tags-line "\n"))
+                                       (:cells row) col-widths)]
+                       (str (attached-comments-block att row table-indent-level)
+                            table-indent "| " (str/join " | " padded) " |")))]
+    (str (attached-comments-block att examples indent-level)
+         (when tags-line (str tags-line "\n"))
          header "\n"
          (when desc (str desc "\n\n"))
          (str/join "\n" (map format-row all-rows)))))
 
 (defn- format-scenario
   "Format a Scenario or ScenarioOutline."
-  [scenario indent-level]
+  [scenario indent-level att]
   (let [indent-str (indent indent-level)
         type-keyword (or (:keyword-text scenario)
                          (if (= :scenario-outline (:type scenario))
@@ -286,32 +375,34 @@
         tags-line (format-tags (:tags scenario) indent-level)
         header (str indent-str type-keyword ": " name-str)
         desc (format-description (:description scenario) (inc indent-level))
-        steps-str (format-steps (:steps scenario) (inc indent-level))
+        steps-str (format-steps (:steps scenario) (inc indent-level) att)
         examples (:examples scenario)]
-    (str (when tags-line (str tags-line "\n"))
+    (str (attached-comments-block att scenario indent-level)
+         (when tags-line (str tags-line "\n"))
          header "\n"
          (when desc (str desc "\n\n"))
          steps-str
          (when (seq examples)
-           (str "\n\n" (str/join "\n\n" (map #(format-examples % indent-level) examples)))))))
+           (str "\n\n" (str/join "\n\n" (map #(format-examples % indent-level att) examples)))))))
 
 (defn- format-background
   "Format a Background section."
-  [background indent-level]
+  [background indent-level att]
   (let [indent-str (indent indent-level)
         kw (or (:keyword-text background) "Background")
         tags-line (format-tags (:tags background) indent-level)
         header (str indent-str kw ":")
         desc (format-description (:description background) (inc indent-level))
-        steps-str (format-steps (:steps background) (inc indent-level))]
-    (str (when tags-line (str tags-line "\n"))
+        steps-str (format-steps (:steps background) (inc indent-level) att)]
+    (str (attached-comments-block att background indent-level)
+         (when tags-line (str tags-line "\n"))
          header "\n"
          (when desc (str desc "\n\n"))
          steps-str)))
 
 (defn- format-rule
   "Format a Rule node."
-  [rule indent-level]
+  [rule indent-level att]
   (let [indent-str (indent indent-level)
         kw (or (:keyword-text rule) "Rule")
         tags-line (format-tags (:tags rule) indent-level)
@@ -319,36 +410,43 @@
         desc (format-description (:description rule) (inc indent-level))
         bg (parser/get-background rule)
         scenarios (parser/get-scenarios rule)
-        bg-str (when bg (format-background bg (inc indent-level)))
+        bg-str (when bg (format-background bg (inc indent-level) att))
         scenarios-str (->> scenarios
-                           (map #(format-scenario % (inc indent-level)))
+                           (map #(format-scenario % (inc indent-level) att))
                            (str/join "\n\n"))]
-    (str (when tags-line (str tags-line "\n"))
+    (str (attached-comments-block att rule indent-level)
+         (when tags-line (str tags-line "\n"))
          header
          (when desc (str "\n" desc))
          (when bg-str (str "\n\n" bg-str))
          (when (seq scenarios) (str "\n\n" scenarios-str)))))
 
 (defn- format-feature
-  "Format a Feature node."
-  [feature]
+  "Format a Feature node. Feature-attached comments (those before the
+   Feature line in the source) emit at the very top, before the language
+   header, separated from it by a blank line — the position top-of-file
+   comments have always had (sl-lg8v)."
+  [feature att]
   (let [kw (or (:keyword-text feature) "Feature")
         language (:language feature)
         language-header (when language (str "# language: " language "\n"))
+        top-comments (attached-comments-block att feature 0)
         tags-line (format-tags (:tags feature) 0)
         header (str kw ": " (:name feature))
         desc (format-description (:description feature) 1)
         bg (parser/get-background feature)
         scenarios (parser/get-scenarios feature)
         rules (parser/get-rules feature)
-        bg-str (when bg (format-background bg 1))
+        bg-str (when bg (format-background bg 1 att))
         scenarios-str (->> scenarios
-                           (map #(format-scenario % 1))
+                           (map #(format-scenario % 1 att))
                            (str/join "\n\n"))
         rules-str (->> rules
-                       (map #(format-rule % 1))
+                       (map #(format-rule % 1 att))
                        (str/join "\n\n"))]
-    (str language-header
+    (str top-comments
+         (when top-comments "\n")
+         language-header
          (when tags-line (str tags-line "\n"))
          header
          (when desc (str "\n" desc))
@@ -357,11 +455,6 @@
          (when (seq rules) (str "\n\n" rules-str))
          "\n")))
 
-(defn- format-comment
-  "Format a Comment node. :text is the trimmed comment line and already
-   includes the leading #."
-  [comment-node]
-  (:text comment-node))
 
 (defn format-canonical
   "Format AST to canonical Gherkin style.
@@ -372,31 +465,32 @@
    - No trailing whitespace
    - Single blank line between sections
 
+   With comment-tokens (sl-lg8v), every comment is preserved: re-attached
+   to its following AST anchor and emitted at that anchor's indent, with
+   comments past the last anchor trailing at the end. The 1-arity form
+   formats without comments (legacy shape for direct AST callers).
+
    Returns:
    - {:status :ok :output formatted-string} on success"
-  [ast]
-  (let [;; Separate comments at top from feature
-        top-comments (take-while #(or (instance? shiftlefter.gherkin.parser.Comment %)
-                                      (instance? shiftlefter.gherkin.parser.Blank %))
-                                 ast)
-        rest-ast (drop (count top-comments) ast)
-        ;; Format top comments (filter blanks, just keep comments)
-        comment-nodes (filter #(instance? shiftlefter.gherkin.parser.Comment %) top-comments)
-        comments-str (when (seq comment-nodes)
-                       (str (str/join "\n" (map format-comment comment-nodes)) "\n"))
-        ;; Format features (usually just one)
-        features (filter #(instance? shiftlefter.gherkin.parser.Feature %) rest-ast)
-        feature-str (str/join "\n" (map format-feature features))
-        ;; Combine and strip trailing whitespace from each line
-        raw-output (str comments-str
-                        (when (and comments-str (seq features)) "\n")
-                        feature-str)
-        ;; Strip trailing whitespace from each line
-        lines (str/split-lines raw-output)
-        stripped-lines (map #(str/replace % #"[ \t]+$" "") lines)]
-    {:status :ok
-     :output (str (str/join "\n" stripped-lines)
-                  (when (str/ends-with? raw-output "\n") "\n"))}))
+  ([ast] (format-canonical ast []))
+  ([ast comment-tokens]
+   (let [{:keys [by-anchor trailing]} (comment-attachments ast comment-tokens)
+         features (filter #(instance? shiftlefter.gherkin.parser.Feature %) ast)
+         feature-str (str/join "\n" (map #(format-feature % by-anchor) features))
+         trailing-str (when (seq trailing)
+                        (str (str/join "\n" trailing) "\n"))
+         raw-output (cond
+                      (and (seq features) trailing-str)
+                      (str feature-str "\n" trailing-str)
+
+                      (seq features) feature-str
+                      :else (or trailing-str ""))
+         ;; Strip trailing whitespace from each line
+         lines (str/split-lines raw-output)
+         stripped-lines (map #(str/replace % #"[ \t]+$" "") lines)]
+     {:status :ok
+      :output (str (str/join "\n" stripped-lines)
+                   (when (str/ends-with? raw-output "\n") "\n"))})))
 
 (defn fmt-canonical
   "Format a file to canonical style.
@@ -420,7 +514,7 @@
            :reason :parse-errors
            :path path
            :details errors}
-          (let [result (format-canonical ast)]
+          (let [result (format-canonical ast (filter #(= :comment (:type %)) tokens))]
             (assoc result :path path)))))))
 
 (defn canonical
@@ -433,16 +527,19 @@
         {:keys [ast errors]} (parser/parse tokens)]
     (if (seq errors)
       (throw (ex-info "Parse errors" {:errors errors}))
-      (:output (format-canonical ast)))))
+      (:output (format-canonical ast (filter #(= :comment (:type %)) tokens))))))
 
 ;; -----------------------------------------------------------------------------
-;; Comment-loss detection (sl-q2uj guard)
+;; Comment-loss detection (sl-q2uj guard — now a permanent backstop, sl-lg8v)
 ;; -----------------------------------------------------------------------------
 ;;
-;; format-canonical only emits comments that sit above the Feature line;
-;; interior comments (between steps, scenarios, etc.) are parsed but dropped.
-;; Until the printer learns comment attachment (post-0.5), callers use this
-;; to refuse destructive writes and to report comment-bearing files.
+;; Canonical formatting preserves every comment (attachment emission,
+;; sl-lg8v), so this check should ALWAYS return empty. It stays wired as a
+;; backstop invariant: if a future printer regression drops comments,
+;; `fmt --write` refuses the destructive write instead of silently
+;; destroying them (Chair ruling at lg8v plan review — the two-seam
+;; philosophy). The four-file comment corpus pins the backstop itself in
+;; printer_test.
 
 (s/def ::line pos-int?)
 (s/def ::text string?)
@@ -454,12 +551,15 @@
   (filter #(= :comment (:type %)) (lexer/lex s)))
 
 (defn lost-comments
-  "Comment lines in s that canonical formatting would drop.
+  "Comment lines in s that canonical formatting would drop — the sl-q2uj
+   guard, kept as a permanent backstop now that canonical formatting
+   preserves comments (sl-lg8v): expected to always return empty; any
+   non-empty result is a printer bug caught before a destructive write.
 
    Compares comment tokens in the input against those in the canonical
-   output, matched by trimmed text as a multiset. Returns a vector of
-   {:line N :text \"# ...\"} in input order; empty when canonical
-   formatting is comment-safe for s. Throws on parse errors (like
+   output, matched by trimmed text as a multiset (re-indentation and
+   re-attachment count as preserved). Returns a vector of
+   {:line N :text \"# ...\"} in input order. Throws on parse errors (like
    `canonical`)."
   [s]
   (let [kept (frequencies (map :value (comment-tokens (canonical s))))
@@ -488,7 +588,8 @@
   :ret boolean?)
 
 (s/fdef format-canonical
-  :args (s/cat :ast (s/coll-of :shiftlefter.gherkin.parser/ast-node))
+  :args (s/cat :ast (s/coll-of :shiftlefter.gherkin.parser/ast-node)
+               :comment-tokens (s/? (s/coll-of :shiftlefter.gherkin.tokens/token)))
   :ret (s/keys :req-un [::status]))
 
 (s/fdef fmt-canonical

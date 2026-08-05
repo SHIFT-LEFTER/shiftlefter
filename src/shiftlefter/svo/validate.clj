@@ -35,6 +35,7 @@
    ```"
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
+            [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.svo.keys :as keys]
             [shiftlefter.intent.resolve :as intent-resolve]
@@ -233,7 +234,10 @@
    miss."
   [object-str]
   (if (quoted-capture? object-str)
-    (when (not= 3 (count object-str))
+    ;; Length check on the UNDOUBLED interior (sl-jlqz): '''' is the
+    ;; one-character apostrophe key, not text.
+    (when (not= 1 (count (bindings/undouble-quotes
+                          (subs object-str 1 (dec (count object-str))))))
       {:type :svo/invalid-key-literal
        :object object-str
        :severity :error

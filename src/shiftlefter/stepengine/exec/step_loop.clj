@@ -10,6 +10,7 @@
   (:require [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.runner.events :as events]
             [shiftlefter.stepengine.bindings :as bindings]
+            [shiftlefter.stepengine.exec.capture :as capture]
             [shiftlefter.stepengine.exec.provisioning :as prov]))
 
 ;; -----------------------------------------------------------------------------
@@ -208,8 +209,11 @@
    - Synthetic (macro wrapper, auto-pass)
    - Regular (provision capability, emit event, invoke)
 
-   Returns {:step-result ... :scenario-ctx ... :status ...} for loop recur."
-  [bound-step scenario-ctx scenario-status interfaces registry opts]
+   Returns {:step-result ... :scenario-ctx ... :status ...} (+
+   :capture-failures when capture infrastructure failed, sl-3q9r) for
+   loop recur. `step-index` is the step's 1-based position — capture
+   filenames key on it."
+  [bound-step step-index scenario-ctx scenario-status interfaces registry opts]
   (cond
     ;; Previous step failed/pending → skip
     (not= :passed scenario-status)
@@ -229,7 +233,9 @@
       (if (:error provision-result)
         ;; Provisioning failed. An :on-provision hook failure carries :ctx
         ;; with the already-live capability — thread it so cleanup can
-        ;; close the impl (sl-uu7x).
+        ;; close the impl (sl-uu7x). Capture does NOT fire on this path
+        ;; (sl-3q9r): the failure is provisioning infrastructure, not a
+        ;; step outcome — there is no settled instant to witness.
         {:step-result (prov/make-step-result bound-step :failed scenario-ctx
                                              (:error provision-result))
          :scenario-ctx (or (:ctx provision-result) scenario-ctx)
@@ -244,6 +250,17 @@
                                     (-> bound-step :binding :captures)
                                     ctx)
                 duration-ms (/ (- (System/nanoTime) start-ns) 1e6)
+                ;; Capture (sl-3q9r) fires HERE — after the step's clock
+                ;; stopped (timing purity by placement: capture cost lands
+                ;; on the ref's :attachment/duration-ms, never in step
+                ;; durations) and against the step's resulting ctx, whose
+                ;; capabilities are still live.
+                captured (when-let [copts (:capture opts)]
+                           (capture/capture-step!
+                            (:scenario result) copts
+                            {:step-index step-index
+                             :svo (get-in bound-step [:binding :svo])
+                             :failed? (= :failed (:status result))}))
                 ;; Binding provenance (sl-yh7): names this step produced,
                 ;; recorded in run evidence — never in the map itself.
                 produced (let [before (get provisioned-ctx bindings/bindings-key)
@@ -253,24 +270,39 @@
                                                   (not= v (get before k)))
                                           k))
                                       after)))]
-            {:step-result (cond-> (assoc (prov/make-step-result
-                                          bound-step (:status result)
-                                          (:scenario result) (:error result))
-                                         :duration-ms duration-ms)
-                            produced (assoc :bindings/produced (vec produced)))
-             :scenario-ctx (:scenario result)
-             :status (:status result)}))))))
+            (cond-> {:step-result
+                     (cond-> (assoc (prov/make-step-result
+                                     bound-step (:status result)
+                                     (:scenario result) (:error result))
+                                    :duration-ms duration-ms)
+                       produced (assoc :bindings/produced (vec produced))
+                       (seq (:refs captured))
+                       (assoc :attachments (:refs captured)))
+                     :scenario-ctx (:scenario result)
+                     :status (:status result)}
+              (seq (:failures captured))
+              (assoc :capture-failures (:failures captured)))))))))
 
 (defn- finalize-scenario-results
-  "Roll up wrapper statuses and compute final scenario status."
+  "Roll up wrapper statuses and compute final scenario status.
+
+   D4 (sl-3q9r): capture-infrastructure failures flip an otherwise-GREEN
+   scenario to :error, capture-attributed — a green scenario whose
+   promised evidence silently failed is green with missing evidence.
+   Already-red (and pending) scenarios keep their status; the refs record
+   the misses."
   [raw-results plan]
   (let [rolled-steps (rollup-wrapper-statuses (:steps raw-results))
         non-wrapper-statuses (map :status (remove #(wrapper-step? %) rolled-steps))
-        final-status (rollup-status non-wrapper-statuses)]
-    {:status final-status
-     :plan plan
-     :steps rolled-steps
-     :scenario-ctx (:scenario-ctx raw-results)}))
+        final-status (rollup-status non-wrapper-statuses)
+        capture-failures (:capture-failures raw-results)]
+    (cond-> {:status final-status
+             :plan plan
+             :steps rolled-steps
+             :scenario-ctx (:scenario-ctx raw-results)}
+      (and (seq capture-failures) (= :passed final-status))
+      (-> (assoc :status :error)
+          (assoc :error (capture/capture-error capture-failures))))))
 
 (defn execute-scenario
   "Execute all steps for a single scenario/pickle plan.
@@ -341,17 +373,22 @@
                (loop [remaining-steps (:plan/steps plan)
                       executed-steps []
                       scenario-ctx provisioned-ctx
-                      scenario-status :passed]
+                      scenario-status :passed
+                      capture-failures []]
                  (if (empty? remaining-steps)
                    {:status scenario-status
                     :steps executed-steps
-                    :scenario-ctx scenario-ctx}
-                   (let [{:keys [step-result scenario-ctx status]}
+                    :scenario-ctx scenario-ctx
+                    :capture-failures capture-failures}
+                   (let [{:keys [step-result scenario-ctx status]
+                          step-capture-failures :capture-failures}
                          (classify-and-execute-step (first remaining-steps)
+                                                    (inc (count executed-steps))
                                                     scenario-ctx scenario-status
                                                     interfaces registry opts)]
                      (recur (rest remaining-steps)
                             (conj executed-steps step-result)
                             scenario-ctx
-                            status))))]
+                            status
+                            (into capture-failures step-capture-failures)))))]
            (finalize-scenario-results raw-results plan)))))))

@@ -5,16 +5,14 @@
             [shiftlefter.stepengine.registry :as registry :refer [defstep]]
             [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.costume.wardrobe :as wardrobe]
-            [shiftlefter.webdriver.session-store :as store]
             [babashka.fs :as fs]))
 
-;; Clear registry, contexts, surfaces, and reset to vanilla mode before each test
+;; Clear registry, contexts, and reset to vanilla mode before each test
 (use-fixtures :each
   (fn [f]
     (registry/clear-registry!)
     (repl/reset-ctx!)
     (repl/reset-ctxs!)
-    (repl/reset-surfaces!)
     (repl/vanilla!)  ; Ensure vanilla mode between tests
     (f)))
 
@@ -277,83 +275,8 @@ Feature: Test
     (is (= {} (repl/ctxs)))))
 
 ;; -----------------------------------------------------------------------------
-;; Surface Tests
-;; -----------------------------------------------------------------------------
-
-(deftest test-mark-surface!
-  (testing "marks context as surface"
-    (is (= :marked (repl/mark-surface! :alice)))
-    (is (true? (repl/surface? :alice)))))
-
-(deftest test-unmark-surface!
-  (testing "unmarks context as surface"
-    (repl/mark-surface! :alice)
-    (is (true? (repl/surface? :alice)))
-    (is (= :unmarked (repl/unmark-surface! :alice)))
-    (is (false? (repl/surface? :alice)))))
-
-(deftest test-surface?
-  (testing "returns false for unmarked context"
-    (is (false? (repl/surface? :nobody))))
-
-  (testing "returns true for marked context"
-    (repl/mark-surface! :alice)
-    (is (true? (repl/surface? :alice))))
-
-  (testing "returns false after unmark"
-    (repl/mark-surface! :bob)
-    (repl/unmark-surface! :bob)
-    (is (false? (repl/surface? :bob)))))
-
-(deftest test-list-surfaces
-  (testing "returns empty when none marked"
-    (is (empty? (repl/list-surfaces))))
-
-  (testing "returns all marked surfaces"
-    (repl/mark-surface! :alice)
-    (repl/mark-surface! :bob)
-    (is (= #{:alice :bob} (set (repl/list-surfaces))))))
-
-(deftest test-reset-surfaces!
-  (testing "clears all surface markings"
-    (repl/mark-surface! :alice)
-    (repl/mark-surface! :bob)
-    (is (= 2 (count (repl/list-surfaces))))
-    (repl/reset-surfaces!)
-    (is (empty? (repl/list-surfaces)))))
-
-(deftest test-clear!-resets-surfaces
-  (testing "clear! also resets surface markings"
-    (repl/mark-surface! :alice)
-    (is (true? (repl/surface? :alice)))
-    (repl/clear!)
-    (is (false? (repl/surface? :alice)))))
-
-(deftest test-acceptance-criteria-surfaces
-  (testing "Task 2.5.8 AC: mark/unmark/check surfaces"
-    (repl/clear!)
-    (repl/mark-surface! :alice)
-    (is (true? (repl/surface? :alice)))
-    (repl/unmark-surface! :alice)
-    (is (false? (repl/surface? :alice)))))
-
-;; -----------------------------------------------------------------------------
 ;; Browser Lifecycle Tests
 ;; -----------------------------------------------------------------------------
-
-;; Spy store for testing lifecycle behavior
-(defrecord SpyStore [saves deletes]
-  store/ISessionStore
-  (load-session-handle [_ _surface-name] nil)
-  (save-session-handle! [_ surface-name handle]
-    (swap! saves conj {:surface surface-name :handle handle})
-    {:ok {:saved-at "test" :surface surface-name}})
-  (delete-session-handle! [_ surface-name]
-    (swap! deletes conj surface-name)
-    {:ok true}))
-
-(defn make-spy-store []
-  (->SpyStore (atom []) (atom [])))
 
 (defn- make-fake-browser
   "Create a fake browser capability for testing lifecycle."
@@ -382,8 +305,8 @@ Feature: Test
       (is (= 1 (count actions)))
       (is (= :none (-> actions first :action))))))
 
-(deftest test-reset-ctxs-non-surface-closes
-  (testing "reset-ctxs! returns :closed action for non-surface with browser"
+(deftest test-reset-ctxs-reports-close-failed-honestly
+  (testing "reset-ctxs! reports :close-failed (not :closed) when the quit errors"
     ;; Inject a fake browser into the context
     (defstep #":(\w+) exists" [_subject] {:exists true})
     (repl/as :alice "exists")
@@ -392,75 +315,14 @@ Feature: Test
     ;; Verify browser is present
     (is (some? (cap/get-capability (repl/ctx :alice) :web)))
 
-    ;; Reset should report :closed (actual close fails gracefully)
+    ;; The fake driver's port has no ChromeDriver behind it, so the (now
+    ;; real, sl-tss7) quit fails — and the action says so instead of lying
+    ;; :closed as the pre-tss7 code did (the error used to be swallowed).
     (let [actions (repl/reset-ctxs!)]
       (is (= 1 (count actions)))
-      (is (= :closed (-> actions first :action)))
+      (is (= :close-failed (-> actions first :action)))
+      (is (some? (-> actions first :error)))
       (is (= :alice (-> actions first :ctx-name))))))
-
-(deftest test-reset-ctxs-surface-persists
-  (testing "reset-ctxs! persists session for surface contexts"
-    (let [spy-store (make-spy-store)]
-      (binding [repl/*session-store* (delay spy-store)]
-        (defstep #":(\w+) exists" [_subject] {:exists true})
-        (repl/as :alice "exists")
-        (inject-browser-into-ctx! :alice "session-456")
-        (repl/mark-surface! :alice)
-
-        ;; Reset should persist, not close
-        (let [actions (repl/reset-ctxs!)]
-          (is (= 1 (count actions)))
-          (is (= :persisted (-> actions first :action)))
-          (is (= :alice (-> actions first :ctx-name)))
-          (is (= "session-456" (-> actions first :handle :session-id))))
-
-        ;; Verify store received the save
-        (is (= 1 (count @(:saves spy-store))))
-        (let [saved (first @(:saves spy-store))]
-          (is (= :alice (:surface saved)))
-          (is (= "session-456" (-> saved :handle :session-id))))))))
-
-(deftest test-clear-handles-browser-lifecycle
-  (testing "clear! handles browser lifecycle before clearing"
-    (let [spy-store (make-spy-store)]
-      (binding [repl/*session-store* (delay spy-store)]
-        (defstep #":(\w+) exists" [_subject] {:exists true})
-        (repl/as :alice "exists")
-        (repl/as :bob "exists")
-        (inject-browser-into-ctx! :alice "alice-session")
-        (inject-browser-into-ctx! :bob "bob-session")
-        (repl/mark-surface! :alice)
-        ;; bob is not a surface
-
-        (repl/clear!)
-
-        ;; Alice should be persisted
-        (is (= 1 (count @(:saves spy-store))))
-        (is (= :alice (-> @(:saves spy-store) first :surface)))))))
-
-(deftest test-acceptance-criteria-lifecycle
-  (testing "Task 2.5.9 AC: non-surface closes, surface persists"
-    (let [spy-store (make-spy-store)]
-      (binding [repl/*session-store* (delay spy-store)]
-        ;; Setup non-surface
-        (repl/clear!)
-        (defstep #":(\w+) exists" [_subject] {:exists true})
-        (repl/as :alice "exists")
-        (inject-browser-into-ctx! :alice "alice-session")
-
-        ;; Reset non-surface - should close (action = :closed)
-        (let [actions (repl/reset-ctxs!)]
-          (is (= :closed (-> actions first :action))))
-
-        ;; Setup surface
-        (repl/as :bob "exists")
-        (inject-browser-into-ctx! :bob "bob-session")
-        (repl/mark-surface! :bob)
-
-        ;; Reset surface - should persist
-        (let [actions (repl/reset-ctxs!)]
-          (is (= :persisted (-> actions first :action)))
-          (is (= 1 (count @(:saves spy-store)))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Costume Re-export Tests (Task 2.6.9)

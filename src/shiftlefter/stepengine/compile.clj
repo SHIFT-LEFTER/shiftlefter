@@ -86,7 +86,10 @@
     ;; Shifted mode: require glossaries, load strictly
     (if-not (contains? config :glossaries)
       {:error {:type :svo/missing-glossaries-config
-               :message "Shifted mode requires :glossaries config"}}
+               :message (str "Shifted mode requires glossaries: add :glossaries to "
+                             "shiftlefter.edn or create the conventional files under "
+                             "the config root (glossary/subjects.edn, "
+                             "glossary/verbs/<type>.edn, glossary/intents/).")}}
       (let [glossary-result (glossary/load-all-glossaries-strict (:glossaries config))]
         (if (:error glossary-result)
           glossary-result

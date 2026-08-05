@@ -48,6 +48,14 @@
      :status "RAT" :case :double-quote-inside-literal
      :step-text ":alice fills Login.code with 'say \"hi\"'"
      :normalized "say \"hi\""}
+    {:example "fills Login.code with 'don''t'"
+     :status "RAT (sl-jlqz)" :case :doubled-quote-literal
+     :step-text ":alice fills Login.code with 'don''t'"
+     :normalized "don't"}
+    {:example "fills Login.code with ''''"
+     :status "RAT (sl-jlqz)" :case :quadruple-quote-literal
+     :step-text ":alice fills Login.code with ''''"
+     :normalized "'"}
     {:example "fills Login.code with \"x\""
      :status "RAT" :case :double-quotes-hint
      :step-text ":alice fills Login.code with \"x\""
@@ -56,6 +64,11 @@
      :status "RAT" :case :unbalanced-quote-hint
      :step-text ":alice fills Login.code with 'x"
      :repaired ":alice fills Login.code with 'x'"}
+    {:example "fills Login.code with 'Don't stop'"
+     :status "RAT (sl-jlqz); hint teaches doubling"
+     :case :apostrophe-in-literal-hint
+     :step-text ":alice fills Login.code with 'Don't stop'"
+     :repaired ":alice fills Login.code with 'Don''t stop'"}
     {:example "fills Login.code with ''"
      :status "RAT; hint points at clears (sl-s04n)" :case :empty-literal
      :step-text ":alice fills Login.code with ''"}
@@ -88,6 +101,9 @@
      :step-text ":alice opens the browser to 'Login'"
      :literal "Login"
      :resolved "http://h:9092/Login"}
+    {:example "opens the browser to '/o''brien'"
+     :status "RAT (sl-jlqz)" :case :nav-doubled-literal
+     :step-text ":alice opens the browser to '/o''brien'"}
     {:example "opens the browser to {resetLink}"
      :status "RAT" :case :nav-token
      :step-text ":alice opens the browser to {resetLink}"}
@@ -161,6 +177,10 @@
      :status "RAT" :case :quoted-single
      :step-text ":alice presses 'g'"
      :key-sent "g"}
+    {:example "presses ''''"
+     :status "RAT (sl-jlqz)" :case :quoted-apostrophe
+     :step-text ":alice presses ''''"
+     :key-sent "'"}
     {:example "presses 'abc'"
      :status "RAT" :case :quoted-multi
      :step-text ":alice presses 'abc'"}

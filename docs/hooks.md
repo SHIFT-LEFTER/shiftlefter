@@ -54,7 +54,7 @@ belongs:
 | launches/quits the browser, logs in, manages sessions | capabilities & costumes | shipped — never write this hook |
 | starts a server, seeds a service, runs once per suite | `setup.clj` | shipped |
 | seeds or resets data per scenario | a hook, honestly | shipped — graduates later |
-| screenshots or scrapes console on failure | a hook, honestly | shipped — config-line graduation designed |
+| screenshots or scrapes console on failure | the `:capture` config line | shipped — delete the hook |
 | collects metrics or timing | nothing — it's already recorded | shipped |
 | retries flaky scenarios | nothing | deliberately unsupported |
 
@@ -73,7 +73,7 @@ thing you want is already happening, and your hook will fight it.
 
 "Start the system under test once, run these features against it, tear it
 down" is *run* orchestration, not scenario lifecycle, and it has its own file:
-`setup.clj`, sibling of your `shiftlefter.edn`. It defines `setups` — a vector
+`setup.clj`, sibling of your `shiftlefter.edn` (both in `sl/`). It defines `setups` — a vector
 of groups, each with a `:start` function (returning an optional `:stop` and an
 optional adapter registry) and the `:features` that group owns:
 
@@ -130,36 +130,115 @@ system (reset a database, call an internal CLI) shells out or uses what's
 already on the framework classpath. Adding your own dependencies to the hook
 classpath is a planned extension, not a current feature.
 
-### Failure diagnostics — a hook today, a config line soon
+### Failure diagnostics — now a config line
 
 Screenshot-on-failure is the most-written After hook in the industry, and
-today it's the honest answer here too. Afters run before capability cleanup,
-so the browser is still live; on-failure conditionality is a plain `when` on
-the result status:
+here it is **configuration, not code**:
+
+```clojure
+{:runner {:capture {:screenshot :on-failure
+                    :console :on-failure}}}
+```
+
+```bash
+sl run --capture screenshot=every-step   # the one-off film-strip debug run
+```
+
+Kinds today (browser-contributed): `:screenshot`, `:console`,
+`:page-source`. Policies: `:never` (the default — capture is always
+opt-in), `:on-failure`, `:every-step`. The `--capture` flag wins over the
+config mirror as a whole value. Captured artifacts land in the run's
+results directory under `attachments/<scenario-slug>/` and render
+everywhere attachments do.
+
+What the policy buys over a hand-rolled After hook:
+
+- **The instant of failure.** `:on-failure` captures at the failing
+  step's moment — before After hooks, before anything moves — and
+  captures **every** live capability: Bob's screen may be exactly what
+  explains Alice's failure. (One honesty note: an instant-of-failure
+  screenshot of an optimistic UI shows *paint*, not settled state —
+  settled ≠ painted.)
+- **The film strip.** `:every-step` follows the acting subject, one
+  capture per step. A step with no SVO actor (vanilla mode) captures
+  every live capability — which in a single-browser suite is exactly the
+  one browser; multi-capability suites pay that linear cost knowingly.
+- **Step-grain console provenance.** Browser console reads are
+  destructive drains (read-and-clear), so under `:every-step` each
+  step's drain holds exactly the entries logged since the last —
+  "which step said this" for free — with a final tail sweep so nothing
+  logged after the last step is lost. Under `:on-failure` the console
+  drains once, post-steps, only when the scenario is red — one
+  whole-scenario log.
+- **Timing honesty.** Capture cost is recorded on each ref
+  (`:attachment/duration-ms`) and never pollutes *step* durations.
+- **The evidence contract (harsh on purpose).** If capture
+  infrastructure itself fails on an otherwise-green scenario, the
+  scenario goes `:error`, capture-attributed — a green run whose
+  promised evidence silently vanished would be green with missing
+  evidence. Already-red scenarios keep their status; the ref records the
+  miss visibly.
+
+Kind support is adapter-level: `:console` is a Chrome/Edge capability
+(other drivers no-op legibly), and the Playwright backend contributes no
+capture kinds yet — on Playwright, a configured `:screenshot` simply
+never fires. A configured kind that *no* registered adapter provides
+gets one stderr warning per run — a typo'd kind must not be a silent
+no-op.
+
+Dry runs never capture (nothing executes), and a run with no results
+directory (no config file) warns once and captures nothing.
+
+### Custom captures — the After-hook attachments claim
+
+For evidence the framework doesn't own — DB dumps, API traces, anything
+beyond the built-in kinds — the After hook remains the sanctioned
+channel. Afters run before capability cleanup, so the browser is still
+live; on-failure conditionality is a plain `when` on the result status.
+The After return is the **attachments claim**: write your file into the
+payload's `:artifacts-dir` (pre-created, absent when the run has no
+results directory) and return refs to what you wrote — they ride the
+scenario envelope and render in every human report surface (inline in
+HTML, Jenkins `[[ATTACHMENT|…]]` lines in JUnit, plain lines in console
+failures; the `--edn` summary does not carry attachment refs yet):
 
 ```clojure
 {:name "failure-screenshot"
- :after (fn [{:keys [ctx result]}]
-          (when (= :failed (:status result))
+ :after (fn [{:keys [ctx result artifacts-dir]}]
+          (when (and artifacts-dir (= :failed (:status result)))
             ;; capabilities are still live here — unless provisioning itself
             ;; failed, in which case Afters run WITHOUT them: check for the
             ;; capability you want, don't assume it
-            ))}
+            (let [path (str artifacts-dir "/failure.png")]
+              ;; ... write the screenshot bytes to path ...
+              {:attachments [{:attachment/kind :screenshot
+                              :attachment/path path
+                              :attachment/media-type "image/png"}]})))}
 ```
 
-But don't build infrastructure on this. A declarative capture policy is
-designed and scheduled: screenshot/console/page-source capture as
-configuration (`:on-failure`, `:every-step`), framework-owned, no user code.
-When it lands, the guidance becomes *delete the After, set `:capture`* — and
-because capture is runner-level and mode-agnostic, a team porting a Cucumber
-suite deletes its screenshot infrastructure and adds one config line on day
-one, before adopting anything else ShiftLefter does. Keep today's After hooks
-thin so that deletion stays a deletion.
+The claim contract is full-strict, deliberately: return nil (no claim) or a
+map holding exactly `:attachments` with well-formed refs
+(`:attachment/kind` + `:attachment/path` required). Anything else —
+a misspelled key, a stray sibling key, a non-map value — is
+`:hook/invalid-return` and the scenario goes `:error`: a typo'd claim that
+silently vanished would be evidence loss the report never confesses to.
+A claimed file that doesn't exist keeps the scenario's outcome (the
+reference is data; the file is world) but the ref renders with a visible
+error and a stderr warning fires.
 
-One hazard to know now, because it shapes that future: browser console reads
-are destructive drains — two readers can't both see the log. Today your After
-owns the console read. Once a capture policy owns it, hooks will read the
-captured artifact, not the browser.
+But for screenshot/console/page-source, the guidance is now: **delete the
+After, set `:capture`**. Capture is runner-level and mode-agnostic, so a
+team porting a Cucumber suite deletes its screenshot infrastructure and
+adds one config line on day one, before adopting anything else
+ShiftLefter does.
+
+One hazard, now live: browser console reads are destructive drains — two
+readers can't both see the log. With `:capture` console on, the framework
+owns the read; a hook that calls the browser's log API gets whatever the
+last drain left (usually nothing). Hooks that want the log read the
+captured artifact, not the browser — and hooks that want the
+*whole-scenario* log want the `:on-failure` policy, whose single
+post-steps drain fires before any After runs.
 
 ### Metrics and timing — already recorded
 
@@ -190,5 +269,5 @@ compatibility *guarantee*, not a migration stage you must pass through. Your
 step definitions themselves don't come over; [Adoption](adoption.md) is honest
 about where migration actually stands. The hook story rides each migration
 slice for free: global Befores land as `:global?` hooks, screenshot
-infrastructure is scheduled to become a config line, and per-scenario seeding
+infrastructure IS a config line (`:capture`, above), and per-scenario seeding
 maps onto named hooks one `@hook=` tag at a time.

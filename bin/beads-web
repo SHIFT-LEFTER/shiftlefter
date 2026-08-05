@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# beads-web — the board as a live local site (bv daemon pair)
+#
+# Usage: ./bin/beads-web
+#
+# This script:
+# 1. Starts `bv --watch-export` in the background — rebuilds board/pages
+#    whenever the beads database changes
+# 2. Serves board/pages at http://127.0.0.1:9000 with live-reload
+#    (WASM won't load over file:// — serving is mandatory, see board/README.md)
+# 3. Ctrl-C stops both
+set -e
+cd "$(dirname "$0")/.."
+
+bv --watch-export --export-pages board/pages &
+WATCH_PID=$!
+trap 'kill "$WATCH_PID" 2>/dev/null' EXIT
+
+bv --preview-pages board/pages

@@ -16,6 +16,7 @@
    [shiftlefter.gherkin.verify :as verify]
    [shiftlefter.orient :as orient]
    [shiftlefter.project-context :as project-context]
+   [shiftlefter.runner.config :as runner-config]
    [shiftlefter.runner.core :as runner]
    [shiftlefter.runner.tag-disposition :as tagd]
    [shiftlefter.version :as version])
@@ -50,7 +51,7 @@
    [nil "--canonical" "Format to canonical style (stdout)"]
    [nil "--step-paths PATHS" "Step definition paths (comma-separated)"
     :parse-fn #(str/split % #",")]
-   ["-c" "--config FILE" "Config file path (default: shiftlefter.edn)"]
+   ["-c" "--config FILE" "Config file path (default: discovered sl/shiftlefter.edn)"]
    [nil "--tags TAGS" "Run only scenarios with any of these tags (comma-separated; repeatable; '@' optional)"
     :parse-fn tagd/parse-tag-list
     :validate [tagd/valid-tag-set? "must be one or more non-empty tags without whitespace"]
@@ -63,6 +64,10 @@
    [nil "--max-parallel N" "Run up to N scenarios concurrently (default 1; @serial and auto-serialized scenarios run alone)"
     :parse-fn #(Integer/parseInt %)
     :validate [pos-int? "must be a positive integer"]]
+   [nil "--capture SPEC" "Capture policy: kind=policy pairs, comma-separated (e.g. screenshot=on-failure,console=every-step; policies: never|on-failure|every-step)"
+    :parse-fn runner-config/parse-capture-spec
+    :validate [runner-config/valid-capture-spec?
+               "must be kind=policy pairs with policy one of never|on-failure|every-step"]]
    ["-s" "--seed SEED" "Random seed for fuzz"
     :parse-fn #(Long/parseLong %)]
    ["-t" "--trials N" "Number of fuzz trials"
@@ -126,7 +131,9 @@
    - paths: space-separated paths/globs to feature files
    - opts: CLI options including :step-paths, :dry-run, :edn, :verbose
 
-   Note: If --step-paths not specified, runner uses config or defaults to steps/"
+   Note: If --step-paths not specified, runner uses config or defaults to
+   steps/ under the config root (sl/steps/). With no paths, the config
+   feature corpus (default sl/features/) runs."
   ([paths opts]
    (run-cmd paths opts (project-context/resolve
                         (cond-> {}
@@ -143,6 +150,7 @@
                                    (:junit-xml opts) (assoc :junit-xml (:junit-xml opts))
                                    (:html opts) (assoc :html (:html opts))
                                    (:max-parallel opts) (assoc :max-parallel (:max-parallel opts))
+                                   (:capture opts) (assoc :capture (:capture opts))
                                    (tag-filter-opt opts) (assoc :tag-filter (tag-filter-opt opts))
                                    (:config-path opts) (assoc :config-path (:config-path opts))))]
      (:exit-code result))))
@@ -257,10 +265,12 @@
     :ok (println (str "Checking " path "... OK"))
     :not-found (println (str "Checking " path "... NOT FOUND"))
     :comments (do
-                (println (str "Checking " path "... CONTAINS COMMENTS"))
-                (println (str "  canonical formatting is not yet comment-safe; "
+                (println (str "Checking " path "... COMMENT-DROP GUARD"))
+                (println (str "  canonical formatting would drop "
                               (comment-lines-phrase comments)
-                              " would be lost — skipped, not counted as a failure")))
+                              " — comment preservation is complete, so this is a"
+                              " formatter bug, not your file; skipped, not counted"
+                              " as a failure")))
     :error (do
              (println (str "Checking " path "... NEEDS FORMATTING"))
              (case reason
@@ -275,7 +285,7 @@
   (println (str total " file" (when (not= 1 total) "s")
                 " checked: " valid " valid, " invalid " invalid"
                 (when (pos? with-comments)
-                  (str ", " with-comments " with comments (skipped)")))))
+                  (str ", " with-comments " skipped (comment-drop guard)")))))
 
 ;; --- In-place formatting helpers ---
 
@@ -292,8 +302,9 @@
           :ok
           (let [formatted (:output result)]
             (cond
-              ;; sl-q2uj guard: never silently destroy comments — refuse
-              ;; the write and leave the file untouched.
+              ;; Backstop (sl-q2uj guard, kept at sl-lg8v): canonical now
+              ;; preserves comments, so this only fires on a printer
+              ;; regression — refuse the write, leave the file untouched.
               (seq (:lost-comments result))
               {:path path
                :status :skipped-comments
@@ -364,9 +375,11 @@
     :not-found (println (str "Formatting " path "... NOT FOUND"))
     :skipped-comments
     (do
-      (println (str "Formatting " path "... SKIPPED (contains comments)"))
-      (println (str "  refusing to reformat: canonical formatting is not yet"
-                    " comment-safe and would delete " (comment-lines-phrase comments)))
+      (println (str "Formatting " path "... SKIPPED (comment-drop guard)"))
+      (println (str "  refusing to reformat: canonical formatting would delete "
+                    (comment-lines-phrase comments)
+                    " — comment preservation is complete, so this is a"
+                    " formatter bug, not your file"))
       (println "  file left untouched"))
     :error (do
              (println (str "Formatting " path "... ERROR"))
@@ -382,7 +395,7 @@
                 " processed: " reformatted " reformatted, "
                 unchanged " unchanged"
                 (when (pos? skipped-comments)
-                  (str ", " skipped-comments " skipped (comments)"))
+                  (str ", " skipped-comments " skipped (comment-drop guard)"))
                 (when (pos? errors) (str ", " errors " error" (when (not= 1 errors) "s"))))))
 
 (defn- format-check-results-edn
@@ -493,7 +506,8 @@
                       (binding [*out* *err*]
                         (println (str "WARNING: canonical output drops "
                                       (comment-lines-phrase lost)
-                                      " — canonical formatting is not yet comment-safe"))))
+                                      " — comment preservation is complete, so this"
+                                      " is a formatter bug, not your file"))))
                     (if edn
                       (do (println (pr-str {:status :ok
                                             :output (:output result)}))
@@ -877,10 +891,11 @@
       (:help options)
       (do
         (println "Usage:
-  sl run <path> [<path2> ...] [--step-paths p1,p2] [-c FILE|--config FILE] [--tags t1,t2] [--skip-tags t1,t2] [--max-parallel N] [--dry-run] [--edn] [--junit-xml PATH] [--html PATH] [-v]
+  sl run <path> [<path2> ...] [--step-paths p1,p2] [-c FILE|--config FILE] [--tags t1,t2] [--skip-tags t1,t2] [--max-parallel N] [--capture k=v,...] [--dry-run] [--edn] [--junit-xml PATH] [--html PATH] [-v]
         (--junit-xml writes a CI-ingestible report; no file on planning error — see ERRATA E009)
         (--html writes a self-contained HTML run report; open it in any browser, no server needed)
         (--max-parallel N runs up to N scenarios concurrently; @serial-tagged and auto-serialized scenarios run alone)
+        (--capture kind=policy,... captures artifacts into the run's results dir; kinds screenshot/console/page-source, policies never/on-failure/every-step)
   sl fmt --check <path> [<path2> ...]   (validate files/directories)
   sl fmt --write <path> [<path2> ...]   (format in place)
   sl fmt --canonical <path>             (format to stdout)

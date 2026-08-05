@@ -331,15 +331,17 @@
       (is (str/starts-with? once "# top one\n# top two\n"))
       (is (= once (printer/canonical once)) "top comments are idempotent"))))
 
-(deftest lost-comments-detects-interior-comments
-  (testing "comment between steps is reported with line and text"
-    (is (= [{:line 5 :text "# mid"}]
-           (printer/lost-comments
-            "Feature: X\n\n  Scenario: S\n    Given a\n    # mid\n    When b\n"))))
-  (testing "comment between scenarios is reported"
-    (is (= [{:line 4 :text "# between scenarios"}]
-           (printer/lost-comments
-            "Feature: X\n\n  Scenario: A\n# between scenarios\n    Given a\n"))))
+;; sl-lg8v: canonical formatting preserves interior comments (following-node
+;; attachment). lost-comments stays wired as the permanent backstop and is
+;; expected to ALWAYS be empty from here on — these tests pin both halves.
+
+(deftest lost-comments-is-empty-under-preservation
+  (testing "comment between steps is preserved, not lost"
+    (is (= [] (printer/lost-comments
+               "Feature: X\n\n  Scenario: S\n    Given a\n    # mid\n    When b\n"))))
+  (testing "column-0 comment inside a scenario is preserved"
+    (is (= [] (printer/lost-comments
+               "Feature: X\n\n  Scenario: A\n# between scenarios\n    Given a\n"))))
   (testing "top-of-file comments are not lost"
     (is (= [] (printer/lost-comments
                "# top\nFeature: X\n\n  Scenario: S\n    Given a\n"))))
@@ -347,13 +349,86 @@
     (is (= [] (printer/lost-comments
                "Feature: X\n\n  Scenario: S\n    Given a\n")))))
 
-(deftest lost-comments-regression-known-files
-  (testing "the three comment-bearing files from the sl-2c68 sweep are detected"
-    (doseq [f ["examples/05-nested-self-rooted/features/feed.feature"
-               "examples/svo-demo/features/login.feature"
+;; sl-yynw F8: the backstop's POSITIVE pin. No real input can reach the
+;; non-empty branch (preservation is complete, above), so the printer
+;; regression it guards against is simulated: canonical redefined to drop
+;; comment lines from its own real output.
+
+(deftest lost-comments-reports-dropped-comments
+  (testing "a comment-dropping canonical makes the backstop fire with the
+            comment's input line and text"
+    (let [input "Feature: X\n\n  Scenario: S\n    Given a\n    # mid\n    When b\n"
+          real printer/canonical]
+      (with-redefs [printer/canonical
+                    (fn [s] (str/replace (real s) #"(?m)^\s*#[^\n]*\n" ""))]
+        (is (= [{:line 5 :text "# mid"}] (printer/lost-comments input))))))
+  (testing "multiset matching: only the dropped comment is reported, the
+            surviving one is not"
+    (let [input (str "Feature: X\n\n  Scenario: S\n    Given a\n"
+                     "    # keep\n    # drop\n    When b\n")
+          real printer/canonical]
+      (with-redefs [printer/canonical
+                    (fn [s] (str/replace (real s) #"(?m)^\s*# drop[^\n]*\n" ""))]
+        (is (= [{:line 6 :text "# drop"}] (printer/lost-comments input)))))))
+
+(deftest interior-comment-emission
+  (testing "a comment attaches to the FOLLOWING step, at the step's indent"
+    (let [once (printer/canonical
+                "Feature: X\n\n  Scenario: S\n    Given a\n    # mid\n    When b\n")]
+      (is (str/includes? once "    Given a\n    # mid\n    When b"))
+      (is (= once (printer/canonical once)))))
+  (testing "a banner between scenarios attaches above the next scenario's tags"
+    (let [once (printer/canonical
+                (str "Feature: X\n\n  Scenario: A\n    Given a\n\n"
+                     "  # banner\n  @tagged\n  Scenario: B\n    Given b\n"))]
+      (is (str/includes? once "\n  # banner\n  @tagged\n  Scenario: B"))
+      (is (= once (printer/canonical once)))))
+  (testing "a comment between data-table rows attaches to the following row"
+    (let [once (printer/canonical
+                "Feature: X\n\n  Scenario: S\n    Given t\n      | a |\n      # row\n      | 1 |\n")]
+      (is (str/includes? once "      | a |\n      # row\n      | 1 |"))
+      (is (= once (printer/canonical once)))))
+  (testing "a comment between Examples rows attaches to the following row"
+    (let [once (printer/canonical
+                (str "Feature: X\n\n  Scenario Outline: S\n    Given <v>\n\n"
+                     "    Examples:\n      | v |\n      # ex\n      | 1 |\n"))]
+      (is (str/includes? once "    | v |\n    # ex\n    | 1 |"))
+      (is (= once (printer/canonical once)))))
+  (testing "comments past the last anchor trail at end of output, indent 0"
+    (let [once (printer/canonical
+                "Feature: X\n\n  Scenario: S\n    Given a\n# trailing\n")]
+      (is (str/ends-with? once "\n# trailing\n"))
+      (is (= once (printer/canonical once)))))
+  (testing "a comments-only file passes through"
+    (let [once (printer/canonical "# only\n# comments\n")]
+      (is (= "# only\n# comments\n" once))
+      (is (= once (printer/canonical once))))))
+
+(deftest top-comment-and-language-header-combo
+  (testing "sl-lg8v fit-pass pin: a leading comment plus a # language:
+            directive — comments emit first, the directive survives, and
+            language detection holds across re-parse (idempotence)"
+    (let [input (str "# top note\n# language: en\n"
+                     "Feature: X\n\n  Scenario: S\n    Given a\n")
+          once (printer/canonical input)]
+      (is (str/starts-with? once "# top note\n\n# language: en\nFeature: X"))
+      (is (= [] (printer/lost-comments input)))
+      (is (= once (printer/canonical once))))))
+
+(deftest comment-corpus-regression
+  (testing "the four comment-bearing files from the sl-q2uj sweep are now
+            comment-safe (red-to-green) and canonical is idempotent on them;
+            this doubles as the backstop's own pin"
+    (doseq [f ["examples/05-nested-self-rooted/sl/features/feed.feature"
+               "examples/svo-demo/sl/features/login.feature"
+               "test/fixtures/features/browser_smoke.feature"
                "drives/artifacts/run2-opus-source-access/features/storefront.feature"]]
-      (is (seq (printer/lost-comments (slurp f)))
-          (str f " should report lost comments")))))
+      (let [s (slurp f)
+            once (printer/canonical s)]
+        (is (= [] (printer/lost-comments s))
+            (str f " must be comment-safe"))
+        (is (= once (printer/canonical once))
+            (str f " canonical must be idempotent"))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Idempotence tests: format(format(x)) == format(x)

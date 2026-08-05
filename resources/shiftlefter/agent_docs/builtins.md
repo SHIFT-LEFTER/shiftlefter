@@ -59,19 +59,19 @@ Reference grammar for each built-in step. To author a step, copy a
 `bind with:` example from the verb entries above — never this regex
 source.
 
-- `:([\w./-]+) receives an SMS to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching /(.+)/` → `:receive`/`:default` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) receives an SMS to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) since ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching /(.+)/` → `:receive`/`:since-iso` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) receives an SMS to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) within the last (\d+ (?:seconds?|minutes?|hours?)) matching /(.+)/` → `:receive`/`:within-last` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) sends an MMS to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) with caption ('[^']*'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) and media ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:send-media`/`:to` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) sends an SMS to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) saying ('[^']*'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:send`/`:to` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) should see (\d+) messages to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:count` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching /(.+)/` → `:receive`/`:default` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) since ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching /(.+)/` → `:receive`/`:since-iso` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) within the last (\d+ (?:seconds?|minutes?|hours?)) matching /(.+)/` → `:receive`/`:within-last` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) sends an MMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) with caption ('(?:[^']|'')*'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) and media ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:send-media`/`:to` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) sends an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) saying ('(?:[^']|'')*'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:send`/`:to` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) should see (\d+) messages to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:count` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
 
 ## Interface `:web`
 
 ### Adapters
 
 - `:etaoin` — provides `:shiftlefter.browser.protocol/IBrowser`
-- `:playwright` — provides `:shiftlefter.browser.protocol/IBrowser` (not bundled — add com.microsoft.playwright/playwright {:mvn/version "1.50.0"} to your deps.edn)
+- `:playwright` — provides `:shiftlefter.browser.protocol/IBrowser` (not bundled — add com.microsoft.playwright/playwright {:mvn/version "1.50.0"} to your deps.edn, or drop the resolved jars in sl/lib/; see docs/INSTALL-TIERS.md)
 
 ### Verbs
 
@@ -252,39 +252,39 @@ source.
 - `:([\w./-]+) dismisses the alert` → `:dismiss-alert`/`:default` `[:web]`
 - `:([\w./-]+) double-clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:doubleclick`/`:default` `[:web]`
 - `:([\w./-]+) drags ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:drag`/`:to` `[:web]`
-- `:([\w./-]+) fills ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:fill`/`:with` `[:web]`
+- `:([\w./-]+) fills ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:fill`/`:with` `[:web]`
 - `:([\w./-]+) goes back` → `:navigate-back`/`:default` `[:web]`
 - `:([\w./-]+) goes forward` → `:navigate-forward`/`:default` `[:web]`
 - `:([\w./-]+) hovers over ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:hover`/`:default` `[:web]`
 - `:([\w./-]+) maximizes the window` → `:maximize`/`:default` `[:web]`
 - `:([\w./-]+) moves to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:move`/`:default` `[:web]`
-- `:([\w./-]+) opens the browser to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}|[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)` → `:navigate`/`:to` `[:web]`
-- `:([\w./-]+) presses ([A-Z][A-Za-z0-9]*|'[^']+')` → `:press`/`:default` `[:web]`
+- `:([\w./-]+) opens the browser to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}|[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)` → `:navigate`/`:to` `[:web]`
+- `:([\w./-]+) presses ([A-Z][A-Za-z0-9]*|'(?:[^']|'')+')` → `:press`/`:default` `[:web]`
 - `:([\w./-]+) refreshes the page` → `:refresh`/`:default` `[:web]`
 - `:([\w./-]+) resizes the window to (\d+)x(\d+)` → `:resize`/`:dimensions` `[:web]`
 - `:([\w./-]+) right-clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:rightclick`/`:default` `[:web]`
 - `:([\w./-]+) scrolls to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:scroll`/`:to-element` `[:web]`
 - `:([\w./-]+) scrolls to the (top|bottom)` → `:scroll`/`:to-position` `[:web]`
-- `:([\w./-]+) selects ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) from ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:select`/`:from` `[:web]`
-- `:([\w./-]+) should be on ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}|[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)` → `:be`/`:at` `[:web]`
-- `:([\w./-]+) should be on exactly ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:be`/`:at-exactly` `[:web]`
+- `:([\w./-]+) selects ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) from ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:select`/`:from` `[:web]`
+- `:([\w./-]+) should be on ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}|[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)` → `:be`/`:at` `[:web]`
+- `:([\w./-]+) should be on exactly ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:be`/`:at-exactly` `[:web]`
 - `:([\w./-]+) should not see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:not-see`/`:invisible` `[:web]`
-- `:([\w./-]+) should see '([^']+)'` → `:see`/`:on-page` `[:web]`
+- `:([\w./-]+) should see '((?:[^']|'')+)'` → `:see`/`:on-page` `[:web]`
 - `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:see`/`:visible` `[:web]`
 - `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) disabled` → `:see`/`:disabled` `[:web]`
 - `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) enabled` → `:see`/`:enabled` `[:web]`
 - `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) matching /(.+)/` → `:see`/`:matching` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with attribute ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) equal to ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:attribute` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with text ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:text` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with value ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:value` `[:web]`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with attribute ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) equal to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:attribute` `[:web]`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with text ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:text` `[:web]`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with value ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:value` `[:web]`
 - `:([\w./-]+) should see (\d+) ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) elements` → `:see`/`:count` `[:web]`
 - `:([\w./-]+) should see an alert` → `:see`/`:alert` `[:web]`
-- `:([\w./-]+) should see an alert with ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:alert-with-text` `[:web]`
-- `:([\w./-]+) should see the title ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:title` `[:web]`
+- `:([\w./-]+) should see an alert with ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:alert-with-text` `[:web]`
+- `:([\w./-]+) should see the title ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:title` `[:web]`
 - `:([\w./-]+) switches to frame ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:switch-frame`/`:into` `[:web]`
 - `:([\w./-]+) switches to the main frame` → `:switch-frame`/`:main` `[:web]`
 - `:([\w./-]+) switches to the next window` → `:switch-window`/`:default` `[:web]`
 - `:([\w./-]+) waits (\d+(?:\.\d+)?) seconds?` → `:wait`/`:duration` `[:web]`
 - `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:wait`/`:for-element` `[:web]`
-- `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to show ('[^']+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:wait`/`:for-text` `[:web]`
+- `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to show ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:wait`/`:for-text` `[:web]`
 - `:([\w./-]+) waits for (\d+) ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:wait`/`:for-count` `[:web]`

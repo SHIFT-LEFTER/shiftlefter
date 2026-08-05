@@ -6,7 +6,8 @@
    Fake hooks over atoms; no browser anywhere. Plans get :plan/hooks
    hand-assoc'd (planning-half resolution is covered in
    runner/hooks_test.clj and runner/core_hooks_test.clj)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [babashka.fs :as fs]
+            [clojure.test :refer [deftest is testing]]
             [shiftlefter.runner.reporter :as reporter]
             [shiftlefter.stepengine.exec :as exec]
             [shiftlefter.test-helpers.adapter-registry :as mock]))
@@ -153,14 +154,118 @@
     (is (true? (::on-failure-fired @captured)))
     (is (= "hooked pickle" (-> @captured :scenario :name)))))
 
-(deftest after-return-is-ignored
+;; -----------------------------------------------------------------------------
+;; sl-l9nj — the After-return redemption (FULL-STRICT, Chair-ratified 08-03)
+;; -----------------------------------------------------------------------------
+
+(deftest after-nil-return-is-no-claim
   (let [plan (make-plan [(make-bound-step (fn [] nil))]
-                        :hooks [{:name "chatty"
-                                 :after (fn [_] {:ctx-smuggling :attempt})}])
+                        :hooks [{:name "quiet" :after (fn [_] nil)}])
         result (first-scenario (run-suite [plan]))]
     (is (= :passed (:status result)))
-    (is (not (contains? (:scenario-ctx result) :ctx-smuggling))
-        ":after return is IGNORED (reserved for the attachments era)")))
+    (is (not (contains? result :attachments)) "nil = no claim, no key")))
+
+(deftest after-valid-claim-lands-stamped-and-finalized
+  (let [root (str (fs/create-temp-dir))]
+    (try
+      (let [seen-dir (atom nil)
+            plan (make-plan
+                  [(make-bound-step (fn [] nil))]
+                  :hooks [{:name "shot"
+                           :after (fn [{:keys [artifacts-dir]}]
+                                    (reset! seen-dir artifacts-dir)
+                                    (spit (str artifacts-dir "/s.png") "png!")
+                                    {:attachments
+                                     [#:attachment{:kind :screenshot
+                                                   :path (str artifacts-dir "/s.png")
+                                                   :media-type "image/png"
+                                                   ;; self-asserted provenance —
+                                                   ;; must be overwritten
+                                                   :source :capture-policy}]})}])
+            result (first-scenario (run-suite [plan] {:artifacts-root root}))
+            [ref] (:attachments result)]
+        (is (= :passed (:status result)) "a valid claim never changes the outcome")
+        (is (some? @seen-dir) ":artifacts-dir rode the payload")
+        (is (= "attachments/hooked-pickle/s.png" (:attachment/path ref))
+            "absolute path under the group root relativized")
+        (is (= [:hook "shot"] (:attachment/source ref))
+            "provenance framework-stamped, self-assertion overwritten")
+        (is (= 4 (:attachment/bytes ref)) "bytes filled from the file")
+        (is (not (contains? (:scenario-ctx result) :attachments))
+            "claims never leak into ctx"))
+      (finally (fs/delete-tree root)))))
+
+(deftest after-invalid-returns-are-hook-errors
+  (doseq [[label ret] [["typo'd key" {:atachments []}]
+                       ["stray sibling key" {:attachments [] :extra 1}]
+                       ["non-map" "screenshot.png"]
+                       ["malformed ref" {:attachments [{:attachment/kind :screenshot}]}]]]
+    (testing label
+      (let [plan (make-plan [(make-bound-step (fn [] nil))]
+                            :hooks [{:name "chatty" :after (fn [_] ret)}])
+            result (first-scenario (run-suite [plan]))]
+        (is (= :error (:status result))
+            "FULL-STRICT: a malformed claim dies loudly")
+        (is (= :hook/invalid-return (-> result :error :type)))
+        (is (re-find #"an After returns nil or \{:attachments"
+                     (-> result :error :message)))))))
+
+(deftest after-invalid-return-does-not-stop-the-unwind
+  (let [events (atom [])
+        plan (make-plan [(make-bound-step (fn [] nil))]
+                        :hooks [(hook events "outer" :after true)
+                                {:name "bad" :after (fn [_] :not-a-claim)}])
+        result (first-scenario (run-suite [plan]))]
+    (is (= :error (:status result)))
+    (is (= [[:after "outer"]] @events)
+        "finally-style: the invalid return doesn't stop earlier frames"
+        )))
+
+(deftest after-empty-claim-is-valid-and-keyless
+  (let [plan (make-plan [(make-bound-step (fn [] nil))]
+                        :hooks [{:name "shrug" :after (fn [_] {:attachments []})}])
+        result (first-scenario (run-suite [plan]))]
+    (is (= :passed (:status result)) "an empty claim is a claim, not an error")
+    (is (not (contains? result :attachments)) "empty finalizes to no key")))
+
+(deftest after-missing-file-marks-ref-warns-keeps-outcome
+  (let [root (str (fs/create-temp-dir))
+        err-out (java.io.StringWriter.)]
+    (try
+      (let [plan (make-plan
+                  [(make-bound-step (fn [] nil))]
+                  :hooks [{:name "shot"
+                           :after (fn [_]
+                                    {:attachments
+                                     [#:attachment{:kind :screenshot
+                                                   :path "attachments/hooked-pickle/gone.png"}]})}])
+            result (binding [*err* err-out]
+                     (first-scenario (run-suite [plan] {:artifacts-root root})))
+            [ref] (:attachments result)]
+        (is (= :passed (:status result))
+            "the reference is data, the file is world — outcome untouched")
+        (is (re-find #"file not found" (:attachment/error ref)))
+        (is (re-find #"attachment file not found.*gone\.png" (str err-out))
+            "one stderr warn per miss"))
+      (finally (fs/delete-tree root)))))
+
+(deftest artifacts-dir-in-both-payloads-only-with-root
+  (let [root (str (fs/create-temp-dir))]
+    (try
+      (let [payloads (atom {})
+            hooks [{:name "watch"
+                    :before (fn [p] (swap! payloads assoc :before (:artifacts-dir p)) nil)
+                    :after (fn [p] (swap! payloads assoc :after (:artifacts-dir p)) nil)}]
+            plan-fn #(make-plan [(make-bound-step (fn [] nil))] :hooks hooks)]
+        (run-suite [(plan-fn)] {:artifacts-root root})
+        (let [{:keys [before after]} @payloads]
+          (is (= before after) "single-map convention: both phases, same dir")
+          (is (and before (fs/directory? before)) "pre-created"))
+        (reset! payloads {:before ::unset :after ::unset})
+        (run-suite [(plan-fn)])
+        (is (= {:before nil :after nil} @payloads)
+            "no results dir -> key absent (destructures to nil), never a path"))
+      (finally (fs/delete-tree root)))))
 
 (deftest invalid-before-return-is-hook-error
   (let [events (atom [])

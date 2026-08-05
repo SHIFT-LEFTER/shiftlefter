@@ -27,19 +27,39 @@ The report never contradicts the exit code: the XML contains at least one
 |------|---------|
 | 0 | All scenarios passed (or pending allowed via config) |
 | 1 | One or more scenarios failed or errored (a lifecycle hook threw), or pending steps when not allowed |
-| 2 | Planning failure (undefined steps, parse errors, config errors, no features found) — **no report file is written** |
+| 2 | Planning failure (undefined steps, parse errors, config errors, no features found) — **no JUnit file is written** |
 | 3 | Runner crash (unexpected exception) |
 
 Canonical table for all commands: [README → Return Codes](../README.md#return-codes).
 Background on the no-file decision and the JUnit format itself:
 [ERRATA E009](../ERRATA.md#e009-junit-xml-has-no-official-spec--we-target-the-consumer-subset).
 
+The HTML report behaves differently on exit 2 (since 0.5.4): late planning
+failures — undefined or ambiguous steps, arity mismatches, a hooks error —
+refresh the configured `--html` path with a PLANNING FAILED report, so that
+path never shows a previous run's green for those exits. Earlier exits
+(config errors, parse failures, setup plan-shape errors, a group's `:start`
+failing) still write nothing, and a `report.html` from a prior run survives
+them untouched — one more reason the exit code, not any report file, is the
+gate.
+
+## Consuming `--edn` output
+
+With `--edn`, stdout carries a **sequence of EDN forms**, not always exactly
+one: one run summary per suite (per *group*, under `setup.clj`
+orchestration), plus occasional small supplementary diagnostics forms
+(`{:run/id … :diagnostics {…}}` — e.g. a setup group's teardown failure, or
+a prior run's dirty-teardown warning at startup). Read **all** forms and
+**skip shapes you don't recognize** — the form vocabulary grows by release,
+and unknown forms are never an error. Summaries are the forms carrying
+`:run/exit-code`.
+
 ## The run results directory
 
 Every executing run in a configured project creates a standing output home:
 
 ```text
-<config-root>/results/<stamp>/     # sl/results/… under the sl/ layout
+<config-root>/results/<stamp>/     # i.e. sl/results/…
 ```
 
 - **`<stamp>`** is the run's start time (UTC), compacted filesystem-safe:
@@ -52,19 +72,38 @@ Every executing run in a configured project creates a standing output home:
   containing `*` when it first creates the directory, so run outputs never
   show up in `git status` — repo hygiene, no `.gitignore` edits needed on
   your side.
-- Runs without a `shiftlefter.edn` (ad-hoc `sl run some.feature`) create
+- Runs without an `sl/shiftlefter.edn` (ad-hoc `sl run some.feature`) create
   nothing — the convention is a project convention. Dry runs and planning
   failures (exit 2) create nothing either.
 
-Today the directory is created empty — it is the standing home that
-attachments (screenshots, console captures) and future run artifacts land
-in. `--junit-xml` and `--html` are unchanged: they write exactly where you
-point them. Whether their *defaults* later move into the run directory is
-an open question, deliberately not decided here.
+What lands inside: the **HTML report's primary copy** (`report.html`, or
+`<group-slug>/report.html` per `setup.clj` group) and per-scenario
+`attachments/<scenario-slug>/` directories holding **captures and hook
+attachments**, with more run artifacts to come. The report sits beside its attachments so relative
+references resolve — the run directory zips and travels as one
+self-contained artifact.
 
-In CI, jobs usually archive the files you pointed `--junit-xml`/`--html`
-at; the results directory matters once attachment capture exists — archive
-the whole `results/<stamp>/` directory then.
+`--html` still writes exactly where you point it: that fixed path now
+receives an end-of-run byte copy of the report (the last group's, under
+`setup.clj`), so CI configs and agents that grab a known path keep
+working unchanged — but images in that copy degrade to labeled text
+(the files live in the run directory, not beside the copy).
+One honesty note for multi-group runs: the fixed path holds whichever
+copy was written last, so a later group's report overwrites an earlier
+group's — including an earlier group's PLANNING FAILED page; the run
+directory keeps every group's truth.
+`--junit-xml` is unchanged; its `[[ATTACHMENT|…]]` lines use absolute
+paths into the run directory. Planning failures (exit 2) still write
+only the fixed `--html` path and create no run directory.
+
+In CI, archive the whole `results/<stamp>/` directory when your suite
+captures attachments; the fixed `--junit-xml`/`--html` paths alone are
+enough only for attachment-less runs. The usual CI capture line is
+`:runner {:capture {:screenshot :on-failure :console :on-failure}}` —
+default is `:never` everywhere, so capture never surprises a pipeline
+that didn't ask for it. A capture-infrastructure failure on an
+otherwise-green scenario flips it to `:error` (capture-attributed in the
+report) — a green gate whose promised evidence vanished would be lying.
 
 ## Picking an image
 
@@ -83,7 +122,7 @@ The installer drops a runnable `sl` + jar into `./sl/`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh \
-  | bash -s -- --version 0.5.3 --no-breadcrumb
+  | bash -s -- --version 0.5.4 --no-breadcrumb
 ```
 
 - **Pin `--version`** to the release your team is on, so CI doesn't silently
@@ -107,12 +146,12 @@ image: eclipse-temurin:21-jre
 stages: [test]
 
 cache:
-  key: "sl-0.5.3"
+  key: "sl-0.5.4"
   paths: [sl/]
 
 .install-sl: &install-sl
   - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl unzip
-  - '[ -x sl/sl ] || curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash -s -- --version 0.5.3 --no-breadcrumb'
+  - '[ -x sl/sl ] || curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash -s -- --version 0.5.4 --no-breadcrumb'
 
 smoke:
   stage: test
@@ -121,7 +160,7 @@ smoke:
   script:
     - *install-sl
     # The exit code is the gate — no `|| true`, no allow_failure.
-    - ./sl/sl run features/ --step-paths steps/ --tags @smoke --junit-xml report.xml
+    - ./sl/sl run --tags @smoke --junit-xml report.xml
   artifacts:
     when: always          # upload the report on failure too — that's when you want it
     reports:
@@ -133,7 +172,7 @@ full-suite:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
     - *install-sl
-    - ./sl/sl run features/ --step-paths steps/ --junit-xml report.xml
+    - ./sl/sl run --junit-xml report.xml
   artifacts:
     when: always
     reports:
@@ -182,11 +221,11 @@ jobs:
       - name: Install sl
         run: |
           curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh \
-            | bash -s -- --version 0.5.3 --no-breadcrumb
+            | bash -s -- --version 0.5.4 --no-breadcrumb
       - name: Run features
         # PRs run the @smoke subset; main runs everything.
         run: |
-          ./sl/sl run features/ --step-paths steps/ --junit-xml report.xml \
+          ./sl/sl run --junit-xml report.xml \
             ${{ github.event_name == 'pull_request' && '--tags @smoke' || '' }}
       - uses: actions/upload-artifact@v4
         if: always()        # keep the report from failed runs — that's the useful one
@@ -230,7 +269,7 @@ Built-in browser steps work in CI with three additions to the basic job:
    ```
 
    ```bash
-   ./sl/sl run features/ -c shiftlefter.ci.edn --junit-xml report.xml
+   ./sl/sl run sl/features/ -c shiftlefter.ci.edn --junit-xml report.xml
    ```
 
 2. **Chrome + ChromeDriver in the image**, with matching major versions.

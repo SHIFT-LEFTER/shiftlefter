@@ -47,13 +47,6 @@
    - `reset-ctx!` — reset session context to empty
    - `reset-ctxs!`— reset all named contexts
 
-   ### Surfaces (opt-in browser session persistence)
-   - `mark-surface!`   — mark context as surface (persist on reset)
-   - `unmark-surface!` — unmark context as surface
-   - `surface?`        — check if context is marked as surface
-   - `list-surfaces`   — list all marked surfaces
-   - `reset-surfaces!` — clear all surface markings
-
    ### Costumes (Chrome-owned authenticated sessions that survive JVM restarts)
    - `init-costume!`    — create new costume
    - `connect-costume!` — reconnect to existing costume
@@ -62,7 +55,7 @@
 
    ### Utilities
    - `steps`      — list registered step patterns
-   - `clear!`     — clear step registry, contexts, and surfaces"
+   - `clear!`     — clear step registry and contexts"
   (:require [shiftlefter.gherkin.api :as api]
             [shiftlefter.stepengine.registry :as registry]
             [shiftlefter.stepengine.bind :as bind]
@@ -72,8 +65,9 @@
             [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.costume :as costume]
-            [shiftlefter.webdriver.etaoin.session :as session]
-            [shiftlefter.webdriver.session-store :as store]))
+            [shiftlefter.costume.browser :as cbrowser]
+            [shiftlefter.webdriver.etaoin.browser :as ebrowser]
+            [shiftlefter.webdriver.etaoin.session :as session]))
 
 ;; -----------------------------------------------------------------------------
 ;; Session Context (for step mode)
@@ -81,7 +75,6 @@
 
 (defonce ^:private session-ctx (atom {}))
 (defonce ^:private named-contexts (atom {}))
-(defonce ^:private surfaces (atom #{}))
 (defonce ^:private connected-subjects (atom {}))
 
 ;; -----------------------------------------------------------------------------
@@ -90,16 +83,8 @@
 
 (defonce ^:private repl-config (atom nil))
 
-;; Session store for surface persistence (can be overridden for testing)
-(defonce ^{:dynamic true
-           :doc "Delay containing the session store for surface persistence.
-   Surfaces use this store to save/load browser session handles across resets.
-   Bind with a custom store for testing; default uses EDN file-based store."}
-  *session-store*
-  (delay (store/make-edn-store)))
-
 ;; Forward declarations for lifecycle functions
-(declare cleanup-all-contexts! surface?)
+(declare cleanup-all-contexts!)
 
 (defn ctx
   "Get the current session context (or a named context).
@@ -122,13 +107,13 @@
   ([new-ctx] (reset! session-ctx new-ctx)))
 
 (defn reset-ctxs!
-  "Reset all named contexts.
+  "Reset all named contexts, closing each context's browser sessions first.
 
-   Before resetting, handles browser session cleanup:
-   - Non-surface contexts: browser session is closed
-   - Surface contexts: browser session is detached and persisted
+   Persistent (costume) capabilities are deliberately skipped — a costume's
+   Chrome outlives the REPL session; use `destroy-costume!` to kill one.
 
-   Returns vector of cleanup actions taken."
+   Returns a vector of cleanup actions, one per :web capability:
+   :closed, :skipped-persistent, :close-failed (with :error), or :none."
   []
   (let [actions (cleanup-all-contexts!)]
     (reset! named-contexts {})
@@ -152,54 +137,6 @@
   [ctx-name ctx-value]
   (swap! named-contexts assoc ctx-name ctx-value)
   ctx-value)
-
-;; -----------------------------------------------------------------------------
-;; Surface Management
-;; -----------------------------------------------------------------------------
-
-(defn mark-surface!
-  "Mark a context name as a surface (opt-in session persistence).
-
-   Surfaces are browser sessions that persist across REPL reset/clear.
-   When a surface ctx is reset, the session is detached (not closed)
-   and persisted to disk for later reattachment.
-
-   Note: Only named contexts can be surfaces.
-   Note: Multi-process attach is not supported (no locking).
-
-   Example:
-   ```clojure
-   (mark-surface! :alice)
-   (as :alice \"opens the browser to 'https://example.com'\")
-   (reset-ctxs!)  ; session persisted, not closed
-   ```"
-  [ctx-name]
-  (swap! surfaces conj ctx-name)
-  :marked)
-
-(defn unmark-surface!
-  "Unmark a context name as a surface.
-
-   After unmarking, the context will behave normally:
-   reset/clear will close browser sessions instead of persisting them."
-  [ctx-name]
-  (swap! surfaces disj ctx-name)
-  :unmarked)
-
-(defn surface?
-  "Returns true if the context name is marked as a surface."
-  [ctx-name]
-  (contains? @surfaces ctx-name))
-
-(defn list-surfaces
-  "List all context names currently marked as surfaces."
-  []
-  (vec @surfaces))
-
-(defn reset-surfaces!
-  "Clear all surface markings."
-  []
-  (reset! surfaces #{}))
 
 ;; -----------------------------------------------------------------------------
 ;; Shifted Mode API
@@ -349,50 +286,60 @@
 ;; Browser Lifecycle (internal)
 ;; -----------------------------------------------------------------------------
 
-(defn- ctx->web-browser
-  "Return the first :web capability impl from ctx, or nil if none.
+(defn- unwrap-driver
+  "Reach the closable raw driver map inside a :web capability impl:
+   CostumeBrowser → its current underlying EtaoinBrowser → the raw driver
+   map. Plain driver maps pass through unchanged. The session id lives
+   inside the driver map, which is why closing a record directly used to
+   no-op (sl-tss7)."
+  [impl]
+  (cond
+    (instance? shiftlefter.costume.browser.CostumeBrowser impl)
+    (recur (cbrowser/underlying-browser impl))
 
-   Walks all :cap/* keys, keeps any whose interface (per
-   `cap/parse-capability-name`) is :web, and returns the first impl.
-   Handles both bare `:cap/web` and subject-keyed `:cap/web.<subject>`
-   storage."
-  [ctx-value]
-  (->> (cap/all-capabilities ctx-value)
-       (some (fn [[k v]]
-               (when (= :web (:interface (cap/parse-capability-name k)))
-                 (:impl v))))))
+    (instance? shiftlefter.webdriver.etaoin.browser.EtaoinBrowser impl)
+    (ebrowser/etaoin-driver impl)
 
-(defn- close-or-persist-browser!
-  "Handle browser session cleanup for a named context.
+    :else impl))
 
-   - If ctx has browser and IS a surface → detach + save handle to store
-   - If ctx has browser and NOT a surface → close session
+(defn- close-context-browsers!
+  "Close the :web browser sessions of a named context (sl-tss7).
 
-   Returns {:action :closed|:persisted|:none, ...} for observability."
+   Mode-aware: a `:persistent` capability (a worn costume) is deliberately
+   SKIPPED — a costume's Chrome outlives the REPL session, and only
+   `destroy-costume!` kills it. Everything else is unwrapped to its raw
+   driver map and actually closed; a failed close is reported as such,
+   never as :closed.
+
+   Returns a vector of action maps, one per :web capability:
+   {:action :closed|:skipped-persistent|:close-failed :ctx-name .. :capability ..}
+   (+ :error on :close-failed); [{:action :none :ctx-name ..}] when the ctx
+   has no :web capability."
   [ctx-name ctx-value]
-  (if-let [browser (ctx->web-browser ctx-value)]
-    (let [is-surface? (surface? ctx-name)]
-      (if is-surface?
-        ;; Surface: detach + persist
-        (let [handle {:webdriver-url (:webdriver-url browser)
-                      :session-id (:session browser)}
-              store @*session-store*]
-          (store/save-session-handle! store ctx-name handle)
-          {:action :persisted :ctx-name ctx-name :handle handle})
-        ;; Non-surface: close session
-        (do
-          (session/close-session! browser)
-          {:action :closed :ctx-name ctx-name})))
-    {:action :none :ctx-name ctx-name}))
+  (let [entries (->> (cap/all-capabilities ctx-value)
+                     (filter (fn [[k _]]
+                               (= :web (:interface (cap/parse-capability-name k))))))]
+    (if (empty? entries)
+      [{:action :none :ctx-name ctx-name}]
+      (mapv (fn [[k {:keys [impl mode]}]]
+              (if (= :persistent mode)
+                {:action :skipped-persistent :ctx-name ctx-name :capability k}
+                (let [r (session/close-session! (unwrap-driver impl))]
+                  (if (:error r)
+                    {:action :close-failed :ctx-name ctx-name :capability k
+                     :error (:error r)}
+                    {:action :closed :ctx-name ctx-name :capability k}))))
+            entries))))
 
 (defn- cleanup-all-contexts!
   "Clean up browser sessions for all named contexts.
 
-   Returns a vector of action results."
+   Returns a vector of action results (one per :web capability per ctx)."
   []
   (let [all-ctxs @named-contexts]
-    (mapv (fn [[ctx-name ctx-value]]
-            (close-or-persist-browser! ctx-name ctx-value))
+    (into []
+          (mapcat (fn [[ctx-name ctx-value]]
+                    (close-context-browsers! ctx-name ctx-value)))
           all-ctxs)))
 
 ;; -----------------------------------------------------------------------------
@@ -501,11 +448,9 @@
                          :pending (count (filter #(= :pending (:status %)) (:scenarios results)))}})))))))
 
 (defn clear!
-  "Clear the step registry, session context, named contexts, and surface markings.
-
-   Before clearing, handles browser session cleanup:
-   - Non-surface contexts: browser session is closed
-   - Surface contexts: browser session is detached and persisted
+  "Clear the step registry, session context, and named contexts (closing
+   their ephemeral browser sessions; persistent/costume capabilities are
+   skipped).
 
    Note: Does NOT destroy costumes. Use `destroy-costume!` for that.
 
@@ -514,7 +459,6 @@
   (registry/clear-registry!)
   (reset-ctx!)
   (reset-ctxs!)  ; This now handles browser cleanup
-  (reset-surfaces!)
   (reset! connected-subjects {})
   :cleared)
 

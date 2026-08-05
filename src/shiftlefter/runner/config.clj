@@ -4,7 +4,7 @@
    ## Config Precedence
 
    1. `--config <path>` (explicit CLI flag)
-   2. `./shiftlefter.edn` (project default)
+   2. Discovered `sl/shiftlefter.edn` (nearest ancestor, sl-fcjm)
    3. Built-in defaults
 
    ## Config Shape
@@ -31,7 +31,8 @@
    (load-config {:config-path \"my-config.edn\"})
    ;=> {:parser {:dialect \"en\"} :runner {...} ...}
    ```"
-  (:require [clojure.edn :as edn]
+  (:require [babashka.fs :as fs]
+            [clojure.edn :as edn]
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [shiftlefter.gherkin.io :as io]
@@ -47,6 +48,10 @@
 
 ;; Runner sub-config
 (s/def ::step-paths (s/coll-of string?))
+;; sl-fcjm: feature corpus default. Config-root-relative (sl/features/ in the
+;; discovered layout); consumed by bare `sl run` in the classic (non-setup)
+;; pipeline only. CLI paths win; setup.clj plan ownership is unaffected.
+(s/def ::features (s/coll-of string?))
 (s/def ::allow-pending? boolean?)
 (s/def ::enabled? boolean?)
 (s/def ::registry-paths (s/coll-of string?))
@@ -73,9 +78,18 @@
 ;; execution. The flag wins when both are present (resolved in runner/core
 ;; resolve-max-parallel).
 (s/def ::max-parallel pos-int?)
+;; sl-3q9r: declarative capture policy. [:runner :capture] is the config
+;; mirror for the --capture flag; the flag wins AS A WHOLE VALUE when both
+;; are set (runner/core resolve-capture — never merged key-by-key, matching
+;; every other mirror). KINDS are open keywords (adapter-contributed —
+;; browser declares :screenshot/:console/:page-source; other adapters may
+;; declare their own); POLICIES are the closed forever-surface. Default is
+;; all-kinds-:never (D2 — opt-in; goldens and behavior unchanged).
+(s/def ::capture-value #{:never :on-failure :every-step})
+(s/def ::capture (s/map-of keyword? ::capture-value))
 (s/def ::runner (s/keys :req-un [::step-paths ::allow-pending?]
-                        :opt-un [::macros ::provisioning ::report
-                                 ::max-parallel]))
+                        :opt-un [::features ::macros ::provisioning ::report
+                                 ::max-parallel ::capture]))
 
 ;; Interface sub-config
 (s/def ::type keyword?)
@@ -150,6 +164,7 @@
    asked for Shifted mode (sl-ieie; ARCHITECTURE.md ':svo absent = Vanilla')."
   {:parser {:dialect "en"}
    :runner {:step-paths ["steps/"]
+            :features ["features/"]
             :allow-pending? false
             :macros {:enabled? false}}
    ;; Glossary paths — nil means use framework defaults only
@@ -200,7 +215,7 @@
        :path path})))
 
 (defn find-default-config
-  "Find the default config file `shiftlefter.edn` if it exists.
+  "Find the discovered config file `sl/shiftlefter.edn` if it exists.
 
    Resolved against `shiftlefter.paths/user-cwd` (the project the user ran `sl`
    from), NOT the raw process CWD — which is the install dir when `sl` runs from
@@ -216,13 +231,46 @@
 
    Mirrors load-config's precedence:
      1. Explicit --config path
-     2. ./shiftlefter.edn
+     2. Discovered sl/shiftlefter.edn
      3. nil (built-in defaults, no config file)"
   [opts]
   (:config-path (or (:project-context opts)
                     (project-context/resolve
                      (cond-> {}
                        (:config-path opts) (assoc :config-path (:config-path opts)))))))
+
+;; -----------------------------------------------------------------------------
+;; Conventional glossary defaults (sl-fcjm / sl-hivf item 1)
+;; -----------------------------------------------------------------------------
+
+(defn- probe-conventional-glossaries
+  "Existence-probed conventional glossary defaults, resolved against the
+   context's :config-root (sl/glossary/... in the discovered layout):
+
+   - glossary/subjects.edn
+   - glossary/verbs/<type>.edn for each known interface type
+   - glossary/intents/ (directory)
+
+   Returns a :glossaries-shaped map of the RELATIVE paths that exist, or nil
+   when none do. Whole-map semantics (Chair ruling 2026-08-03): this runs only
+   when the user's config has no :glossaries key at all — any explicit
+   :glossaries value, including nil, is used as written."
+  [context]
+  (let [root (:config-root context)
+        probe (fn [rel] (when (fs/exists? (fs/path root rel)) rel))
+        subjects (probe "glossary/subjects.edn")
+        verbs (into {}
+                    (keep (fn [t]
+                            (when-let [rel (probe (str "glossary/verbs/" (name t) ".edn"))]
+                              [t rel])))
+                    known-interface-types)
+        intents (when (fs/directory? (fs/path root "glossary" "intents"))
+                  "glossary/intents")]
+    (when (or subjects (seq verbs) intents)
+      (cond-> {}
+        subjects (assoc :subjects subjects)
+        (seq verbs) (assoc :verbs verbs)
+        intents (assoc :intents intents)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API
@@ -236,7 +284,7 @@
 
    Precedence:
    1. Explicit --config path
-   2. ./shiftlefter.edn (if exists)
+   2. Discovered sl/shiftlefter.edn (if exists)
    3. Built-in defaults
 
    Returns merged config map.
@@ -273,7 +321,15 @@
        (let [result (read-config-file config-path)]
          (if (= :ok (:status result))
            (let [user-config (:config result)
-                 merged (deep-merge default-config user-config)]
+                 merged (deep-merge default-config user-config)
+                 ;; Conventional glossary defaults (sl-fcjm): only when the
+                 ;; user's config has NO :glossaries key — same contains?-on-
+                 ;; user-config pattern as :svo below. Real-config path only;
+                 ;; the defaults context never probes.
+                 merged (if (contains? user-config :glossaries)
+                          merged
+                          (assoc merged :glossaries
+                                 (probe-conventional-glossaries context)))]
              ;; Shifted mode is user opt-in: keep :svo (with defaults merged
              ;; under it) only when the user's config has the key (sl-ieie).
              (if (contains? user-config :svo)
@@ -314,6 +370,13 @@
   [config]
   (get-in config [:runner :step-paths] ["steps/"]))
 
+(defn get-features
+  "Get the feature corpus paths from config (sl-fcjm). Config-root-relative;
+   the bare-`sl run` fallback in the classic pipeline. Default [\"features/\"]
+   (sl/features/ in the discovered layout)."
+  [config]
+  (get-in config [:runner :features] ["features/"]))
+
 (defn allow-pending?
   "Check if pending steps are allowed (don't cause failure)."
   [config]
@@ -352,6 +415,45 @@
   [config]
   (get-in config [:runner :max-parallel] 1))
 
+(defn capture-policy
+  "Return the config-declared capture policy map ({kind policy}), default {}
+   (every kind :never). Config mirror for --capture (sl-3q9r); the flag wins
+   AS A WHOLE VALUE when both are set (runner/core resolve-capture)."
+  [config]
+  (get-in config [:runner :capture] {}))
+
+(defn parse-capture-spec
+  "Parse a --capture flag value: \"screenshot=on-failure,console=never\" ->
+   {:screenshot :on-failure :console :never}. A leading ':' on either side
+   is tolerated (agents write keywords). Returns nil on ANY malformed
+   segment — empty segment, missing '=', empty kind, unknown policy word —
+   so the tools.cli :validate pair rejects the whole flag (usage error,
+   exit 1). Unknown KINDS are legal here (the set is open,
+   adapter-contributed); the unknown-kind warn happens at capture
+   resolution against the live registry."
+  [s]
+  (let [segments (str/split (str s) #",")
+        parse-segment (fn [seg]
+                        (let [[k v :as parts] (str/split seg #"=" -1)
+                              strip #(str/replace % #"^:" "")]
+                          (when (and (= 2 (count parts))
+                                     (seq (strip k)) (seq (strip v)))
+                            (let [policy (keyword (strip v))]
+                              (when (s/valid? ::capture-value policy)
+                                [(keyword (strip k)) policy])))))
+        pairs (map parse-segment segments)]
+    (when (and (seq pairs) (every? some? pairs))
+      (into {} pairs))))
+
+(s/fdef parse-capture-spec
+  :args (s/cat :s (s/nilable string?))
+  :ret (s/nilable ::capture))
+
+(defn valid-capture-spec?
+  "tools.cli :validate predicate for a parsed --capture value."
+  [m]
+  (s/valid? ::capture m))
+
 (defn get-macro-registry-paths
   "Get macro registry paths from config."
   [config]
@@ -376,11 +478,13 @@
   ;; path the runner actually reads. Drives the did-you-mean suggestion;
   ;; top-level keys absent here get the plain unknown-key warning.
   {:step-paths        [:runner :step-paths]
+   :features          [:runner :features]
    :allow-pending?    [:runner :allow-pending?]
    :macros            [:runner :macros]
    :provisioning      [:runner :provisioning]
    :report            [:runner :report]
    :max-parallel      [:runner :max-parallel]
+   :capture           [:runner :capture]
    :junit-xml         [:runner :report :junit-xml]
    :html              [:runner :report :html]
    :dialect           [:parser :dialect]

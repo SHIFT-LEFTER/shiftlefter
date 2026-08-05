@@ -11,7 +11,8 @@
    them in the same ns as `eager-failure-result` and
    `collect-provisioning-targets` is what lets the step-loop /
    provisioning split avoid a cross-feature forward-declare."
-  (:require [shiftlefter.adapters.registry :as registry]
+  (:require [clojure.string :as str]
+            [shiftlefter.adapters.registry :as registry]
             [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.costume :as costume]))
 
@@ -387,6 +388,46 @@
           initial-ctx
           group-ctxs))
 
+(defn- duplicate-wears-error
+  "Single-wearer/single-interface doctrine violation (sl-xbm): one costume
+   claimed by 2+ (interface, subject) targets. A costume is brought-state —
+   a device-local browser profile — so every imagined cross-interface share
+   decomposes into identity (the account, which crosses through the
+   application) plus one costume per device. Same shape as the per-ctx
+   `costume-already-worn-error` so it flows the existing provisioning
+   error path; the message carries the teaching."
+  [costume targets]
+  (let [wearers (->> targets
+                     (map (fn [{:keys [interface subject]}]
+                            (str (pr-str (or subject interface))
+                                 " on " (pr-str interface))))
+                     (str/join ", "))]
+    {:type :svo/provisioning-failed
+     :interface (:interface (second targets))
+     :costume costume
+     :reason :costume/already-worn
+     :message (str "costume " (pr-str costume) " is worn by "
+                   (count targets) " targets this scenario (" wearers
+                   ") — a costume is single-wearer and single-interface; "
+                   "share identity through the application (account/context), "
+                   "not the browser profile")}))
+
+(defn- duplicate-wears-errors
+  "Pure pre-pass over collected provisioning targets (sl-xbm): an error per
+   costume worn by 2+ targets, in first-seen costume order. Run BEFORE the
+   eager parallel futures spawn — the per-ctx guard can't see across
+   futures (each provisions from a shared initial-ctx), which is how the
+   eager path silently double-attached where the lazy path refused."
+  [targets]
+  (let [worn (filter :wears targets)
+        by-costume (group-by :wears worn)]
+    (->> (distinct (map :wears worn))
+         (keep (fn [costume]
+                 (let [ts (by-costume costume)]
+                   (when (< 1 (count ts))
+                     (duplicate-wears-error costume ts)))))
+         vec)))
+
 (defn eager-provision-scenario
   "Scoped-eager provisioning phase. Returns {:ok ctx'} or
    {:error {...} :ctx ctx}.
@@ -396,15 +437,28 @@
    `:shared-impl?` reuse works. Errors from all groups are collected
    before returning so callers see every failure, not just the first.
 
+   Before any future spawns, a pure pre-pass rejects duplicate `:wears`
+   across ALL targets (sl-xbm) — within- and cross-interface alike, so a
+   doctrine violation fails before any browser attaches. Additive: the
+   per-ctx guard in `ensure-capability-for-svo` still covers the lazy path.
+
    On failure, :ctx merges every capability that DID come up — successful
    sibling groups' plus the failing group's pre-failure partial — so the
    caller can hand cleanup a ctx that sees the live impls (sl-uu7x)."
   [plan initial-ctx interfaces registry]
   (let [targets (collect-provisioning-targets plan)
+        dup-errors (duplicate-wears-errors targets)
         ;; group-by preserves group order via the reducing function;
         ;; we don't depend on ordering across groups (parallel anyway).
         groups  (vals (group-by :interface targets))]
     (cond
+      ;; Doctrine pre-pass (sl-xbm): nothing has provisioned yet, so :ctx is
+      ;; initial-ctx verbatim — Before-hook contributions survive for the
+      ;; Afters (the sl-esq contract).
+      (seq dup-errors)
+      {:error (aggregate-eager-errors dup-errors)
+       :ctx initial-ctx}
+
       (empty? groups)
       {:ok initial-ctx}
 

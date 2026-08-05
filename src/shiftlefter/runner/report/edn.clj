@@ -16,12 +16,43 @@
     :planning {...}     ;; present when exit-code 2 (may carry :config-lints)
     :failures [{...}]   ;; present when exit-code 1
     :diagnostics {:svo-issues [...]     ;; warn-level, non-blocking (sl-qk8l)
-                  :config-lints [...]}  ;; sl-lnj1 — unknown/misplaced
+                  :config-lints [...]   ;; sl-lnj1 — unknown/misplaced
                                         ;; top-level config keys; shape is
                                         ;; runner.config ::lint-warnings,
                                         ;; scrubbed. Absent on clean runs.
+                  :capture-lints [...]} ;; sl-3q9r — capture warns (stderr
+                                        ;; suppressed under --edn; they ride
+                                        ;; here instead, once per run): maps
+                                        ;; of :type :capture/unknown-kind |
+                                        ;; :capture/invalid-policy-value |
+                                        ;; :capture/no-results-dir, plus
+                                        ;; :message (and :kind where one
+                                        ;; applies). A machine consumer
+                                        ;; reads THIS key to learn promised
+                                        ;; capture evidence is not coming.
+                                        ;; Absent on clean runs.
     :error {...}}       ;; present when exit-code 3
    ```
+
+   ## The form stream (the consumer contract, sl-yvaz)
+
+   stdout carries a SEQUENCE of EDN forms, not always exactly one:
+
+   - classic pipeline: one summary form.
+   - setup.clj orchestration: one summary form PER GROUP, in group order.
+   - supplementary diagnostics forms may appear BETWEEN or BEFORE
+     summaries: `{:run/id .. :group? .. :diagnostics {..}}` — producers are
+     teardown surfacing (a group's :stop threw → emitted after that group's
+     summary; a PRIOR run's dirty-teardown marker → emitted at startup,
+     entries carrying the prior run's id) and plan-shape lint warnings
+     (sl-lkla: `{:diagnostics {:setup-lints [..]}}` emitted before any
+     group summary — warn-level, never exit-flipping). These forms have no
+     :counts and no :run/exit-code.
+
+   Consumers must read ALL forms and SKIP shapes they don't recognize —
+   the form vocabulary grows by release; unknown forms are never an error.
+   (Summary :diagnostics may also carry :cleanup-failures, sl-lbrc;
+   supplementary forms carry :teardown-failures.)
 
    ## Usage
 
@@ -209,7 +240,8 @@
    byte-identical)."
   [diagnostics]
   (when diagnostics
-    (let [{:keys [svo-issues config-lints cleanup-failures counts]} diagnostics]
+    (let [{:keys [svo-issues config-lints cleanup-failures capture-lints
+                  counts]} diagnostics]
       (not-empty
        (cond-> {}
          (seq svo-issues)   (assoc :svo-issues svo-issues
@@ -217,7 +249,11 @@
          (seq config-lints) (assoc :config-lints (vec config-lints))
          ;; Capability-cleanup failures (sl-lbrc): a leaked driver on an
          ;; otherwise-green run — warn-level truth, never the exit code.
-         (seq cleanup-failures) (assoc :cleanup-failures (vec cleanup-failures)))))))
+         (seq cleanup-failures) (assoc :cleanup-failures (vec cleanup-failures))
+         ;; Capture warns (sl-3q9r): unknown kinds / invalid policy values
+         ;; / no-results-dir — stderr is suppressed under --edn, so this is
+         ;; where a machine consumer learns its evidence was never coming.
+         (seq capture-lints) (assoc :capture-lints (vec capture-lints)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Summary Building

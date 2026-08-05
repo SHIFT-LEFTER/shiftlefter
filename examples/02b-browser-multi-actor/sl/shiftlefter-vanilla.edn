@@ -1,6 +1,6 @@
 ;; Vanilla-mode contrast config — no :svo, no glossary. Any subject name
 ;; is accepted; ShiftLefter behaves like a standard Gherkin runner.
-;; Run with: sl run -c shiftlefter-vanilla.edn --dry-run features/
+;; Run with: sl run -c sl/shiftlefter-vanilla.edn --dry-run sl/features/
 ;;
 ;; Chrome's native password popups are suppressed by the :etaoin adapter's
 ;; defaults (see shiftlefter.edn).

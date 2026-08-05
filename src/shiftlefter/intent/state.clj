@@ -29,7 +29,10 @@
          :errors nil}))
 
 (def ^:private default-intents-dir
-  "glossary/intents")
+  ;; REPL-convenience zero-arg default, cwd-relative (project root). The
+  ;; runner never relies on this — load-intents-stage resolves the
+  ;; config-root path explicitly.
+  "sl/glossary/intents")
 
 ;; -----------------------------------------------------------------------------
 ;; Public API

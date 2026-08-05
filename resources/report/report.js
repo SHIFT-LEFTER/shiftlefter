@@ -13,6 +13,12 @@
 // never via attribute interpolation. (No literal angle-bracket tag text in
 // these comments either: this file is inlined into the document, and tests
 // count tag occurrences.)
+//
+// The ONE sanctioned exception (sl-l9nj): an attachment ref whose media
+// type is image/* and whose path passes safeRelPath (relative, no scheme,
+// no backslash, no dot-dot segment) gets an img element whose src is set
+// by PROPERTY ASSIGNMENT on a created node — still never HTML parsing.
+// Every path failing that gate renders as plain text.
 
 "use strict";
 
@@ -283,13 +289,16 @@ function el(tag, className, textContent) {
 function renderHeader(runCtx, summary, scenarios) {
   const header = el("header", "run-header");
   const failed = summary ? k(summary, ":exit-code") !== 0 : null;
+  // sl-6hsd: exit 2 before execution — nothing ran; the badge must not
+  // pretend scenarios failed.
+  const planningFailed = summary && k(summary, ":status") === ":planning-failed";
 
   const h1 = el("h1", null, k(runCtx, ":project-name") || "ShiftLefter run");
   if (failed !== null) {
     const badge = el(
       "span",
-      "run-status " + (failed ? "st-failed" : "st-passed"),
-      failed ? "FAILED" : "PASSED",
+      "run-status " + (planningFailed ? "st-error" : failed ? "st-failed" : "st-passed"),
+      planningFailed ? "PLANNING FAILED" : failed ? "FAILED" : "PASSED",
     );
     h1.appendChild(badge);
   }
@@ -334,38 +343,45 @@ function renderHeader(runCtx, summary, scenarios) {
     );
   }
 
-  const counts = summary ? k(summary, ":counts") : null;
-  const countsList = el("ul", "run-counts");
-  countsList.appendChild(el("li", "count", scenarios.length + " scenario(s)"));
-  for (const status of [":passed", ":failed", ":pending", ":skipped"]) {
-    const n = counts ? k(counts, status) || 0 : 0;
-    countsList.appendChild(el("li", "count st-" + status.slice(1), n + " " + status.slice(1)));
+  // Planning-failed reports carry issue counts, not scenario statuses —
+  // a zeroed status row would be noise (sl-6hsd).
+  if (!planningFailed) {
+    const counts = summary ? k(summary, ":counts") : null;
+    const countsList = el("ul", "run-counts");
+    countsList.appendChild(el("li", "count", scenarios.length + " scenario(s)"));
+    for (const status of [":passed", ":failed", ":pending", ":skipped"]) {
+      const n = counts ? k(counts, status) || 0 : 0;
+      countsList.appendChild(el("li", "count st-" + status.slice(1), n + " " + status.slice(1)));
+    }
+    // :error (hook threw, sl-esq) — only when present, so hook-less reports
+    // keep the historical four-count row.
+    const errorCount = counts ? k(counts, ":error") || 0 : 0;
+    if (errorCount > 0) {
+      countsList.appendChild(el("li", "count st-error", errorCount + " error"));
+    }
+    header.appendChild(countsList);
   }
-  // :error (hook threw, sl-esq) — only when present, so hook-less reports
-  // keep the historical four-count row.
-  const errorCount = counts ? k(counts, ":error") || 0 : 0;
-  if (errorCount > 0) {
-    countsList.appendChild(el("li", "count st-error", errorCount + " error"));
-  }
-  header.appendChild(countsList);
 
-  const controls = el("div", "controls");
-  const expand = el("button", null, "Expand all");
-  expand.addEventListener("click", () => setAllOpen(true));
-  const collapse = el("button", null, "Collapse all");
-  collapse.addEventListener("click", () => setAllOpen(false));
-  const label = el("label");
-  const checkbox = el("input");
-  checkbox.type = "checkbox";
-  checkbox.addEventListener("change", () =>
-    document.body.classList.toggle("failures-only", checkbox.checked),
-  );
-  label.appendChild(checkbox);
-  label.appendChild(document.createTextNode(" Failures only"));
-  controls.appendChild(expand);
-  controls.appendChild(collapse);
-  controls.appendChild(label);
-  header.appendChild(controls);
+  // Scenario controls have nothing to operate on when planning failed.
+  if (!planningFailed) {
+    const controls = el("div", "controls");
+    const expand = el("button", null, "Expand all");
+    expand.addEventListener("click", () => setAllOpen(true));
+    const collapse = el("button", null, "Collapse all");
+    collapse.addEventListener("click", () => setAllOpen(false));
+    const label = el("label");
+    const checkbox = el("input");
+    checkbox.type = "checkbox";
+    checkbox.addEventListener("change", () =>
+      document.body.classList.toggle("failures-only", checkbox.checked),
+    );
+    label.appendChild(checkbox);
+    label.appendChild(document.createTextNode(" Failures only"));
+    controls.appendChild(expand);
+    controls.appendChild(collapse);
+    controls.appendChild(label);
+    header.appendChild(controls);
+  }
 
   return header;
 }
@@ -415,7 +431,88 @@ function renderStep(step, counts) {
     detail.appendChild(el("pre", null, message));
     li.appendChild(detail);
   }
+  // Step-level attachment refs (sl-l9nj; producer arrives with sl-3q9r).
+  for (const ref of k(step, ":attachments") || []) {
+    li.appendChild(renderAttachment(ref));
+  }
   return li;
+}
+
+// ---------------------------------------------------------------------------
+// Attachments (sl-l9nj): pure-data refs from the envelope. Paths are
+// group-root-relative when portable — and this report sits AT the group
+// root, so a safe relative path resolves as a sibling. Anything else
+// (absolute paths, hostile strings) renders as text, never as a URL.
+// ---------------------------------------------------------------------------
+
+function safeRelPath(p) {
+  return (
+    typeof p === "string" &&
+    p.length > 0 &&
+    !p.startsWith("/") &&
+    !p.includes("\\") &&
+    !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(p) &&
+    !p.split("/").includes("..")
+  );
+}
+
+function fmtBytes(n) {
+  if (typeof n !== "number") return "";
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+  if (n >= 1024) return (n / 1024).toFixed(1) + " KB";
+  return n + " B";
+}
+
+function attachmentSource(ref) {
+  const source = k(ref, ":attachment/source");
+  if (Array.isArray(source)) return "via hook " + source[1];
+  if (source === ":capture-policy") return "via capture policy";
+  return "";
+}
+
+function renderAttachment(ref) {
+  const kind = String(k(ref, ":attachment/kind") || ":attachment").slice(1);
+  const path = k(ref, ":attachment/path") || "";
+  const mediaType = k(ref, ":attachment/media-type") || "";
+  const excerpt = k(ref, ":attachment/excerpt");
+  const error = k(ref, ":attachment/error");
+  const portable = safeRelPath(path);
+
+  const wrap = el("div", "attachment" + (error ? " attachment-failed" : ""));
+  const line = el("div", "attachment-line");
+  line.appendChild(el("span", "attachment-kind", error ? "FAILED" : kind));
+  line.appendChild(
+    el("span", "attachment-text", (error ? kind + ": " + error + " -- " : "") + path),
+  );
+  if (!portable) {
+    line.appendChild(el("span", "attachment-note", "(non-portable path)"));
+  }
+  const source = attachmentSource(ref);
+  if (source) line.appendChild(el("span", "attachment-note", source));
+  const bytes = fmtBytes(k(ref, ":attachment/bytes"));
+  if (bytes) line.appendChild(el("span", "duration", bytes));
+  wrap.appendChild(line);
+
+  // Inline image: healthy image/* ref with a safe sibling-relative path.
+  // Mailed alone (or read at the stable-path copy, which sits outside the
+  // run dir) the img degrades to its alt text — the line above still
+  // names the evidence.
+  if (!error && portable && mediaType.startsWith("image/")) {
+    const img = el("img", "attachment-image");
+    img.alt = kind + " " + path;
+    img.loading = "lazy";
+    img.src = path; // property assignment on a created node — see SAFETY
+    wrap.appendChild(img);
+  }
+
+  // Text excerpt (D3): the mailed-alone triage courtesy, bounded upstream.
+  if (excerpt) {
+    const d = el("details", "attachment-excerpt");
+    d.appendChild(el("summary", null, "excerpt"));
+    d.appendChild(el("pre", null, excerpt));
+    wrap.appendChild(d);
+  }
+  return wrap;
 }
 
 // One row per lifecycle hook that ran (sl-esq): name, phase, status,
@@ -525,6 +622,14 @@ function renderScenario(scenario, allowPending) {
   for (const h of hookRecords.filter((r) => k(r, ":phase") === ":after")) {
     details.appendChild(renderHookLine(h));
   }
+  // Scenario-level attachments (sl-l9nj): After-hook claims, below the
+  // transcript they evidence. Claim-less scenarios render exactly as before.
+  const attachments = k(scenario, ":attachments") || [];
+  if (attachments.length) {
+    const block = el("div", "attachments");
+    for (const ref of attachments) block.appendChild(renderAttachment(ref));
+    details.appendChild(block);
+  }
   return details;
 }
 
@@ -571,16 +676,93 @@ function renderFeatures(runCtx, scenarios) {
   return main;
 }
 
-function renderDiagnostics(diagnostics) {
-  const issues = k(diagnostics, ":svo-issues") || [];
-  if (!issues.length) return null;
-  const section = el("section", "diagnostics");
-  section.appendChild(el("h2", null, "Diagnostics (" + issues.length + ")"));
-  const list = el("ul");
-  for (const issue of issues) {
-    list.appendChild(el("li", null, k(issue, ":message") || k(issue, ":type") || "(diagnostic)"));
+// Planning diagnostics (sl-6hsd) — full parity with the console sections:
+// undefined steps carry their grammar hint (sl-s04n) and interface
+// suggestion (sl-563); ambiguous steps list their candidate stepdefs;
+// invalid arity shows expected/got. Bound-step shapes, textContent only.
+
+function stepLocation(runCtx, boundStep) {
+  const file = relativePath(k(runCtx, ":project-root"), k(boundStep, ":source-file"));
+  const line = kIn(boundStep, [":step", ":step/location", ":line"]);
+  if (!file && line == null) return "";
+  return " (" + [file || "?", line].filter((x) => x != null && x !== "").join(":") + ")";
+}
+
+function renderUndefinedItem(runCtx, boundStep) {
+  const li = el("li", "diag-item");
+  const head = el("div", "diag-step");
+  head.appendChild(
+    el("span", "diag-step-text", kIn(boundStep, [":step", ":step/text"]) || "(step)"),
+  );
+  head.appendChild(el("span", "diag-loc", stepLocation(runCtx, boundStep)));
+  li.appendChild(head);
+  const hint = kIn(boundStep, [":hint", ":suggestion"]);
+  if (hint) li.appendChild(el("div", "diag-hint", "hint: " + hint));
+  const filterHint = kIn(boundStep, [":filter-info", ":suggestion"]);
+  if (filterHint) li.appendChild(el("div", "diag-hint", "hint: " + filterHint));
+  return li;
+}
+
+function renderAmbiguousItem(runCtx, boundStep) {
+  const li = el("li", "diag-item");
+  const head = el("div", "diag-step");
+  head.appendChild(
+    el("span", "diag-step-text", kIn(boundStep, [":step", ":step/text"]) || "(step)"),
+  );
+  head.appendChild(el("span", "diag-loc", stepLocation(runCtx, boundStep)));
+  li.appendChild(head);
+  const alts = k(boundStep, ":alternatives") || [];
+  for (const alt of alts) {
+    li.appendChild(el("div", "diag-alt", "matches: " + (k(alt, ":pattern-src") || "(stepdef)")));
   }
+  return li;
+}
+
+function renderArityItem(runCtx, boundStep) {
+  const li = el("li", "diag-item");
+  const head = el("div", "diag-step");
+  head.appendChild(
+    el("span", "diag-step-text", kIn(boundStep, [":step", ":step/text"]) || "(step)"),
+  );
+  const expected = kIn(boundStep, [":binding", ":expected"]);
+  const actual = kIn(boundStep, [":binding", ":actual"]);
+  head.appendChild(el("span", "diag-loc", " (expected " + expected + ", got " + actual + ")"));
+  li.appendChild(head);
+  return li;
+}
+
+function diagSection(section, title, cls, items, renderItem) {
+  if (!items.length) return;
+  section.appendChild(el("h3", null, title));
+  const list = el("ul", "diag-list " + cls);
+  for (const item of items) list.appendChild(renderItem(item));
   section.appendChild(list);
+}
+
+function renderDiagnostics(runCtx, diagnostics) {
+  if (!diagnostics) return null;
+  const undef = k(diagnostics, ":undefined") || [];
+  const ambiguous = k(diagnostics, ":ambiguous") || [];
+  const arity = k(diagnostics, ":invalid-arity") || [];
+  const svoIssues = k(diagnostics, ":svo-issues") || [];
+  const errors = k(diagnostics, ":errors") || [];
+  const total = undef.length + ambiguous.length + arity.length + svoIssues.length + errors.length;
+  if (!total) return null;
+  const section = el("section", "diagnostics");
+  section.appendChild(el("h2", null, "Diagnostics (" + total + ")"));
+  diagSection(section, "Undefined steps", "diag-undefined", undef, (bs) =>
+    renderUndefinedItem(runCtx, bs),
+  );
+  diagSection(section, "Ambiguous steps", "diag-ambiguous", ambiguous, (bs) =>
+    renderAmbiguousItem(runCtx, bs),
+  );
+  diagSection(section, "Invalid arity", "diag-arity", arity, (bs) => renderArityItem(runCtx, bs));
+  diagSection(section, "Issues", "diag-svo", svoIssues, (issue) =>
+    el("li", "diag-item", k(issue, ":message") || k(issue, ":type") || "(diagnostic)"),
+  );
+  diagSection(section, "Errors", "diag-errors", errors, (err) =>
+    el("li", "diag-item", k(err, ":message") || k(err, ":type") || "(error)"),
+  );
   return section;
 }
 
@@ -593,8 +775,18 @@ function render() {
 
   const app = document.getElementById("app");
   app.appendChild(renderHeader(runCtx, summary, scenarios));
-  app.appendChild(renderFeatures(runCtx, scenarios));
-  const diagnostics = renderDiagnostics(k(data, ":diagnostics"));
+  if (k(summary, ":status") === ":planning-failed") {
+    app.appendChild(
+      el(
+        "p",
+        "planning-failed-note",
+        "Planning failed — no scenarios ran. The diagnostics below say why.",
+      ),
+    );
+  } else {
+    app.appendChild(renderFeatures(runCtx, scenarios));
+  }
+  const diagnostics = renderDiagnostics(runCtx, k(data, ":diagnostics"));
   if (diagnostics) app.appendChild(diagnostics);
   app.appendChild(
     el(

@@ -302,14 +302,16 @@
     ;; Repo form (unchanged): the framework's own wrappers.
     (cond-> ["./bin/kaocha unit"]
       (:config-path project-context)
-      (conj (str "./bin/sl run features --dry-run --config "
+      (conj (str "./bin/sl run --dry-run --config "
                  (:config-path project-context))))
-    ;; Consumer/installed form: the `sl` on PATH. Append --config only for an
-    ;; explicit config path; a discovered shiftlefter.edn is the runner default.
+    ;; Consumer/installed form: the `sl` on PATH. Bare `sl run` is
+    ;; well-defined post-fcjm (the config feature corpus, default
+    ;; sl/features/). Append --config only for an explicit config path; a
+    ;; discovered sl/shiftlefter.edn is the runner default.
     (let [cfg-flag (when (= :explicit (:config-source project-context))
                      (str " --config " (:config-path project-context)))]
-      [(str "sl run features" cfg-flag)
-       (str "sl run features --dry-run" cfg-flag)])))
+      [(str "sl run" cfg-flag)
+       (str "sl run --dry-run" cfg-flag)])))
 
 (defn- projection-inputs [project-context cfg step-load]
   (let [glossaries (:glossaries cfg)

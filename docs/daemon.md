@@ -37,8 +37,8 @@ nobody edits `bin/sl` to make it fast.
 
 ## Where state lives
 
-Per project, under the instance root (the nearest ancestor with `shiftlefter.edn`
-or `.git`):
+Per project, under the instance root (the nearest ancestor with
+`sl/shiftlefter.edn` or `.git`):
 
 ```
 .shiftlefter/
@@ -48,7 +48,7 @@ or `.git`):
 ```
 
 `.shiftlefter/` is **gitignored** — it's per-checkout runtime state, like
-`.nrepl-port`. If no `shiftlefter.edn` and no `.git` is found above your cwd,
+`.nrepl-port`. If no `sl/shiftlefter.edn` and no `.git` is found above your cwd,
 `sl` runs **cold** and spawns nothing (it won't litter daemons across an
 unconfigured tree).
 
@@ -83,8 +83,9 @@ a variable you exported afterward, and we'd rather run cold than lie.
 The warm path needs only the jar and a JRE — the dispatch client
 (`shiftlefter.client.NreplClient`) ships **inside the jar**. There is nothing
 extra to install. If the daemon can't be reached for any reason, `sl` silently
-falls back to a cold run (with an AppCDS archive, ~0.4–0.6s), so a call never
-fails just because the warm path was unavailable.
+falls back to a cold run (with an AppCDS archive, ~0.4–0.6s; projects with
+`sl/lib/` jars run cold without the archive, so their fallback is somewhat
+slower), so a call never fails just because the warm path was unavailable.
 
 ## Output note (current limitation)
 

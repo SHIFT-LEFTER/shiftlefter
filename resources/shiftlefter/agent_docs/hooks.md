@@ -28,7 +28,8 @@ ordinary inert tags.
 
 ## Registration: hooks.clj
 
-Registrations live in `hooks.clj` next to your `shiftlefter.edn` (discovered
+Registrations live in `hooks.clj` next to your `shiftlefter.edn` (both in
+`sl/`; discovered
 exactly like `setup.clj`; no file = no hooks). It declares `(ns hooks)` and
 defines `hooks` — an ordered vector, or a `(fn [config])` returning one:
 
@@ -92,7 +93,28 @@ capability cleanup.**
   is the in-flight scenario result (status, per-step results with durations,
   error). On-failure conditionality is a plain `when` on
   `(:status result)` — there is no separate on-failure hook kind. The
-  return value is ignored (reserved).
+  return is the ATTACHMENTS CLAIM: nil (no claim) or
+  `{:attachments [{:attachment/kind :screenshot :attachment/path "..."} ..]}`
+  — refs to files the hook wrote, which then ride the scenario envelope and
+  render in the human report surfaces (HTML, JUnit, console; the `--edn`
+  summary carries no refs yet). The contract is full-strict: any other return
+  (a map with extra or misspelled keys, a malformed ref, a non-map value)
+  is `:hook/invalid-return` → scenario `:error`. A claimed file that does
+  not exist keeps the scenario outcome but the ref is marked
+  `:attachment/error` and a stderr warning fires — evidence loss is never
+  silent.
+- Both payloads carry `:artifacts-dir` (an absolute path, pre-created)
+  when the run has a results directory — write attachment files there and
+  claim them; refs inside the run directory render inline/portable in the
+  HTML report. The key is absent (not nil) in runs without a results
+  directory (no config file) — check, don't assume.
+- Before writing a screenshot/console/page-source After hook: DON'T — set
+  the `[:runner :capture]` policy instead (see the CLI overview's
+  `--capture` entry). Hooks are for evidence the framework doesn't own
+  (DB dumps, API traces). With `:capture` console active, the framework
+  owns the destructive console drain — a hook reading the browser's log
+  API gets leftovers; read the captured artifact, or use `:on-failure`
+  (whose single post-steps drain fires before any After).
 - A `:before` throw makes the scenario `:error` (never `:failed`), skips its
   steps, and unwinds only the frames whose Befores succeeded. A `:after`
   throw makes the scenario `:error` even when all steps passed — broken
@@ -108,7 +130,13 @@ capability cleanup.**
 
 ## Reaching external systems
 
-In this release a hook that must touch an external system (reset a database,
-call an internal CLI) shells out — `clojure.java.shell/sh` — or uses what is
-already on the framework classpath. Adding project dependencies onto the
-hook classpath is a planned extension, not a current feature.
+A hook that needs a library beyond the bundled classpath (the flagship case:
+a JDBC driver for a database-resetting `:before`) gets it by dropping the
+library's jar — and its dependencies' jars — into the project's `sl/lib/`
+directory. Everything in `sl/lib/*.jar` rides the classpath of every run,
+cold and warm alike (the daemon restarts itself when the lib set changes).
+No build tooling: bring resolved jars, not coordinates.
+
+Shelling out — `clojure.java.shell/sh` to `psql`, `curl`, an internal CLI —
+remains an option when a subprocess is genuinely the right tool; it is no
+longer the only route to an external system.

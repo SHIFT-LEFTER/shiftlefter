@@ -34,6 +34,7 @@
      expansion multiplies steps, never scenarios). <system-out> carries the
      authored-primary step transcript (D6)."
   (:require [clojure.string :as str]
+            [shiftlefter.attachments :as attachments]
             [shiftlefter.runner.reporter :as reporter]))
 
 ;; -----------------------------------------------------------------------------
@@ -178,17 +179,43 @@
        (when-let [contributed (seq (:contributed record))]
          (str " -> " (str/join ", " (map str contributed))))))
 
+(defn- attachment-line
+  "One transcript line per attachment ref (sl-l9nj). Healthy refs use the
+   Jenkins JUnit-Attachments convention — `[[ATTACHMENT|<absolute path>]]`
+   — with relative (group-root-relative) paths absolutized against the
+   run-ctx :artifacts-root. Errored refs get a plain FAILED line instead
+   of an [[ATTACHMENT]] pointer: the failure message is the signal, and
+   the .err evidence file (sl-yynw F7) stays unpromoted — failed captures
+   visible, never linkable. A relative ref with no root to resolve
+   against (hand-built envelopes) degrades to a plain named line."
+  [artifacts-root ref]
+  (let [kind (name (:attachment/kind ref))]
+    (if-let [err (:attachment/error ref)]
+      (str "attachment " kind " FAILED: " err)
+      (if-let [abs (attachments/resolve-ref-path artifacts-root
+                                                 (:attachment/path ref))]
+        (str "[[ATTACHMENT|" abs "]]")
+        (str "attachment " kind ": " (:attachment/path ref))))))
+
 (defn- transcript
   "Scenario transcript: before-phase hook lines above the steps, after-phase
-   below — mirroring actual execution order. Hook-less scenarios are
-   byte-identical to before."
-  [scenario counts]
+   below — mirroring actual execution order; each step's attachment lines
+   directly under its step line, scenario-level attachment lines at the
+   tail (sl-l9nj). Hook-less, attachment-less scenarios are byte-identical
+   to before."
+  [scenario counts artifacts-root]
   (let [hooks (:hooks scenario)
         befores (filter #(= :before (:phase %)) hooks)
         afters (filter #(= :after (:phase %)) hooks)]
     (str/join "\n" (concat (map hook-line befores)
-                           (map #(step-line % counts) (:steps scenario))
-                           (map hook-line afters)))))
+                           (mapcat (fn [step]
+                                     (cons (step-line step counts)
+                                           (map #(attachment-line artifacts-root %)
+                                                (:attachments step))))
+                                   (:steps scenario))
+                           (map hook-line afters)
+                           (map #(attachment-line artifacts-root %)
+                                (:attachments scenario))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Failure / error / skipped classification
@@ -304,7 +331,7 @@
 
 (defn- pickle-of [scenario] (get-in scenario [:plan :plan/pickle]))
 
-(defn- testcase-el [scenario display-name project-root allow-pending?]
+(defn- testcase-el [scenario display-name project-root allow-pending? artifacts-root]
   (let [pickle (pickle-of scenario)
         classname (:pickle/feature-name pickle)
         file (relative-path project-root (:pickle/source-file pickle))
@@ -318,7 +345,8 @@
          :line line
          :time (secs (scenario-ms scenario))}
         [outcome
-         (el "system-out" {} [{:cdata (clean (transcript scenario counts))}])])))
+         (el "system-out" {}
+             [{:cdata (clean (transcript scenario counts artifacts-root))}])])))
 
 (defn- count-outcomes [scenarios allow-pending?]
   (reduce (fn [acc sc]
@@ -332,7 +360,8 @@
           scenarios))
 
 (defn- testsuite-el [scenarios run-ctx]
-  (let [{:keys [version mode started-at hostname project-root allow-pending?]} run-ctx
+  (let [{:keys [version mode started-at hostname project-root allow-pending?
+                artifacts-root]} run-ctx
         pickle (pickle-of (first scenarios))
         feature-name (:pickle/feature-name pickle)
         names (disambiguate-names (map pickle-of scenarios))
@@ -350,7 +379,8 @@
         (into [(el "properties" {}
                    [(el "property" {:name "shiftlefter.version" :value version} nil)
                     (el "property" {:name "mode" :value (some-> mode name)} nil)])]
-              (map (fn [sc nm] (testcase-el sc nm project-root allow-pending?))
+              (map (fn [sc nm]
+                     (testcase-el sc nm project-root allow-pending? artifacts-root))
                    scenarios names)))))
 
 (defn build-document

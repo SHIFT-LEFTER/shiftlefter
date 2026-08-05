@@ -15,21 +15,26 @@
 
    One dir per runner INVOCATION: under setup.clj orchestration all groups
    share the invocation's run-id and this dir (the first executing group's
-   `:started-at` stamps it). Where per-group artifacts land INSIDE the run
-   dir (the sliver of sl-oobu this bead absorbs): `<run-dir>/<group-slug>/`
-   — a paper convention until a writer exists (sl-l9nj).
+   `:started-at` stamps it). Per-group outputs land at
+   `<run-dir>/<group-slug>/` (`ensure-group-dir!` — real since sl-l9nj,
+   the first writer; the sliver of sl-oobu sl-y3wd absorbed). An IMPLICIT
+   single group (no setup.clj) gets NO subdir — its group root IS the run
+   dir, so the common case's layout stays flat (Chair-ratified 08-03).
 
    The results root self-ignores: a `results/.gitignore` containing `*` is
    written at creation (the Maven target/ pattern) — repo hygiene, not
    security. No-config (`:defaults`) invocations create nothing: the
    convention is a project convention.
 
-   This bead writes nothing INTO the dir — the attachments contract
-   (sl-l9nj) is the first producer; the zztu viewer browses the
+   What lives inside (sl-l9nj, the first producer): each group root holds
+   `report.html` (the primary — the configured `--html` path is an
+   end-of-run byte COPY of the last group's) and `attachments/<scenario-
+   slug>/` artifact dirs; the zztu viewer browses the
    directory-of-stamped-runs."
   (:require [babashka.fs :as fs]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
+            [shiftlefter.attachments :as attachments]
             [shiftlefter.project-context :as project-context])
   (:import [java.nio.file FileAlreadyExistsException Files Path]
            [java.nio.file.attribute FileAttribute]))
@@ -89,6 +94,27 @@
       (catch FileAlreadyExistsException _
         (let [suffixed (fs/path root (str stamp "-" (subs run-id 0 8)))]
           (str (fs/create-dirs suffixed)))))))
+
+(defn ensure-group-dir!
+  "Create and return `<run-dir>/<group-slug>/` for an EXPLICIT setup.clj
+   group (implicit single-group runs never call this — their group root
+   is the run dir itself). Duplicate labels (two `\"<unlabeled>\"` groups)
+   collide on the slug and fall back to `<slug>-<group-index>`; groups run
+   sequentially, so the collision is a real duplicate, not a race.
+   Idempotent per (label, index) via create-dirs on the fallback."
+  [run-dir group-label group-index]
+  (let [base (fs/path run-dir (attachments/slug group-label "group"))]
+    (try
+      (str (Files/createDirectory ^Path base (make-array FileAttribute 0)))
+      (catch FileAlreadyExistsException _
+        (str (fs/create-dirs (fs/path run-dir (str (attachments/slug group-label "group")
+                                                   "-" group-index))))))))
+
+(s/fdef ensure-group-dir!
+  :args (s/cat :run-dir (s/and string? seq)
+               :group-label (s/nilable string?)
+               :group-index nat-int?)
+  :ret (s/and string? seq))
 
 (defn ensure-run-dir!
   "Return this invocation's run-results directory (absolute path string),

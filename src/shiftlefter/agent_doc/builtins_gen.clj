@@ -130,7 +130,8 @@
                                                   (sort-by str provides))))
          " — provides nothing declared")
        (when requires-dep
-         (str " (not bundled — add " requires-dep " to your deps.edn)"))))
+         (str " (not bundled — add " requires-dep " to your deps.edn, or "
+              "drop the resolved jars in sl/lib/; see docs/INSTALL-TIERS.md)"))))
 
 (defn- step-line
   "Render one built-in step pattern: its regex source, the verb/frame it maps

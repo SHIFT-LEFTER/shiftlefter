@@ -5,6 +5,7 @@
    filtered runs verify against the tag-filtered manifest subset. sl-q9wp
    activates the parallel axis through the remaining harness knob."
   (:require [babashka.fs :as fs]
+            [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [shiftlefter.corpus.generator :as gen]
@@ -117,7 +118,42 @@
       (is (= :planning-failed (:status result)))
       (is (some #(= :undefined (:type %))
                 (get-in edn-summary [:planning :issues])))
-      (is (not (fs/exists? junit-file)) "no JUnit file on planning failure"))))
+      (is (not (fs/exists? junit-file)) "no JUnit file on planning failure")))
+  (testing "sl-6hsd: the HTML report IS written on planning failure -- the
+            deliberate inverse of the JUnit pin above (JUnit has no planning
+            concept; HTML tells the truth about why nothing ran). The island
+            carries both quarantine steps: B-002 draws the prose-as-step
+            teaching hint (sl-bav1 byte-pin), B-001 stays hint-free"
+    (let [{:keys [result html-file]}
+          (harness/run-corpus! {:seed seed :include-broken? true :html? true})]
+      (is (= 2 (:exit-code result)))
+      (is (fs/exists? html-file) "report.html written on planning failure")
+      (let [html (slurp html-file)
+            island-str (let [marker "id=\"run-data\">"
+                             start (long (+ (str/index-of html marker)
+                                            (count marker)))
+                             end (long (str/index-of html "</script>" start))]
+                         (subs html start end))
+            island (edn/read-string island-str)
+            undefined (get-in island [:diagnostics :undefined])
+            by-text (fn [text]
+                      (first (filter #(= text (get-in % [:step :step/text]))
+                                     undefined)))
+            b1 (by-text "corpus step that no stepdef defines")
+            b2 (by-text "the gateway degrades, the client retries.")]
+        (is (= :planning-failed (get-in island [:summary :status])))
+        (is (= [] (:scenarios island)) "nothing ran; the island says so")
+        (is (some? b1) "B-001 rides the island")
+        (is (some? b2) "B-002 rides the island")
+        (is (= :grammar/prose-as-step (get-in b2 [:hint :type]))
+            "the newest hint family (sl-bav1) classifies B-002")
+        (is (str/starts-with?
+             (get-in b2 [:hint :suggestion])
+             (str "This line reads like description prose. Descriptions end"
+                  " at the first Given/When/Then/And/But (or *)"))
+            "the sl-bav1 byte-pinned suggestion rides the island")
+        (is (not (contains? b1 :hint))
+            "B-001's cue-free step draws no hint — teaching stays honest")))))
 
 ;; -----------------------------------------------------------------------------
 ;; sl-i608 -- the tag axis: filtered runs verify against the filtered manifest

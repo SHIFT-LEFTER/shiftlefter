@@ -53,18 +53,19 @@
         (is (true? (:portable? ctx)))
         (is (= [] (:diagnostics ctx)))))))
 
-(deftest discovers-root-config-from-descendant
+(deftest root-config-is-not-discovered
+  ;; Layout C (sl-fcjm): <project>/shiftlefter.edn is no longer a discovered
+  ;; location. A root-only config yields the defaults context; -c FILE remains
+  ;; the explicit escape hatch.
   (with-temp-dir
     (fn [dir]
       (touch (fs/path dir "shiftlefter.edn"))
       (let [sub (str (fs/path dir "a" "b"))]
         (fs/create-dirs sub)
         (let [ctx (project-context/resolve {:invocation-root sub})]
-          (is (= :discovered (:config-source ctx)))
-          (is (= (npath dir) (:project-root ctx)))
-          (is (= (npath dir) (:config-root ctx)))
-          (is (= (npath dir "shiftlefter.edn") (:config-path ctx)))
-          (is (= :root (:layout ctx))))))))
+          (is (= :defaults (:config-source ctx)))
+          (is (nil? (:config-path ctx)))
+          (is (= :defaults (:layout ctx))))))))
 
 (deftest discovers-sl-directory-config-from-descendant
   (with-temp-dir
@@ -79,19 +80,18 @@
           (is (= (npath dir "sl" "shiftlefter.edn") (:config-path ctx)))
           (is (= :sl-directory (:layout ctx))))))))
 
-(deftest same-root-dual-configs-return-ambiguity-diagnostic
+(deftest stray-root-config-does-not-shadow-sl-config
+  ;; The pre-fcjm ambiguity diagnostic is gone: a leftover root shiftlefter.edn
+  ;; is inert; sl/shiftlefter.edn is simply the config.
   (with-temp-dir
     (fn [dir]
       (touch (fs/path dir "shiftlefter.edn"))
       (touch (fs/path dir "sl" "shiftlefter.edn"))
-      (let [ctx (project-context/resolve {:invocation-root dir})
-            diag (first (:diagnostics ctx))]
-        (is (= :error (:config-source ctx)))
-        (is (= :ambiguous (:layout ctx)))
-        (is (= :project-context/ambiguous-config (:type diag)))
-        (is (= [(npath dir "shiftlefter.edn")
-                (npath dir "sl" "shiftlefter.edn")]
-               (:paths diag)))))))
+      (let [ctx (project-context/resolve {:invocation-root dir})]
+        (is (= :discovered (:config-source ctx)))
+        (is (= (npath dir "sl" "shiftlefter.edn") (:config-path ctx)))
+        (is (= :sl-directory (:layout ctx)))
+        (is (= [] (:diagnostics ctx)))))))
 
 (deftest nested-project-nearest-wins
   (with-temp-dir
@@ -99,7 +99,7 @@
       (let [parent (str (fs/path dir "parent"))
             child (str (fs/path parent "apps" "shop"))
             invocation (str (fs/path child "features"))]
-        (touch (fs/path parent "shiftlefter.edn"))
+        (touch (fs/path parent "sl" "shiftlefter.edn"))
         (touch (fs/path child "sl" "shiftlefter.edn"))
         (fs/create-dirs invocation)
         (let [ctx (project-context/resolve {:invocation-root invocation})]
@@ -114,7 +114,7 @@
       (let [repo (str (fs/path dir "repo"))
             sub (str (fs/path repo "sub"))]
         (fs/create-dirs sub)
-        (touch (fs/path dir "shiftlefter.edn"))
+        (touch (fs/path dir "sl" "shiftlefter.edn"))
         (init-git! repo)
         (let [ctx (project-context/resolve {:invocation-root sub})]
           (is (= :defaults (:config-source ctx)))
@@ -169,7 +169,7 @@
 (deftest instance-root-uses-project-root-when-config-discovered
   (with-temp-dir
     (fn [dir]
-      (touch (fs/path dir "shiftlefter.edn"))
+      (touch (fs/path dir "sl" "shiftlefter.edn"))
       (let [sub (str (fs/path dir "a" "b"))]
         (fs/create-dirs sub)
         (is (= (npath dir)

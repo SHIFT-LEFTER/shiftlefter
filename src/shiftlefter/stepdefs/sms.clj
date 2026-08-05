@@ -246,7 +246,7 @@
 (def ^:private value-re bindings/value-re-fragment)
 
 (def ^:private empty-ok-value-re
-  (str "'[^']*'|" bindings/token-re-fragment))
+  (str "'(?:[^']|'')*'|" bindings/token-re-fragment))
 
 (def ^:private send-pattern
   (re-pattern (str ":([\\w./-]+) sends an SMS to (" value-re

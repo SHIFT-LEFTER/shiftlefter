@@ -189,10 +189,12 @@
 
    Returns {:status :ok/:comments/:error ...}
    - On success (already canonical): {:status :ok}
-   - Contains comments canonical formatting would drop (sl-q2uj guard —
-     reported as its own state, distinct from OK and NEEDS FORMATTING,
-     so CI gates never go red on a file --write refuses to fix):
-     {:status :comments :comments [{:line N :text \"# ...\"} ...]}
+   - Contains comments canonical formatting would drop: {:status :comments
+     :comments [{:line N :text \"# ...\"} ...]}. Canonical formatting
+     preserves comments since sl-lg8v, so this state is a permanent
+     BACKSTOP (sl-q2uj lineage) expected never to fire — if it does, a
+     printer regression is dropping comments and CI reports it as its own
+     state rather than silently passing or misreporting NEEDS FORMATTING.
    - On parse error: {:status :error :reason :parse-errors :details [...]}
    - On needs formatting: {:status :error :reason :needs-formatting}"
   [s]
@@ -227,10 +229,11 @@
    - Normalizes tag spacing to single space
    - Supports all Gherkin constructs including Rule: blocks
 
-   When the output would drop interior comments (canonical formatting is
-   not yet comment-safe, sl-q2uj), the :ok result carries
-   :lost-comments [{:line N :text \"# ...\"} ...] so callers can refuse
-   destructive writes."
+   Canonical formatting preserves comments (sl-lg8v). As a permanent
+   backstop (sl-q2uj lineage), if the output WOULD drop any comment —
+   i.e. a printer regression — the :ok result carries
+   :lost-comments [{:line N :text \"# ...\"} ...] so callers refuse the
+   destructive write; expected never to fire."
   [s]
   (try
     (let [lost (printer/lost-comments s)]

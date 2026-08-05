@@ -37,17 +37,20 @@ the rest.
 
 ### 1. Lay out a glossary
 
-The default glossary path layout (see your `shiftlefter.edn`):
+The conventional glossary layout — `glossary/` next to your config, inside
+the project's `sl/` directory:
 
 ```
 my-project/
-├── shiftlefter.edn
-├── glossary/
-│   ├── subjects.edn
-│   ├── verbs/
-│   │   └── web.edn          # project verbs for the :web interface type
-│   └── intents/             # object/intent regions (optional)
-└── steps/
+└── sl/
+    ├── shiftlefter.edn
+    ├── glossary/
+    │   ├── subjects.edn
+    │   ├── verbs/
+    │   │   └── web.edn      # project verbs for the :web interface type
+    │   └── intents/         # object/intent regions (optional)
+    ├── features/
+    └── steps/
 ```
 
 **`glossary/subjects.edn`** — who can act:
@@ -78,13 +81,18 @@ single `:default` frame:
            :frames {:with {:args [:query] :pattern "S searches for QUERY"}}}}}
 ```
 
-### 2. Point `shiftlefter.edn` at the glossaries
+### 2. Wire the glossaries (or let the convention do it)
+
+Glossaries at the conventional paths above are discovered automatically —
+a config with no `:glossaries` key loads them as-is. An explicit
+`:glossaries` map overrides the convention wholesale (`:glossaries nil`
+turns glossaries off):
 
 ```clojure
-{:glossaries
+{:glossaries                           ; optional — these ARE the conventions
  {:subjects "glossary/subjects.edn"
   :verbs    {:web "glossary/verbs/web.edn"}
-  :intents  "glossary/intents"}      ; optional — drives object validation
+  :intents  "glossary/intents"}       ; drives object validation
 
  :interfaces
  {:web {:type :web
@@ -391,7 +399,7 @@ Unknown interface :foobar in step "When Alice clicks the button"
 
 ## Working examples
 
-The `examples/` projects use the current `glossary/` layout end-to-end —
+The `examples/` projects use the current `sl/glossary/` layout end-to-end —
 `examples/04-sms-2fa` (subjects across web + SMS) and the nested-addressing
 examples `examples/05-nested-self-rooted` / `examples/06-nested-parent-anchored`
 (subjects plus intent regions) are good starting points.

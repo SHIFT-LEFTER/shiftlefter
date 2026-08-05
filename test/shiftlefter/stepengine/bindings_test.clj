@@ -34,6 +34,28 @@
     (is (empty? (b/embedded-tokens "no tokens, just {:edn \"here\"}")))))
 
 ;; -----------------------------------------------------------------------------
+;; sl-jlqz — SQL-style quote doubling in literals
+;; -----------------------------------------------------------------------------
+
+(deftest quote-doubling-normalization
+  (testing "value/text literals undouble at the exec seam"
+    (is (= "don't" (b/normalize-capture "'don''t'" :value {})))
+    (is (= "'" (b/normalize-capture "''''" :text {})))
+    (is (= "it's a 'quote'" (b/normalize-capture "'it''s a ''quote'''" :value {}))))
+  (testing "quoted tokens stay literal (sl-iseq), undoubling included"
+    (is (= "{code}" (b/normalize-capture "'{code}'" :value {}))))
+  (testing "resolved token values are NEVER undoubled — doubling is
+            authored-surface syntax only"
+    (is (= "don''t" (b/normalize-capture "{v}" :value {:sl/bindings {:v "don''t"}}))))
+  (testing "location token wrap doubles interior quotes so the stepdef's
+            strip-then-undouble is the exact inverse"
+    (is (= "'/o''brien'"
+           (b/normalize-capture "{u}" :location {:sl/bindings {:u "/o'brien"}}))))
+  (testing "undouble/double round-trip is identity"
+    (doseq [s ["" "'" "''" "a'b" "don't" "/o'brien?q='x'"]]
+      (is (= s (b/undouble-quotes (b/double-quotes s)))))))
+
+;; -----------------------------------------------------------------------------
 ;; capture! — assert-plus-bind
 ;; -----------------------------------------------------------------------------
 

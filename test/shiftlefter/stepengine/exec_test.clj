@@ -1980,7 +1980,9 @@
           (is (= :failed (:status result)))
           (is (= :costume/already-worn (:reason err)))
           (is (= 0 @steps-ran) "Eager fail-fast: no step runs when provisioning is rejected")
-          (is (= 1 @connect-calls) "Only the first wearer attaches"))))))
+          ;; Was 1 (attach-then-reject, an artifact of the per-ctx guard's
+          ;; position). The sl-xbm pre-pass rejects before ANY attach.
+          (is (= 0 @connect-calls) "Rejected before any wearer attaches"))))))
 
 (deftest test-distinct-costumes-two-subjects-both-attach
   (testing "Two subjects wearing DIFFERENT costumes both provision (no false positive)"
@@ -2003,6 +2005,63 @@
                                                      :adapter-registry registry})]
           (is (= :passed (:status result)) "Distinct costumes do not trip the guard")
           (is (= #{:finance :personal} @connected) "Both costumes attached"))))))
+
+(deftest test-cross-interface-duplicate-wears-rejected-eager
+  (testing "Eager (runner default): one costume worn across two interfaces is
+            rejected before any attach — the sl-xbm gap. Pre-fix, the parallel
+            per-interface futures each provisioned from a shared initial-ctx
+            and silently double-attached."
+    (let [connect-calls (atom 0)
+          steps-ran (atom 0)
+          registry (mock/registry {:web {:impl {:browser-type :spawned}}})
+          interfaces (mock/interfaces {:web {:adapter :web}
+                                       :mobile {:adapter :web}})
+          alice-step (make-bound-step-with-svo
+                       (fn [ctx] (swap! steps-ran inc) ctx) 1 []
+                       {:subject :alice :verb :navigate :interface :web :wears :finance})
+          bob-step (make-bound-step-with-svo
+                     (fn [ctx] (swap! steps-ran inc) ctx) 1 []
+                     {:subject :bob :verb :navigate :interface :mobile :wears :finance})
+          plan (make-plan [alice-step bob-step])]
+      (with-redefs [costume/connect-costume! (fn [name]
+                                               (swap! connect-calls inc)
+                                               {:status :connected :costume name
+                                                :port 9300 :pid 1 :browser fake-costume-browser})]
+        (let [result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                     :adapter-registry registry
+                                                     :provisioning :eager})
+              err (->> result :steps (keep :error) first)]
+          (is (= :failed (:status result)) "Cross-interface duplicate :wears fails the scenario")
+          (is (= :svo/provisioning-failed (:type err)))
+          (is (= :costume/already-worn (:reason err)))
+          (is (= 0 @steps-ran) "Rejected before any step runs")
+          (is (= 0 @connect-calls) "Rejected before ANY attach — no browser comes up"))))))
+
+(deftest test-same-subject-cross-interface-wears-rejected-eager
+  (testing "The category error the doctrine names: 'same user on web and mobile'
+            is two costumes + one account, never one costume on two interfaces"
+    (let [connect-calls (atom 0)
+          registry (mock/registry {:web {:impl {:browser-type :spawned}}})
+          interfaces (mock/interfaces {:web {:adapter :web}
+                                       :mobile {:adapter :web}})
+          web-step (make-bound-step-with-svo
+                     (fn [ctx] ctx) 1 []
+                     {:subject :alice :verb :navigate :interface :web :wears :finance})
+          mobile-step (make-bound-step-with-svo
+                        (fn [ctx] ctx) 1 []
+                        {:subject :alice :verb :navigate :interface :mobile :wears :finance})
+          plan (make-plan [web-step mobile-step])]
+      (with-redefs [costume/connect-costume! (fn [name]
+                                               (swap! connect-calls inc)
+                                               {:status :connected :costume name
+                                                :port 9300 :pid 1 :browser fake-costume-browser})]
+        (let [result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                     :adapter-registry registry
+                                                     :provisioning :eager})
+              err (->> result :steps (keep :error) first)]
+          (is (= :failed (:status result)))
+          (is (= :costume/already-worn (:reason err)))
+          (is (= 0 @connect-calls) "Neither interface attaches"))))))
 
 ;; -----------------------------------------------------------------------------
 ;; sl-091: wrapping-adapter impl/cleanup-handle decoupling

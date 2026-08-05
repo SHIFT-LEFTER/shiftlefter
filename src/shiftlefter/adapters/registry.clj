@@ -33,6 +33,22 @@
                         knowing about each interface type. Engine surfaces
                         thrown exceptions as
                         `{:error {:type :adapter/on-provision-failed ...}}`.
+   - `:capture`      — optional map of adapter-contributed capture kinds
+                        (sl-3q9r): `{kind {:fn f :scenario-scoped? bool}}`.
+                        `:fn` is `(fn [{:keys [handle]}])` where handle is
+                        the capability's `(or :cleanup-handle :impl)`;
+                        returns nil (nothing to capture — no file, no ref)
+                        or `{:data <bytes-or-String> :media-type \"...\"
+                        :ext \"...\"}` (+ optional `:excerpt`); may throw
+                        (the engine converts it to a capture-attributed
+                        failure, D4). The framework owns timing, file
+                        writes, filenames, and ref construction — capture
+                        fns only produce data. `:scenario-scoped?` marks
+                        destructive drain kinds (console): under
+                        :on-failure they fire once post-steps when red
+                        rather than at the failing instant. A kind absent
+                        from this map is a no-op for this adapter's
+                        capabilities, never an error.
 
    The suite-load lint (sl-unz) consults `:provides` post-bind when a
    stepdef declares `:requires-protocols`; if any required protocol is
@@ -83,7 +99,14 @@
   {:etaoin     {:factory  etaoin/create-browser
                 :cleanup  etaoin/close-browser
                 :impl-key :browser
-                :provides [:shiftlefter.browser.protocol/IBrowser]}
+                :provides [:shiftlefter.browser.protocol/IBrowser]
+                ;; sl-3q9r: the browser capture kinds. :console is the
+                ;; destructive drain (returns-and-clears, Chrome/Edge only
+                ;; — capture-console no-ops legibly elsewhere).
+                :capture  {:screenshot  {:fn etaoin/capture-screenshot}
+                           :console     {:fn etaoin/capture-console
+                                         :scenario-scoped? true}
+                           :page-source {:fn etaoin/capture-page-source}}}
    :playwright {:factory  playwright/create-browser
                 :cleanup  playwright/close-browser
                 :impl-key :browser
@@ -92,10 +115,12 @@
                 ;; (sl-gcdu): config load probes :requires-class and fails
                 ;; with a not-bundled error naming :requires-dep. Keep the
                 ;; version in :requires-dep in step with the :test alias
-                ;; pin in deps.edn.
+                ;; pin in deps.edn AND the Maven Central links in
+                ;; docs/INSTALL-TIERS.md § Using Playwright (sl-wgnw) —
+                ;; three pin sites, one version.
                 :requires-class "com.microsoft.playwright.Playwright"
                 :requires-dep "com.microsoft.playwright/playwright {:mvn/version \"1.50.0\"}"
-                :not-bundled-note "the driver alone is ~163MB"}
+                :not-bundled-note "the driver bundle alone is ~200MB"}
    :sms-mock   {:factory      sms-mock/create-sms
                 :cleanup      sms-mock/close-sms
                 :provides     [:shiftlefter.sms.protocol/ISMS
@@ -220,7 +245,9 @@
                         (when (seq alternatives)
                           (str "use " (str/join " or " alternatives)
                                " (bundled), or "))
-                        "add " (:requires-dep entry) " to your deps.edn")
+                        "add " (:requires-dep entry) " to your deps.edn, "
+                        "or drop the resolved jars in sl/lib/ "
+                        "(docs/INSTALL-TIERS.md)")
           :data {:interface interface-name
                  :adapter adapter-name
                  :requires-class cls}})))))
@@ -238,6 +265,24 @@
    (on-provision adapter-name default-registry))
   ([adapter-name registry]
    (get-in registry [adapter-name :on-provision])))
+
+(defn capture-kinds
+  "Return the adapter's `:capture` map ({kind {:fn ... :scenario-scoped?
+   ...}}), or {} when the adapter is unknown or contributes no kinds
+   (sl-3q9r)."
+  ([adapter-name]
+   (capture-kinds adapter-name default-registry))
+  ([adapter-name registry]
+   (get-in registry [adapter-name :capture] {})))
+
+(defn capture-spec
+  "Return the adapter's capture spec for `kind` ({:fn ... :scenario-scoped?
+   ...}), or nil — an unsupported kind on this adapter's capabilities is a
+   no-op, never an error (sl-3q9r)."
+  ([adapter-name kind]
+   (capture-spec adapter-name kind default-registry))
+  ([adapter-name kind registry]
+   (get-in registry [adapter-name :capture kind])))
 
 (defn impl-key
   "Return the adapter's `:impl-key`, or nil.

@@ -11,10 +11,22 @@
 
    ## Cleanup
 
-   `close-browser` closes the browser session and releases resources."
-  (:require [etaoin.api :as eta]
+   `close-browser` closes the browser session and releases resources.
+
+   ## Capture (sl-3q9r)
+
+   `capture-screenshot` / `capture-console` / `capture-page-source` — the
+   adapter-contributed capture kinds behind the [:runner :capture] policy.
+   Each takes the capture request map ({:handle <cleanup-handle>}) and
+   returns nil (nothing to capture) or {:data ... :media-type ... :ext ...};
+   the framework owns timing, file writes, and ref construction. The raw
+   etaoin driver lives ONLY in the cleanup handle (`:impl-key` adapter), so
+   capture fns read (:etaoin-driver handle), same as close-browser."
+  (:require [clojure.string :as str]
+            [etaoin.api :as eta]
             [shiftlefter.config.user :as user-config]
-            [shiftlefter.webdriver.etaoin.browser :as browser]))
+            [shiftlefter.webdriver.etaoin.browser :as browser])
+  (:import [java.util Base64]))
 
 ;; -----------------------------------------------------------------------------
 ;; Factory
@@ -138,3 +150,63 @@
              :message (str "No :etaoin-driver in capability — nothing was closed. "
                            "Pass the unwrapped map (the value under :ok of "
                            "create-browser's return), not the wrapped {:ok {...}} result.")}}))
+
+;; -----------------------------------------------------------------------------
+;; Capture (sl-3q9r)
+;; -----------------------------------------------------------------------------
+
+(defn- require-driver
+  "The raw etaoin driver from a capture request's handle, or throw (a
+   handle without the driver is a capture infrastructure failure — D4
+   converts the throw to a capture-attributed error)."
+  [{:keys [handle]}]
+  (or (:etaoin-driver handle)
+      (throw (ex-info "no :etaoin-driver in capture handle"
+                      {:type :capture/no-driver}))))
+
+(defn capture-screenshot
+  "PNG screenshot of the current page, as bytes. The raw-execute Base64
+   route (the sieve take-screenshot precedent) — no temp file, unlike
+   eta/screenshot which insists on writing one."
+  [req]
+  (let [driver (require-driver req)
+        resp (eta/execute {:driver driver
+                           :method :get
+                           :path [:session (:session driver) :screenshot]})
+        b64 (:value resp)]
+    (when-not (seq b64)
+      (throw (ex-info "empty screenshot response" {:type :capture/empty-screenshot})))
+    {:data (.decode (Base64/getDecoder) ^String b64)
+     :media-type "image/png"
+     :ext "png"}))
+
+(defn format-console-lines
+  "One plain line per browser console entry: `LEVEL source message`.
+   Pure — unit-testable without a driver."
+  [entries]
+  (str/join "\n" (map (fn [{:keys [level source message]}]
+                        (str (str/upper-case (name (or level :info)))
+                             " " (some-> source name) " " message))
+                      entries)))
+
+(defn capture-console
+  "Drain the browser console log. DESTRUCTIVE: WebDriver returns-and-clears,
+   so each call captures exactly the entries since the last read (the
+   step-grain provenance the per-step drain policy is built on). Chrome/
+   Edge only — drivers without log support return nil (legible no-op, never
+   an error); an empty drain returns nil (no file, no ref)."
+  [req]
+  (let [driver (require-driver req)]
+    (when (eta/supports-logs? driver)
+      (let [entries (eta/get-logs driver)]
+        (when (seq entries)
+          {:data (format-console-lines entries)
+           :media-type "text/plain"
+           :ext "log"})))))
+
+(defn capture-page-source
+  "The current page's full HTML source."
+  [req]
+  {:data (eta/get-source (require-driver req))
+   :media-type "text/html"
+   :ext "html"})

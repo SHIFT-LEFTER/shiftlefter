@@ -138,9 +138,10 @@
   "The exact user-facing remedy text, byte-pinned (Tower condition on
    sl-gcdu) so message-template refactors can't drift the two remedies or
    the sizing clause."
-  (str "Playwright is supported but not bundled (the driver alone is ~163MB)"
+  (str "Playwright is supported but not bundled (the driver bundle alone is ~200MB)"
        " — use :etaoin (bundled), or add com.microsoft.playwright/playwright"
-       " {:mvn/version \"1.50.0\"} to your deps.edn"))
+       " {:mvn/version \"1.50.0\"} to your deps.edn, or drop the resolved jars"
+       " in sl/lib/ (docs/INSTALL-TIERS.md)"))
 
 (deftest test-playwright-declares-not-bundled-data
   (testing ":playwright carries the not-bundled registry keys"
@@ -229,6 +230,43 @@
                          :provides [:no.such.ns/NopeProtocol]}}]
       (is (= [:no.such.ns/NopeProtocol]
              (registry/check-extracted-impl :webwrap (fake-ibrowser) reg))))))
+
+;; -----------------------------------------------------------------------------
+;; Capture kinds (sl-3q9r)
+;; -----------------------------------------------------------------------------
+
+(deftest test-capture-accessors-nil-tolerance
+  (testing "unknown adapter -> {} / nil, never a throw"
+    (is (= {} (registry/capture-kinds :no-such-adapter)))
+    (is (nil? (registry/capture-spec :no-such-adapter :screenshot))))
+  (testing "adapter without capture kinds -> {} / nil"
+    (is (= {} (registry/capture-kinds :sms-mock)))
+    (is (nil? (registry/capture-spec :sms-mock :screenshot))))
+  (testing "custom registry is honored"
+    (let [reg {:my-adapter {:capture {:message-log {:fn (constantly nil)}}}}]
+      (is (some? (registry/capture-spec :my-adapter :message-log reg)))
+      (is (nil? (registry/capture-spec :my-adapter :screenshot reg))))))
+
+(deftest test-etaoin-capture-contract
+  (testing "the browser adapter contributes exactly the three v1 kinds"
+    (is (= #{:screenshot :console :page-source}
+           (set (keys (registry/capture-kinds :etaoin))))))
+  (testing ":console is the destructive drain — scenario-scoped; the others instant"
+    (is (true? (:scenario-scoped? (registry/capture-spec :etaoin :console))))
+    (is (not (:scenario-scoped? (registry/capture-spec :etaoin :screenshot))))
+    (is (not (:scenario-scoped? (registry/capture-spec :etaoin :page-source)))))
+  (testing "every kind's :fn is callable"
+    (is (every? #(fn? (:fn %)) (vals (registry/capture-kinds :etaoin))))))
+
+(deftest test-console-line-formatting
+  (testing "one plain line per entry: LEVEL source message"
+    (is (= "SEVERE console-api boom at line 3\nINFO network fetch failed"
+           (etaoin/format-console-lines
+            [{:level :severe :source :console-api :message "boom at line 3"}
+             {:level :info :source :network :message "fetch failed"}]))))
+  (testing "missing level defaults to INFO; missing source tolerated"
+    (is (= "INFO  hello"
+           (etaoin/format-console-lines [{:message "hello"}])))))
 
 (deftest acceptance-adapter-registry-test
   (testing "Task 3.0.8 AC: get-adapter for known adapter"

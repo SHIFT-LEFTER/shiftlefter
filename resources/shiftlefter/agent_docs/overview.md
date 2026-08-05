@@ -36,6 +36,24 @@ Core commands:
   `edn/read-string`-able straight out of the file. Renders with JavaScript;
   without JS the island is still readable via view-source. Very large runs
   (thousands of scenarios) build a big DOM and will scroll sluggishly.
+- `sl run <path> --capture kind=policy,…` captures artifacts into the run's
+  results directory (config mirror `[:runner :capture]`; the flag wins as a
+  whole value). Kinds are adapter-contributed — the WebDriver backend
+  (`:etaoin`, the default) provides `screenshot`, `console`, `page-source`;
+  the Playwright backend contributes no capture kinds yet, so a configured
+  kind never fires there; policies are `never` (default),
+  `on-failure` (fires at the failing step's instant, capturing ALL live
+  browsers), `every-step` (the film strip: one capture per step, following
+  the acting subject; no-SVO steps capture all live). Console is a
+  destructive drain: per-step under `every-step` (each file holds exactly
+  that step's entries, plus a final tail sweep), once post-steps when red
+  under `on-failure`; Chrome/Edge only, other drivers no-op. Refs render as
+  attachments in the human report surfaces (HTML, JUnit, console); the
+  `--edn` summary carries no refs yet. A capture-infrastructure failure on an
+  otherwise-green scenario flips it to `:error`, capture-attributed —
+  check `:data {:kind … :capability …}` to triage "all N errors are
+  capture-attributed; ship, fix harness". Capture time never pollutes step
+  durations. Dry runs and config-less runs never capture.
 - `sl run <path> --max-parallel N` runs up to N scenarios concurrently (config
   mirror `[:runner :max-parallel]`; the flag wins; default 1 = sequential).
   Results and console output are identical to a sequential run — only

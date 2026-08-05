@@ -14,6 +14,7 @@
    SHIFTLEFTER_LIVE_WEBDRIVER (like integration/browser-smoke-test); skipped by
    default, opt in with the env var + a running ChromeDriver."
   (:require [shiftlefter.adapters.etaoin :as eta-adapter]
+            [shiftlefter.adapters.playwright :as pw-adapter]
             [shiftlefter.browser.intent :as bi]
             [shiftlefter.browser.protocol :as bp]
             [shiftlefter.demo.fixture.handler :as fh]
@@ -21,8 +22,14 @@
             [shiftlefter.intent.loader :as loader]))
 
 (def live?
-  "True when live-browser E2E tests should run."
+  "True when live-browser (WebDriver/etaoin) E2E tests should run."
   (some? (System/getenv "SHIFTLEFTER_LIVE_WEBDRIVER")))
+
+(def live-playwright?
+  "True when live-Playwright E2E tests should run (sl-tnx). Same gate as the
+   adapter tests: needs Playwright on the classpath and its browsers cached
+   (first use auto-fetches)."
+  (= "1" (System/getenv "SHIFTLEFTER_LIVE_PLAYWRIGHT")))
 
 (defn run-against*
   "Full-context variant of `run-against`: load intents from `:intents-dir`,
@@ -32,15 +39,26 @@
    that exercise named-location resolution (sl-3jr4). Cleans up the browser and
    server even on throw.
 
+   `:adapter` selects the backend — :etaoin (default) or :playwright — and
+   `:pruning` (Playwright-only meaning) passes the sl-tnx strategy knob
+   through, so the same validator bodies exercise every backend × strategy
+   combination against the same live DOM.
+
    Throws if the intents fail to load (a broken glossary is a test failure, not
    a silent skip)."
-  [{:keys [intents-dir pages path]} f]
+  [{:keys [intents-dir pages path adapter pruning] :or {adapter :etaoin}} f]
   (let [load-res (loader/load-all-intents intents-dir)]
     (when (:errors load-res)
       (throw (ex-info "intents failed to load" {:errors (:errors load-res)})))
     (let [intents (:ok load-res)
           {:keys [server port]} (srv/start-server (fh/build-handler {:pages pages}))
-          cap (:ok (eta-adapter/create-browser {:headless true}))
+          [create-fn close-fn] (case adapter
+                                 :etaoin [eta-adapter/create-browser
+                                          eta-adapter/close-browser]
+                                 :playwright [pw-adapter/create-browser
+                                              pw-adapter/close-browser])
+          cap (:ok (create-fn (cond-> {:headless true}
+                                pruning (assoc :pruning pruning))))
           browser (:browser cap)]
       (try
         (bp/open-to! browser (str "http://localhost:" port path))
@@ -49,7 +67,7 @@
             :resolve (fn [address] (bi/resolve-target browser intents address :web))
             :base-url (str "http://localhost:" port)})
         (finally
-          (eta-adapter/close-browser cap)
+          (close-fn cap)
           (srv/stop-server server))))))
 
 (defn run-against

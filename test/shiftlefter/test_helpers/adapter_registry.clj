@@ -62,6 +62,7 @@
    | `:fail?`        | `false`                            | Factory returns `:error` instead of `:ok` |
    | `:error`        | `{:type :adapter/test-failure ...}` | Error map when `:fail? true` |
    | `:events`       | nil (no recording)                 | Atom that receives event tuples |
+   | `:capture`      | absent                             | Mirrors the production `:capture` contract (sl-3q9r): `{kind {:fn f :scenario-scoped? bool}}`. Each `:fn` is wrapped to record `[:capture <adapter> <kind>]` on `:events` before delegating. |
 
    ## Interface spec keys
 
@@ -84,6 +85,7 @@
    [:on-provision <adapter-name>]     ;; :on-provision hook fired
    [:cleanup <adapter-name>]          ;; cleanup called
    [:provision-failed <adapter-name>] ;; factory returned :error (fail? true)
+   [:capture <adapter-name> <kind>]   ;; a capture :fn fired (sl-3q9r)
    ```
 
    Same atom can be shared across adapters to track ordering between them.
@@ -124,8 +126,15 @@
 ;; loudly if a non-atom slips through. Overly tight predicates (IAtom
 ;; instance checks etc.) make for noisier failures than the runtime one.
 
+;; Capture kinds (sl-3q9r) — the production :capture contract's shape.
+(s/def ::fn (s/with-gen ifn? #(gen/return (constantly nil))))
+(s/def ::scenario-scoped? boolean?)
+(s/def ::capture-kind-spec (s/keys :req-un [::fn] :opt-un [::scenario-scoped?]))
+(s/def ::capture (s/map-of keyword? ::capture-kind-spec))
+
 (s/def ::adapter-spec
-  (s/keys :opt-un [::impl ::impl-key ::factory ::on-provision ::provides ::cleanup ::fail? ::error]))
+  (s/keys :opt-un [::impl ::impl-key ::factory ::on-provision ::provides
+                   ::cleanup ::fail? ::error ::capture]))
 
 (s/def ::adapter-specs
   (s/map-of keyword? ::adapter-spec))
@@ -205,6 +214,21 @@
       (record-event! events [:on-provision adapter-name])
       (on-provision ctx impl))))
 
+(defn- build-capture
+  "Wrap each capture kind's :fn to record [:capture <adapter> <kind>] on
+   :events before delegating (sl-3q9r). Returns nil when the spec declares
+   no :capture — caller omits the key (absence-as-default)."
+  [adapter-name {:keys [capture events]}]
+  (when capture
+    (into {}
+          (map (fn [[kind kind-spec]]
+                 [kind (update kind-spec :fn
+                               (fn [f]
+                                 (fn [req]
+                                   (record-event! events [:capture adapter-name kind])
+                                   (f req))))]))
+          capture)))
+
 (defn- build-adapter-entry
   "Build one adapter registry entry from a spec.
 
@@ -217,7 +241,9 @@
     (some? (:on-provision spec))
     (assoc :on-provision (build-on-provision adapter-name spec))
     (some? (:impl-key spec))
-    (assoc :impl-key (:impl-key spec))))
+    (assoc :impl-key (:impl-key spec))
+    (some? (:capture spec))
+    (assoc :capture (build-capture adapter-name spec))))
 
 (defn- build-interface-entry
   "Build one interfaces-config entry from a spec.

@@ -31,7 +31,7 @@ and the session (`:alice`). No "I" — every browser step has an explicit actor.
 
 ## 2. Configure the `:web` interface
 
-`shiftlefter.edn`:
+`sl/shiftlefter.edn`:
 
 ```clojure
 {:interfaces {:web {:type :web :adapter :etaoin}}}

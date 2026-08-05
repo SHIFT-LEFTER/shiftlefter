@@ -31,25 +31,26 @@
   (project-context/resolve {:invocation-root dir}))
 
 (defn- make-basic-project! [dir]
-  (write-edn! (fs/path dir "glossary" "subjects.edn")
+  ;; sl/ layout (sl-fcjm): config + corpus under <project>/sl/.
+  (write-edn! (fs/path dir "sl" "glossary" "subjects.edn")
               {:subjects {:user {:desc "Application user"
                                   :instances [:alice :bob]}
                           :guest {:desc "Visitor"}}})
-  (write-edn! (fs/path dir "glossary" "intents" "Login.edn")
+  (write-edn! (fs/path dir "sl" "glossary" "intents" "Login.edn")
               {:intent "Login"
                :description "Login flow"
                :elements {:email {:description "Email input"
                                   :bindings {:web {:css "#email"}}}
                           :submit {:description "Submit button"
                                    :bindings {:web {:css "button[type=submit]"}}}}})
-  (write-text! (fs/path dir "steps" "login.clj")
+  (write-text! (fs/path dir "sl" "steps" "login.clj")
                "(ns login.steps
                   (:require [shiftlefter.stepengine.registry :refer [defstep]]))
 
                 (defstep #\"a project custom step\"
                   [ctx]
                   ctx)")
-  (write-edn! (fs/path dir "shiftlefter.edn")
+  (write-edn! (fs/path dir "sl" "shiftlefter.edn")
               {:runner {:step-paths ["steps/"]
                         :allow-pending? false
                         :macros {:enabled? false}}
@@ -92,7 +93,7 @@
   (with-temp-project
     (fn [dir]
       (make-basic-project! dir)
-      (write-edn! (fs/path dir "shiftlefter.edn")
+      (write-edn! (fs/path dir "sl" "shiftlefter.edn")
                   {:step-paths ["steps/"]  ; misplaced — the evidence case
                    :mystery-knob true      ; unknown
                    :runner {:step-paths ["steps/"]
@@ -137,7 +138,7 @@
   (with-temp-project
     (fn [dir]
       (make-basic-project! dir)
-      (write-text! (fs/path dir "macros" "auth.ini")
+      (write-text! (fs/path dir "sl" "macros" "auth.ini")
                    "name = login as alice
 description = Login flow
 steps =
@@ -145,7 +146,7 @@ steps =
   When :user/alice fills Login.email with 'a@example.test'
 
 ")
-      (write-edn! (fs/path dir "shiftlefter.edn")
+      (write-edn! (fs/path dir "sl" "shiftlefter.edn")
                   {:runner {:step-paths ["steps/"]
                             :allow-pending? false
                             :macros {:enabled? true
@@ -173,7 +174,7 @@ steps =
   (with-temp-project
     (fn [dir]
       (make-basic-project! dir)
-      (write-text! (fs/path dir "steps" "broken.clj")
+      (write-text! (fs/path dir "sl" "steps" "broken.clj")
                    "(ns broken.steps
                       (:require [shiftlefter.stepengine.registry :refer [defstep]]))
                     (throw (ex-info \"boom\" {:why :test}))")
@@ -187,7 +188,7 @@ steps =
   (with-temp-project
     (fn [dir]
       (make-basic-project! dir)
-      (write-text! (fs/path dir "setup.clj")
+      (write-text! (fs/path dir "sl" "setup.clj")
                    "(ns setup)
                     (spit \"setup-was-loaded.txt\" \"bad\")
                     (def setups [])")
@@ -202,7 +203,7 @@ steps =
       (make-basic-project! dir)
       (let [ctx (project-context dir)
             p1 (projection/build-projection ctx {:source :working-tree})]
-        (write-edn! (fs/path dir "glossary" "subjects.edn")
+        (write-edn! (fs/path dir "sl" "glossary" "subjects.edn")
                     {:subjects {:user {:desc "Application user"
                                         :instances [:alice :bob :carol]}}})
         (let [p2 (projection/build-projection ctx {:source :working-tree})]
@@ -236,7 +237,7 @@ steps =
    web verb glossary (:click has no :nope frame). Tier-2 catches it in
    Shifted mode; the runner ignores it in Vanilla."
   [dir]
-  (write-text! (fs/path dir "steps" "mismatched.clj")
+  (write-text! (fs/path dir "sl" "steps" "mismatched.clj")
                "(ns mismatched.steps
                   (:require [shiftlefter.stepengine.registry :refer [defstep]]))
                 (defstep #\"(\\w+) taps the (.+)\"
@@ -249,7 +250,7 @@ steps =
   "Rewrite the temp project's shiftlefter.edn without its :svo key — the
    vanilla twin of make-basic-project!."
   [dir]
-  (write-edn! (fs/path dir "shiftlefter.edn")
+  (write-edn! (fs/path dir "sl" "shiftlefter.edn")
               {:runner {:step-paths ["steps/"]
                         :allow-pending? false
                         :macros {:enabled? false}}
@@ -293,7 +294,7 @@ steps =
       ;; Break the subjects glossary path — the runner never loads it in
       ;; vanilla, so orientation must not fail; it warns and falls back to
       ;; framework defaults.
-      (fs/delete (fs/path dir "glossary" "subjects.edn"))
+      (fs/delete (fs/path dir "sl" "glossary" "subjects.edn"))
       (let [p (projection/build-projection (project-context dir)
                                            {:source :working-tree})]
         (is (= :vanilla (:mode p)))
@@ -307,7 +308,7 @@ steps =
   (with-temp-project
     (fn [dir]
       (make-basic-project! dir)
-      (fs/delete (fs/path dir "glossary" "subjects.edn"))
+      (fs/delete (fs/path dir "sl" "glossary" "subjects.edn"))
       (let [p (projection/build-projection (project-context dir)
                                            {:source :working-tree})]
         (is (= :shifted (:mode p)))
@@ -320,8 +321,8 @@ steps =
 ;; -----------------------------------------------------------------------------
 
 (deftest validation-commands-consumer-discovered
-  ;; A temp project has no bin/sl at its root → consumer context. config at the
-  ;; root resolves :discovered, so no --config flag is needed.
+  ;; A temp project has no bin/sl at its root → consumer context. sl/shiftlefter.edn
+  ;; resolves :discovered, so no --config flag is needed.
   (with-temp-project
     (fn [dir]
       (make-basic-project! dir)
@@ -332,7 +333,7 @@ steps =
         (is (not-any? #(str/includes? % "./bin/kaocha") cmds))
         (is (not-any? #(str/includes? % "./bin/sl") cmds))
         (is (every? #(str/starts-with? % "sl run") cmds))
-        (is (some #(= "sl run features --dry-run" %) cmds))
+        (is (some #(= "sl run --dry-run" %) cmds))
         (is (not-any? #(str/includes? % "--config") cmds))))))
 
 (deftest validation-commands-consumer-explicit
@@ -341,7 +342,7 @@ steps =
     (fn [dir]
       (make-basic-project! dir)
       (let [ctx (project-context/resolve {:invocation-root dir
-                                          :config-path "shiftlefter.edn"})
+                                          :config-path "sl/shiftlefter.edn"})
             cmds (:validation-commands
                   (projection/build-projection ctx {:source :working-tree}))]
         (is (= :explicit (:config-source ctx)) "sanity: explicit config")
@@ -360,4 +361,4 @@ steps =
                   (projection/build-projection (project-context dir)
                                                {:source :working-tree}))]
         (is (some #(= "./bin/kaocha unit" %) cmds))
-        (is (some #(str/includes? % "./bin/sl run features") cmds))))))
+        (is (some #(str/includes? % "./bin/sl run --dry-run") cmds))))))

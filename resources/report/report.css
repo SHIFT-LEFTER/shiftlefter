@@ -299,6 +299,62 @@ body {
   margin-left: auto;
 }
 
+/* ---- attachments (sl-l9nj) ------------------------------------------- */
+
+.attachment {
+  padding: 0.15rem 0.75rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--fg-muted);
+}
+
+.attachment-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.attachment-line .attachment-kind {
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.attachment-line .attachment-note {
+  font-style: italic;
+}
+
+.attachment-line .duration {
+  margin-left: auto;
+}
+
+.attachment-failed,
+.attachment-failed .attachment-kind {
+  color: var(--red, #c0392b);
+}
+
+.attachment-image {
+  display: block;
+  max-width: 100%;
+  max-height: 480px;
+  margin: 0.35rem 0 0.5rem;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 4px;
+}
+
+.attachment-excerpt {
+  margin: 0.2rem 0 0.4rem;
+}
+
+.attachment-excerpt pre {
+  max-height: 16rem;
+  overflow: auto;
+  font-size: 0.72rem;
+  margin: 0.25rem 0 0;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg-alt, rgba(127, 127, 127, 0.08));
+  border-radius: 4px;
+}
+
 .duration {
   color: var(--fg-muted);
   font-size: 0.78rem;
@@ -401,6 +457,51 @@ body {
   margin: 0;
   padding-left: 1.2rem;
   font-size: 0.85rem;
+}
+
+/* ---- planning diagnostics (sl-6hsd) --------------------------------- */
+
+.planning-failed-note {
+  margin: 1.25rem 0 0;
+  padding: 0.6rem 0.9rem;
+  border-left: 3px solid var(--error);
+  background: var(--surface);
+  font-size: 0.9rem;
+}
+
+.diagnostics h3 {
+  font-size: 0.85rem;
+  margin: 0.8rem 0 0.3rem;
+  color: var(--fg-muted);
+}
+
+.diag-item {
+  margin: 0.25rem 0;
+}
+
+.diag-step-text {
+  font-family: var(--mono);
+}
+
+.diag-loc,
+.diag-alt {
+  color: var(--fg-muted);
+  font-size: 0.8rem;
+}
+
+.diag-alt {
+  font-family: var(--mono);
+  margin-left: 0.75rem;
+}
+
+/* The teaching line (sl-s04n family) — the console renders it cyan; here
+   it gets the pending accent and a quiet indent under its step. */
+.diag-hint {
+  margin: 0.15rem 0 0 0.75rem;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--pending);
+  color: var(--fg);
+  font-size: 0.82rem;
 }
 
 .run-footer {

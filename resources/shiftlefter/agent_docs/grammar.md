@@ -58,6 +58,11 @@ literal or a binding token, nothing else. Some consequences worth knowing:
 - `'{code}'` is the six characters `{code}` — quoted is literal, always.
 - `'say "hi"'` is fine; a double-quote inside a single-quoted literal is an
   ordinary character.
+- `'Don''t have an account?'` — a literal `'` inside a literal is written
+  doubled, SQL-style: `''` inside a nonempty literal is one quote character.
+  The doubled pair must be adjacent, which is what keeps steps with several
+  quoted slots unambiguous. `''''` is the one-character literal `'`. There
+  are no backslash escapes — `''` is the whole escape grammar.
 - `"x"` (double quotes) is **reserved** — it is not a quote form in this
   grammar, and the step won't match. The diagnostic teaches the rule and,
   when swapping the quotes would produce a real step, quotes the corrected
@@ -67,6 +72,8 @@ literal or a binding token, nothing else. Some consequences worth knowing:
 - `''` (empty literal) is not admitted — "put nothing in the field" wants a
   verb (`clears`), not an empty value. The diagnostic points at the verb,
   naming your element when it can: "to empty a field: clears Login.code".
+  (Only the *bare* `''` is refused; inside a nonempty literal, `''` is the
+  doubling escape above.)
 - `with Welcome` (unquoted ref-shape in a value slot) matches nothing — there
   is deliberately no named-value registry.
 - Binding names are born as Java regex group names: a letter, then letters and
@@ -147,6 +154,8 @@ could produce. So the spacebar answers to `Space`.
 
 - `presses 'g'` — a quoted single character presses that character key (the
   keyboard-shortcut case, unreachable through `fills`).
+- `presses ''''` — the doubling rule applies in every quoted slot, so this
+  presses the apostrophe character key.
 - `presses 'abc'` — a plan error: pressing is one key; entering text is
   `fills`.
 - Chords (`Cmd+A`) and key sequences are not yet part of the grammar.
@@ -182,16 +191,32 @@ missed and teaches the rule it broke — at most one hint per step:
 
 - double quotes in a slot → literals use single quotes; double quotes are
   reserved
-- an unbalanced single quote → the literal may be unclosed
+- an unbalanced single quote → the literal may be unclosed (and when doubling
+  an interior quote would produce a real step — `'friends' page'` →
+  `'friends'' page'` — the hint offers exactly that)
 - an empty literal (`''`) → emptying a field wants the `clears` verb, and
   the hint names your element when it can
+- an undoubled apostrophe inside a literal (`'Don't stop'`) → a literal
+  quote is written doubled (`''`), with the doubled step quoted when that
+  repair matches
 - quoted ref-shaped content → quoted is literal, always; with a glossary
   check for "Did you mean X (unquoted)?"
+- bare words where a value slot expects a value (`fills X with the SMS
+  code`) → value slots take a quoted literal (`'...'`) or a binding
+  (`{Name}`); offered only when quoting the tail produces a step that
+  actually matches
+- an undefined step with no structured tokens at all — no `'...'` literal,
+  no `{...}` locator, no `Object.ref` — ending in sentence punctuation →
+  it probably wasn't meant as a step. Description prose ends at the first
+  step keyword (`Given/When/Then/And/But`, or `*`), so prose that opens
+  with one lexes as a real step; move prose above the first step or
+  rephrase it. Teaching-only — no repair makes prose match, so there is
+  never a did-you-mean
 
 When repairing the text produces a step that actually matches, the hint quotes
-the exact corrected step. Apostrophes inside words (`the user's name`) never
-trigger any of this, and a `"` inside a single-quoted literal stays an
-ordinary character.
+the exact corrected step. Apostrophes inside *unquoted* words (`the user's
+name` outside any literal) never trigger any of this, and a `"` inside a
+single-quoted literal stays an ordinary character.
 
 For tooling, the EDN report carries the same hint machine-readably on each
 undefined issue: a `:hint` map of `{:type :grammar/… :suggestion "…"}` plus
@@ -208,10 +233,10 @@ compatible extension:
 | Form | Status |
 |------|--------|
 | `"double quoted"` anywhere | Reserved — not a quote form; won't match, and the hint says so |
-| Unquoted bare word in a text slot | Reserved for future named text |
+| Unquoted bare word in a text slot | Reserved for future named text — won't match; the hint offers the quoted tail when that would |
 | Unquoted name on `should be on exactly` | Reserved — see the region explanation above |
 | `+` in a key slot (chords, sequences) | Parked pending a real need |
-| `''` empty literal | Not admitted — the hint points at `clears` |
+| `''` empty literal | Not admitted bare — the hint points at `clears`. Inside a nonempty literal, `''` is one literal quote (SQL-style doubling) |
 
 ## What `--dry-run` promises
 

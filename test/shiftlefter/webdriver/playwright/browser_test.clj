@@ -104,6 +104,120 @@
           chord-str (str shift-down "a" shift-up)]
       (is (= "Shift+a" (pw-keys/translate-key-string chord-str))))))
 
+;; -----------------------------------------------------------------------------
+;; Nested-pruning strategies: call-count contracts (sl-tnx)
+;;
+;; Playwright's Java API is interfaces, so the whole surface reifies — these
+;; tests count real invocations at the two strategy seams with no live
+;; browser. The asymmetry IS the acceptance evidence: :fast makes exactly ONE
+;; evaluateHandle round trip per hop regardless of candidate count; :safe
+;; makes one evaluate PER candidate (the retained pre-tnx path).
+;; -----------------------------------------------------------------------------
+
+(defn- fake-element-handle []
+  (reify com.microsoft.playwright.ElementHandle))
+
+(defn- fake-el-jshandle
+  "A JSHandle property whose asElement yields `eh` (nil ⇒ non-element)."
+  [eh]
+  (reify com.microsoft.playwright.JSHandle
+    (asElement [_] eh)))
+
+(defn- fake-array-handle
+  "The array JSHandle evaluateHandle returns: getProperties yields `props`
+   (a map, deliberately orderable by the caller); records disposal."
+  [props disposed?]
+  (reify com.microsoft.playwright.JSHandle
+    (getProperties [_] (java.util.LinkedHashMap. ^java.util.Map props))
+    (dispose [_] (reset! disposed? true))))
+
+(defn- fast-page
+  "A Page whose evaluateHandle counts calls and returns `arr-handle`."
+  [calls arr-handle]
+  (reify com.microsoft.playwright.Page
+    (^com.microsoft.playwright.JSHandle evaluateHandle [_ ^String _script ^Object _arg]
+      (swap! calls inc)
+      arr-handle)))
+
+(defn- browser-with [page pruning]
+  (pw-browser/make-playwright-browser
+   page (cond-> {:playwright nil :browser nil :context nil
+                 :last-dialog (atom nil) :active-frame (atom nil)}
+          pruning (assoc :pruning pruning))))
+
+(deftest fast-pruning-is-one-round-trip
+  (testing ":fast (and the default): ONE evaluateHandle for N candidates,
+            ordered ElementHandles out, scrambled/artifact keys handled,
+            array handle disposed"
+    (let [[eh0 eh1 eh2] [(fake-element-handle) (fake-element-handle) (fake-element-handle)]
+          ;; Scrambled insertion order + a `length` artifact: the unpack must
+          ;; sort numerically and drop non-numeric keys silently.
+          props (doto (java.util.LinkedHashMap.)
+                  (.put "2" (fake-el-jshandle eh2))
+                  (.put "length" (fake-el-jshandle nil))
+                  (.put "0" (fake-el-jshandle eh0))
+                  (.put "1" (fake-el-jshandle eh1)))
+          calls (atom 0)
+          disposed? (atom false)
+          page (fast-page calls (fake-array-handle props disposed?))]
+      (doseq [mode [nil :fast]]           ;; nil ⇒ knob absent ⇒ default :fast
+        (reset! calls 0) (reset! disposed? false)
+        (let [browser (browser-with page mode)
+              result (bp/query-all-pruned browser :document
+                                          {:q {:css ".card"}} ".boundary")]
+          (is (= 1 @calls) "exactly one browser round trip per hop")
+          (is (= [{:el eh0} {:el eh1} {:el eh2}] result)
+              "numeric-sorted ElementHandles, artifact key dropped")
+          (is (true? @disposed?) "the array JSHandle is disposed"))))))
+
+(deftest fast-pruning-loud-on-non-element-survivor
+  (testing "a NUMERIC property that fails asElement throws, never silently drops"
+    (let [props (doto (java.util.LinkedHashMap.)
+                  (.put "0" (fake-el-jshandle nil)))
+          page (fast-page (atom 0) (fake-array-handle props (atom false)))
+          browser (browser-with page :fast)]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not a DOM element"
+                            (bp/query-all-pruned browser :document
+                                                 {:q {:css ".card"}} ".b"))))))
+
+(defn- candidate-locator
+  "A candidate Locator whose evaluate counts calls and answers `keep?`."
+  [calls keep?]
+  (reify com.microsoft.playwright.Locator
+    (^Object evaluate [_ ^String _script ^Object _arg]
+      (swap! calls inc)
+      keep?)))
+
+(deftest safe-pruning-is-per-candidate-and-retained
+  (testing ":safe: one evaluate PER candidate, surviving Locators returned"
+    (let [calls (atom 0)
+          keep-a (candidate-locator calls true)
+          drop-b (candidate-locator calls false)
+          keep-c (candidate-locator calls true)
+          base (reify com.microsoft.playwright.Locator
+                 (all [_] (java.util.Arrays/asList
+                           (object-array [keep-a drop-b keep-c]))))
+          page (reify com.microsoft.playwright.Page
+                 (^com.microsoft.playwright.Locator locator [_ ^String _sel] base))
+          browser (browser-with page :safe)
+          result (bp/query-all-pruned browser :document
+                                      {:q {:css ".card"}} ".boundary")]
+      (is (= 3 @calls) "O(N): one evaluate per candidate — the retained trade")
+      (is (= [{:el keep-a} {:el keep-c}] result)
+          "survivors are the stale-safe Locators, pruned one dropped"))))
+
+(deftest blank-boundary-stays-query-all-in-both-modes
+  (testing "no boundary ⇒ native query-all (Locators), whichever the knob says"
+    (let [l1 (reify com.microsoft.playwright.Locator)
+          base (reify com.microsoft.playwright.Locator
+                 (all [_] (java.util.Arrays/asList (object-array [l1]))))
+          page (reify com.microsoft.playwright.Page
+                 (^com.microsoft.playwright.Locator locator [_ ^String _sel] base))]
+      (doseq [mode [:fast :safe]]
+        (is (= [{:el l1}]
+               (bp/query-all-pruned (browser-with page mode) :document
+                                    {:q {:css ".card"}} "")))))))
+
 ;; =============================================================================
 ;; Integration Tests (require live Playwright browser)
 ;; =============================================================================

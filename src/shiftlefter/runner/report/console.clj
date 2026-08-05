@@ -129,18 +129,38 @@
        (when-let [data (:data error)]
          (str "     " (colorize (str "Data: " (pr-str data)) :gray use-color?) "\n"))))
 
+(defn- format-attachment-line
+  "One plain ASCII continuation line per attachment ref (sl-l9nj, design
+   §4): `     attachment: screenshot -> attachments/<slug>/x.png` on the
+   5-space ladder; errored refs show the failure message instead of the
+   path — the message is the triage signal (the path's .err file holds
+   the same text, sl-yynw F7)."
+  [ref use-color?]
+  (let [kind (name (:attachment/kind ref))]
+    (if-let [err (:attachment/error ref)]
+      (str "     " (colorize (str "attachment: " kind " FAILED: " err)
+                             :red use-color?) "\n")
+      (str "     " (colorize "attachment: " :gray use-color?)
+           kind " -> " (:attachment/path ref) "\n"))))
+
 (defn- format-scenario-failure
   "Format a scenario with its failed steps. A scenario-level :error (a
    lifecycle hook threw, sl-esq) renders its own attributed block; any
-   failed steps still follow (the after-throw-plus-step-failure case)."
+   failed steps still follow (the after-throw-plus-step-failure case).
+   Attachment refs (sl-l9nj) close the block — evidence lines under the
+   failure they explain; attachment-less scenarios are byte-identical."
   [scenario-result use-color?]
   (let [pickle (-> scenario-result :plan :plan/pickle)
         source-file (:pickle/source-file pickle)
-        failed-steps (filter #(= :failed (:status %)) (:steps scenario-result))]
+        failed-steps (filter #(= :failed (:status %)) (:steps scenario-result))
+        attachments (concat (mapcat :attachments (:steps scenario-result))
+                            (:attachments scenario-result))]
     (str (colorize (str "Scenario: " (:pickle/name pickle)) :bold use-color?) "\n"
          (when-let [error (:error scenario-result)]
            (format-hook-failure error use-color?))
-         (str/join "\n" (map-indexed #(format-step-failure %2 %1 source-file use-color?) failed-steps)))))
+         (str/join "\n" (map-indexed #(format-step-failure %2 %1 source-file use-color?) failed-steps))
+         (when (seq attachments)
+           (apply str (map #(format-attachment-line % use-color?) attachments))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Macro Step Helpers

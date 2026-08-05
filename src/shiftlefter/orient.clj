@@ -34,7 +34,7 @@
   "Actionable next steps for a project with no ShiftLefter config. Points only
    at surfaces that exist today — there is no `sl init`/`sl sieve` command."
   []
-  ["Create shiftlefter.edn at the project root (or sl/shiftlefter.edn)."
+  ["Create sl/shiftlefter.edn at the project root."
    "Read `sl agent-doc overview` to learn the operating model."
    "Read `sl agent-doc examples` for worked config/glossary/feature file shapes."
    "Use `sl agent-doc sieve` for the vocabulary bootstrap workflow."])

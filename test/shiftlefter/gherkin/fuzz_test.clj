@@ -122,12 +122,14 @@
       (is (every? #(str/ends-with? % "|") samples)))))
 
 (deftest gen-step-produces-valid-steps
-  (testing "gen-step produces steps with valid keywords"
+  (testing "gen-step produces steps with valid keywords (an optional
+            whole-line comment may precede the step, sl-lg8v)"
     (let [samples (gen/sample fuzz/gen-step 20)
-          valid-keywords #{"Given" "When" "Then" "And" "But" "*"}]
+          valid-keywords #{"Given" "When" "Then" "And" "But" "*"}
+          strip-comments #(str/replace % #"^(?:\s*#[^\n]*\n)+" "")]
       (is (every? #(str/starts-with? % "    ") samples))
       (is (every? (fn [s]
-                    (let [kw (second (re-find #"^\s+(\w+|\*)" s))]
+                    (let [kw (second (re-find #"^\s+(\w+|\*)" (strip-comments s)))]
                       (contains? valid-keywords kw)))
                   samples)))))
 
@@ -148,8 +150,9 @@
   (testing "gen-feature produces valid feature files that parse without errors"
     (let [samples (gen/sample fuzz/gen-feature 10)]
       (is (every? string? samples))
+      ;; Leading comment and tag lines (sl-lg8v / tags) precede Feature:
       (is (every? #(str/starts-with? (str/trim %) "Feature:")
-                  (map #(str/replace % #"^@[^\n]+\n" "") samples)))
+                  (map #(str/replace % #"^(?:[#@][^\n]*\n)+" "") samples)))
       ;; All should parse without errors
       (doseq [s samples]
         (let [{:keys [errors]} (api/parse-string s)]
@@ -239,6 +242,12 @@
           before (collect-descriptions (:ast (api/parse-string content)))
           after (collect-descriptions (:ast (api/parse-string canonical)))]
       (= before after))))
+
+;; sl-lg8v: with comments sprinkled into gen-feature, canonical formatting
+;; must never lose one — the lost-comments backstop is the property.
+(defspec canonical-preserves-comments 100
+  (prop/for-all [content fuzz/gen-feature]
+    (empty? (printer/lost-comments content))))
 
 (deftest run-with-generated-features-passes
   (testing "fuzz run with test.check generators passes"

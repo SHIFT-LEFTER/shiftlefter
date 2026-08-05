@@ -35,7 +35,8 @@
    Playwright uses event-driven dialog handling (not synchronous like WebDriver).
    We pre-register a dialog listener on page creation that stores the latest
    dialog reference. accept-alert!/dismiss-alert!/get-alert-text operate on it."
-  (:require [shiftlefter.browser.protocol :as bp]
+  (:require [shiftlefter.browser.locators :as locators]
+            [shiftlefter.browser.protocol :as bp]
             [shiftlefter.browser.target :as target]
             [shiftlefter.webdriver.playwright.keys :as pw-keys]
             [clojure.string :as str]))
@@ -99,11 +100,11 @@
 ;; -----------------------------------------------------------------------------
 
 (def ^:private pw-keep-script
-  "Per-candidate §8.1 boundary check, run with the candidate as `element`.
-   arg: [scopeHandle-or-null, boundaryCss]. Keep when the nearest boundary
-   ancestor is absent, is the scope, or sits above the scope; prune one
-   strictly inside the scope. `parentElement` first so a candidate that is
-   itself a boundary never matches itself."
+  "Per-candidate §8.1 boundary check (the :safe strategy), run with the
+   candidate as `element`. arg: [scopeHandle-or-null, boundaryCss]. Keep
+   when the nearest boundary ancestor is absent, is the scope, or sits
+   above the scope; prune one strictly inside the scope. `parentElement`
+   first so a candidate that is itself a boundary never matches itself."
   (str "(element, args) => {"
        "  const scope = args[0] || document;"
        "  const boundary = args[1];"
@@ -112,13 +113,100 @@
        "  return b === null || b === scope || b.contains(scope);"
        "}"))
 
+(def ^:private pw-prune-script
+  "Scoped querySelectorAll fused with the §8.1 boundary filter in ONE round
+   trip (the :fast strategy, sl-tnx) — the arrow-function twin of the
+   etaoin `prune-script`; the keep-condition is IDENTICAL to
+   `pw-keep-script` above, only the query/return mechanism differs.
+   arg: [scopeEl-or-null, cssSelector, boundaryCss]; returns the surviving
+   elements as an array (consumed via evaluateHandle → array JSHandle)."
+  (str "(args) => {"
+       "  const scope = args[0] || document;"
+       "  const sel = args[1];"
+       "  const boundary = args[2];"
+       "  const nodes = Array.from(scope.querySelectorAll(sel));"
+       "  return nodes.filter((c) => {"
+       "    const p = c.parentElement;"
+       "    const b = p ? p.closest(boundary) : null;"
+       "    return b === null || b === scope || b.contains(scope);"
+       "  });"
+       "}"))
+
 (defn- scope->element-handle
   "The scope as a Playwright ElementHandle for passing into evaluate, or nil
-   for `:document` (the script falls back to document). A scope handle is a
-   Locator (from query-all); `.elementHandle` materializes it."
+   for `:document` (the scripts fall back to document). Under :safe a
+   scope's :el is a Locator (materialized via `.elementHandle`); under
+   :fast a prior pruned hop already produced ElementHandles, which pass
+   through — while non-pruned hops still produce Locators, so both shapes
+   reach here. Class check via `resolve`/`isInstance` so this ns keeps
+   compiling without Playwright on the classpath (lazy-imports doctrine)."
   [scope]
   (when (target/el-target? scope)
-    (.elementHandle (:el scope))))
+    (let [el (:el scope)
+          eh-class ^Class (resolve 'com.microsoft.playwright.ElementHandle)]
+      (if (and eh-class (.isInstance eh-class el))
+        el
+        (.elementHandle el)))))
+
+(defn- candidate-css
+  "CSS string for a resolved locator under active pruning — :fast feeds it
+   to querySelectorAll. Structured error if the locator is not
+   CSS-expressible; the resolver pre-validates element bindings, so this is
+   a backend safety net, never the user path (same posture as the etaoin
+   twin)."
+  [locator]
+  (let [r (locators/locator->css (:q locator))]
+    (if (:ok r)
+      (:ok r)
+      (throw (ex-info (str "query-all-pruned needs a CSS locator under an active "
+                           "boundary; got " (pr-str (:q locator)))
+                      {:type :browser/locator-not-css
+                       :location "PlaywrightBrowser/query-all-pruned"
+                       :locator locator})))))
+
+(defn- fast-prune!
+  "One evaluateHandle round trip for the :fast strategy: run
+   `pw-prune-script` on the page, unpack the returned array JSHandle into
+   `{:el <ElementHandle>}` handles. THE :fast CALL-COUNT SEAM — tests count
+   invocations here (sl-tnx acceptance #1).
+
+   Unpack discipline: `getProperties` key order is not trusted — keys are
+   filtered to numeric, then sorted numerically (non-numeric artifacts like
+   `length` are expected JS noise and dropped silently); a NUMERIC property
+   whose `asElement` is nil is a loud :webdriver/not-an-element (a script
+   returning non-elements is a programming error — same posture as etaoin's
+   `script-result->handles`). The array handle is disposed after
+   extraction; the element handles are OWNED BY THE RESULT — point-in-time
+   snapshots, valid until navigation (staleness contract:
+   docs/INSTALL-TIERS.md § Backend differences)."
+  [page scope-handle css boundary-css]
+  (let [arg (java.util.Arrays/asList (object-array [scope-handle css boundary-css]))
+        arr (.evaluateHandle page pw-prune-script arg)]
+    (try
+      (let [props (.getProperties arr)
+            idxs (->> (keys props)
+                      (keep #(when (re-matches #"\d+" %) (parse-long %)))
+                      sort)]
+        (mapv (fn [i]
+                (let [el (.asElement (.get props (str i)))]
+                  (when-not el
+                    (throw (ex-info "Pruned script result entry is not a DOM element"
+                                    {:type :webdriver/not-an-element
+                                     :message "Pruned script result entry is not a DOM element"
+                                     :index i})))
+                  {:el el}))
+              idxs))
+      (finally
+        (.dispose arr)))))
+
+(defn- safe-keep?
+  "Per-candidate §8.1 boundary check for the :safe strategy (the retained
+   pre-tnx path): one `.evaluate` per candidate Locator, preserving
+   Playwright auto-retry stale-safety at O(N) browser calls per hop. THE
+   :safe CALL-COUNT SEAM — tests count invocations here (acceptance #2)."
+  [loc scope-handle boundary-css]
+  (let [arg (java.util.Arrays/asList (object-array [scope-handle boundary-css]))]
+    (.evaluate loc pw-keep-script arg)))
 
 ;; -----------------------------------------------------------------------------
 ;; Right-click helper — needs imported classes at runtime
@@ -307,27 +395,40 @@
 
   (query-all [_this scope locator]
     (target/check-query-all-args! scope locator)
-    (let [sel  (resolve-playwright-selector locator)
-          base (if (target/el-target? scope)
-                 (.locator (:el scope) sel)   ;; scoped: parentLocator.locator(childSel)
-                 (.locator page sel))         ;; document
-          locs (.all base)]
-      (mapv (fn [l] {:el l}) locs)))
+    (let [sel (resolve-playwright-selector locator)]
+      (if (target/el-target? scope)
+        (let [el (:el scope)
+              eh-class ^Class (resolve 'com.microsoft.playwright.ElementHandle)]
+          (if (and eh-class (.isInstance eh-class el))
+            ;; Inside a :fast pruned chain (sl-tnx) the scope is an
+            ;; ElementHandle snapshot — it has no .locator, so descend with
+            ;; querySelectorAll; results stay snapshot-typed for the rest of
+            ;; the chain (found live by the playwright e2e variants: the
+            ;; rating-region descent inside a pruned card).
+            (mapv (fn [e] {:el e}) (.querySelectorAll el sel))
+            (mapv (fn [l] {:el l}) (.all (.locator el sel)))))
+        (mapv (fn [l] {:el l}) (.all (.locator page sel))))))
 
   (query-all-pruned [this scope locator boundary-css]
     (target/check-query-all-args! scope locator)
-    (let [all (bp/query-all this scope locator)]
-      (if (str/blank? boundary-css)
-        all
-        ;; Filter the candidate Locators by the §8.1 boundary check. One
-        ;; IBrowser call (acceptance #5); internally a closest() check per
-        ;; candidate — Playwright's value-returning evaluate can't round-trip
-        ;; element handles cleanly, and this keeps the result type-consistent
-        ;; with query-all (Locators). Per-hop round-trip optimization for this
-        ;; backend is sl-zi2, not here.
-        (let [scope-handle (scope->element-handle scope)
-              arg (java.util.Arrays/asList (object-array [scope-handle boundary-css]))]
-          (filterv (fn [{loc :el}] (.evaluate loc pw-keep-script arg)) all))))))
+    (if (str/blank? boundary-css)
+      ;; No boundary → native query-all in BOTH modes (Locators, unchanged;
+      ;; nothing to prune — acceptance #5's non-pruned invariant).
+      (bp/query-all this scope locator)
+      (case (get pw-context :pruning :fast)
+        ;; :fast (default, sl-tnx): one fused round trip per hop, matching
+        ;; the etaoin path. Results are ElementHandle SNAPSHOTS (§8
+        ;; point-in-time) — staleness contract in INSTALL-TIERS.
+        :fast
+        (fast-prune! page (scope->element-handle scope)
+                     (candidate-css locator) boundary-css)
+        ;; :safe (opt-in): the retained Locator-filter path — Playwright
+        ;; auto-retry stale-safety at O(N) evaluates per hop.
+        :safe
+        (let [all (bp/query-all this scope locator)
+              scope-handle (scope->element-handle scope)]
+          (filterv (fn [{loc :el}] (safe-keep? loc scope-handle boundary-css))
+                   all))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Factory
@@ -339,14 +440,17 @@
    Options:
    - :headless — run headless (default true)
    - :browser-type — :chromium (default), :firefox, or :webkit
+   - :pruning — nested-pruning strategy (sl-tnx): :fast (default; one fused
+     round trip per hop, ElementHandle snapshots) or :safe (per-candidate
+     Locator filter, stale-safe, O(N) calls per hop)
 
    Returns a PlaywrightBrowser. Call close-playwright-browser to clean up.
 
    Requires com.microsoft.playwright/playwright on the classpath.
    Throws with a clear message if it's missing."
   ([] (launch-playwright-browser {}))
-  ([{:keys [headless browser-type]
-     :or {headless true browser-type :chromium}}]
+  ([{:keys [headless browser-type pruning]
+     :or {headless true browser-type :chromium pruning :fast}}]
    (ensure-playwright-imports!)
    (let [pw-class    (resolve 'com.microsoft.playwright.Playwright)
          create-meth (.getMethod ^Class pw-class "create" (into-array Class []))
@@ -367,7 +471,10 @@
                       :browser browser
                       :context context
                       :last-dialog last-dialog
-                      :active-frame active-frame}]
+                      :active-frame active-frame
+                      ;; Nested-pruning strategy (sl-tnx); read by
+                      ;; query-all-pruned, chosen at provision time.
+                      :pruning pruning}]
      ;; Register dialog handler to capture alerts
      (.onDialog page
                 (reify java.util.function.Consumer

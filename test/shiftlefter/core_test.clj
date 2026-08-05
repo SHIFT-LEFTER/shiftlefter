@@ -7,6 +7,7 @@
    [clojure.tools.cli :refer [parse-opts]]
    [shiftlefter.core :as core]
    [shiftlefter.costume :as costume]
+   [shiftlefter.gherkin.printer :as printer]
    [shiftlefter.gherkin.verify :as verify]
    [shiftlefter.paths :as paths]
    [shiftlefter.project-context :as project-context]
@@ -158,7 +159,20 @@
 
   (testing "returns :not-found for non-existent file"
     (let [result (format-single-file "/nonexistent/path.feature")]
-      (is (= :not-found (:status result))))))
+      (is (= :not-found (:status result)))))
+
+  (testing "refuses the destructive write when the printer would drop
+            comments (the sl-q2uj backstop's positive path, sl-yynw F8)"
+    (let [path (str (jio/file *temp-dir* "backstop.feature"))
+          content "Feature: Test\n\n  Scenario: S\n    # mid\n    Given step\n"
+          real printer/canonical]
+      (spit path content)
+      (with-redefs [printer/canonical
+                    (fn [s] (str/replace (real s) #"(?m)^\s*#[^\n]*\n" ""))]
+        (let [result (format-single-file path)]
+          (is (= :skipped-comments (:status result)))
+          (is (seq (:comments result)) "the refusal names the lost comments")))
+      (is (= content (slurp path)) "the file is left untouched"))))
 
 (deftest format-files-directory-test
   (testing "formats directory and returns correct counts"
@@ -292,6 +306,28 @@
     (doseq [bad ["0" "-2" "three" "2.5"]]
       (let [parsed (parse-opts ["--max-parallel" bad "file.feature"] core/cli-options)]
         (is (seq (:errors parsed)) (str "--max-parallel " bad))))))
+
+(deftest test-capture-flag
+  ;; sl-3q9r: --capture kind=policy,... — malformed values ride the
+  ;; usage-error path (exit 1), like --max-parallel.
+  (testing "valid spec parses to a policy map"
+    (let [parsed (parse-opts ["--capture" "screenshot=on-failure,console=never"
+                              "file.feature"] core/cli-options)]
+      (is (empty? (:errors parsed)))
+      (is (= {:screenshot :on-failure :console :never}
+             (get-in parsed [:options :capture])))))
+  (testing "absent flag leaves the option unset (config mirror decides)"
+    (let [parsed (parse-opts ["file.feature"] core/cli-options)]
+      (is (nil? (get-in parsed [:options :capture])))))
+  (testing "unknown kinds parse (open set — resolution warns, never errors)"
+    (let [parsed (parse-opts ["--capture" "message-log=every-step" "file.feature"]
+                             core/cli-options)]
+      (is (empty? (:errors parsed)))))
+  (testing "malformed specs are usage errors"
+    (doseq [bad ["screenshot" "screenshot=" "screenshot=sometimes"
+                 "screenshot=on-failure,console" "=never"]]
+      (let [parsed (parse-opts ["--capture" bad "file.feature"] core/cli-options)]
+        (is (seq (:errors parsed)) (str "--capture " bad))))))
 
 (deftest test-valid-flags-no-errors
   (testing "Known run flags produce no errors"

@@ -22,17 +22,18 @@
         (is (= (count (mapcat :snippets gen/manifest))
                (count (re-seq #"_Verbatim from `examples/" md)))))
       (testing "minimal config"
-        (is (str/includes? md "examples/02-browser-zero-code/shiftlefter.edn")))
-      (testing "subjects + verbs glossaries (canonical layout)"
-        (is (str/includes? md "examples/svo-demo/glossary/subjects.edn"))
-        (is (str/includes? md "examples/svo-demo/glossary/verbs/web.edn")))
+        (is (str/includes? md "examples/02-browser-zero-code/sl/shiftlefter.edn")))
+      (testing "subjects glossary (canonical layout)"
+        (is (str/includes? md "examples/svo-demo/sl/glossary/subjects.edn")))
+      (testing "macro registry INI (domain actions are macros, sl-q8al)"
+        (is (str/includes? md "examples/svo-demo/sl/macros/login.ini")))
       (testing "intents, including a parent-anchored nested address"
-        (is (str/includes? md "examples/04-sms-2fa/glossary/intents/login.edn"))
+        (is (str/includes? md "examples/04-sms-2fa/sl/glossary/intents/login.edn"))
         (is (str/includes? md "Dashboard.featured[1].rating.stars")))
       (testing "an SVO feature with builtin steps"
-        (is (str/includes? md "examples/06-nested-parent-anchored/features/catalog.feature")))
+        (is (str/includes? md "examples/06-nested-parent-anchored/sl/features/catalog.feature")))
       (testing "setup.clj orchestration"
-        (is (str/includes? md "examples/02-browser-zero-code/setup.clj"))))))
+        (is (str/includes? md "examples/02-browser-zero-code/sl/setup.clj"))))))
 
 (deftest checked-in-resource-up-to-date-test
   (testing "the committed examples.md equals fresh generation (drift guard, AC2)"

@@ -14,10 +14,22 @@
    Classifier order (structural, not priority): unbalanced single quotes
    gate span analysis, so they are checked first; double quotes are only
    significant outside single-quoted spans (a `\"` inside a literal is an
-   ordinary character); quoted-ref classification needs balanced spans.
+   ordinary character); an undoubled apostrophe INSIDE a balanced span is
+   checked before quoted-ref classification (sl-jlqz — the literal grammar
+   writes it doubled, '');  quoted-ref classification needs balanced spans.
+   The bare-value family (sl-38fy) runs last among the repair families: it
+   has no textual cue at all — bare words are ordinary prose in most
+   undefined steps — so its only evidence is the rematch itself, and it
+   stays silent without one. The prose-as-step family (sl-bav1) is the
+   terminal fallback after even that: teaching-only (no repair makes prose
+   match), fired by a structural cue — zero structured tokens plus sentence
+   punctuation — for description prose that opened with a step keyword and
+   so lexed as a real step.
 
    Apostrophe rule: a `'` flanked by letters on both sides is never a slot
-   quote (\"the user's dashboard\" contributes no quotes).
+   quote (\"the user's dashboard\" contributes no quotes). Doubling rule
+   (sl-jlqz): two adjacent slot quotes inside a span are one escaped quote,
+   not a close-and-reopen.
 
    Pure functions; callers supply stepdefs and the loaded intents map."
   (:require [clojure.spec.alpha :as s]
@@ -30,7 +42,9 @@
 ;; -----------------------------------------------------------------------------
 
 (s/def ::type #{:grammar/unbalanced-quote :grammar/double-quotes
-                :grammar/quoted-ref :grammar/empty-literal})
+                :grammar/quoted-ref :grammar/empty-literal
+                :grammar/apostrophe-in-literal :grammar/bare-value
+                :grammar/prose-as-step})
 (s/def ::suggestion string?)
 (s/def ::repaired-text string?)
 (s/def ::did-you-mean string?)
@@ -90,11 +104,29 @@
 
 (defn single-quote-spans
   "Paired slot-quote indices as spans `{:start :end :inner}` (indices of the
-   opening and closing quotes; :inner excludes them). An unpaired trailing
-   quote yields no span — balance is the caller's check."
+   opening and closing quotes; :inner excludes them and keeps doubled pairs
+   raw, not undoubled). Doubling-aware (sl-jlqz): two textually adjacent
+   slot quotes INSIDE a span are one escaped quote, so `'don''t'` is a
+   single span — while a bare `''` still opens and immediately closes (the
+   empty-literal cue). An unpaired trailing quote yields no span — balance
+   is the caller's check."
   [text]
-  (mapv (fn [[a b]] {:start a :end b :inner (subs text (inc a) b)})
-        (partition 2 (slot-quote-indices text))))
+  (loop [idxs (seq (slot-quote-indices text)) open nil acc []]
+    (if-not idxs
+      acc
+      (let [[i & more] idxs]
+        (cond
+          (nil? open)
+          (recur more i acc)
+
+          ;; adjacent pair inside a span = escaped quote, consume both
+          (and (some? (first more)) (= (first more) (inc i)))
+          (recur (next more) open acc)
+
+          :else
+          (recur more nil
+                 (conj acc {:start open :end i
+                            :inner (subs text (inc open) i)})))))))
 
 (defn- outside-spans?
   [spans i]
@@ -154,12 +186,56 @@
 
 (defn close-quote-candidates
   "Candidate repairs for an odd slot-quote count: close the literal at the
-   end of the step, or drop the last (stray) slot quote."
+   end of the step, drop the last (stray) slot quote, or double one of the
+   interior quotes (sl-jlqz — `'friends' page'` plausibly meant
+   `'friends'' page'`)."
   [text]
   (let [indices (slot-quote-indices text)
         last-i (peek indices)]
-    [(str text "'")
-     (str (subs text 0 last-i) (subs text (inc last-i)))]))
+    (into [(str text "'")
+           (str (subs text 0 last-i) (subs text (inc last-i)))]
+          (map (fn [i] (str (subs text 0 i) "'" (subs text i))))
+          (rest indices))))
+
+(def ^:private undoubled-apostrophe-re
+  "A `'` that is not part of a doubled pair — the character the literal
+   grammar requires to be written '' (sl-jlqz)."
+  #"(?<!')'(?!')")
+
+(defn repair-double-apostrophes
+  "Double every undoubled apostrophe inside balanced single-quoted spans.
+   Returns nil when no span contains one."
+  [text]
+  (let [spans (filterv #(re-find undoubled-apostrophe-re (:inner %))
+                       (single-quote-spans text))]
+    (when (seq spans)
+      (reduce (fn [s {:keys [start end inner]}]
+                (str (subs s 0 (inc start))
+                     (str/replace inner undoubled-apostrophe-re "''")
+                     (subs s end)))
+              text
+              (reverse spans)))))
+
+(defn quote-tail-candidates
+  "Candidate repairs for bare words in a trailing value slot (sl-38fy):
+   single-quote the tail starting at each word boundary, longest tail
+   first. The tail zone never crosses a slot quote or a brace-delimited
+   EDN slot — locators and existing literals are opaque, so tails begin
+   strictly after the last of either. Interior apostrophes in the quoted
+   tail are doubled, as the literal grammar requires (sl-jlqz)."
+  [^String text]
+  (let [zone-start (inc (max (or (peek (slot-quote-indices text)) -1)
+                             (or (second (peek (brace-spans text))) -1)))
+        word-start? (fn [i]
+                      (and (pos? i)
+                           (>= i zone-start)
+                           (not= \space (.charAt text i))
+                           (= \space (.charAt text (dec i)))))]
+    (vec (for [i (range (count text))
+               :when (word-start? i)]
+           (str (subs text 0 i)
+                "'" (str/replace (subs text i) undoubled-apostrophe-re "''")
+                "'")))))
 
 ;; -----------------------------------------------------------------------------
 ;; Rematch + glossary probe
@@ -259,6 +335,36 @@
                         " values are always literals; refs are bare"
                         " (unquoted).")})))
 
+(defn- apostrophe-hint
+  "sl-jlqz ride-along: a balanced span holding an undoubled apostrophe —
+   `'Don't have an account?'` — where the literal grammar requires ''.
+   Repair-and-rematch: doubling the interior apostrophes proves the
+   author's plausible intent; without a match the law-backed generic
+   wording stands."
+  [text stepdefs]
+  (with-repair
+    {:type :grammar/apostrophe-in-literal
+     :suggestion (str "An apostrophe inside a literal is written doubled"
+                      " ('') - a single ' would end the literal.")}
+    (some-> (repair-double-apostrophes text) vector)
+    stepdefs))
+
+(defn- bare-value-hint
+  "sl-38fy (y9gn option C): bare words where a value slot expects a quoted
+   literal or a {Name} binding — ':user fills {:id \"code\"} with the SMS
+   code'. Rematch-gated: the family has no textual cue, so it fires ONLY
+   when quoting a tail produces a full match against a candidate stepdef —
+   the proof of a near-miss frame. Without one, nil: bare words are
+   ordinary undefined text."
+  [text stepdefs]
+  (let [hint (with-repair
+               {:type :grammar/bare-value
+                :suggestion (str "Value slots take a quoted literal ('...')"
+                                 " or a binding ({Name}).")}
+               (quote-tail-candidates text)
+               stepdefs)]
+    (when (:repaired-text hint) hint)))
+
 (defn- empty-literal-hint
   "An empty literal ('') is not admitted anywhere — emptying a field wants
    the clears verb, not an empty value. Direct classification, no repair to
@@ -278,6 +384,55 @@
                         " clears " element)
                    (str "Empty literals aren't admitted - to empty a field,"
                         " use a verb: clears"))}))
+
+(def ^:private sentence-end-chars
+  "Terminal characters that mark a sentence — the punctuation half of the
+   prose cue (sl-bav1). `…` covers dictated ellipses; a literal `...` ends
+   in `.` and needs no case of its own."
+  #{\. \! \? \…})
+
+(def ^:private trailing-punct-re
+  "Trailing punctuation stripped from a word before the ref-shape test —
+   `Login.` and `Login.submit,` must still count as ref-shaped tokens."
+  #"[.,;:!?…)\"]+$")
+
+(defn- prose-like?
+  "Structural cue for description prose that lexed as a step (sl-bav1,
+   Chair-ruled): ZERO structured tokens — no slot quotes, no brace
+   characters (even an unclosed `{` is structure evidence here; stricter
+   than brace-spans, whose fail-open serves scanning, not classification),
+   no bare-ref-shaped word (any PascalCase token, dotted or not, after
+   trailing punctuation is stripped) — AND the text ends in sentence
+   punctuation. Both halves required: real steps essentially never end in
+   sentence punctuation, and prose essentially always does."
+  [^String text]
+  (let [trimmed (str/trimr text)]
+    (boolean
+     (and (seq trimmed)
+          (contains? sentence-end-chars (.charAt trimmed (dec (count trimmed))))
+          (empty? (slot-quote-indices text))
+          (not (str/includes? text "{"))
+          (not (str/includes? text "}"))
+          (not-any? #(intent-resolve/location-ref?
+                      (str/replace % trailing-punct-re ""))
+                    (str/split trimmed #"\s+"))))))
+
+(def ^:private prose-as-step-suggestion
+  ;; Byte-pinned wording (sl-bav1, Chair-previewed; `(or *)` amendment
+  ;; ratified at plan review) — tests assert it verbatim.
+  (str "This line reads like description prose. Descriptions end at the"
+       " first Given/When/Then/And/But (or *) — move prose above the first"
+       " step or rephrase so it does not open with a step keyword."))
+
+(defn- prose-as-step-hint
+  "sl-bav1: description prose that opens with a step keyword lexes as a
+   real (undefined) step — standard Gherkin, Cucumber-identical, and
+   staying that way. Teaching-only: no did-you-mean, because no repair
+   makes prose match; the hint names the trap instead."
+  [text]
+  (when (prose-like? text)
+    {:type :grammar/prose-as-step
+     :suggestion prose-as-step-suggestion}))
 
 ;; -----------------------------------------------------------------------------
 ;; Entry point
@@ -304,9 +459,15 @@
       (some #(= "" (:inner %)) (single-quote-spans match-text))
       (empty-literal-hint match-text stepdefs)
 
+      (some #(re-find undoubled-apostrophe-re (:inner %))
+            (single-quote-spans match-text))
+      (apostrophe-hint match-text stepdefs)
+
       :else
-      (when-let [ref-spans (seq (quoted-ref-spans match-text))]
-        (quoted-ref-hint match-text ref-spans stepdefs intents)))))
+      (if-let [ref-spans (seq (quoted-ref-spans match-text))]
+        (quoted-ref-hint match-text ref-spans stepdefs intents)
+        (or (bare-value-hint match-text stepdefs)
+            (prose-as-step-hint match-text))))))
 
 (s/fdef undefined-hint
   :args (s/cat :match-text string?

@@ -54,11 +54,11 @@
    ;; sl-esq AC9: the dry-run hook preview — a project with a hooks.clj
    ;; sibling lists each scenario's hooks in execution order (globals
    ;; outermost, then @hook= tag order). Locks the preview format.
-   ["console-dry-run-hooks" {:paths ["test/fixtures/hooks-project/features/hooked.feature"]
-                             :config-path "test/fixtures/hooks-project/shiftlefter.edn"
+   ["console-dry-run-hooks" {:paths ["test/fixtures/hooks-project/sl/features/hooked.feature"]
+                             :config-path "test/fixtures/hooks-project/sl/shiftlefter.edn"
                              :no-color true :dry-run true}]
-   ["edn-dry-run-hooks"     {:paths ["test/fixtures/hooks-project/features/hooked.feature"]
-                             :config-path "test/fixtures/hooks-project/shiftlefter.edn"
+   ["edn-dry-run-hooks"     {:paths ["test/fixtures/hooks-project/sl/features/hooked.feature"]
+                             :config-path "test/fixtures/hooks-project/sl/shiftlefter.edn"
                              :edn true :dry-run true}]])
 
 (defn- capture

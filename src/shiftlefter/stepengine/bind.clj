@@ -203,7 +203,8 @@
    - :hint - on :undefined, at most one grammar hint classifying why the text
      matched nothing (sl-s04n; see shiftlefter.stepengine.hints). Computed on
      the annotation-stripped text against the narrowed candidates, so it
-     composes with :filter-info.
+     composes with :filter-info. The prose-as-step family is suppressed for
+     annotated steps — an annotation is authored step-evidence (sl-bav1).
 
    opts (optional):
    - :intents - loaded intents map for glossary-aware hints (nil degrades)
@@ -267,7 +268,16 @@
        (case (count matches)
          ;; No matches - undefined; classify why with a grammar hint (sl-s04n)
          0 (let [hint (hints/undefined-hint match-text candidates
-                                            (:intents opts))]
+                                            (:intents opts))
+                 ;; sl-bav1: an interface annotation is authored
+                 ;; step-evidence — description prose never opens with
+                 ;; :user — so the prose-as-step teaching hint is
+                 ;; suppressed for annotated steps. The classifier only
+                 ;; sees the stripped text; the annotation is visible
+                 ;; here alone.
+                 hint (when-not (and declared
+                                     (= :grammar/prose-as-step (:type hint)))
+                        hint)]
              (cond-> {:status :undefined
                       :step pickle-step
                       :binding nil

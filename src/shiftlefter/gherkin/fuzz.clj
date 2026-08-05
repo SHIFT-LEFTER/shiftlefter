@@ -28,7 +28,7 @@
 (def generator-version
   "Bump this when generator logic changes to preserve reproducibility.
    Format: [major minor] where major = breaking change, minor = additions."
-  [2 1])  ; sl-2c68: descriptions (Feature/Scenario/Outline/Examples) + Background
+  [2 2])  ; sl-lg8v: comment sprinkling (steps, table/example rows, feature top/mid/trailing)
 
 ;; -----------------------------------------------------------------------------
 ;; Presets
@@ -145,6 +145,16 @@
                        base-indent extra text "\n")))
            (apply str)))]))
 
+(defn gen-comment-line
+  "Generator for an optional whole-line comment at the given indent
+   (sl-lg8v): nil ~3/4 of the time so comment-free features stay the
+   common case. NOTE: a comment between a step and its table's FIRST row
+   is a parse error (the parser ends the step at the comment), so callers
+   only splice these where comments are grammar-legal."
+  [indent]
+  (gen/frequency [[3 (gen/return nil)]
+                  [1 (gen/fmap #(str indent "# " %) gen-text)]]))
+
 (def gen-tag
   "Generator for a single tag."
   (gen/fmap #(str "@" %) gen-identifier))
@@ -174,13 +184,17 @@
 
 (def gen-data-table
   "Generator for a data table (1-3 rows, or nil for no table).
-   All rows have consistent cell count."
+   All rows have consistent cell count. May carry a comment BETWEEN rows
+   (sl-lg8v) — never before the first row, which is a parse error."
   (gen/one-of
    [(gen/return nil)
     (gen/return nil)  ; 2/3 chance of no table
     (gen/let [num-cols (gen/choose 2 4)
-              rows (gen/vector (gen-table-row-with-count num-cols) 1 3)]
-      (str/join "\n" rows))]))
+              rows (gen/vector (gen-table-row-with-count num-cols) 1 3)
+              cmt (gen-comment-line "      ")]
+      (str/join "\n" (if (and cmt (seq (rest rows)))
+                       (concat [(first rows) cmt] (rest rows))
+                       rows)))]))
 
 (def gen-docstring
   "Generator for a docstring (or nil for no docstring)."
@@ -195,11 +209,14 @@
   (gen/elements ["Given" "When" "Then" "And" "But" "*"]))
 
 (def gen-step
-  "Generator for a complete step with optional table or docstring."
-  (gen/let [kw gen-step-keyword
+  "Generator for a complete step with optional table or docstring, and an
+   optional preceding whole-line comment (sl-lg8v)."
+  (gen/let [cmt (gen-comment-line "    ")
+            kw gen-step-keyword
             text gen-text
             arg (gen/one-of [gen-data-table gen-docstring])]
-    (str "    " kw " " text
+    (str (when cmt (str cmt "\n"))
+         "    " kw " " text
          (when arg (str "\n" arg)))))
 
 (def gen-scenario
@@ -228,15 +245,18 @@
             (gen/vector gen-identifier n)))
 
 (def gen-examples
-  "Generator for an Examples block with optional description and consistent
-   cell counts."
+  "Generator for an Examples block with optional description, consistent
+   cell counts, and an optional comment between rows (sl-lg8v)."
   (gen/let [desc (gen-description "      ")
             num-cols (gen/choose 2 3)
             header (gen-example-row-with-count num-cols)
-            rows (gen/vector (gen-example-row-with-count num-cols) 1 3)]
+            rows (gen/vector (gen-example-row-with-count num-cols) 1 3)
+            cmt (gen-comment-line "      ")]
     (str "    Examples:\n"
          (when desc (str desc "\n"))
-         header "\n" (str/join "\n" rows))))
+         header "\n"
+         (when cmt (str cmt "\n"))
+         (str/join "\n" rows))))
 
 (def gen-scenario-outline
   "Generator for a scenario outline with optional description and examples."
@@ -258,21 +278,31 @@
                gen-scenario-outline]))  ; 2/3 scenarios, 1/3 outlines
 
 (def gen-feature
-  "Generator for a complete feature file with optional description and
-   optional Background."
-  (gen/let [tags gen-tags
+  "Generator for a complete feature file with optional description,
+   optional Background, and optional comments (sl-lg8v): above the
+   feature, above the last scenario, and trailing at end of file."
+  (gen/let [top (gen-comment-line "")
+            tags gen-tags
             name gen-identifier
             desc (gen-description "  ")
             background (gen/one-of [(gen/return nil)
                                     (gen/return nil)
                                     gen-background])
-            scenarios (gen/vector gen-scenario-or-outline 1 3)]
-    (str (or tags "")
+            scenarios (gen/vector gen-scenario-or-outline 1 3)
+            mid (gen-comment-line "  ")
+            trailing (gen-comment-line "")]
+    (str (when top (str top "\n"))
+         (or tags "")
          "Feature: " name "\n"
          (when desc desc)
          "\n"
          (when background (str background "\n\n"))
-         (str/join "\n\n" scenarios) "\n")))
+         (str/join "\n\n" (if mid
+                            (concat (butlast scenarios)
+                                    [(str mid "\n" (last scenarios))])
+                            scenarios))
+         "\n"
+         (when trailing (str trailing "\n")))))
 
 (defn generate-from-gen
   "Generate a value from a test.check generator with given seed and size."

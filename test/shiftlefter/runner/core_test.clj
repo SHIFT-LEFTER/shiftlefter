@@ -51,17 +51,16 @@
   [project]
   (let [subjects (str (fs/absolutize "test/fixtures/glossaries/subjects.edn"))
         verbs (str (fs/absolutize "test/fixtures/glossaries/verbs-web-project.edn"))]
-    (fs/create-dirs (fs/path project "sl"))
-    (fs/create-dirs (fs/path project "steps"))
+    (fs/create-dirs (fs/path project "sl" "steps"))
     (fs/create-dirs (fs/path project "features"))
     (spit (str (fs/path project "sl" "shiftlefter.edn"))
-          (pr-str {:runner {:step-paths ["../steps"]
+          (pr-str {:runner {:step-paths ["steps/"]
                             :allow-pending? false}
                    :svo {:unknown-subject :warn}
                    :glossaries {:subjects subjects
                                 :verbs {:web verbs}}
                    :interfaces {:web {:type :web :adapter :mock-web}}}))
-    (spit (str (fs/path project "steps" "steps.clj"))
+    (spit (str (fs/path project "sl" "steps" "steps.clj"))
           (str "(ns steps.shifted-warn\n"
                "  (:require [shiftlefter.stepengine.registry :refer [defstep]]))\n"
                "(defstep #\"(.+) clicks (.+)\"\n"
@@ -347,6 +346,97 @@
                                        :dry-run true})]
           (is (= 0 (:exit-code result)))
           (is (= :dry-run (:status result))))
+        (finally
+          (fs/delete-tree project))))))
+
+;; -----------------------------------------------------------------------------
+;; Bare-run feature corpus default (sl-fcjm): [:runner :features], config-root-
+;; relative, real-config contexts only
+;; -----------------------------------------------------------------------------
+
+(defn- write-features-default-project!
+  "sl/ layout with the corpus at the DEFAULT sl/features/ (no :features key)."
+  [project]
+  (fs/create-dirs (fs/path project "sl" "features"))
+  (fs/create-dirs (fs/path project "sl" "steps"))
+  (spit (str (fs/path project "sl" "shiftlefter.edn"))
+        (pr-str {:runner {:step-paths ["steps/"] :allow-pending? false}}))
+  (spit (str (fs/path project "sl" "steps" "steps.clj"))
+        (str "(ns steps.corpus-default\n"
+             "  (:require [shiftlefter.stepengine.registry :refer [defstep]]))\n"
+             "(defstep #\"a corpus step\" [] nil)\n"))
+  (spit (str (fs/path project "sl" "features" "f.feature"))
+        "Feature: F\n\n  Scenario: S\n    Given a corpus step\n"))
+
+(deftest bare-run-uses-features-default
+  (testing "no CLI paths + real config -> sl/features/ corpus runs"
+    (let [project (str (fs/create-temp-dir))]
+      (try
+        (write-features-default-project! project)
+        (let [ctx (project-context/resolve {:invocation-root project})
+              result (runner/execute! {:project-context ctx
+                                       :paths []
+                                       :dry-run true})]
+          (is (= 0 (:exit-code result)))
+          (is (= :dry-run (:status result)))
+          (is (= 1 (count (:plans result)))))
+        (finally
+          (fs/delete-tree project))))))
+
+(deftest cli-paths-win-over-features-default
+  (testing "CLI paths bypass the corpus default entirely"
+    (let [project (str (fs/create-temp-dir))]
+      (try
+        (write-features-default-project! project)
+        ;; A second feature OUTSIDE the corpus default, addressed by CLI path.
+        (fs/create-dirs (fs/path project "elsewhere"))
+        (spit (str (fs/path project "elsewhere" "g.feature"))
+              "Feature: G\n\n  Scenario: T\n    Given a corpus step\n")
+        (let [ctx (project-context/resolve {:invocation-root project})
+              result (runner/execute! {:project-context ctx
+                                       :paths ["elsewhere/g.feature"]
+                                       :dry-run true})]
+          (is (= 0 (:exit-code result)))
+          (is (= 1 (count (:plans result))))
+          (is (= "T" (-> result :plans first :plan/pickle :pickle/name))
+              "only the CLI-addressed scenario planned"))
+        (finally
+          (fs/delete-tree project))))))
+
+(deftest bare-run-missing-default-corpus-is-planning-error
+  (testing "real config but no sl/features/ -> exit 2 naming the default"
+    (let [project (str (fs/create-temp-dir))]
+      (try
+        (fs/create-dirs (fs/path project "sl"))
+        (spit (str (fs/path project "sl" "shiftlefter.edn")) "{}")
+        (let [err (java.io.StringWriter.)
+              ctx (project-context/resolve {:invocation-root project})
+              result (binding [*err* err]
+                       (runner/execute! {:project-context ctx
+                                         :paths []
+                                         :dry-run true}))]
+          (is (= 2 (:exit-code result)))
+          (is (= :planning-failed (:status result)))
+          (is (str/includes? (str err) "sl/features/")
+              "error points at the conventional corpus location"))
+        (finally
+          (fs/delete-tree project))))))
+
+(deftest bare-run-without-config-unchanged
+  (testing "defaults context (no config anywhere): bare run stays a no-paths error"
+    (let [project (str (fs/create-temp-dir))]
+      (try
+        (let [err (java.io.StringWriter.)
+              ctx (project-context/resolve {:invocation-root project})
+              result (binding [*err* err]
+                       (runner/execute! {:project-context ctx
+                                         :paths []
+                                         :dry-run true}))]
+          (is (= :defaults (:config-source ctx)) "sanity: no config")
+          (is (= 2 (:exit-code result)))
+          (is (= :planning-failed (:status result)))
+          (is (not (str/includes? (str err) "features"))
+              "the corpus default is never probed without a real config"))
         (finally
           (fs/delete-tree project))))))
 
@@ -779,6 +869,158 @@
                                      :max-parallel bad})]
         (is (= 2 (:exit-code result)) (pr-str bad))
         (is (= :planning-failed (:status result)) (pr-str bad))))))
+
+;; -----------------------------------------------------------------------------
+;; Capture resolution + warn channel (sl-3q9r)
+;; -----------------------------------------------------------------------------
+
+(defn- run-in-temp-project
+  "execute! against a temp config-rooted project (so a results dir
+   exists), stdout+stderr captured. Returns {:result :out :err :root}."
+  [opts]
+  (let [tmp (str (fs/create-temp-dir))
+        _ (spit (str tmp "/shiftlefter.edn")
+                (pr-str (or (:config-content opts) {:runner {:step-paths []}})))
+        out (java.io.StringWriter.)
+        err (java.io.StringWriter.)
+        result (binding [*out* out *err* err]
+                 (runner/execute! (-> opts
+                                      (dissoc :config-content)
+                                      (assoc :config-path (str tmp "/shiftlefter.edn")))))]
+    {:result result :out (str out) :err (str err) :root tmp}))
+
+(deftest test-capture-threads-to-execution
+  (testing "an active policy reaches the exec layer: per-scenario artifact
+            dirs appear in the run dir even for capability-less scenarios"
+    (let [{:keys [result root]}
+          (run-in-temp-project {:paths [simple-feature]
+                                :step-paths [step-path]
+                                :capture {:screenshot :on-failure}
+                                :no-color true})]
+      (is (= 0 (:exit-code result)))
+      (is (some? (:results-dir result)))
+      (is (fs/directory? (fs/path (:results-dir result) "attachments"))
+          "capture-active scenarios pre-create their artifact dirs")
+      (fs/delete-tree root)))
+  (testing ":never everywhere -> no attachments dir"
+    (let [{:keys [result root]}
+          (run-in-temp-project {:paths [simple-feature]
+                                :step-paths [step-path]
+                                :capture {:screenshot :never}
+                                :no-color true})]
+      (is (= 0 (:exit-code result)))
+      (is (not (fs/exists? (fs/path (:results-dir result) "attachments"))))
+      (fs/delete-tree root))))
+
+(deftest test-capture-flag-beats-config-wholly
+  (testing "the flag replaces the config mirror AS A WHOLE VALUE"
+    ;; Config declares a typo'd kind (would warn); the flag wins wholly, so
+    ;; the typo is never even resolved — no warn for it, but the flag's own
+    ;; unknown kind warns.
+    (let [{:keys [err root]}
+          (run-in-temp-project {:paths [simple-feature]
+                                :step-paths [step-path]
+                                :config-content {:runner {:step-paths []
+                                                          :capture {:config-typo :on-failure}}}
+                                :capture {:flag-typo :on-failure}
+                                :no-color true})]
+      (is (str/includes? err ":flag-typo"))
+      (is (not (str/includes? err ":config-typo"))
+          "the config mirror is not merged in — whole-value replacement")
+      (fs/delete-tree root))))
+
+(deftest test-capture-unknown-kind-warns-once
+  (let [{:keys [result err root]}
+        (run-in-temp-project {:paths [simple-feature]
+                              :step-paths [step-path]
+                              :config-content {:runner {:step-paths []
+                                                        :capture {:screenshoot :on-failure}}}
+                              :no-color true})]
+    (is (= 0 (:exit-code result)) "never an error")
+    (is (= 1 (count (re-seq #"Capture warning: kind :screenshoot" err)))
+        "one stderr warn, and only one")
+    (fs/delete-tree root)))
+
+(deftest test-capture-invalid-config-value-warns-and-inerts
+  (let [{:keys [result err root]}
+        (run-in-temp-project {:paths [simple-feature]
+                              :step-paths [step-path]
+                              :config-content {:runner {:step-paths []
+                                                        :capture {:screenshot :sometimes}}}
+                              :no-color true})]
+    (is (= 0 (:exit-code result))
+        "a config-file bad VALUE never bricks the run (forward compat)")
+    (is (str/includes? err "invalid value :sometimes"))
+    (is (not (fs/exists? (fs/path (:results-dir result) "attachments")))
+        "the kind is inert")
+    (fs/delete-tree root)))
+
+(deftest test-capture-without-results-dir-warns-and-disables
+  ;; No config file -> :defaults context -> no results dir -> nowhere to
+  ;; write. One warn, capture disabled, exit unchanged.
+  (let [err (java.io.StringWriter.)
+        result (binding [*out* (java.io.StringWriter.) *err* err]
+                 (runner/execute! {:paths [simple-feature]
+                                   :step-paths [step-path]
+                                   :capture {:screenshot :on-failure}
+                                   :no-color true}))]
+    (is (= 0 (:exit-code result)))
+    (is (nil? (:results-dir result)))
+    (is (str/includes? (str err) "no results directory"))))
+
+(deftest test-capture-warns-suppressed-under-edn
+  (let [{:keys [out err root]}
+        (run-in-temp-project {:paths [simple-feature]
+                              :step-paths [step-path]
+                              :config-content {:runner {:step-paths []
+                                                        :capture {:screenshoot :on-failure}}}
+                              :edn true})]
+    (is (not (str/includes? err "Capture warning"))
+        "stderr stays machine-clean under --edn")
+    (let [summary (edn/read-string out)
+          lints (get-in summary [:diagnostics :capture-lints])]
+      (is (= 1 (count lints)) "the warn rides :diagnostics instead")
+      (is (= :capture/unknown-kind (:type (first lints))))
+      (is (= :screenshoot (:kind (first lints)))))
+    (fs/delete-tree root)))
+
+(deftest test-capture-dry-run-inert
+  (let [{:keys [result root]}
+        (run-in-temp-project {:paths [simple-feature]
+                              :step-paths [step-path]
+                              :capture {:screenshot :every-step}
+                              :dry-run true
+                              :no-color true})]
+    (is (= 0 (:exit-code result)))
+    (is (empty? (when (fs/exists? (fs/path root "results"))
+                  (mapcat fs/list-dir
+                          (filter fs/directory? (fs/list-dir (fs/path root "results"))))))
+        "dry-run creates no run dir and captures nothing")
+    (fs/delete-tree root)))
+
+(deftest test-capture-invalid-boundary
+  ;; sl-3q9r: the programmatic execute! boundary (CLI input is caught by
+  ;; tools.cli). Config-FILE values are deliberately NOT gated here — they
+  ;; warn-and-inert at resolution (forward compat).
+  (testing "malformed :capture at the execute! boundary is a planning error"
+    (doseq [bad [{:screenshot :sometimes} {"screenshot" :never}
+                 [:screenshot :never] "screenshot=never"]]
+      (let [result (runner/execute! {:paths [tagged-feature]
+                                     :step-paths [step-path]
+                                     :capture bad})]
+        (is (= 2 (:exit-code result)) (pr-str bad))
+        (is (= :planning-failed (:status result)) (pr-str bad)))))
+  (testing "the error rides the planning EDN with type + explain"
+    (let [out (java.io.StringWriter.)
+          _ (binding [*out* out]
+              (runner/execute! {:paths [tagged-feature]
+                                :step-paths [step-path]
+                                :capture {:screenshot :sometimes}
+                                :edn true}))
+          summary (edn/read-string (str out))
+          [err] (get-in summary [:planning :errors])]
+      (is (= :capture/invalid (:type err)))
+      (is (str/includes? (:message err) ":screenshot")))))
 
 ;; -----------------------------------------------------------------------------
 ;; Tag filtering × dry-run: the selection preview (addendum 3)

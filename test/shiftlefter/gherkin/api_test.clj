@@ -1,7 +1,9 @@
 (ns shiftlefter.gherkin.api-test
   "Tests for the stable public API facade."
-  (:require [clojure.test :refer [deftest is testing]]
-            [shiftlefter.gherkin.api :as api]))
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
+            [shiftlefter.gherkin.api :as api]
+            [shiftlefter.gherkin.printer :as printer]))
 
 ;; -----------------------------------------------------------------------------
 ;; Test fixtures
@@ -160,16 +162,30 @@
 (def feature-with-top-comment
   "# top of file\n\nFeature: Test\n\n  Scenario: Basic\n    Given a step\n")
 
-(deftest fmt-check-returns-comments-state-for-interior-comments
-  (testing "interior comments produce :comments status with line info"
+(deftest fmt-check-interior-comments-are-preserved
+  (testing "sl-lg8v: interior comments are preserved by canonical, so a
+            comment-bearing file in canonical position is plain :ok — the
+            :comments state survives only as the lost-comments backstop"
     (let [result (api/fmt-check feature-with-interior-comment)]
-      (is (= :comments (:status result)))
-      (is (= [{:line 5 :text "# between steps"}] (:comments result))))))
+      (is (= :ok (:status result)))
+      (is (not (contains? result :comments))))))
 
 (deftest fmt-check-top-comments-are-not-flagged
   (testing "comments above the Feature line are preserved by canonical, so no :comments state"
     (let [result (api/fmt-check feature-with-top-comment)]
       (is (= :ok (:status result))))))
+
+(deftest fmt-check-reports-comments-when-printer-drops-them
+  (testing "sl-yynw F8: the backstop's positive path — under a simulated
+            comment-dropping printer regression, fmt-check reports the
+            :comments state instead of :ok or NEEDS FORMATTING"
+    (let [real printer/canonical]
+      (with-redefs [printer/canonical
+                    (fn [s] (str/replace (real s) #"(?m)^\s*#[^\n]*\n" ""))]
+        (let [result (api/fmt-check feature-with-interior-comment)]
+          (is (= :comments (:status result)))
+          (is (= [{:line 5 :text "# between steps"}] (:comments result))
+              "the lost comments ride the envelope with line + text"))))))
 
 ;; -----------------------------------------------------------------------------
 ;; fmt-canonical tests
@@ -195,15 +211,28 @@
       (is (= :error (:status result)))
       (is (= :parse-errors (:reason result))))))
 
-(deftest fmt-canonical-reports-lost-comments
-  (testing "carries :lost-comments when output would drop interior comments (sl-q2uj)"
+(deftest fmt-canonical-preserves-interior-comments
+  (testing "sl-lg8v: interior comments are emitted, so no :lost-comments key
+            — the key survives only as the backstop for a future regression"
     (let [result (api/fmt-canonical feature-with-interior-comment)]
       (is (= :ok (:status result)))
-      (is (= [{:line 5 :text "# between steps"}] (:lost-comments result)))))
+      (is (not (contains? result :lost-comments)))
+      (is (str/includes? (:output result) "    # between steps\n    When another"))))
   (testing "no :lost-comments key when formatting is comment-safe"
     (let [result (api/fmt-canonical feature-with-top-comment)]
       (is (= :ok (:status result)))
       (is (not (contains? result :lost-comments))))))
+
+(deftest fmt-canonical-carries-lost-comments-when-printer-drops-them
+  (testing "sl-yynw F8: under a simulated comment-dropping printer
+            regression the :ok result carries non-empty :lost-comments —
+            the key callers use to refuse the destructive write"
+    (let [real printer/canonical]
+      (with-redefs [printer/canonical
+                    (fn [s] (str/replace (real s) #"(?m)^\s*#[^\n]*\n" ""))]
+        (let [result (api/fmt-canonical feature-with-interior-comment)]
+          (is (= :ok (:status result)))
+          (is (= [{:line 5 :text "# between steps"}] (:lost-comments result))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Envelope contract enforcement

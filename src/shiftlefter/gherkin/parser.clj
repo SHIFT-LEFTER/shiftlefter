@@ -901,7 +901,13 @@
               ;; Capture language for the next Feature node
               (recur (rest ts) ast errors pending-tags (:value token))
               (= (:type token) :unknown-line)
-              (recur (next ts) ast (conj errors (->error :invalid-keyword (:location token) (str "Invalid keyword: " (:value token)) :token token)) pending-tags pending-language)
+              ;; sl-bav1 rider: the old "Invalid keyword: <text>" misframed
+              ;; the common bite — description prose after a line that
+              ;; accidentally lexed as a step lands here, and the author
+              ;; never meant a keyword. Conditional teach-tail because this
+              ;; error fires on ANY unknown line, prose or junk. :type stays
+              ;; :invalid-keyword — EDN consumers dispatch on it.
+              (recur (next ts) ast (conj errors (->error :invalid-keyword (:location token) (str "Unrecognized line (not a keyword or step): " (:value token) " — if this was description prose, descriptions end at the first step keyword.") :token token)) pending-tags pending-language)
               :else
               (recur (rest ts) ast (conj errors (->error :unexpected-token (:location token) (str "Unexpected token: " (:type token)) :token token)) pending-tags pending-language)))))))))
 

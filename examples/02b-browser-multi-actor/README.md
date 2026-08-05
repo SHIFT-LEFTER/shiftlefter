@@ -5,7 +5,8 @@ zero custom step definitions — just built-in steps, plus a two-line glossary
 that declares who exists.
 
 > **Mode: Shifted** — this is the first example on the advertised path.
-> `shiftlefter.edn` carries `:svo` and a subject glossary, so every scenario
+> `sl/shiftlefter.edn` carries `:svo` and a subject glossary sits at the
+> conventional path beside it, so every scenario
 > is validated against the project vocabulary at planning time, before a
 > browser opens (`sl orient` will say `Mode: Shifted`). A Vanilla config is
 > included for contrast — see [Vanilla contrast](#vanilla-contrast) below.
@@ -31,7 +32,7 @@ visible as page text. This demonstrates:
 ## The Feature File
 
 ```gherkin
-# features/two-users.feature
+# sl/features/two-users.feature
 Feature: Multi-actor browser test
 
   Scenario: Two users login simultaneously
@@ -58,21 +59,25 @@ logs in — if the sessions shared state, that step would fail.
 ## The Config and the Glossary
 
 ```clojure
-;; shiftlefter.edn
+;; sl/shiftlefter.edn
 {:interfaces {:web {:type :web
                     :adapter :etaoin}}
- :glossaries {:subjects "glossary/subjects.edn"}
  :svo {:unknown-subject :error
        :unknown-verb :warn
        :unknown-interface :error}}
 ```
 
 ```clojure
-;; glossary/subjects.edn
+;; sl/glossary/subjects.edn
 {:subjects
  {:user {:desc "Standard application user"
          :instances [:alice :bob]}}}
 ```
+
+Note there is no `:glossaries` key — `glossary/subjects.edn` sits at the
+conventional path next to the config, so it's discovered automatically.
+An explicit `:glossaries` map overrides the convention wholesale;
+`:glossaries nil` turns glossaries off (experiment 2 below relies on that).
 
 The `:user/alice` and `:user/bob` prefixes in step text identify both the actor **type** (`:user`) and the session **instance** (`:alice`, `:bob`). The type is for glossary organization and display; the instance is the session key. When ShiftLefter sees a declared instance:
 
@@ -97,10 +102,10 @@ From this directory (release zip installs `sl`; in a checkout of this repo subst
 
 ```bash
 # Validate against the glossary — no browser opens, no server starts
-sl run --dry-run features/
+sl run --dry-run sl/features/
 
 # Run it: watch two Chrome windows open and fill forms independently
-sl run features/
+sl run sl/features/
 ```
 
 ## Vocabulary Validation, Demonstrated
@@ -116,18 +121,18 @@ ERROR: Unknown subject :user/bbo in step ":user/bbo opens the browser to '...'"
 
 A typo, or someone inventing test users without updating the domain model — caught before any browser opens. (Undo the rename before moving on.)
 
-**2. Shifted with no glossary.** `shiftlefter-shifted-no-glossary.edn` turns on `:svo {:unknown-subject :error}` but declares nobody:
+**2. Shifted with no glossary.** `sl/shiftlefter-shifted-no-glossary.edn` turns on `:svo {:unknown-subject :error}` but declares nobody — it carries an explicit `:glossaries nil` so the conventional `glossary/` files next to it stay out of play:
 
 ```bash
-sl run -c shiftlefter-shifted-no-glossary.edn --dry-run features/
+sl run -c sl/shiftlefter-shifted-no-glossary.edn --dry-run sl/features/
 ```
 
 Every step is rejected — `:user/alice` and `:user/bob` are unknown until a glossary declares them.
 
-**3. Vanilla contrast.** <a name="vanilla-contrast"></a>`shiftlefter-vanilla.edn` has no `:svo` at all:
+**3. Vanilla contrast.** <a name="vanilla-contrast"></a>`sl/shiftlefter-vanilla.edn` has no `:svo` at all:
 
 ```bash
-sl run -c shiftlefter-vanilla.edn --dry-run features/
+sl run -c sl/shiftlefter-vanilla.edn --dry-run sl/features/
 ```
 
 Everything binds — any actor name is accepted, like a standard Gherkin runner. That's Vanilla mode: fine for getting started (example 02 uses it deliberately), but nothing stops `:user/bbo` from silently becoming a third session. Shifted mode is the advertised path for exactly that reason.

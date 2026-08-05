@@ -12,9 +12,9 @@ source example and regenerate with `clojure -T:build gen-examples`.
 
 ## Minimal config
 
-The smallest useful `shiftlefter.edn`: one interface, one adapter. Everything else (glossaries, `:svo` enforcement, step paths) is opt-in.
+The smallest useful config. It lives at `sl/shiftlefter.edn` — the ONLY discovered location; everything ShiftLefter (config, glossaries, features, steps) lives under `sl/`. Everything beyond the interface map (glossaries, `:svo` enforcement, step paths) is opt-in.
 
-_Verbatim from `examples/02-browser-zero-code/shiftlefter.edn`._
+_Verbatim from `examples/02-browser-zero-code/sl/shiftlefter.edn`._
 
 ```edn
 ;; The :etaoin adapter suppresses Chrome's native password popups (breach
@@ -29,9 +29,9 @@ _Verbatim from `examples/02-browser-zero-code/shiftlefter.edn`._
 
 ## Config with glossaries wired
 
-The canonical glossary layout: `glossary/` at the project root, subjects in `glossary/subjects.edn`, per-interface verbs in `glossary/verbs/<iface>.edn`, plus `:svo` enforcement levels.
+The canonical glossary layout: `glossary/` next to the config (so `sl/glossary/`), subjects in `glossary/subjects.edn`, plus `:svo` enforcement levels and a macro registry under `:runner :macros`. The glossary path is CONVENTIONAL — a config with no `:glossaries` key discovers it automatically; this example spells it explicitly for teaching. Note there is no project verbs glossary: the built-in interface verbs cover the example, which is the normal case.
 
-_Verbatim from `examples/svo-demo/shiftlefter.edn`._
+_Verbatim from `examples/svo-demo/sl/shiftlefter.edn`._
 
 ```edn
 ;; ShiftLefter SVO Demo Configuration
@@ -44,26 +44,38 @@ _Verbatim from `examples/svo-demo/shiftlefter.edn`._
 ;;
 ;; Simple case: name = type (:web interface uses :web verbs)
 ;; Advanced case: multiple names share a type (:legacy-app and :new-app both use :web verbs)
+;;
+;; Note there is NO project verbs glossary here. Verbs are interface-level
+;; actions (fill, click, see, navigate) and the framework's built-in set
+;; covers this example completely — most projects never add one. Domain
+;; actions like "logs in" are NOT verbs; they're macros (see :macros below
+;; and macros/login.ini).
 
 {:parser {:dialect "en"}
 
- :runner {:step-paths ["src/stepdefs/"]
-          :allow-pending? true}
+ :runner {:step-paths ["steps/"]
+          :allow-pending? true
 
- ;; Glossary configuration (canonical layout: glossary/ at the project root —
- ;; same convention as examples 04-06 and docs)
- ;; - subjects: path to subject glossary (glossary/subjects.edn)
- ;; - verbs: map of interface-type -> verb glossary path (glossary/verbs/<iface>.edn)
- ;; Project glossaries extend (don't replace) framework defaults
- :glossaries {:subjects "glossary/subjects.edn"
-              :verbs {:web "glossary/verbs/web.edn"}}
+          ;; Macros: domain shorthand as DATA, not code. A macro is a named
+          ;; contraction of interface steps, declared in an INI registry and
+          ;; invoked from Gherkin with a trailing ' +' (the provenance marker).
+          ;; This is where domain actions like "logs in" live — never in a
+          ;; verbs glossary.
+          :macros {:enabled? true
+                   :registry-paths ["macros/login.ini"]}}
+
+ ;; Glossary configuration, spelled EXPLICITLY for teaching. This is the
+ ;; conventional path (glossary/ next to this config, i.e. sl/glossary/) —
+ ;; omitting :glossaries entirely would discover the same file.
+ ;; Project glossaries extend (don't replace) framework defaults.
+ :glossaries {:subjects "glossary/subjects.edn"}
 
  ;; Interface definitions
  ;; Each interface NAME maps to:
  ;; - :type — which verb vocabulary to use (determines valid verbs)
  ;; - :adapter — which adapter to use for provisioning
  ;; - :config — adapter-specific configuration
- :interfaces {:web {:type :web              ; Uses :web verb glossary
+ :interfaces {:web {:type :web              ; Uses the built-in :web verb set
                     :adapter :etaoin        ; Browser automation
                     :config {:headless true}}}
 
@@ -79,7 +91,7 @@ _Verbatim from `examples/svo-demo/shiftlefter.edn`._
 
 Subject types with optional `:instances` (session handles — `:user/alice`) and singletons (`:admin`, `:guest`).
 
-_Verbatim from `examples/svo-demo/glossary/subjects.edn`._
+_Verbatim from `examples/svo-demo/sl/glossary/subjects.edn`._
 
 ```edn
 ;; Subject Glossary for SVO Demo
@@ -107,44 +119,39 @@ _Verbatim from `examples/svo-demo/glossary/subjects.edn`._
   :system/database {:desc "Database operations actor"}}}
 ```
 
-## Project verbs glossary
+## Macro registry (INI)
 
-A project verbs glossary EXTENDS the framework defaults for its interface type. Each verb declares a closed set of frames; each frame declares its arg slots and surface pattern. Frames bind to step definitions via shifted stepdef metadata — see `sl agent-doc authoring`.
+Domain actions are MACROS, not interface verbs: "logs in" is a contraction of several interface steps (fill, fill, click) wearing a domain name, authored as data in an INI registry and invoked from Gherkin with a trailing ` +` provenance marker (`When Alice logs in +`). Enable via `:runner {:macros {:enabled? true :registry-paths [...]}}`. The match is fixed text today (no subject/argument parameterization — named-argument macros are roadmapped); never declare a domain action as a glossary verb, which types a word nothing can run.
 
-_Verbatim from `examples/svo-demo/glossary/verbs/web.edn`._
+_Verbatim from `examples/svo-demo/sl/macros/login.ini`._
 
-```edn
-;; Project-Specific Web Verbs
-;;
-;; This glossary EXTENDS the framework's default web verbs.
-;; Default verbs include: :click, :fill, :see, :navigate, :scroll, :press, etc.
-;;
-;; Each verb declares its valence as a closed set of frames; each frame
-;; declares its args (slot names beyond S-V-O) and a human-readable
-;; surface pattern. See the framework's verbs-web.edn for documentation.
+```ini
+# Macro registry for the SVO demo.
+#
+# A macro is a DOMAIN ACTION — a named contraction of interface steps.
+# "Logs in" is not an interface verb (those are fill/click/see/...); it's
+# three interface steps wearing one domain name. The registry is data you
+# author, not code: each macro's `name` is matched against the whole step
+# text, and the feature invokes it with a trailing ' +' so provenance stays
+# visible at the call site.
+#
+# Honest limitation (current form): the match is fixed text — no subject or
+# argument parameterization yet — so this macro logs in Alice specifically.
+# Named-argument macros are the planned upgrade (0.6 contracts arc).
 
-{:type :web
- :verbs
- {;; Domain-specific verbs for this application
-  :login  {:desc "Authenticate with username/password"
-           :frames {:default {:args [:username :password]
-                              :pattern "S logs in as USERNAME with PASSWORD"}}}
-  :logout {:desc "End authenticated session"
-           :frames {:default {:args []
-                              :pattern "S logs out"}}}
-  :search {:desc "Execute a search query"
-           :frames {:default {:args [:query]
-                              :pattern "S searches for QUERY"}}}
-  :filter {:desc "Apply filter criteria to results"
-           :frames {:default {:args [:criteria]
-                              :pattern "S filters by CRITERIA"}}}}}
+name = Alice logs in
+description = Contract the three-step UI login into one domain action
+steps =
+  When Alice fills the username field with 'alice@example.com'
+  And Alice fills the password field with 'correct-password'
+  And Alice clicks the login button
 ```
 
 ## Intent with elements
 
 The simplest intent shape: named elements with per-interface locator bindings. Steps then address `Login.email` instead of a raw locator.
 
-_Verbatim from `examples/04-sms-2fa/glossary/intents/login.edn`._
+_Verbatim from `examples/04-sms-2fa/sl/glossary/intents/login.edn`._
 
 ```edn
 ;; Login — the reset-password flow's form surface. Both stages of the
@@ -156,23 +163,22 @@ _Verbatim from `examples/04-sms-2fa/glossary/intents/login.edn`._
             :submit {:bindings {:web {:css "button[type=\"submit\"]"}}}}}
 ```
 
-## Config wiring an intents directory
+## Config using the conventional intents directory
 
-Intents load from a directory of EDN files via `:glossaries {:intents "glossary/intents"}`.
+Intents load from a directory of EDN files. The conventional `glossary/intents/` next to the config is discovered automatically (no `:glossaries` key needed); an explicit `:glossaries {:intents "glossary/intents"}` overrides the convention wholesale.
 
-_Verbatim from `examples/06-nested-parent-anchored/shiftlefter.edn`._
+_Verbatim from `examples/06-nested-parent-anchored/sl/shiftlefter.edn`._
 
 ```edn
 ;; ShiftLefter config — parent-anchored nested addressing demo (sl-1ps example 06).
 ;;
-;; One interface (:web via Etaoin). The :intents glossary is loaded by the
-;; runner into the intent state at startup (runner Stage 1b) so the browser
-;; step path resolves nested addresses like Dashboard.featured[1].rating.stars
-;; against this example's own intents. setup.clj stands up the fixture server.
+;; One interface (:web via Etaoin). The subjects + intents glossaries are
+;; discovered at the conventional paths next to this config
+;; (glossary/subjects.edn, glossary/intents/) and loaded at startup (runner
+;; Stage 1b) so the browser step path resolves nested addresses like
+;; Dashboard.featured[1].rating.stars against this example's own intents.
+;; setup.clj stands up the fixture server.
 {:interfaces {:web {:type :web :adapter :etaoin :config {}}}
- :runner     {:step-paths []}
- :glossaries {:subjects "glossary/subjects.edn"
-              :intents  "glossary/intents"}
  :svo        {:unknown-subject :error
               :unknown-verb    :warn
               :unknown-interface :error}}
@@ -182,7 +188,7 @@ _Verbatim from `examples/06-nested-parent-anchored/shiftlefter.edn`._
 
 One reused component (`ProductCard`) appearing under three different wrappers: the parent's `:collections` supply the container `:selector`, the child keeps only its inner selectors, and features address nested regions semantically (`Dashboard.featured[1].rating.stars`) — prefer this over flat union selectors.
 
-_Verbatim from `examples/06-nested-parent-anchored/glossary/intents/dashboard.edn`._
+_Verbatim from `examples/06-nested-parent-anchored/sl/glossary/intents/dashboard.edn`._
 
 ```edn
 ;; Dashboard — document-scoped (no :root). The SAME ProductCard appears under
@@ -197,7 +203,7 @@ _Verbatim from `examples/06-nested-parent-anchored/glossary/intents/dashboard.ed
   :results  {:intent "ProductCard" :selector {:web {:css ".results .s-result-item"}} :cardinality :many}}}
 ```
 
-_Verbatim from `examples/06-nested-parent-anchored/glossary/intents/product-card.edn`._
+_Verbatim from `examples/06-nested-parent-anchored/sl/glossary/intents/product-card.edn`._
 
 ```edn
 ;; ProductCard — the reused component (design §7.3, parent-anchored).
@@ -215,7 +221,7 @@ _Verbatim from `examples/06-nested-parent-anchored/glossary/intents/product-card
                         :count {:max 1}}}}
 ```
 
-_Verbatim from `examples/06-nested-parent-anchored/glossary/intents/rating.edn`._
+_Verbatim from `examples/06-nested-parent-anchored/sl/glossary/intents/rating.edn`._
 
 ```edn
 ;; Rating — a nested region inside a ProductCard. No :root; the card's
@@ -229,7 +235,7 @@ _Verbatim from `examples/06-nested-parent-anchored/glossary/intents/rating.edn`.
 
 Built-in steps driving the parent-anchored intents above. Note the single-quoted literals (double quotes are reserved) and that no selector ever appears in step text.
 
-_Verbatim from `examples/06-nested-parent-anchored/features/catalog.feature`._
+_Verbatim from `examples/06-nested-parent-anchored/sl/features/catalog.feature`._
 
 ```gherkin
 Feature: Parent-anchored nested addressing
@@ -254,7 +260,7 @@ Feature: Parent-anchored nested addressing
 
 Built-in steps can also take raw locator maps inline (`{:id "username"}`) when no intent exists yet — a legitimate fallback; see `sl agent-doc locators` for the brittleness policy.
 
-_Verbatim from `examples/02-browser-zero-code/features/login.feature`._
+_Verbatim from `examples/02-browser-zero-code/sl/features/login.feature`._
 
 ```gherkin
 Feature: Login page
@@ -279,7 +285,7 @@ Feature: Login page
 
 The setup.clj convention: run-level fixture orchestration (start/stop a server around chosen features), not a step definition — the feature files stay zero custom stepdefs.
 
-_Verbatim from `examples/02-browser-zero-code/setup.clj`._
+_Verbatim from `examples/02-browser-zero-code/sl/setup.clj`._
 
 ```clojure
 (ns setup

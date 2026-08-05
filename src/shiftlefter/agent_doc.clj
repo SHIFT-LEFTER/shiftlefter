@@ -13,6 +13,8 @@
     :summary "What ShiftLefter is, the agent surface, and project-fit pointer."}
    {:topic "overview"
     :summary "Operating model and command map for fresh agents."}
+   {:topic "layout"
+    :summary "The project-contents contract: what you bring, what the framework writes."}
    {:topic "authoring"
     :summary "Subjects, instances, Shifted syntax, and step authoring rules."}
    {:topic "grammar"
@@ -25,6 +27,8 @@
     :summary "Unknown subject, verb, interface, and object diagnostics."}
    {:topic "hooks"
     :summary "Scenario lifecycle hooks: hooks.clj registry, @hook= tags, ordering, failure semantics."}
+   {:topic "lifecycle"
+    :summary "Two-phase run model: plan guarantees, the execution weave, failure semantics by stage, parallelism."}
    {:topic "sieve"
     :summary "Vocabulary bootstrap and proposal reconciliation workflow."}
    {:topic "examples"

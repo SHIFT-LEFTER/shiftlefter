@@ -18,8 +18,10 @@ is a singleton, used directly:
 ```
 
 Project verbs extend the built-in set per interface type in
-`glossary/verbs/<type>.edn`; intents live under `glossary/intents/`. The full
-file formats and validation model are in `docs/SVO.md`.
+`glossary/verbs/<type>.edn`; intents live under `glossary/intents/` (all under
+`sl/`, next to the config — these conventional paths are discovered
+automatically when `:glossaries` is unset). The full file formats and
+validation model are in `docs/SVO.md`.
 
 Partial vocabulary is normal. A project may have accepted subjects but missing
 verbs, or accepted verbs but incomplete intents. Treat that as useful diagnostic

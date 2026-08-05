@@ -6,7 +6,7 @@ reviewable project vocabulary. It is not a license to silently accept guesses.
 **Status in 0.5: preview.** SIEVE's interactive tooling is a development/REPL
 surface; there is no `sl` subcommand for it yet. What you can do today: name the
 missing vocabulary, draft the glossary/intent edits as an ordinary reviewable
-change (a patch or PR against the project's `glossary/` files), and let a human
+change (a patch or PR against the project's `sl/glossary/` files), and let a human
 accept it. The discipline below describes the workflow's shape either way.
 
 When accepted vocabulary is missing, collect evidence, draft candidate subjects,

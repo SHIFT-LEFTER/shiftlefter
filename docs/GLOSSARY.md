@@ -31,7 +31,7 @@ parser is 100% Gherkin-compatible, so these mean what they mean upstream.
 | **Examples** | Value table driving Scenario Outline substitution. |
 | **Rule** | Keyword grouping scenarios under one business rule. |
 | **Scenario Outline** | Parameterized scenario template; N examples → N scenarios. |
-| **Tag** | Metadata marker (`@wip`, `@slow`). Parsed and preserved; `sl run --tags` / `--skip-tags` selects a tagged subset at planning time. `@serial` marks a scenario as exclusive under parallel runs. Value-tags (`@<key>=<value>`) attach machinery by name: `@hook=<name>` runs the named lifecycle hook from `hooks.clj` around the scenario (unknown hook names are planning errors; unrecognized keys are ordinary tags). |
+| **Tag** | Metadata marker (`@wip`, `@slow`). Parsed and preserved; `sl run --tags` / `--skip-tags` selects a tagged subset at planning time. `@serial` marks a scenario as exclusive under parallel runs. Value-tags (`@<key>=<value>`) attach machinery by name: `@hook=<name>` runs the named lifecycle hook from `hooks.clj` around the scenario (unknown hook names are planning errors; unrecognized keys are ordinary tags). `@because=<pointer>` is the documented provenance convention — an opaque why-pointer nothing interprets or validates (see [AGENT.md](AGENT.md#recording-why-the-provenance-convention)). |
 
 ## Modes
 
@@ -65,7 +65,8 @@ Validation strictness is **fine-grained**, not a global switch: each check in th
   predefined sequence of steps during compilation. Macros keep **provenance** —
   every expanded step traces back to the original ` +` line.
 - **shiftlefter.edn** — the single project configuration file (parser, runner,
-  glossaries, interfaces, modes).
+  glossaries, interfaces, modes). Lives at `sl/shiftlefter.edn` — the only
+  discovered location; everything ShiftLefter lives in that `sl/` directory.
 - **Lifecycle hooks / `hooks.clj`** — scenario Before/After work, registered
   in `hooks.clj` (a sibling of `shiftlefter.edn`) and named per-scenario with
   `@hook=<name>` tags. Read [hooks.md](hooks.md) before writing one.

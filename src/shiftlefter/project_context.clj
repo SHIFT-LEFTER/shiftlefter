@@ -58,43 +58,21 @@
           (nil? (fs/parent dir)) acc'
           :else (recur (fs/parent dir) acc'))))))
 
-(defn- root-config-path [candidate-root]
-  (normalize-path candidate-root config-file-name))
-
 (defn- sl-config-path [candidate-root]
   (normalize-path candidate-root "sl" config-file-name))
 
-(defn- candidate-at [candidate-root]
-  (let [root-path (root-config-path candidate-root)
-        sl-path (sl-config-path candidate-root)
-        root? (fs/exists? root-path)
-        sl? (fs/exists? sl-path)]
-    (cond
-      (and root? sl?)
-      {:status :ambiguous
-       :root candidate-root
-       :paths [root-path sl-path]}
-
-      root?
-      {:status :found
-       :project-root candidate-root
-       :config-root candidate-root
-       :config-path root-path
-       :layout :root}
-
-      sl?
+(defn- candidate-at
+  "The single discovered layout (sl-fcjm, layout C): <candidate>/sl/shiftlefter.edn.
+   Root-level shiftlefter.edn is no longer discovered; -c FILE remains the
+   escape hatch for exotic layouts."
+  [candidate-root]
+  (let [sl-path (sl-config-path candidate-root)]
+    (when (fs/exists? sl-path)
       {:status :found
        :project-root candidate-root
        :config-root (normalize-path candidate-root "sl")
        :config-path sl-path
-       :layout :sl-directory}
-
-      :else nil)))
-
-(defn- ambiguity-diagnostic [paths]
-  {:type :project-context/ambiguous-config
-   :message "Both standard ShiftLefter config locations exist at the same project root"
-   :paths (vec paths)})
+       :layout :sl-directory})))
 
 (defn- not-found-diagnostic [path]
   {:type :config/not-found
@@ -212,27 +190,13 @@
                      :layout :defaults
                      :portable? true
                      :diagnostics []})
-             (let [candidate (candidate-at candidate-root)]
-               (case (:status candidate)
-                 :ambiguous
-                 (merge base
-                        {:project-root candidate-root
-                         :config-root candidate-root
-                         :config-path nil
-                         :config-source :error
-                         :layout :ambiguous
-                         :portable? false
-                         :diagnostics [(ambiguity-diagnostic (:paths candidate))]})
-
-                 :found
-                 (merge base
-                        (select-keys candidate [:project-root :config-root :config-path :layout])
-                        {:config-source :discovered
-                         :portable? true
-                         :diagnostics []})
-
-                 nil
-                 (recur more))))))))))
+             (if-let [candidate (candidate-at candidate-root)]
+               (merge base
+                      (select-keys candidate [:project-root :config-root :config-path :layout])
+                      {:config-source :discovered
+                       :portable? true
+                       :diagnostics []})
+               (recur more)))))))))
 
 (defn instance-root
   "Daemon-instance anchor for a resolved context, or nil when there is none.
@@ -257,6 +221,6 @@
   [context command]
   (when (= :defaults (:config-source context))
     {:type :project-context/config-required
-     :message (str command " requires a shiftlefter.edn. Create shiftlefter.edn at the project root or sl/shiftlefter.edn.")
+     :message (str command " requires a shiftlefter.edn. Create sl/shiftlefter.edn at the project root.")
      :command command
      :invocation-root (:invocation-root context)}))

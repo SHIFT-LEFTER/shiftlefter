@@ -176,11 +176,41 @@
       (is (= repaired (-> bound :hint :repaired-text))))))
 
 (deftest value-slot-reserved-rows
-  (doseq [case-kw [:hyphen-token :bare-value-reserved]]
-    (let [{:keys [step-text]} (value-row case-kw)]
-      (testing (str case-kw ": reserved — no match, cue-free, no hint")
-        (is (nil? (find-stepdef step-text)))
-        (is (not (contains? (bind-text step-text) :hint)))))))
+  ;; The reserved LAW (no match) is unchanged for both rows. Since sl-38fy
+  ;; the bare-value row also gets the rematch-gated teaching hint — quoting
+  ;; the tail proves the fills frame — superseding the option-A no-hint pin.
+  ;; The hyphen-token row stays hint-free: {order-number} is a brace span,
+  ;; so the tail zone holds no bare words to quote.
+  (let [{:keys [step-text]} (value-row :hyphen-token)]
+    (testing ":hyphen-token: reserved — no match, cue-free, no hint"
+      (is (nil? (find-stepdef step-text)))
+      (is (not (contains? (bind-text step-text) :hint)))))
+  (let [{:keys [step-text]} (value-row :bare-value-reserved)]
+    (testing ":bare-value-reserved: reserved — no match; bare-value hint
+              fires with the quote-the-tail repair (sl-38fy)"
+      (is (nil? (find-stepdef step-text)))
+      (let [bound (bind-text step-text)]
+        (is (= :grammar/bare-value (-> bound :hint :type)))
+        (is (= ":alice fills Login.code with 'Welcome'"
+               (-> bound :hint :repaired-text)))))))
+
+(deftest value-slot-doubled-literal-rows
+  (testing "sl-jlqz: '' inside a nonempty literal is one literal quote"
+    (doseq [case-kw [:doubled-quote-literal :quadruple-quote-literal]]
+      (let [{:keys [step-text normalized]} (value-row case-kw)
+            sd (find-stepdef step-text)]
+        (is (some? sd) (str case-kw " must match"))
+        (is (= normalized (-> (normalize sd step-text {}) :ok (nth 2)))
+            (str case-kw ": interior undoubles at the exec seam"))))))
+
+(deftest value-slot-apostrophe-hint-row
+  (let [{:keys [step-text repaired]} (value-row :apostrophe-in-literal-hint)]
+    (testing "an undoubled apostrophe ends the literal: no match, taught by
+              the sl-jlqz hint family with the doubled did-you-mean"
+      (is (nil? (find-stepdef step-text)))
+      (let [bound (bind-text step-text)]
+        (is (= :grammar/apostrophe-in-literal (-> bound :hint :type)))
+        (is (= repaired (-> bound :hint :repaired-text)))))))
 
 (deftest value-slot-empty-literal-row
   (let [{:keys [step-text]} (value-row :empty-literal)]
@@ -201,8 +231,8 @@
 (deftest location-slot-admission-rows
   (testing "refs, tokens, and quoted forms all bind (resolution is exec's job)"
     (doseq [case-kw [:named-ref-navigate :no-location-ref :nav-root-relative
-                     :nav-bare-word-literal :nav-token :exactly-quoted-token
-                     :exactly-bare-word]]
+                     :nav-bare-word-literal :nav-doubled-literal :nav-token
+                     :exactly-quoted-token :exactly-bare-word]]
       (let [{:keys [step-text]} (location-row case-kw)]
         (is (some? (find-stepdef step-text)) (str case-kw " must match"))))))
 
@@ -295,6 +325,17 @@
     (testing ":key captures reach the stepdef raw (not engine-normalized)"
       (is (= (str "'" key-sent "'")
              (-> (normalize sd step-text {}) :ok (nth 1)))))))
+
+(deftest key-slot-quoted-apostrophe-row
+  (let [{:keys [step-text]} (first (filter #(= :quoted-apostrophe (:case %)) (rows :key-slot)))
+        sd (find-stepdef step-text)]
+    (is (some? sd) "'''' matches the press stepdef (sl-jlqz doubling)")
+    (testing "always-on validation: the undoubled interior is one character"
+      (doseq [enforcement [:off :warn :strict]]
+        (is (= [] (validate-object-issues sd step-text enforcement)))))
+    (testing ":key captures reach the stepdef raw (undoubling is the
+              stepdef's own resolve step)"
+      (is (= "''''" (-> (normalize sd step-text {}) :ok (nth 1)))))))
 
 (deftest key-slot-quoted-multi-row
   (let [{:keys [step-text]} (first (filter #(= :quoted-multi (:case %)) (rows :key-slot)))

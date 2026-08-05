@@ -339,6 +339,46 @@
     (testing "still XSD-valid"
       (is (true? (xsd-valid? xml))))))
 
+(deftest attachment-lines-render-in-system-out
+  ;; sl-l9nj: healthy refs use the Jenkins JUnit-Attachments convention with
+  ;; absolute paths (relative refs absolutized against run-ctx
+  ;; :artifacts-root); errored refs get a plain FAILED line — never an
+  ;; [[ATTACHMENT]] pointer at a file that isn't there.
+  (let [env (reporter/scenario-envelope
+             {:status :passed
+              :duration-ms 2.0
+              :plan {:plan/pickle {:pickle/id (java.util.UUID/randomUUID)
+                                   :pickle/name "Evidenced"
+                                   :pickle/feature-name "Attach"
+                                   :pickle/source-file "/proj/features/a.feature"
+                                   :pickle/location {:line 1}}}
+              :steps [(step "Given" "a step" :passed)]
+              :hooks [{:name "shot" :phase :after :status :ok :duration-ms 0.5}]
+              :attachments [#:attachment{:kind :screenshot
+                                         :path "attachments/evidenced/s.png"
+                                         :source [:hook "shot"]}
+                            #:attachment{:kind :page-source
+                                         :path "/elsewhere/dump.html"}
+                            #:attachment{:kind :console
+                                         :path "attachments/evidenced/c.log"
+                                         :error "console read timed out"}]})
+        xml (ju/build-document [env] (assoc run-ctx :artifacts-root "/results/run"))]
+    (testing "relative refs absolutized against :artifacts-root"
+      (is (str/includes? xml "[[ATTACHMENT|/results/run/attachments/evidenced/s.png]]")))
+    (testing "absolute refs verbatim"
+      (is (str/includes? xml "[[ATTACHMENT|/elsewhere/dump.html]]")))
+    (testing "errored refs are FAILED lines, never pointers"
+      (is (str/includes? xml "attachment console FAILED: console read timed out"))
+      (is (not (str/includes? xml "[[ATTACHMENT|attachments/evidenced/c.log")))
+      (is (not (str/includes? xml "[[ATTACHMENT|/results/run/attachments/evidenced/c.log"))))
+    (testing "attachment lines land after the after-phase hook lines"
+      (let [hook-idx (str/index-of xml "hook shot [after] [ok]")
+            att-idx (str/index-of xml "[[ATTACHMENT|/results/run")]
+        (is (and hook-idx att-idx))
+        (is (< hook-idx att-idx))))
+    (testing "still XSD-valid"
+      (is (true? (xsd-valid? xml))))))
+
 ;; Regenerate the macro golden (run in a REPL after a deliberate mapping change):
 ;;   (spit "test/fixtures/junit/macro-golden.xml"
 ;;         (shiftlefter.runner.report.junit/build-document

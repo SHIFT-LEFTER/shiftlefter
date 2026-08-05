@@ -63,6 +63,10 @@ Enable macros and point at your registry:
 :runner {:macros {:enabled? true :registry-paths ["macros/"]}}
 ```
 
+Each entry is a path relative to your config: a directory loads every `.ini`
+file under it (recursively, in sorted order), and a direct file path like
+`"macros/login.ini"` works too.
+
 Macros are how you get domain shorthand **without writing code** — but be honest that
 they're a stopgap right now: the expansion is a fixed text match (no clean
 subject/argument parameterization yet), and the polished "domain verb" form — where

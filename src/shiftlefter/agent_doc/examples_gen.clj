@@ -30,41 +30,56 @@
    like the builtins preamble — while snippet CONTENT always comes from the
    example files themselves."
   [{:title "Minimal config"
-    :framing (str "The smallest useful `shiftlefter.edn`: one interface, one "
-                  "adapter. Everything else (glossaries, `:svo` enforcement, "
-                  "step paths) is opt-in.")
-    :snippets [{:path "examples/02-browser-zero-code/shiftlefter.edn"
+    :framing (str "The smallest useful config. It lives at `sl/shiftlefter.edn` "
+                  "— the ONLY discovered location; everything ShiftLefter "
+                  "(config, glossaries, features, steps) lives under `sl/`. "
+                  "Everything beyond the interface map (glossaries, `:svo` "
+                  "enforcement, step paths) is opt-in.")
+    :snippets [{:path "examples/02-browser-zero-code/sl/shiftlefter.edn"
                 :lang "edn"}]}
    {:title "Config with glossaries wired"
-    :framing (str "The canonical glossary layout: `glossary/` at the project "
-                  "root, subjects in `glossary/subjects.edn`, per-interface "
-                  "verbs in `glossary/verbs/<iface>.edn`, plus `:svo` "
-                  "enforcement levels.")
-    :snippets [{:path "examples/svo-demo/shiftlefter.edn"
+    :framing (str "The canonical glossary layout: `glossary/` next to the "
+                  "config (so `sl/glossary/`), subjects in "
+                  "`glossary/subjects.edn`, plus `:svo` enforcement levels "
+                  "and a macro registry under `:runner :macros`. The "
+                  "glossary path is CONVENTIONAL — a config with no "
+                  "`:glossaries` key discovers it automatically; this "
+                  "example spells it explicitly for teaching. Note there is "
+                  "no project verbs glossary: the built-in interface verbs "
+                  "cover the example, which is the normal case.")
+    :snippets [{:path "examples/svo-demo/sl/shiftlefter.edn"
                 :lang "edn"}]}
    {:title "Subjects glossary"
     :framing (str "Subject types with optional `:instances` (session handles "
                   "— `:user/alice`) and singletons (`:admin`, `:guest`).")
-    :snippets [{:path "examples/svo-demo/glossary/subjects.edn"
+    :snippets [{:path "examples/svo-demo/sl/glossary/subjects.edn"
                 :lang "edn"}]}
-   {:title "Project verbs glossary"
-    :framing (str "A project verbs glossary EXTENDS the framework defaults "
-                  "for its interface type. Each verb declares a closed set of "
-                  "frames; each frame declares its arg slots and surface "
-                  "pattern. Frames bind to step definitions via shifted "
-                  "stepdef metadata — see `sl agent-doc authoring`.")
-    :snippets [{:path "examples/svo-demo/glossary/verbs/web.edn"
-                :lang "edn"}]}
+   {:title "Macro registry (INI)"
+    :framing (str "Domain actions are MACROS, not interface verbs: \"logs "
+                  "in\" is a contraction of several interface steps (fill, "
+                  "fill, click) wearing a domain name, authored as data in "
+                  "an INI registry and invoked from Gherkin with a trailing "
+                  "` +` provenance marker (`When Alice logs in +`). Enable "
+                  "via `:runner {:macros {:enabled? true :registry-paths "
+                  "[...]}}`. The match is fixed text today (no subject/"
+                  "argument parameterization — named-argument macros are "
+                  "roadmapped); never declare a domain action as a glossary "
+                  "verb, which types a word nothing can run.")
+    :snippets [{:path "examples/svo-demo/sl/macros/login.ini"
+                :lang "ini"}]}
    {:title "Intent with elements"
     :framing (str "The simplest intent shape: named elements with "
                   "per-interface locator bindings. Steps then address "
                   "`Login.email` instead of a raw locator.")
-    :snippets [{:path "examples/04-sms-2fa/glossary/intents/login.edn"
+    :snippets [{:path "examples/04-sms-2fa/sl/glossary/intents/login.edn"
                 :lang "edn"}]}
-   {:title "Config wiring an intents directory"
-    :framing (str "Intents load from a directory of EDN files via "
-                  "`:glossaries {:intents \"glossary/intents\"}`.")
-    :snippets [{:path "examples/06-nested-parent-anchored/shiftlefter.edn"
+   {:title "Config using the conventional intents directory"
+    :framing (str "Intents load from a directory of EDN files. The "
+                  "conventional `glossary/intents/` next to the config is "
+                  "discovered automatically (no `:glossaries` key needed); "
+                  "an explicit `:glossaries {:intents \"glossary/intents\"}` "
+                  "overrides the convention wholesale.")
+    :snippets [{:path "examples/06-nested-parent-anchored/sl/shiftlefter.edn"
                 :lang "edn"}]}
    {:title "Parent-anchored nested intents"
     :framing (str "One reused component (`ProductCard`) appearing under "
@@ -73,30 +88,30 @@
                   "its inner selectors, and features address nested regions "
                   "semantically (`Dashboard.featured[1].rating.stars`) — "
                   "prefer this over flat union selectors.")
-    :snippets [{:path "examples/06-nested-parent-anchored/glossary/intents/dashboard.edn"
+    :snippets [{:path "examples/06-nested-parent-anchored/sl/glossary/intents/dashboard.edn"
                 :lang "edn"}
-               {:path "examples/06-nested-parent-anchored/glossary/intents/product-card.edn"
+               {:path "examples/06-nested-parent-anchored/sl/glossary/intents/product-card.edn"
                 :lang "edn"}
-               {:path "examples/06-nested-parent-anchored/glossary/intents/rating.edn"
+               {:path "examples/06-nested-parent-anchored/sl/glossary/intents/rating.edn"
                 :lang "edn"}]}
    {:title "Feature: intent refs and nested addresses"
     :framing (str "Built-in steps driving the parent-anchored intents above. "
                   "Note the single-quoted literals (double quotes are "
                   "reserved) and that no selector ever appears in step text.")
-    :snippets [{:path "examples/06-nested-parent-anchored/features/catalog.feature"
+    :snippets [{:path "examples/06-nested-parent-anchored/sl/features/catalog.feature"
                 :lang "gherkin"}]}
    {:title "Feature: raw-locator fallback"
     :framing (str "Built-in steps can also take raw locator maps inline "
                   "(`{:id \"username\"}`) when no intent exists yet — a "
                   "legitimate fallback; see `sl agent-doc locators` for the "
                   "brittleness policy.")
-    :snippets [{:path "examples/02-browser-zero-code/features/login.feature"
+    :snippets [{:path "examples/02-browser-zero-code/sl/features/login.feature"
                 :lang "gherkin"}]}
    {:title "Run-level orchestration: setup.clj"
     :framing (str "The setup.clj convention: run-level fixture orchestration "
                   "(start/stop a server around chosen features), not a step "
                   "definition — the feature files stay zero custom stepdefs.")
-    :snippets [{:path "examples/02-browser-zero-code/setup.clj"
+    :snippets [{:path "examples/02-browser-zero-code/sl/setup.clj"
                 :lang "clojure"}]}])
 
 ;; -----------------------------------------------------------------------------

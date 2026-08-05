@@ -22,6 +22,7 @@
    - CLI runs are safe-by-default: ephemeral capabilities always close
      after their scenario, even on failure"
   (:require [clojure.spec.alpha :as s]
+            [shiftlefter.attachments :as attachments]
             [shiftlefter.stepengine.exec.cleanup :as cleanup]
             [shiftlefter.stepengine.exec.step-loop :as step-loop]))
 
@@ -51,9 +52,13 @@
 ;; wrappers. Absent on skipped/synthetic steps and REPL-path scenarios.
 (s/def ::duration-ms (s/and number? (complement neg?)))
 
+;; Finalized attachment refs (sl-l9nj) — scenario-level; the per-step
+;; vector arrives with the capture policy (sl-3q9r).
+(s/def ::attachments ::attachments/attachments)
+
 (s/def ::scenario-exec-result
   (s/keys :req-un [::status ::steps]
-          :opt-un [::plan ::scenario-ctx ::duration-ms]))
+          :opt-un [::plan ::scenario-ctx ::duration-ms ::attachments]))
 
 ;; execute-suite result — keys are :scenarios, :counts, :status
 (s/def ::passed nat-int?)

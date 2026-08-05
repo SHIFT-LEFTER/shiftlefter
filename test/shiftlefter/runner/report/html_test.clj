@@ -236,6 +236,29 @@
                                    :steps [(step "Given" "a" :passed)]})])]
     (is (= name (-> island :scenarios first :plan :plan/pickle :pickle/name)))))
 
+(deftest island-carries-attachments
+  ;; sl-l9nj: refs ride the island untouched at both levels; the renderer
+  ;; side is locked structurally (renderer-structural-locks below).
+  (let [ref #:attachment{:kind :screenshot :path "attachments/f/shot.png"
+                         :media-type "image/png" :bytes 42
+                         :source [:hook "shot"]}
+        env (reporter/scenario-envelope
+             {:status :passed
+              :plan {:plan/pickle {:pickle/id (java.util.UUID/randomUUID)
+                                   :pickle/name "f" :pickle/feature-name "F"
+                                   :pickle/source-file "/proj/features/x.feature"
+                                   :pickle/location {:line 1}}}
+              :steps [{:step {:step/keyword "Given" :step/text "a"}
+                       :binding {}
+                       :status :passed
+                       :attachments [ref]}]
+              :attachments [ref]})
+        [_doc island] (doc-and-island [env])]
+    (is (= [ref] (-> island :scenarios first :attachments))
+        "scenario-level refs round-trip the island")
+    (is (= [ref] (-> island :scenarios first :steps first :attachments))
+        "step-level refs round-trip the island")))
+
 ;; -----------------------------------------------------------------------------
 ;; AC1/AC7/AC9: self-contained shell — offline, one style block, noscript
 ;; -----------------------------------------------------------------------------
@@ -278,7 +301,17 @@
       (is (str/includes? js ":contributed")))
     (testing "sl-esq: derived-scheduling chip, never pretending authorship"
       (is (str/includes? js "tag derived"))
-      (is (str/includes? js "\"via \" + reasonText")))))
+      (is (str/includes? js "\"via \" + reasonText")))
+    (testing "sl-l9nj: attachments render behind the safe-path gate"
+      (is (str/includes? js "renderAttachment"))
+      (is (str/includes? js "safeRelPath"))
+      (is (str/includes? js "img.src = path")
+          "the ONE sanctioned src assignment — property on a created node")
+      (is (str/includes? js "mediaType.startsWith(\"image/\")"))
+      (is (str/includes? js ".includes(\"..\")")
+          "dot-dot segments rejected explicitly")
+      (is (str/includes? js ":attachment/error")
+          "failed captures render visibly"))))
 
 ;; -----------------------------------------------------------------------------
 ;; AC5: macro golden parity — the same real-expansion scenario the JUnit
@@ -440,6 +473,45 @@
         (is (nil? (:selection ctx)) "no filter active => no selection key")))
     (testing "the document at corpus scale is still self-contained"
       (is (zero? (count (re-seq #"(?i)https?://" doc)))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-6hsd: planning-failure report — write-planning-failure! materializes
+;; the artifact the lifecycle path never reaches on exit 2
+;; -----------------------------------------------------------------------------
+
+(deftest planning-failure-report
+  (let [dir (str (fs/create-temp-dir))
+        path (str dir "/report.html")
+        diagnostics {:undefined [{:status :undefined
+                                  :step {:step/text "the gateway degrades, the client retries."
+                                         :step/location {:line 4 :column 5}}
+                                  :source-file "/proj/features/broken.feature"
+                                  :hint {:type :grammar/prose-as-step
+                                         :suggestion "This line reads like description prose."}}]
+                     :errors [{:type :hooks/unknown-name
+                               :message "Unknown hook name(s): [nope]"}]
+                     :counts {:undefined-count 1 :total-issues 2}}
+        summary {:run-id "r-2" :exit-code 2 :status :planning-failed
+                 :counts (:counts diagnostics)}]
+    (html/write-planning-failure! path run-ctx diagnostics summary)
+    (let [doc (slurp path)
+          island (edn/read-string (island-of doc))]
+      (testing "the artifact exists and its island tells the planning story"
+        (is (= [] (:scenarios island)))
+        (is (= :planning-failed (-> island :summary :status)))
+        (is (= 2 (-> island :summary :exit-code))))
+      (testing "diagnostics ride scrubbed but shape-intact: the undefined
+                step keeps its hint, the hooks error keeps its message"
+        (let [undef (first (-> island :diagnostics :undefined))]
+          (is (= "the gateway degrades, the client retries."
+                 (-> undef :step :step/text)))
+          (is (= :grammar/prose-as-step (-> undef :hint :type)))
+          (is (= "This line reads like description prose."
+                 (-> undef :hint :suggestion))))
+        (is (= "Unknown hook name(s): [nope]"
+               (-> island :diagnostics :errors first :message))))
+      (testing "self-contained document, no external requests"
+        (is (zero? (count (re-seq #"(?i)https?://" doc))))))))
 
 (deftest corpus-island-selection-story
   (let [{:keys [manifest html-file]}

@@ -1,3 +1,400 @@
+# Changelog: 0.5.4
+
+**Release Date:** 2026-08-05
+
+The theme of this release is **keep every promise the docs already made**.
+The features our shipped docs called "planned" now exist: screenshot- and
+console-on-failure as a config line, After-hook attachments that ride the
+report surfaces, third-party jars dropped into `sl/lib/`, and a Playwright
+backend you can wire without a Clojure toolchain — now honoring the same
+step contract as WebDriver, with the real differences stated in a table
+instead of implied away. The formatter keeps the oldest promise of all:
+`sl fmt` now preserves every comment. The same promise-keeping applies to
+run artifacts — a planning failure writes the HTML report it earned instead
+of leaving a previous run's green one lying, a failed teardown warns the
+*next* run that the environment may be dirty, and a setup plan with a dead
+group exits 2 instead of green-lighting a group that tested nothing. Two
+new pages pin the contracts down: the execution lifecycle on one page, and
+the project-contents contract with a verification appendix citing code for
+every table row. One breaking change worth reading before you upgrade:
+everything ShiftLefter now lives under `sl/` — migration is one `git mv`.
+
+## Stats
+
+```
+2120 tests, 7454 assertions, 0 failures (./bin/kaocha unit — the fast suite)
+17 tests, 77 assertions, 0 failures (./bin/kaocha daemon — warm-path shell E2E through the built jar)
+11 tests, 41 assertions, 0 failures (SHIFTLEFTER_LIVE_WEBDRIVER=1 ./bin/kaocha e2e — live-browser example validators)
+Cucumber compliance: 46/46 good, 11/11 bad (100%)
+Verified against Chrome 150 / ChromeDriver 150
+```
+
+## Features
+
+<!-- entry: sl-3q9r -->
+- **Screenshot-on-failure is now a config line.** The most-written After
+  hook in the industry graduates to declarative configuration:
+  `:runner {:capture {:screenshot :on-failure :console :on-failure}}`
+  (CLI mirror `--capture screenshot=on-failure,…`; policies `never` —
+  the default, capture is always opt-in — `on-failure`, `every-step`).
+  `on-failure` captures at the failing step's *instant*, before After
+  hooks, across **all** live browsers — Bob's screen may be what explains
+  Alice's failure. `every-step` is the film-strip debug run, one capture
+  per step following the acting subject. Console capture is a
+  step-grained drain: under `every-step` each artifact holds exactly that
+  step's log entries (plus a tail sweep for anything after the last
+  step); under `on-failure` one whole-scenario log, drained only when
+  red. Kinds are adapter-contributed — the browser provides `screenshot`,
+  `console` (Chrome/Edge), `page-source`; a typo'd kind gets a warning,
+  never a silent no-op. Capture cost is recorded per-artifact and never
+  pollutes step durations. And the evidence contract is deliberately
+  harsh: if capture infrastructure fails on an otherwise-green scenario,
+  the scenario goes `:error`, capture-attributed — a green run whose
+  promised evidence silently vanished would be green with missing
+  evidence. Hand-rolled screenshot Afters: delete the hook, set the
+  config line.
+
+<!-- entry: sl-l9nj -->
+- **Attachments: hooks can now hand evidence to the report.** An After
+  hook's return value goes live: return
+  `{:attachments [{:attachment/kind :screenshot :attachment/path "…"} …]}`
+  and the refs ride the scenario envelope into every report surface —
+  inline images and excerpt blocks in the HTML report, Jenkins
+  `[[ATTACHMENT|…]]` lines in JUnit system-out, plain `attachment:` lines
+  under console failures. Hook payloads gain `:artifacts-dir`, a
+  pre-created per-scenario directory inside the run's results dir, so
+  hooks have a sanctioned place to write. The contract is strict on
+  purpose: nil means no claim, anything malformed (a typo'd key, a bad
+  ref) makes the scenario `:error` — and a claimed file that's missing
+  renders as a visible failed capture rather than vanishing. Attachments
+  are references, never inline bytes; runs that claim nothing produce
+  byte-identical output everywhere. The HTML report also *joins the run
+  directory*: the primary `report.html` now lives in
+  `results/<stamp>/` beside `attachments/`, making each run dir a
+  self-contained, zippable artifact, while the configured `--html` path
+  keeps working as an end-of-run copy — written atomically, so the HTML
+  copy specifically can no longer be read torn under concurrent runs
+  (JUnit XML writes are unchanged). The declarative capture policy built on
+  this contract shipped in the same release (see the entry above).
+
+<!-- entry: sl-yvaz -->
+- **Teardown failures now tell the truth — twice.** When a setup group's
+  `:stop` throws, the run no longer buries it in a log line: the failure
+  lands on the group's result, prints an stderr notice, and (under
+  `--edn`) emits a small supplementary diagnostics form after the group's
+  summary — while the exit code stays what the tests earned (a leaked
+  resource never flips a green run red). And because the person who
+  suffers is whoever runs the suite NEXT, the failure is also written to
+  `.shiftlefter/dirty-teardown.edn`: the next run announces "previous run
+  teardown for group X failed — environment may be dirty" and clears the
+  marker (a `--dry-run` announces but leaves it). EDN consumers: stdout
+  is a form *stream* — read all forms, skip shapes you don't recognize
+  (documented in docs/CI.md). Also: the `:start`-threw planning error now
+  teaches partial-start ownership (anything your `:start` began is yours
+  to clean — wrap your own try/catch), and the resolved config map that
+  `:start` receives is now spec'd (`::config`, read-only by contract).
+
+<!-- entry: sl-6hsd -->
+- **Planning failures now produce the HTML report they earned.** When a run
+  exits 2 at planning (undefined or ambiguous steps, arity mismatches, a
+  hooks error), `--html` no longer stays silent — worse, it no longer
+  leaves a *previous* run's report sitting there lying. The report is
+  written with a PLANNING FAILED header, zero scenarios, and a full
+  diagnostics section matching the console: undefined steps with their
+  location and their grammar hint (the s04n teaching line, rendered under
+  the step), ambiguous steps with their candidate stepdefs, invalid arity
+  with expected/got, and generic planning errors. The EDN data island
+  carries the same machine-readable diagnostics (`:summary :status
+  :planning-failed`, `:scenarios []`), so island consumers can distinguish
+  "nothing ran" from "everything passed" without heuristics. Scope note:
+  parse/config-stage failures (before binding) still report on
+  console/stderr only.
+
+<!-- entry: sl-lkla -->
+- **The setup.clj plan is now linted before anything runs.** Three
+  plan-shape checks fire at plan time — and dry-run sees the same
+  verdicts, because plan-shape is static. A group whose `:features`
+  match no feature files is a planning **error** (exit 2): a dead group
+  would report green while testing nothing. Two groups sharing a
+  `:label` is a planning **error**: labels are reporting-load-bearing —
+  a group is a run-scope, and its name must be unique. The same feature
+  file declared by two groups is a **warning**, deliberately not an
+  error: it runs once per group, and same-feature-under-two-registries
+  is a legitimate matrix pattern we won't foreclose. Warnings print one
+  stderr line each; under `--edn` they ride a supplementary
+  `{:diagnostics {:setup-lints [...]}}` form before the group summaries.
+  If your setup.clj carried a dead group or a duplicated label, runs
+  that used to "pass" will now exit 2 — that green was a lie.
+
+<!-- entry: sl-bav1 -->
+- **Description prose that opens with a step keyword now gets named for
+  what it is.** Gherkin descriptions end at the first
+  `Given/When/Then/And/But` (or `*`) — Cucumber-identical, and staying
+  that way — so natural BDD prose like
+  `When the gateway degrades, the client retries.` inside an intended
+  description silently becomes a real (and usually undefined) step. The
+  undefined diagnostic now recognizes the shape — no quoted literal, no
+  `{...}` locator, no `Object.ref`, ending in sentence punctuation — and
+  teaches the rule: move prose above the first step, or rephrase it so it
+  doesn't open with a step keyword. Teaching-only: there's no did-you-mean
+  because no repair makes prose match; annotated steps (`[:web] …`) never
+  draw it — an annotation is step-evidence. The companion parse error for
+  prose *after* an accidental step explains itself now too:
+  `Unrecognized line (not a keyword or step): … — if this was description
+  prose, descriptions end at the first step keyword.` EDN report
+  consumers see the new `:type :grammar/prose-as-step` in the stable
+  `:hint` envelope.
+
+<!-- entry: sl-38fy -->
+- **Bare words in a value slot now get a quote-the-tail did-you-mean.**
+  `fills {:id "code"} with the SMS code` used to report undefined with no
+  guidance; the diagnostics now recognize a near-miss frame — quoting the
+  trailing words produces a step that actually matches — and teach the slot
+  grammar: *Value slots take a quoted literal ('...') or a binding
+  ({Name}). Did you mean: … with 'the SMS code'?* The hint is
+  rematch-gated (it only fires when the repaired step really matches, so
+  ordinary undefined prose stays hint-free), quotes the corrected step
+  with locators untouched, and doubles any interior apostrophes per the
+  0.5.4 literal grammar (`with the user's code` → `'the user''s code'`).
+  Suffix tails only for now: values before `from`/`and`-style
+  continuations (e.g. `selects X from …`) don't hint yet. EDN report
+  consumers see the new `:type :grammar/bare-value` in the stable `:hint`
+  envelope.
+
+<!-- entry: sl-lg8v -->
+- **`sl fmt` now preserves every comment.** The canonical formatter emits
+  interior comments — between steps, between scenarios, between table and
+  Examples rows, and trailing at end of file — by attaching each comment to
+  the construct that follows it and placing it at that construct's canonical
+  indent. `fmt --write` no longer skips comment-bearing files, and the
+  comment-loss guard from 0.5.1 stays wired as a permanent backstop that now
+  refuses a write only if a formatter regression would drop a comment.
+  One visible shift in `fmt --check`: files that used to sit in the
+  CI-neutral `:comments` state now report NEEDS FORMATTING when their
+  comments aren't in canonical position — because the formatter can finally
+  fix them; one `--write` clears it. Known attachment rule worth knowing:
+  a comment binds forward, so a note after a scenario's last step belongs
+  to the next scenario — write trailing notes above the step they describe.
+  Comment-preservation and idempotence are fuzz-covered (comments are now
+  sprinkled through the generative corpus).
+
+<!-- entry: sl-jlqz -->
+- **Apostrophes inside quoted literals: write them doubled.** `''` inside a
+  nonempty literal is one literal `'` character, SQL-style — so English UI
+  text is now assertable as a plain literal:
+  `should see 'Don''t have an account?'`, `fills Login.code with 'don''t'`,
+  and `''''` is the one-character literal `'`. The rule holds in every
+  quoted slot (value, text, location, key — `presses ''''` presses the
+  apostrophe key), needs no backslash semantics, and stays unambiguous with
+  several quoted slots in one step because the doubled pair must be
+  adjacent. The bare empty literal `''` is still refused (emptying a field
+  wants `clears`, and the hint still says so). The undefined-step
+  diagnostics learned the rule too: an undoubled apostrophe inside a
+  literal (`'Don't stop'`) now draws a hint teaching the doubling — with
+  the exact corrected step when doubling it produces a real one — and the
+  unbalanced-quote hint gained doubling repairs (`'friends' page'` →
+  did-you-mean `'friends'' page'`). Grammar law updated in the
+  grammar-markers decision table; the `sl agent-doc grammar` topic
+  documents the rule.
+
+<!-- entry: sl-5ee5 -->
+- **Third-party libraries without build tooling: drop jars in `sl/lib/`.**
+  Steps, hooks, and custom adapters can now use libraries beyond the bundled
+  classpath — the flagship case is a JDBC driver for a database-seeding hook.
+  Every jar in the project's `sl/lib/` directory rides the classpath of every
+  run: the cold path and the warm daemon alike, framework jar first, and the
+  daemon restarts itself when the lib set changes, exactly as it does on a
+  framework upgrade. No dependency resolution — bring resolved jars (a
+  library plus its dependencies' jars); for transitive resolution from
+  `deps.edn` coordinates, that remains the Clojure-CLI tier. User jars are
+  user code: same in-process trust as your `load-file`'d step definitions.
+  See docs/INSTALL-TIERS.md § Third-Party Libraries.
+
+<!-- entry: sl-tnx -->
+- **Playwright nested addressing is now one browser round trip per address
+  segment — and live-verified for the first time.** Resolving
+  `Dashboard.featured[1].title` on the Playwright backend used to cost one
+  browser call per candidate per segment; the new `:fast` strategy
+  (default) fuses the scoped query and the nested-instance filter into a
+  single script, matching the WebDriver backend. The previous per-candidate
+  path is retained as `:pruning :safe` — Playwright's auto-retrying
+  Locators all the way down, stale-safe across re-renders, at the old
+  O(candidates) cost. Both strategies now pass the full nested-addressing
+  example suites against a real browser (neither had ever been
+  DOM-verified). `:fast` results are point-in-time element snapshots —
+  re-resolve after navigation; the staleness contract, the knob, and the
+  new backend where-they-differ table live in docs/INSTALL-TIERS.md
+  § Backend differences. The knob is Playwright-meaning only: the WebDriver
+  backend is always fused, having no retrying-locator concept to trade.
+
+<!-- entry: sl-wgnw -->
+- **The Playwright backend now works without a Clojure toolchain — three
+  jars in `sl/lib/` and you're wired.** Verified end to end through the
+  installed launcher, cold path and warm daemon alike: drop
+  `playwright`, `driver`, and `driver-bundle` (same version) into your
+  project's `sl/lib/` and set `:adapter :playwright` — the driver bundle
+  self-extracts its runtime from the classpath jar, and browsers auto-fetch
+  once per user on first use. docs/INSTALL-TIERS.md § Using Playwright now
+  carries both wiring paths with exact version-pinned download links, and
+  the config-load "not bundled" error names the `sl/lib/` remedy alongside
+  the `deps.edn` one. (Honest sizes while we're at it: ~200MB driver bundle
+  + one-time browser downloads, vs the 43MB framework jar.)
+
+<!-- entry: sl-gd16 -->
+- **A documented home for "why": the `@because=` / `# why:` convention.**
+  Scenarios and glossary entries may carry an opaque why-pointer to the
+  ticket, decision, or conversation that motivated them — a
+  `@because=CHK-4412` tag, or a `# why:` comment on the line above the
+  step or scenario it explains (`;; why:` in EDN glossaries). Nothing
+  parses, validates, or resolves the pointer; both forms round-trip
+  through `sl fmt` like any tag or comment. A convention, not a schema —
+  documented in the authoring topic (`sl agent-doc authoring`) so
+  rationale accretes in the corpus now, with promotion to a first-class
+  annotation deferred until use-case artifacts land. No parser or runner
+  changes.
+
+<!-- entry: sl-q8al -->
+- **The SVO demo now teaches the real verb model — and ships the missing
+  macro worked example.** `examples/svo-demo` no longer declares domain
+  actions (`:login`, `:logout`, `:search`, `:filter`) as interface verbs —
+  the anti-pattern the three-tier vocabulary model retired: built-in
+  interface verbs / **macros** for domain actions / rare defstep-backed
+  verbs. The demo's verbs glossary is deleted (built-ins cover it, which
+  is the normal case), and in its place the example gains a macro registry:
+  `Alice logs in +` contracts fill/fill/click through `macros/login.ini`,
+  with the fixed-text limitation stated honestly (named-argument macros
+  are the planned upgrade). The packaged agent-docs examples topic
+  (`sl agent-doc examples`) swaps its verbs-glossary section for the
+  macro-registry INI worked shape it never had, and the demo's feature and
+  stepdefs move to the single-quote literal convention. No behavior
+  changes — this is the shipped teaching surface catching up to the ruled
+  vocabulary model.
+
+<!-- entry: sl-fhuj -->
+- **The execution lifecycle is now one page.** `docs/lifecycle.md` tells
+  the whole run story in order: every run is two phases — plan, then
+  execute — with planning as a compilation (typed step resolution,
+  per-scenario hook firing lists, binding producer checks, plan-shape
+  lints) and `--dry-run` as that phase exposed. The execution weave is
+  stated once, as a timeline: groups in declared order, `:start`,
+  per-scenario Before hooks → capability provisioning → steps → After
+  hooks → capability cleanup, `:stop` in a finally. A failure table
+  walks every stage — what a `:start` throw, a hook error, a
+  capture-infrastructure failure, or a `:stop` throw each does to the
+  run — plus where parallelism applies and where capture fires in the
+  weave. Agents get the same model from the jar:
+  `sl agent-doc lifecycle`.
+
+<!-- entry: sl-hivf -->
+- **The project-contents contract is now one page.**
+  `docs/project-layout.md` states both halves of the layout contract:
+  everything a project brings to ShiftLefter (how required, where it's
+  discovered, what overrides — with every table row verified against the
+  code the page ships with, and planned changes annotated rather than
+  omitted), and everything ShiftLefter writes back (`results/` run dirs,
+  configured reports and their two path-anchoring rules, the full
+  `.shiftlefter/` operational inventory — with the honest git guidance:
+  add `.shiftlefter/` to your `.gitignore`, because the framework only
+  self-ignores `results/` and the wardrobe). The page also carries the
+  user-code doctrine in public form: three named attachment points plus a
+  reserved fourth, config is data-only, no orchestration DSL ever, and
+  the already-locked data contracts any future reporter/observer
+  mechanism must honor. Agents get the same contract from the jar:
+  `sl agent-doc layout`.
+
+## Breaking Changes
+
+<!-- entry: sl-fcjm -->
+- **Everything ShiftLefter now lives in `sl/` — config discovery narrowed
+  to `sl/shiftlefter.edn` only.** `<project>/shiftlefter.edn` at the
+  project root is no longer discovered (the two-location rule and its
+  ambiguity diagnostic are gone); `-c FILE` remains the escape hatch for
+  exotic layouts. The corpus follows the config: config-declared paths
+  resolve from `sl/`, so the defaults are `sl/steps/`, `sl/glossary/`,
+  and the new `sl/features/` — bare `sl run` now runs the project's
+  feature corpus (`[:runner :features]`, default `["features/"]`) when no
+  paths are given and no `setup.clj` owns the plan. Glossaries at the
+  conventional paths (`sl/glossary/subjects.edn`,
+  `sl/glossary/verbs/<type>.edn`, `sl/glossary/intents/`) are discovered
+  automatically when `:glossaries` is unset; an explicit `:glossaries`
+  (including `nil`) is used as written. Run results move with the config
+  root to `sl/results/`. **Migration is one move:**
+  `mkdir sl && git mv shiftlefter.edn setup.clj hooks.clj features glossary steps sl/`
+  (move the ones you have; skip the rest).
+
+<!-- entry: sl-1qet -->
+- **Removed the REPL surfaces + session-store subsystem**: `mark-surface!`,
+  `unmark-surface!`, `surface?`, `list-surfaces`, `reset-surfaces!`, and the
+  EDN session-handle store. This was a pre-costume design that never worked:
+  the persisted handles were written with nil fields off real browser
+  records, and nothing ever read them back — a write-only subsystem whose
+  persist half was a bridge to nowhere. **The workflow lives on:** a browser
+  session that survives REPL reset/clear is a costume — use
+  `connect-costume!` + `repl/as`, which persist across JVM restarts too
+  (more than surfaces ever delivered). See docs/COSTUMES.md.
+
+## Fixes
+
+<!-- entry: sl-g71p -->
+- **Macro `:registry-paths` now accepts directories — as the docs always
+  promised.** `docs/extending-vocabulary.md` showed
+  `:registry-paths ["macros/"]`, but the loader slurped every path as a
+  file and a directory failed with a read error. The docs' example is now
+  true: a directory entry loads every `.ini` file under it, recursively,
+  in sorted path order (so duplicate-key detection is deterministic);
+  non-INI files are ignored; direct file paths behave exactly as before,
+  and the two forms can be mixed in one list. A nonexistent path — file
+  or directory — still fails loud with `:macro/file-not-found`:
+  configured macros never go silently missing.
+
+<!-- entry: sl-tss7 -->
+- **REPL `reset-ctxs!` and `clear!` now actually close ephemeral browser
+  sessions — and never touch a worn costume.** Previously the close path
+  silently no-oped on the record shapes real provisioning produces (the
+  session id lives inside the wrapped driver), leaking Chrome/ChromeDriver
+  process trees while reporting `:closed`; connected costumes survived
+  cleanup only by riding that same no-op. Cleanup now unwraps the capability
+  to its raw driver and issues the real close, deliberately skips
+  `:persistent` (costume) capabilities — only `destroy-costume!` kills a
+  costume's Chrome — and closes every `:web` capability in a context, not
+  just the first. The returned actions tell the new truth: one action map
+  per capability with a `:capability` key, and `:action` one of `:closed`,
+  `:skipped-persistent`, `:close-failed` (with the `:error`), or `:none` —
+  code pattern-matching on the old always-`:closed` reports should switch
+  on these.
+
+<!-- entry: sl-xbm -->
+- **A costume worn by two targets is now refused on the default path too —
+  before any browser attaches.** A costume is a device-local browser profile:
+  single-wearer, single-interface. The lazy provisioning path already refused
+  duplicate `:wears`; the eager (default) path silently attached two WebDriver
+  sessions to one Chrome when the wearers landed on different interfaces,
+  because each interface provisions in its own parallel future. A pure
+  pre-pass now rejects duplicate `:wears` across all targets before
+  provisioning starts, and the error says where shared identity actually
+  lives: in the application (an account/context), not the browser profile —
+  "the same user on web and mobile" is two costumes plus one account. A
+  refusal made honest, not a new restriction.
+
+<!-- entry: sl-yynw -->
+- **A failed capture's `.err` pointer now names a real file.** When a
+  capture fn threw, the attachment ref recorded the miss with a path
+  ending in `.err` — but nothing wrote that file, so the one pointer the
+  HTML report printed led nowhere. The engine now writes the error
+  message to that path at the moment of failure: the artifacts dir holds
+  the evidence the ref promises. Report rendering is unchanged — errored
+  captures still lead with the failure message on every surface.
+
+<!-- no-entry: sl-5dhn (blog scaffold in the shiftlefter.com repo; no SL shipped surface — deploy is vvxu) -->
+<!-- no-entry: sl-6uvs (VPS-to-GH-Pages migration of shiftlefter.com; infra move surfaced by the 5dhn close, no SL shipped surface) -->
+<!-- no-entry: sl-85ls (cross-repo doc drift sweep: wiki/runbook/process edits only; runbook and wiki are not in the jar, no shipped surface — Chair pre-ruled 08-03) -->
+<!-- no-entry: sl-c76w (validation exercise: paired REPL costume deep pass against real sessions; findings filed to 0.5.5, no shipped-surface change — Tower, 08-05, closing the parallel-close guard gap) -->
+<!-- no-entry: sl-wp5k (Chair sitting: 85ls D4 discrepancy-table disposition — rulings, bead filings, and doc homes only; no shipped surface) -->
+<!-- no-entry: sl-tnjq (release-process bead: Herald release pass — changelog drain + drift sweep; chartered doc fixes ship under their originating beads' entries) -->
+<!-- no-entry: sl-8k5m (release-process bead: cut & tag v0.5.4) -->
+
+---
+
 # Changelog: 0.5.3
 
 **Release Date:** 2026-07-28
@@ -11,6 +408,13 @@ call. Each of those surfaces now says what actually happened. The rest of
 the release hardens the same promise from the other side: machine-verified
 doc examples, offline-deterministic examples, a bytecode-enforced Java
 floor, and drift guards that make the next lie a loud test failure.
+
+## Stats
+
+```
+2012 tests, 6939 assertions, 0 failures (./bin/kaocha — the default suite; unit-only: 2003 tests, 6930 assertions)
+Cucumber compliance: 46/46 good, 11/11 bad (100%)
+```
 
 ## Fixes
 
@@ -458,6 +862,7 @@ floor, and drift guards that make the next lie a loud test failure.
 <!-- no-entry: sl-8094 (SubMid thread archive under notes/; personal-vision material, no shipped surface) -->
 <!-- no-entry: sl-wvgn (Q06/Q07 audits under notes/; process + governance, no shipped surface) -->
 <!-- no-entry: sl-xbh8 (overnight Warden batch audit + Herald tail prep; release-process bead, no shipped surface) -->
+<!-- no-entry: sl-rfp (sl-vision wiki glossary seeding only; no dev-repo surface) -->
 <!-- no-entry: sl-0ni2 (release-process bead: cut & tag v0.5.3) -->
 <!-- no-entry: sl-7rb6 (test-side: per-JVM corpus scratch dirs make concurrent suite runs safe; no shipped surface) -->
 <!-- no-entry: sl-8mz (test-strengthening board pass: REPL costume flow + persistent-skip/selectivity tests, findings report; no shipped surface) -->
@@ -466,6 +871,17 @@ floor, and drift guards that make the next lie a loud test failure.
 <!-- no-entry: sl-qo7 (internal doctrine: code-verified claim-stamp convention in wiki SCHEMA + stale release-map fix; no shipped surface) -->
 <!-- no-entry: sl-ybox (test-side: planning-level validators for examples 02b/03/svo-demo in the bare unit suite; guards public examples, ships nothing) -->
 <!-- no-entry: sl-kh5r (internal: cleanup-seam consolidation; no user surface) -->
+<!-- no-entry: sl-z9m5 (internal doctrine: W1-W9/Q1-Q8 red-team amendments + sweep addenda across sl-vision wiki and notes/; no shipped surface) -->
+<!-- no-entry: sl-3i4h (Pony Test talk: prep, delivery 07-31, archive to wiki decks; no shipped surface) -->
+<!-- no-entry: sl-pzec (build tooling: docs task now cleans docs/api before codox regen so deleted namespaces drop their pages; docs/api is public-export-forbidden, no shipped surface) -->
+<!-- no-entry: sl-h0oj (internal: version-agreement drift-guard test + append-release.sh tag/tree version refusal; no user surface) -->
+<!-- no-entry: sl-1hpy (release-planning bead: the 0.5.4/0.5.5 split ruling + 0.5.6 renumber; board state only, no shipped surface) -->
+<!-- no-entry: sl-mmfy (grooming session: setup.clj promoted-surface rulings — G1-G8 dispositioned, builds spawned as sl-yvaz/sl-lkla/sl-cgxr; no shipped surface) -->
+<!-- no-entry: sl-kvw8 (notes/ groom: dispositions + board tooling bin/beads-web + bin/beads-graph; dev-repo hygiene, no shipped surface) -->
+<!-- no-entry: sl-hbnp (rulings session: Q07 envelope owed decisions — Twilio dated, asami conscious-keep, Chrome dated-lockstep, S3 park checklist; runbook/wiki records, no shipped surface) -->
+<!-- no-entry: sl-x7ec (docs-only truth-up: hygiene parity holds by construction under Playwright's off-the-record contexts — decision comment + table row, no behavior change; the table itself shipped in the sl-tnx entry) -->
+<!-- no-entry: sl-l4c (internal doctrine: Capabilities & Boundaries ledger populated in the sl-vision wiki — Holds-today rows + permanent-only Non-goals; wiki-only, z9m5 precedent, no shipped surface) -->
+<!-- no-entry: sl-c3gx (internal board tooling: edge metadata + renderer styling + chart relocation to board/; no shipped surface) -->
 
 ---
 

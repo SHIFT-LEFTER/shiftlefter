@@ -37,6 +37,10 @@
                    Vector position drives intra-group order; group position
                    in the outer vector drives between-group order.
 
+   The `config` argument (to `setups` and to each `:start`) is the RESOLVED
+   config map (`::config`) — the same map every group receives. Treat it as
+   read-only: nothing you assoc onto it is seen by the framework.
+
    ## Pure-mode invariant
 
    When `setup.clj` is present, **the union of all `:features` vectors
@@ -48,7 +52,18 @@
    only one source of truth, so drift can't happen.
 
    When `setup.clj` is absent, the runner uses today's behavior
-   (CLI paths drive discovery, no orchestration, no groups)."
+   (CLI paths drive discovery, no orchestration, no groups).
+
+   ## Plan-shape lints
+
+   The declared plan is linted statically before any group runs (and
+   before CLI narrowing — dry-run sees the same verdicts). A group whose
+   `:features` match no files is a planning ERROR (a dead group is a
+   config lie), as is a `:label` shared by two groups (labels are
+   reporting-load-bearing — group = run-scope). The same feature file
+   declared by two groups is a WARNING, not an error: it runs once per
+   group, and same-feature-under-two-registries is a conceivable
+   legitimate matrix pattern. See `lint-setups`."
   (:require [babashka.fs :as fs]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
@@ -76,6 +91,40 @@
 
 (s/def ::start-result
   (s/keys :opt-un [::adapter-registry ::stop]))
+
+;; The config argument (:start receives it, and `setups` may) is the RESOLVED
+;; config map — whatever load-config produced from shiftlefter.edn plus
+;; defaults. Treat it as READ-ONLY: it is the same map every group receives,
+;; and nothing you assoc onto it is seen by the framework. Deliberately
+;; permissive (s/keys, all optional): user configs carry open keys, and the
+;; setup boundary's promise is "you get the resolved map", not a schema.
+;; NOTE: ::start stays `ifn?`, never s/fspec — fspec instrumentation would
+;; generatively INVOKE side-effectful user lifecycle fns at spec-check time
+;; (a miniature of the G7 dry-run-runs-:start bug; Chair-ratified, sl-yvaz).
+(s/def ::config
+  (s/with-gen map? #(gen/return {})))
+
+(s/def ::ok ::setup-list)
+(s/def ::error map?)
+
+;; Plan-shape lint issues (sl-lkla). Same open style as discover's error
+;; maps: :type + :message required, locating keys (:group, :label, :groups,
+;; :features, :feature) ride along per issue type.
+(s/def ::type keyword?)
+(s/def ::message string?)
+(s/def ::lint-issue (s/keys :req-un [::type ::message]))
+(s/def ::errors (s/coll-of ::lint-issue))
+(s/def ::warnings (s/coll-of ::lint-issue))
+(s/def ::lint-result (s/keys :req-un [::errors ::warnings]))
+
+(s/fdef load-setup
+  :args (s/cat :setup-path string? :config ::config)
+  :ret (s/or :ok (s/keys :req-un [::ok])
+             :error (s/keys :req-un [::error])))
+
+(s/fdef lint-setups
+  :args (s/cat :setups ::setup-list :base-dir (s/? (s/nilable string?)))
+  :ret ::lint-result)
 
 ;; -----------------------------------------------------------------------------
 ;; File Resolution
@@ -256,3 +305,99 @@
   [setup-entry]
   (or (::resolved-features setup-entry)
       (expand-group-features setup-entry)))
+
+;; -----------------------------------------------------------------------------
+;; Plan-Shape Lints (sl-lkla)
+;; -----------------------------------------------------------------------------
+
+(defn- group-name
+  "Reporting name for a group: its :label, or a positional fallback."
+  [entry idx]
+  (or (:label entry) (str "group " idx)))
+
+(defn- empty-features-issue
+  [entry name]
+  {:type :setup/empty-features
+   :group name
+   :features (vec (:features entry))
+   :message (str "Setup group " (pr-str name)
+                 " declares :features that match no feature files ("
+                 (str/join ", " (:features entry))
+                 ") — a dead group would report green while testing nothing")})
+
+(defn- lint-empty-features
+  [setups names expansions]
+  (vec (keep (fn [idx]
+               (when (empty? (nth expansions idx))
+                 (empty-features-issue (nth setups idx) (nth names idx))))
+             (range (count setups)))))
+
+(defn- duplicate-label-issue
+  [label idxs]
+  {:type :setup/duplicate-label
+   :label label
+   :groups (vec idxs)
+   :message (str "Setup label " (pr-str label)
+                 " is declared by groups at positions " (str/join " and " idxs)
+                 " — labels are reporting-load-bearing (group = run-scope)"
+                 " and must be unique")})
+
+(defn- lint-duplicate-labels
+  [setups]
+  (->> (map-indexed (fn [idx entry] [(:label entry) idx]) setups)
+       (filter (comp some? first))
+       (group-by first)
+       (filter (fn [[_ pairs]] (> (count pairs) 1)))
+       (sort-by key)
+       (mapv (fn [[label pairs]] (duplicate-label-issue label (map second pairs))))))
+
+(defn- shared-feature-issue
+  [feature names]
+  {:type :setup/feature-in-multiple-groups
+   :feature feature
+   :groups (vec names)
+   :message (str "Feature " feature " is declared by groups "
+                 (str/join " and " (map pr-str names))
+                 " — it will run once per group; if this is a deliberate"
+                 " matrix, this warning is expected")})
+
+(defn- lint-shared-features
+  [names expansions]
+  (->> (range (count expansions))
+       ;; distinct WITHIN a group: the same file declared twice by one group
+       ;; must not masquerade as a cross-group share.
+       (mapcat (fn [idx] (map vector
+                              (distinct (nth expansions idx))
+                              (repeat (nth names idx)))))
+       (group-by first)
+       (filter (fn [[_ pairs]] (> (count pairs) 1)))
+       (sort-by key)
+       (mapv (fn [[feature pairs]] (shared-feature-issue feature (map second pairs))))))
+
+(defn lint-setups
+  "Static plan-shape lints over the DECLARED setups (mmfy G4, severities
+   Chair-ruled 08-02). Runs on the full plan before any CLI narrowing —
+   plan-shape is static, so dry-run and filtered runs see the same verdicts.
+
+   Errors (planning failures, exit 2):
+   - :setup/empty-features  — a group's :features match no feature files on
+     disk; a dead group would report green while testing nothing. (A literal
+     empty :features vector is already rejected at load by ::features.)
+   - :setup/duplicate-label — two groups share a :label; labels are
+     reporting-load-bearing (group = run-scope) and must be unique.
+
+   Warnings (surfaced, never exit-flipping):
+   - :setup/feature-in-multiple-groups — the same feature file is declared
+     by more than one group. It runs once per group; same-feature-under-two-
+     registries is a conceivable legitimate matrix pattern, so this warns
+     loudly instead of erroring.
+
+   `base-dir` resolves relative :features paths (directory containing
+   setup.clj). Returns {:errors [...] :warnings [...]} (::lint-result)."
+  ([setups] (lint-setups setups nil))
+  ([setups base-dir]
+   (let [names      (vec (map-indexed (fn [idx entry] (group-name entry idx)) setups))
+         expansions (mapv #(expand-group-features % base-dir) setups)]
+     {:errors (into (lint-empty-features setups names expansions)
+                    (lint-duplicate-labels setups))
+      :warnings (lint-shared-features names expansions)})))

@@ -69,12 +69,21 @@
    Lexically disjoint from raw EDN locators, which open with `{:`."
   "\\{[A-Za-z][A-Za-z0-9]*(?:\\.[A-Za-z][A-Za-z0-9]*)*\\}")
 
+(def literal-re-fragment
+  "Regex pattern STRING for a nonempty quoted literal (sl-jlqz): a literal
+   quote inside is written SQL-style doubled ('' = one ' character), so
+   'Don''t' is the text Don't. The doubled pair needs adjacency, which is
+   what keeps multiple quoted slots in one step unambiguous. Bare '' (the
+   empty literal) stays a no-match — the alternation requires at least one
+   unit — and draws the clears hint."
+  "'(?:[^']|'')+'")
+
 (def value-re-fragment
   "Central value-slot regex fragment (sl-yh7): a quoted literal — captured
    WITH its quotes; the engine strips them by the frame's :arg-kinds — or a
    {binding} token. Splice into step patterns as (str \"(\" fragment \")\").
    Quoted is always literal (sl-iseq)."
-  (str "'[^']+'|" token-re-fragment))
+  (str literal-re-fragment "|" token-re-fragment))
 
 (def ^:private whole-token-re
   (re-pattern "\\{([A-Za-z][A-Za-z0-9]*)((?:\\.[A-Za-z][A-Za-z0-9]*)*)\\}"))
@@ -179,7 +188,20 @@
        (str/starts-with? s "'")
        (str/ends-with? s "'")))
 
-(defn- strip-quotes [s] (subs s 1 (dec (count s))))
+(defn undouble-quotes
+  "Collapse SQL-style doubled quotes in a literal's INTERIOR ('' -> ',
+   sl-jlqz). Authored-surface syntax only: never applied to resolved
+   binding values or observed text."
+  [s]
+  (str/replace s "''" "'"))
+
+(defn double-quotes
+  "Inverse of `undouble-quotes` (' -> ''): escape a value for re-wrapping
+   in quote delimiters, so strip-then-undouble round-trips to the value."
+  [s]
+  (str/replace s "'" "''"))
+
+(defn- strip-quotes [s] (undouble-quotes (subs s 1 (dec (count s)))))
 
 (defn normalize-capture
   "Normalize one capture by its bind-time slot kind, against the live
@@ -204,7 +226,10 @@
                      (token? capture) (str (resolve-token scenario-ctx capture))
                      :else capture)
     :location (if (token? capture)
-                (str "'" (resolve-token scenario-ctx capture) "'")
+                ;; Quote-wrap with interior quotes doubled (sl-jlqz) so the
+                ;; stepdef's strip-then-undouble is the exact inverse — a
+                ;; resolved value containing ' survives the round trip.
+                (str "'" (double-quotes (str (resolve-token scenario-ctx capture))) "'")
                 capture)
     capture))
 

@@ -23,11 +23,37 @@
 ;; Factory
 ;; -----------------------------------------------------------------------------
 
+;; DECISION (sl-x7ec, 2026-08-01): no automation-hygiene prefs here — parity
+;; with the etaoin defaults (sl-0fco: breach popup, save-password bubble,
+;; autofill offers) holds BY CONSTRUCTION. Every session this adapter creates
+;; goes launch() -> newContext() -> newPage(): Playwright browser contexts on
+;; Chromium are off-the-record profiles, and OTR profiles have no password
+;; store — the popup machinery isn't suppressed, the profile it needs doesn't
+;; exist. This covers the bundled Chromium AND :channel-driven branded
+;; Chrome/Edge (the context model, not the binary, is what matters; the
+;; unbranded build additionally lacks the leak-detection API keys). Playwright's
+;; own default switches do NOT disable this machinery — verified against the
+;; driver-bundle's chromiumSwitches.js — so porting the prefs as launch args
+;; would be dead code teaching a false load-bearing story, and accepting
+;; :adapter-opts :prefs here would be a silently-ignored lie. Neither ships.
+;;
+;; REOPEN IF this adapter ever gets a non-OTR route to a real profile —
+;; both shapes live in sl-3j7c (playwright-costume spike): (a) connectOverCDP
+;; to a costume's already-running Chrome — hygiene responsibility then sits
+;; with whoever SPAWNED the profile (the wardrobe machinery, where the sl-0fco
+;; prefs already live on the etaoin side); the Playwright attacher inherits,
+;; it does not configure; (b) launchPersistentContext(userDataDir) — a real
+;; profile with the machinery live, prefs become this adapter's problem.
+;; User-facing story: docs/INSTALL-TIERS.md § Backend differences.
+
 (defn create-browser
   "Create a new Playwright browser instance from configuration.
 
    Config options:
    - :headless — if true, run headless (default: true)
+   - :pruning — nested-pruning strategy (sl-tnx): :fast (default) or :safe;
+     see docs/INSTALL-TIERS.md § Backend differences. Playwright-meaning
+     only — the etaoin backend is always fused/fast.
    - :adapter-opts — map merged into Playwright launch options
      Common adapter-opts:
      - :browser-type — :chromium (default), :firefox, or :webkit
@@ -51,12 +77,20 @@
   [config]
   (try
     (require 'shiftlefter.webdriver.playwright.browser)
-    (let [launch-fn (resolve 'shiftlefter.webdriver.playwright.browser/launch-playwright-browser)
-          headless? (get config :headless true)
-          adapter-opts (get config :adapter-opts {})
-          opts (merge {:headless headless?} adapter-opts)
-          browser (launch-fn opts)]
-      {:ok {:browser browser}})
+    (let [pruning (get config :pruning :fast)]
+      (when-not (contains? #{:fast :safe} pruning)
+        (throw (ex-info (str "Unknown :pruning strategy " (pr-str pruning)
+                             " — must be :fast (default) or :safe")
+                        {:type :adapter/invalid-config
+                         :adapter :playwright
+                         :key :pruning
+                         :value pruning})))
+      (let [launch-fn (resolve 'shiftlefter.webdriver.playwright.browser/launch-playwright-browser)
+            headless? (get config :headless true)
+            adapter-opts (get config :adapter-opts {})
+            opts (merge {:headless headless? :pruning pruning} adapter-opts)
+            browser (launch-fn opts)]
+        {:ok {:browser browser}}))
     (catch ClassNotFoundException _
       {:error {:type :adapter/dependency-missing
                :adapter :playwright

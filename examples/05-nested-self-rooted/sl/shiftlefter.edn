@@ -1,9 +1,11 @@
 ;; ShiftLefter config — self-rooted nested addressing demo (sl-1ps example 05).
 ;;
-;; One interface (:web via Etaoin). The :intents glossary is loaded by the
-;; runner into the intent state at startup (runner Stage 1b) so the browser
-;; step path resolves nested addresses like Feed.post[2].author against this
-;; example's own intents. setup.clj stands up the fixture server.
+;; One interface (:web via Etaoin). The subjects + intents glossaries are
+;; discovered at the conventional paths next to this config
+;; (glossary/subjects.edn, glossary/intents/) and loaded at startup (runner
+;; Stage 1b) so the browser step path resolves nested addresses like
+;; Feed.post[2].author against this example's own intents. setup.clj stands
+;; up the fixture server.
 ;;
 ;; :base-url (sl-3jr4) — the environmental HOST half of named locations; the
 ;; semantic PATH lives on each intent's :location. Must match setup.clj's fixed
@@ -11,9 +13,6 @@
 ;; file is replaced wholesale, not merged).
 {:interfaces {:web {:type :web :adapter :etaoin
                     :config {:base-url "http://localhost:9092"}}}
- :runner     {:step-paths []}
- :glossaries {:subjects "glossary/subjects.edn"
-              :intents  "glossary/intents"}
  :svo        {:unknown-subject :error
               :unknown-verb    :warn
               :unknown-interface :error}}

@@ -14,6 +14,13 @@ account.
 > bank logins, `:x` = your Twitter). A subject can act bare (a fresh browser) or
 > wearing a costume; a costume is never an actor and has no agency.
 
+> **Single-wearer, single-interface.** A costume is a device-local browser
+> profile, so it has exactly one wearer on exactly one interface per scenario.
+> What crosses interfaces is *identity* — the account, which lives in the
+> application — so "the same user on web and mobile" is two costumes plus one
+> account, never one costume shared. The runner rejects duplicate `:wears`
+> across targets before any browser attaches.
+
 **What a costume is not.** It launches plain Chrome with no anti-automation
 flags — ever. A costume is "bring your own authenticated session," not a
 detection-evasion tool. You log in once, like a human; ShiftLefter reuses that

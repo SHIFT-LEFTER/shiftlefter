@@ -95,6 +95,29 @@
           output (with-err-str (console/print-failures! scenarios {:no-color true}))]
       (is (empty? output)))))
 
+(deftest test-print-failures-shows-attachment-lines
+  ;; sl-l9nj: one plain ASCII continuation line per artifact on failure;
+  ;; errored refs show the failure, never a path that would lie.
+  (testing "attachment refs close the failure block on the 5-space ladder"
+    (let [scenarios [{:status :failed
+                      :plan {:plan/pickle {:pickle/name "Evidenced"}}
+                      :steps [{:status :failed
+                               :step {:step/text "I click the button"}
+                               :binding {:source {:file "steps.clj" :line 10}}
+                               :error {:type :step/exception :message "boom"}}]
+                      :attachments [#:attachment{:kind :screenshot
+                                                 :path "attachments/evidenced/s.png"}
+                                    #:attachment{:kind :console
+                                                 :path "attachments/evidenced/c.log"
+                                                 :error "console read timed out"}]}]
+          output (with-err-str (console/print-failures! scenarios {:no-color true}))]
+      (is (str/includes? output
+                         "     attachment: screenshot -> attachments/evidenced/s.png"))
+      (is (str/includes? output
+                         "     attachment: console FAILED: console read timed out"))
+      (is (not (str/includes? output "c.log"))
+          "the errored ref's path is not offered as evidence"))))
+
 ;; -----------------------------------------------------------------------------
 ;; print-diagnostics! Tests
 ;; -----------------------------------------------------------------------------

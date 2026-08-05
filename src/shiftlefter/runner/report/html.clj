@@ -216,7 +216,31 @@
 ;; Reporter
 ;; -----------------------------------------------------------------------------
 
-(defrecord HtmlReporter [path state]
+(defn- write-atomically!
+  "Write `content` to `path`: spit to a temp sibling, then ATOMIC_MOVE over
+   the target (the daemon.clj write-edn! pattern — sl-luhn's torn-write fix
+   for the HTML half). A reader never sees a half-written report."
+  [^String path content]
+  (let [file (java.io.File. path)
+        dir (or (.getParentFile file) (java.io.File. "."))]
+    (.mkdirs dir)
+    (let [tmp (java.io.File/createTempFile "report" ".html" dir)]
+      (spit tmp content)
+      (java.nio.file.Files/move
+       (.toPath tmp) (.toPath file)
+       (into-array java.nio.file.CopyOption
+                    [java.nio.file.StandardCopyOption/ATOMIC_MOVE
+                     java.nio.file.StandardCopyOption/REPLACE_EXISTING])))
+    nil))
+
+(defn- same-file-target?
+  "True when two path strings name the same target file (the user pointed
+   --html INTO the run dir) — guard against a pointless self-copy."
+  [^String a ^String b]
+  (= (.getCanonicalPath (java.io.File. a))
+     (.getCanonicalPath (java.io.File. b))))
+
+(defrecord HtmlReporter [path primary state]
   reporter/Reporter
   (on-run-start [_this run-ctx]
     (swap! state assoc :run-ctx run-ctx)
@@ -233,18 +257,53 @@
   (on-run-end [_this run-summary]
     ;; Materialize the artifact. A write failure THROWS (invariant 4): the
     ;; user asked for this file and must never get a silent partial.
+    ;;
+    ;; sl-l9nj (Chair-ratified 08-03): when the run has a results dir the
+    ;; report JOINS it — `primary` (<group-root>/report.html) is the real
+    ;; artifact, sitting beside attachments/ so relative refs resolve and
+    ;; the run dir zips as a self-contained directory. The configured
+    ;; `path` then gets an end-of-run byte copy (same string, same
+    ;; encoding — not a symlink, Windows-safe): the stable deterministic
+    ;; path CI configs and agents grab survives exactly as before. With no
+    ;; results dir (`primary` nil — :defaults context) the stable path is
+    ;; the only write, as it always was.
     (let [{:keys [run-ctx scenarios diagnostics]} @state
           html (build-document {:run-ctx run-ctx
                                 :scenarios scenarios
                                 :diagnostics diagnostics
-                                :summary run-summary})
-          file (java.io.File. ^String path)]
-      (when-let [parent (.getParentFile file)]
-        (.mkdirs parent))
-      (spit file html)
+                                :summary run-summary})]
+      (if primary
+        (do (write-atomically! primary html)
+            (when-not (same-file-target? primary path)
+              (write-atomically! path html)))
+        (write-atomically! path html))
       nil)))
 
+(defn write-planning-failure!
+  "Materialize the HTML report for a planning-failed run (exit 2, sl-6hsd).
+   Console and EDN both carry the diagnostics on this path; the HTML file
+   must not stay silently absent — worse, a previous run's report.html
+   would sit there lying. Reuses the pure build-document: zero scenarios,
+   the diagnostics island (scrubbed exactly like the lifecycle path), and
+   a :planning-failed summary the renderer keys its header state on.
+   Loud failure (reporter invariant 4): a write error throws."
+  [path run-ctx diagnostics summary]
+  ;; Stable path ONLY, by design (sl-l9nj kept it): planning failures never
+  ;; create a run dir (sl-y3wd — execute-and-report-stage is never reached),
+  ;; so there is no primary to join.
+  (write-atomically! path
+                     (build-document {:run-ctx run-ctx
+                                      :scenarios []
+                                      :diagnostics (reporter/diagnostics-envelope
+                                                    diagnostics)
+                                      :summary summary}))
+  nil)
+
 (defn make-reporter
-  "Construct an HtmlReporter. `opts` is {:path <output-path>}."
+  "Construct an HtmlReporter. `opts` is {:path <stable-configured-path>
+   :primary <group-root>/report.html | nil} — `path` is always written;
+   when `primary` is set it is the real artifact and `path` becomes the
+   end-of-run byte copy (sl-l9nj)."
   [opts]
-  (->HtmlReporter (:path opts) (atom {:scenarios [] :run-ctx nil :diagnostics nil})))
+  (->HtmlReporter (:path opts) (:primary opts)
+                  (atom {:scenarios [] :run-ctx nil :diagnostics nil})))

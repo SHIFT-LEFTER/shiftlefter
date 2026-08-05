@@ -59,11 +59,12 @@ step's frame is fully declared, and the handoff is first-class.
 ## Standing Up the SUT — `setup.clj`
 
 This demo needs a target webapp. We don't want users to spin one up
-manually before each run, so `setup.clj` (a sibling of `shiftlefter.edn`)
-declares the orchestration. ShiftLefter loads it automatically.
+manually before each run, so `setup.clj` (a sibling of `shiftlefter.edn`,
+both in `sl/`) declares the orchestration. ShiftLefter loads it
+automatically.
 
 ```clojure
-;; setup.clj — abridged
+;; sl/setup.clj — abridged
 (defn- start-sms-2fa [_config]
   (let [shared-sms (->MirrorMockSMS (mock/make-mock-sms))
         stop!      (http/run-server

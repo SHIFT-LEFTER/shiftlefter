@@ -6,7 +6,7 @@
 
 ;; Raw stepdef maps — the hint classifier only reads :pattern and :metadata.
 (def ^:private stepdefs
-  [{:pattern #"alice fills Login\.code with '([^']+)'"
+  [{:pattern #"alice fills Login\.code with '((?:[^']|'')+)'"
     :metadata {:interface :web}}
    {:pattern #"alice clicks ([A-Z][A-Za-z0-9_.-]*)"
     :metadata {:interface :web}}])
@@ -30,7 +30,23 @@
   (testing "apostrophe inside a quoted literal does not break the span"
     (is (= [{:inner "the user's name"}]
            (map #(select-keys % [:inner])
-                (hints/single-quote-spans "fills X with 'the user's name'"))))))
+                (hints/single-quote-spans "fills X with 'the user's name'")))))
+  (testing "doubling-aware pairing (sl-jlqz): '' inside a span is one
+            escaped quote, not a close-and-reopen"
+    (is (= [{:inner "don''t"}]
+           (map #(select-keys % [:inner])
+                (hints/single-quote-spans "fills X with 'don''t'"))))
+    (is (= [{:inner "''"}]
+           (map #(select-keys % [:inner])
+                (hints/single-quote-spans "fills X with ''''"))))
+    (is (= [{:inner ""}]
+           (map #(select-keys % [:inner])
+                (hints/single-quote-spans "fills X with ''")))
+        "a bare '' still opens and immediately closes — the empty-literal cue")
+    (is (= [{:inner "a"} {:inner "b"}]
+           (map #(select-keys % [:inner])
+                (hints/single-quote-spans "sel 'a' from 'b'")))
+        "non-adjacent quotes still pair as separate spans")))
 
 (deftest double-quote-scanner
   (testing "double quote inside a single-quoted literal is ordinary (law scope)"
@@ -84,10 +100,48 @@
 
 (deftest apostrophes-do-not-trigger-hints
   (is (nil? (hints/undefined-hint "alice checks the user's dashboard"
-                                  stepdefs intents)))
-  (is (nil? (hints/undefined-hint "alice fills X with 'the user's name'"
                                   stepdefs intents))
-      "apostrophe inside a balanced literal is not an unbalanced quote"))
+      "apostrophes in unquoted prose stay silent"))
+
+(deftest unbalanced-doubling-candidate
+  (testing "sl-jlqz: an interior stray quote repairs by doubling, with
+            did-you-mean (was: close-at-end/drop-last only, both failing)"
+    (let [hint (hints/undefined-hint
+                "alice fills Login.code with 'friends' page'"
+                stepdefs intents)]
+      (is (= :grammar/unbalanced-quote (:type hint)))
+      (is (= "alice fills Login.code with 'friends'' page'"
+             (:repaired-text hint))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-jlqz — undoubled apostrophe inside a balanced literal
+;; -----------------------------------------------------------------------------
+
+(deftest apostrophe-in-literal-hint
+  (testing "letter-flanked apostrophe in a literal (pre-jlqz: silent no-match)
+            — the repair doubles it and rematch proves the intent"
+    (let [hint (hints/undefined-hint
+                "alice fills Login.code with 'Don't stop'"
+                stepdefs intents)]
+      (is (= :grammar/apostrophe-in-literal (:type hint)))
+      (is (= "alice fills Login.code with 'Don''t stop'"
+             (:repaired-text hint)))
+      (is (str/includes? (:suggestion hint) "written doubled"))
+      (is (str/includes? (:suggestion hint)
+                         "Did you mean: alice fills Login.code with 'Don''t stop'?")))))
+
+(deftest apostrophe-in-literal-hint-without-matching-repair
+  (let [hint (hints/undefined-hint "alice frobs 'the user's name'"
+                                   stepdefs intents)]
+    (is (= :grammar/apostrophe-in-literal (:type hint)))
+    (is (nil? (:repaired-text hint)))
+    (is (not (str/includes? (:suggestion hint) "Did you mean")))))
+
+(deftest legal-doubling-is-not-a-cue
+  (testing "a correctly doubled literal in a step that no-matches for other
+            reasons draws no apostrophe hint"
+    (is (nil? (hints/undefined-hint "alice frobs 'don''t'"
+                                    stepdefs intents)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Case 3 — quoted ref-shaped content (grammar-markers row 3)
@@ -168,21 +222,35 @@
 
 ;; Builtin-shaped patterns so repair-and-rematch is live for the matrix:
 ;; a locator slot accepts a brace form or a ref; values are single-quoted.
+;; Value slots use the real doubling-aware shape '(?:[^']|'')*' (sl-38fy) —
+;; the simplified '[^']*' would reject repairs that double an apostrophe.
 (def ^:private matrix-stepdefs
-  [{:pattern #"(?::\S+ )?fills (\{.+?\}|[A-Z][A-Za-z0-9_.-]*) with '([^']*)'"
+  [{:pattern #"(?::\S+ )?fills (\{.+?\}|[A-Z][A-Za-z0-9_.-]*) with '((?:[^']|'')*)'"
     :metadata {:interface :web}}
-   {:pattern #"(?::\S+ )?should see '([^']*)'"
+   {:pattern #"(?::\S+ )?should see '((?:[^']|'')*)'"
     :metadata {:interface :web}}
    {:pattern #"(?::\S+ )?clicks (\{.+?\}|[A-Z][A-Za-z0-9_.-]*)"
     :metadata {:interface :web}}])
 
 (deftest locator-quote-matrix
   (let [hint #(hints/undefined-hint % matrix-stepdefs nil)]
-    (testing "cases 1/2/6 — quotes only inside EDN locators: SILENT (the
+    (testing "cases 1/6 — quotes only inside EDN locators: SILENT (the
               undefined diagnostic itself still reports; no false repair)"
       (is (nil? (hint ":user/alice clicsk {:css \"button.submit\"}")))
-      (is (nil? (hint ":user fills {:id \"code\"} with the SMS code")))
       (is (nil? (hint ":user clicksk {:css \"button[type='submit']\"}"))))
+
+    (testing "case 2 — bare words in a value slot (sl-38fy, y9gn option C):
+              SUPERSEDES the option-A silent pin. Quote-the-tail rematches
+              the fills frame, so the positive hint fires — locator quotes
+              intact, the law sentence names both admitted value forms"
+      (let [h (hint ":user fills {:id \"code\"} with the SMS code")]
+        (is (= :grammar/bare-value (:type h)))
+        (is (= ":user fills {:id \"code\"} with 'the SMS code'"
+               (:repaired-text h)))
+        (is (= (str "Value slots take a quoted literal ('...') or a binding"
+                    " ({Name}). Did you mean: :user fills {:id \"code\"}"
+                    " with 'the SMS code'?")
+               (:suggestion h)))))
 
     (testing "cases 3/4 — genuine prose double quotes: byte-identical to the
               pre-fix hint, did-you-mean included"
@@ -226,3 +294,112 @@
               open and the double-quote family fires as pre-fix"
       (let [h (hint ":user clicks {:text \"{\"}")]
         (is (= :grammar/double-quotes (:type h)))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-38fy: bare-value family — rematch-gated (no textual cue; the proven
+;; near-miss frame IS the evidence). Suffix tails only by design: interior
+;; value slots (selects 'X' from ..., MMS caption/media) stay silent — the
+;; pattern-relaxation follow-up bead opens when interior evidence appears.
+;; -----------------------------------------------------------------------------
+
+(deftest bare-value-tail-candidates
+  (testing "tail zone starts after the last brace span — no candidate
+            crosses or precedes the locator"
+    (is (= [":user fills {:id \"a b\"} 'with x'"
+            ":user fills {:id \"a b\"} with 'x'"]
+           (hints/quote-tail-candidates ":user fills {:id \"a b\"} with x"))))
+  (testing "tail zone starts after the last slot quote — existing literals
+            are opaque"
+    (is (= ["fills X with 'a' 'b c'"
+            "fills X with 'a' b 'c'"]
+           (hints/quote-tail-candidates "fills X with 'a' b c"))))
+  (testing "interior apostrophes in the quoted tail are doubled (sl-jlqz);
+            candidates run longest tail first"
+    (is (= ["with 'the user''s code'"
+            "with the 'user''s code'"
+            "with the user's 'code'"]
+           (hints/quote-tail-candidates "with the user's code")))))
+
+(deftest bare-value-hint-fires-on-proven-frame
+  (let [hint #(hints/undefined-hint % matrix-stepdefs nil)]
+    (testing "apostrophe in the tail is doubled in the repair, and the
+              doubling-aware value slot admits it"
+      (let [h (hint ":user fills Login.note with the user's code")]
+        (is (= :grammar/bare-value (:type h)))
+        (is (= ":user fills Login.note with 'the user''s code'"
+               (:repaired-text h)))))
+    (testing "longest matching tail wins when several candidates rematch"
+      (let [says-stepdefs [{:pattern #"says (.+) '((?:[^']|'')*)'"
+                           :metadata {:interface :web}}]
+            h (hints/undefined-hint "says hello big world" says-stepdefs nil)]
+        (is (= "says hello 'big world'" (:repaired-text h))
+            "'big world' (earlier boundary) beats 'world'")))))
+
+(deftest bare-value-stays-silent-without-proof
+  (let [hint #(hints/undefined-hint % matrix-stepdefs nil)]
+    (testing "no near-miss frame: bare words are ordinary undefined text"
+      (is (nil? (hint ":user frobnicates the widget"))))
+    (testing "interior value slot (v1 boundary): tail quoting cannot reach
+              a slot before 'from', so selects-shaped steps stay silent"
+      (is (nil? (hints/undefined-hint
+                 ":user selects Basic from Menu.plans"
+                 [{:pattern #"(?::\S+ )?selects '((?:[^']|'')*)' from ([A-Z][A-Za-z0-9_.-]*)"
+                   :metadata {:interface :web}}]
+                 nil))))
+    (testing "bare words after a locator with no matching frame: silent"
+      (is (nil? (hint ":user clicks {:id \"x\"} now"))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-bav1: prose-as-step — terminal teaching-only fallback. Description
+;; prose that opens with a step keyword lexes as a real step (standard
+;; Gherkin; the keyword is stripped before the classifier sees the text).
+;; Structural cue (Chair-ruled): zero structured tokens (no slot quotes,
+;; no brace characters, no PascalCase ref-shaped word — dotted or bare)
+;; AND terminal sentence punctuation. No did-you-mean — no repair makes
+;; prose match.
+;; -----------------------------------------------------------------------------
+
+(deftest prose-as-step-fires-on-the-v85e-bite
+  (testing "the thrice-observed trap: 'When the gateway degrades, the
+            client retries.' — keyword lexed off, prose left as step text"
+    (let [h (hints/undefined-hint "the gateway degrades, the client retries."
+                                  stepdefs intents)]
+      (is (= :grammar/prose-as-step (:type h)))
+      (is (= (str "This line reads like description prose. Descriptions end"
+                  " at the first Given/When/Then/And/But (or *) — move prose"
+                  " above the first step or rephrase so it does not open"
+                  " with a step keyword.")
+             (:suggestion h))
+          "byte-pinned wording")
+      (is (not (contains? h :repaired-text))
+          "teaching-only — no repair is claimed"))))
+
+(deftest prose-as-step-accepts-all-sentence-enders
+  (doseq [text ["the gateway simply gives up!"
+                "does the gateway even retry?"
+                "the gateway degrades…"]]
+    (is (= :grammar/prose-as-step
+           (:type (hints/undefined-hint text stepdefs intents)))
+        text)))
+
+(deftest prose-as-step-negative-ref-shaped-tokens
+  (testing "cue precision: an undefined real step ending in a period stays
+            silent when it carries a ref-shaped token — dotted or bare"
+    (is (nil? (hints/undefined-hint "alice clcks Login.submit."
+                                    stepdefs intents))
+        "dotted ref, trailing period stripped before the shape test")
+    (is (nil? (hints/undefined-hint "goe to Login." stepdefs intents))
+        "bare named-location ref counts as structure too (Chair-ruled)")))
+
+(deftest prose-as-step-negative-no-sentence-punctuation
+  (testing "both cue halves required: token-free prose without a terminal
+            sentence mark stays silent (existing cue-free behavior)"
+    (is (nil? (hints/undefined-hint
+               "the gateway degrades and the client retries"
+               stepdefs intents)))))
+
+(deftest prose-as-step-negative-brace-character
+  (testing "any brace character is structure evidence — even an unclosed
+            one that brace-spans would fail open on"
+    (is (nil? (hints/undefined-hint "the gateway { degrades, sadly."
+                                    stepdefs intents)))))

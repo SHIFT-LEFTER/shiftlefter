@@ -99,7 +99,7 @@
 ;;     - gherkin.dialect/*  (defonce delays over Cucumber i18n.json — pure data)
 ;;     - webdriver.playwright.browser/imports-loaded?  (one-shot import latch)
 ;;   NOT ON THE CLI DISPATCH PATH (REPL-API only):
-;;     - repl/{session-ctx,named-contexts,surfaces,connected-subjects,repl-config}
+;;     - repl/{session-ctx,named-contexts,connected-subjects,repl-config}
 ;;   DAEMON CONTROL (this ns — lifecycle, not user state; reset by serve!):
 ;;     - daemon-state, shutdown-hook-registered (below)
 ;;

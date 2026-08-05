@@ -1,10 +1,19 @@
 ;; ShiftLefter configuration
-;; Copy to shiftlefter.edn and customize
+;; Copy to sl/shiftlefter.edn (the only discovered location) and customize.
+;; Config-declared paths resolve from the config's directory, so the
+;; defaults below land at sl/steps/ and sl/features/.
 
 {:parser {:dialect "en"}       ;; Language dialect (en, fr, de, etc.)
 
  :runner {:step-paths ["steps/"]      ;; Where to find step definitions
-          :allow-pending? false}      ;; Exit 0 even with pending steps?
+          :features ["features/"]     ;; Feature corpus for bare `sl run`
+          :allow-pending? false       ;; Exit 0 even with pending steps?
+          ;; Capture artifacts into the run's results dir (sl/results/<run>/).
+          ;; Kinds: :screenshot :console :page-source (browser); policies:
+          ;; :never (default) | :on-failure | :every-step. Recommended:
+          ;; :capture {:screenshot :on-failure
+          ;;           :console :on-failure}
+          }
 
  ;; --- Shifted mode (the advertised path) ---
  ;; Uncomment to validate scenarios against a project glossary at planning
@@ -12,8 +21,12 @@
  ;; `sl orient` confirms which mode you're in. See docs/SVO.md for the
  ;; glossary file formats.
  ;;
+ ;; Glossaries at the conventional paths next to this config —
+ ;; glossary/subjects.edn, glossary/verbs/<type>.edn, glossary/intents/ —
+ ;; are discovered automatically; an explicit :glossaries map overrides
+ ;; them wholesale (:glossaries nil turns them off).
+ ;;
  ;; :interfaces {:web {:type :web :adapter :etaoin}}   ; bundled WebDriver backend
- ;; :glossaries {:subjects "glossary/subjects.edn"}
  ;; :svo {:unknown-subject :error
  ;;       :unknown-verb    :warn
  ;;       :unknown-interface :error}

@@ -166,7 +166,7 @@
    textually identical to intent.resolve/location-ref-pattern — a regex
    splice can't call the classifier. Change both together; extract if a
    third consumer appears. Drift guard: stepdefs/browser_test.clj."
-  (str "'[^']+'|" bindings/token-re-fragment
+  (str bindings/literal-re-fragment "|" bindings/token-re-fragment
        "|[A-Z][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_-]+)*"))
 
 ;; Pre-built pattern strings for common step patterns
@@ -384,8 +384,9 @@
    the closed set in svo.keys) or a quoted capture ('g' presses that
    character; multi-char is admitted by the pattern so plan validation
    can reject it with a pointer at fills, not a bare no-match).
+   Doubling applies here too (sl-jlqz): '''' presses the apostrophe key.
    Chords/sequences: removed at sl-2sj6, parked as sl-eecq."
-  "[A-Z][A-Za-z0-9]*|'[^']+'")
+  (str "[A-Z][A-Za-z0-9]*|" bindings/literal-re-fragment))
 
 (defn- resolve-key-capture
   "Resolve a :key-slot capture (raw, WITH quotes — :key slots are not
@@ -395,7 +396,7 @@
    throws here are the runtime backstop for direct invocation."
   [capture]
   (if (str/starts-with? capture "'")
-    (let [inner (subs capture 1 (dec (count capture)))]
+    (let [inner (bindings/undouble-quotes (subs capture 1 (dec (count capture))))]
       (if (= 1 (count inner))
         inner
         (throw (ex-info (str "presses takes a single key, not text: " capture
@@ -535,14 +536,16 @@
                        :available-sessions (web-subjects-in-ctx ctx)})))))
 
 (defn- unquote-literal
-  "Strip the single quotes off a quoted location-slot capture ('…' → …).
-   Non-quoted values pass through unchanged."
+  "Strip the single quotes off a quoted location-slot capture ('…' → …)
+   and collapse SQL-style doubled interior quotes (sl-jlqz) — the exact
+   inverse of the engine's token quote-wrap. Non-quoted values pass
+   through unchanged."
   [s]
   (if (and (string? s)
            (>= (count s) 2)
            (str/starts-with? s "'")
            (str/ends-with? s "'"))
-    (subs s 1 (dec (count s)))
+    (bindings/undouble-quotes (subs s 1 (dec (count s))))
     s))
 
 (defn- resolve-location-object
@@ -806,12 +809,15 @@
 
 ;; --- Existing Verification Steps (0.3.5) ---
 
-(defstep #":([\w./-]+) should see '([^']+)'"
+(defstep #":([\w./-]+) should see '((?:[^']|'')+)'"
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :on-page :object :$2}
    :doc/example ":alice should see 'Welcome'"}
   [ctx subject-str expected-text]
-  (let [[ctx' browser] (with-subject-query ctx subject-str)
+  ;; The capture is the literal's INTERIOR (no :object-kind on :see/:on-page,
+  ;; so the engine never normalizes it) — undouble here (sl-jlqz).
+  (let [expected-text (bindings/undouble-quotes expected-text)
+        [ctx' browser] (with-subject-query ctx subject-str)
         body-locator (locators/resolve-locator {:tag "body"})]
     (with-retry
       (fn []

@@ -6,7 +6,7 @@
 
 (deftest topics-test
   (testing "topics are stable and include the default overview"
-    (is (= ["intro" "overview" "authoring" "grammar" "vocabulary" "locators" "diagnostics" "hooks" "sieve" "examples" "builtins"]
+    (is (= ["intro" "overview" "layout" "authoring" "grammar" "vocabulary" "locators" "diagnostics" "hooks" "lifecycle" "sieve" "examples" "builtins"]
            (agent-doc/topic-names)))
     (is (= "overview" agent-doc/default-topic))))
 

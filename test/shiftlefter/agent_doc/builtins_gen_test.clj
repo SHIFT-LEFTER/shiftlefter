@@ -38,7 +38,9 @@
       (testing "not-bundled adapters carry the extra-dep pointer (sl-gcdu)"
         (is (str/includes?
              md
-             "(not bundled — add com.microsoft.playwright/playwright {:mvn/version \"1.50.0\"} to your deps.edn)"))
+             (str "(not bundled — add com.microsoft.playwright/playwright "
+                  "{:mvn/version \"1.50.0\"} to your deps.edn, or drop the "
+                  "resolved jars in sl/lib/; see docs/INSTALL-TIERS.md)")))
         (is (not (str/includes? md "`:etaoin` — provides `:shiftlefter.browser.protocol/IBrowser` (not bundled"))
             "bundled adapters gain no pointer"))
       (testing "capability lane (requires-protocols) is surfaced for gated steps"

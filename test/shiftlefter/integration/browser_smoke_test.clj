@@ -310,17 +310,9 @@
     ;; is tested in the integration tests above
     (repl/clear!)
 
-    ;; Surface marking
-    (repl/mark-surface! :alice)
-    (is (true? (repl/surface? :alice)))
-
     ;; reset-ctxs! returns actions
     (let [actions (repl/reset-ctxs!)]
-      (is (vector? actions)))
-
-    ;; Surfaces cleared by clear!
-    (repl/clear!)
-    (is (false? (repl/surface? :alice)))))
+      (is (vector? actions)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Costume Integration Tests

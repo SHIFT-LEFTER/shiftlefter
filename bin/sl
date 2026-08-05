@@ -12,6 +12,10 @@
 # frozen at build time. Edit src/ and re-run `sl` and you get the OLD jar until
 # you rebuild (the warm daemon bounces itself on a jar rebuild).
 #
+# User classpath extension (sl-5ee5): jars dropped in the project's sl/lib/
+# ride every run — cold floor and daemon alike, framework jar first — and the
+# daemon bounces when the lib set changes, same as on a jar rebuild.
+#
 # To run the CLI against live src/ (no jar, no daemon — the old "source mode"),
 # use `bin/sl-dev`. For interactive exploration use the REPL (`bin/repl-eval`).
 #
@@ -207,18 +211,6 @@ if [[ "${1:-}" == "repl" ]]; then
     # No --clj: fall through to normal java -jar dispatch below
 fi
 
-# Check for lib/ directory with extra JARs (classpath extension)
-# If lib/*.jar files exist, use -cp mode instead of -jar to include them
-build_classpath() {
-    local jar="$1"
-    local lib_dir="$SCRIPT_DIR/lib"
-    if [[ -d "$lib_dir" ]] && ls "$lib_dir"/*.jar &>/dev/null 2>&1; then
-        echo "$jar:$lib_dir/*"
-    else
-        echo ""
-    fi
-}
-
 # AppCDS cold floor (sl-s3u). Freshness is an mtime stat (never hash the 42MB
 # jar): the archive is usable only while it is newer than the jar.
 cds_is_fresh() {
@@ -261,8 +253,14 @@ cds_flags() {
 }
 
 # exec a cold `java -jar` run, prefixing CDS flags when the archive is fresh.
+# With sl/lib jars present (sl-5ee5), -cp mode instead — intentionally NO CDS:
+# the archive is keyed to the plain `-jar` classpath and would mismatch (the
+# same rationale the pre-5ee5 installation-lib stub carried).
 exec_jar() {
     local java_cmd="$1"; shift
+    if [[ -n "$LIB_CP" ]]; then
+        exec "$java_cmd" -cp "$LIB_CP" clojure.main -m shiftlefter.core "$@"
+    fi
     local cds; cds=$(cds_flags "$java_cmd")
     # shellcheck disable=SC2086  # $cds is a deliberately word-split flag list (0 or 2 tokens)
     exec "$java_cmd" $cds -jar "$JAR_FILE" "$@"
@@ -294,8 +292,21 @@ canon_path() {
 # link path, which would otherwise read as 'stale' and bounce the daemon every call.
 file_size() { stat -L -f %z "$1" 2>/dev/null || stat -L -c %s "$1" 2>/dev/null; }
 
-# Nearest ancestor of $1 containing shiftlefter.edn, sl/shiftlefter.edn (the
-# sl-directory config layout), OR .git (a .git *file* counts — that's a linked
+# Sorted `name:size` lines for the jars in dir $1; empty output when the dir is
+# absent or holds no jars (sl-5ee5). The daemon's classpath freezes sl/lib at
+# spawn; spawn_daemon records this signature and read_daemon compares against a
+# fresh one, so any change to the SET (add/remove/replace, including deleting
+# the whole dir) bounces the daemon — same treatment as a jar rebuild.
+lib_sig() {
+    local d="$1" f
+    [[ -n "$d" && -d "$d" ]] || return 0
+    for f in "$d"/*.jar; do
+        [[ -f "$f" ]] && printf '%s:%s\n' "${f##*/}" "$(file_size "$f")"
+    done | sort
+}
+
+# Nearest ancestor of $1 containing sl/shiftlefter.edn (the single discovered
+# config layout, sl-fcjm) OR .git (a .git *file* counts — that's a linked
 # worktree). MUST match shiftlefter.project-context/instance-root exactly:
 # wrapper and daemon have to agree on where .shiftlefter/daemon.edn lives
 # (sl-v7l6). No anchor -> caller runs cold (we don't spawn a daemon for an
@@ -303,7 +314,7 @@ file_size() { stat -L -f %z "$1" 2>/dev/null || stat -L -c %s "$1" 2>/dev/null; 
 find_instance_root() {
     local dir="$1" parent
     while true; do
-        if [[ -e "$dir/shiftlefter.edn" || -e "$dir/sl/shiftlefter.edn" || -e "$dir/.git" ]]; then
+        if [[ -e "$dir/sl/shiftlefter.edn" || -e "$dir/.git" ]]; then
             printf '%s\n' "$dir"
             return 0
         fi
@@ -335,6 +346,19 @@ read_daemon() {
     cur_size="$(file_size "$JAR_FILE")"
     [[ -n "$rec_size" && "$rec_size" == "$cur_size" ]] || return 3
     [[ "$JAR_FILE" -nt "$edn" ]] && return 3
+    # Lib staleness (sl-5ee5): the sl/lib set the daemon spawned with vs now.
+    # Signature mismatch (add/remove/replace/deleted dir — and a pre-lib-sig
+    # daemon when libs exist) -> bounce. The -nt belt catches a same-size
+    # rebuild, mirroring the jar check above.
+    local rec_lsig cur_lsig lf
+    rec_lsig="$(cat "$(dirname "$edn")/lib-sig" 2>/dev/null || true)"
+    cur_lsig="$(lib_sig "$LIB_DIR")"
+    [[ "$rec_lsig" == "$cur_lsig" ]] || return 3
+    if [[ -n "$LIB_DIR" && -d "$LIB_DIR" ]]; then
+        for lf in "$LIB_DIR"/*.jar; do
+            [[ -f "$lf" && "$lf" -nt "$edn" ]] && return 3
+        done
+    fi
     # JDK path change (e.g. an upgrade): respawn so the daemon runs the new java.
     local rec_java cur_canon rec_canon
     rec_java="$(edn_str "$edn" java)"
@@ -383,9 +407,19 @@ spawn_daemon() {
         # breadcrumb is suppressed; this is the wrapper's job per the design).
         [[ -t 2 ]] && printf 'ShiftLefter daemon started — sl daemon status\n' >&2
         rm -f "$edn"  # clear any dead breadcrumb so wait_for_edn sees OURS
-        local cds; cds=$(cds_flags "$java_cmd")
-        # shellcheck disable=SC2086  # $cds is a deliberately word-split flag list
-        nohup "$java_cmd" $cds -jar "$JAR_FILE" daemon serve >>"$sdir/daemon.log" 2>&1 &
+        # Record the sl/lib set this daemon spawns with (sl-5ee5); read_daemon
+        # bounces on any later difference. Written empty when there are no libs.
+        lib_sig "$LIB_DIR" > "$sdir/lib-sig"
+        local cds
+        if [[ -n "$LIB_CP" ]]; then
+            # Lib classpath: -cp mode, no CDS (archive keyed to plain -jar).
+            nohup "$java_cmd" -cp "$LIB_CP" clojure.main -m shiftlefter.core \
+                daemon serve >>"$sdir/daemon.log" 2>&1 &
+        else
+            cds=$(cds_flags "$java_cmd")
+            # shellcheck disable=SC2086  # $cds is a deliberately word-split flag list
+            nohup "$java_cmd" $cds -jar "$JAR_FILE" daemon serve >>"$sdir/daemon.log" 2>&1 &
+        fi
         wait_for_edn "$edn"; local ok=$?
         rmdir "$lock" 2>/dev/null
         return $ok
@@ -445,8 +479,10 @@ maybe_route_warm() {
     [[ "$SL_NO_DAEMON_FLAG" == 1 || -n "${SL_NO_DAEMON:-}" ]] && return 0
     env | grep -q '^SHIFTLEFTER_' && return 0  # daemon env is frozen at spawn; don't lie
     is_cold_command "$@" && return 0
-    local root
-    root="$(find_instance_root "$USER_CWD")" || return 0
+    # One root resolution, one truth: the global INSTANCE_ROOT (computed before
+    # dispatch) is this same lookup; lib discovery and warm routing must agree.
+    local root="$INSTANCE_ROOT"
+    [[ -n "$root" ]] || return 0
     ensure_warm_port "$java_cmd" "$root" "$@" || return 0
     "$java_cmd" -cp "$JAR_FILE" shiftlefter.client.NreplClient "$D_PORT" "$USER_CWD" "$@"
     local rc=$?
@@ -458,7 +494,7 @@ maybe_route_warm() {
 do_daemon_status() {
     local root edn pid live
     root="$(find_instance_root "$USER_CWD")" \
-        || { echo "sl daemon: no instance root above $USER_CWD (need shiftlefter.edn or .git)"; return 0; }
+        || { echo "sl daemon: no instance root above $USER_CWD (need sl/shiftlefter.edn or .git)"; return 0; }
     edn="$root/.shiftlefter/daemon.edn"
     if [[ ! -f "$edn" ]]; then
         echo "sl daemon: no daemon running for $root"
@@ -525,14 +561,22 @@ if [[ -z "$JAVA_CMD" ]]; then
     exit 1
 fi
 
-# Check for classpath extension
-EXTRA_CP=$(build_classpath "$JAR_FILE")
-if [[ -n "$EXTRA_CP" ]]; then
-    # Extended classpath mode: include lib/*.jar. Intentionally NO CDS —
-    # the archive is keyed to the plain `-jar` classpath, so a lib/*.jar
-    # run would mismatch it. Rare path; staying cold is correct.
-    exec "$JAVA_CMD" -cp "$EXTRA_CP" clojure.main -m shiftlefter.core "$@"
+# --- User classpath extension: sl/lib/*.jar (sl-5ee5) -------------------------
+# Project-level, resolved from the instance root (layout C: everything under
+# sl/), NOT from the install dir. Framework jar FIRST, then the user's own
+# resolved jars — user jars are user code, the same in-process trust as
+# load-file'd steps (legibility, not sandboxing). Rides the cold floor AND the
+# daemon spawn; no instance root -> no libs (a configless tree can't anchor a
+# lib dir any more than a daemon).
+INSTANCE_ROOT="$(find_instance_root "$USER_CWD")" || INSTANCE_ROOT=""
+LIB_DIR=""
+LIB_CP=""
+if [[ -n "$INSTANCE_ROOT" ]]; then
+    LIB_DIR="$INSTANCE_ROOT/sl/lib"
+    _sl_libs=("$LIB_DIR"/*.jar)
+    [[ -f "${_sl_libs[0]}" ]] && LIB_CP="$JAR_FILE:$LIB_DIR/*"
 fi
+
 # Wrapper-owned daemon controls (status/stop are not wired in the jar), then
 # warm routing. maybe_route_warm execs/exits on the warm path; it returns
 # only when routing declines, falling through to the cold floor below.

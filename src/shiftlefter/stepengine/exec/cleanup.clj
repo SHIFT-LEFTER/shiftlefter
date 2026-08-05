@@ -6,9 +6,12 @@
    Internal: external callers should go through
    `shiftlefter.stepengine.exec` (the facade) which re-exports
    `execute-suite` from this ns."
-  (:require [clojure.tools.logging :as log]
+  (:require [babashka.fs :as fs]
+            [clojure.tools.logging :as log]
             [shiftlefter.adapters.registry :as registry]
+            [shiftlefter.attachments :as attachments]
             [shiftlefter.capabilities.ctx :as cap]
+            [shiftlefter.stepengine.exec.capture :as capture]
             [shiftlefter.stepengine.exec.hooks :as hooks]
             [shiftlefter.stepengine.exec.provisioning :as prov]
             [shiftlefter.stepengine.exec.step-loop :as step-loop])
@@ -160,28 +163,98 @@
 
    Returns scenario result with `:capability-cleanup` populated; when hooks
    ran, `:hooks` carries their records and a hook failure sets `:status
-   :error` with the (first) failure on `:error`."
+   :error` with the (first) failure on `:error`. Valid After attachment
+   claims (sl-l9nj) land on `:attachments`, finalized against the world
+   (missing files marked `:attachment/error` + one stderr warn each —
+   outcome untouched: the reference is data, the file is world).
+
+   Capture (sl-3q9r): when a capture policy is active and the run has a
+   results dir, per-step capture opts thread into execute-scenario (the
+   step_loop firing site), and scenario-scoped drain kinds fire here —
+   post-steps, PRE-Afters, so After hooks observe the drain refs and the
+   honest pre-cleanup state. Capture refs precede hook-claim refs on the
+   scenario's :attachments (chronological)."
   [plan opts]
   (let [start-ns  (System/nanoTime)
         entries   (when (:plan/runnable? plan) (:plan/hooks plan))
-        sid       (when (seq entries) (hooks/scenario-identity plan))
+        capture?  (and (:plan/runnable? plan)
+                       (:artifacts-root opts)
+                       (capture/capture-active? (:capture-policy opts)))
+        sid       (when (or (seq entries) capture?) (hooks/scenario-identity plan))
+        ;; sl-l9nj: the scenario's artifact home, pre-created before any
+        ;; hook runs so both phases can write into it. When hooks exist OR
+        ;; capture is active (sl-3q9r first widened the gate), and the run
+        ;; has a results dir; a creation failure warns and degrades to no
+        ;; :artifacts-dir (hooks check, don't assume; capture skips).
+        artifacts-dir (when (and (or (seq entries) capture?)
+                                 (:artifacts-root opts))
+                        (try
+                          (attachments/ensure-scenario-dir!
+                           (:artifacts-root opts)
+                           (:name sid)
+                           (-> plan :plan/pickle :pickle/id))
+                          (catch java.io.IOException e
+                            (binding [*out* *err*]
+                              (println (str "WARN: could not create artifacts dir for '"
+                                            (:name sid) "': " (ex-message e))))
+                            nil)))
+        extras    (when artifacts-dir {:artifacts-dir artifacts-dir})
+        ;; sl-3q9r: the per-scenario capture opts — threaded into the step
+        ;; loop for the instant sites, reused below for the drains.
+        capture-opts (when (and capture? artifacts-dir)
+                       {:policy (:capture-policy opts)
+                        :artifacts-dir artifacts-dir
+                        :rel-prefix (str "attachments/"
+                                         (fs/file-name artifacts-dir))
+                        :interfaces (:interfaces opts)
+                        :registry (:adapter-registry opts)})
+        step-opts (cond-> opts capture-opts (assoc :capture capture-opts))
         {befores-ctx :ctx :keys [frames] before-records :records before-error :error}
-        (hooks/run-befores! entries sid {})
+        (hooks/run-befores! entries sid {} extras)
 
         result    (if before-error
                     (hooks/error-scenario-result plan befores-ctx before-error)
-                    (step-loop/execute-scenario plan befores-ctx opts))
+                    (step-loop/execute-scenario plan befores-ctx step-opts))
+        ;; Scenario-scoped capture drains (sl-3q9r): post-steps, pre-Afters.
+        ;; :on-failure drains fire only when the scenario is red; the
+        ;; :every-step tail sweep always runs (emitting only non-empty).
+        ;; A drain failure on an otherwise-GREEN scenario is D4 material.
+        {drain-refs :refs drain-failures :failures}
+        (when capture-opts
+          (capture/drain-at-scenario-end!
+           (:scenario-ctx result) capture-opts
+           (contains? #{:failed :error} (:status result))))
+        result    (cond-> result
+                    (seq drain-refs)
+                    (update :attachments (fnil into []) drain-refs)
+                    (and (seq drain-failures) (= :passed (:status result)))
+                    (-> (assoc :status :error)
+                        (assoc :error (capture/capture-error drain-failures))))
         ;; The in-flight result handed to Afters — richer than the envelope
         ;; (hooks are in-process trusted code; invariant 3 governs the
         ;; reporter seam, not hook payloads).
         in-flight (cond-> result
                     (seq before-records) (assoc :hooks before-records))
-        {after-records :records after-errors :errors}
-        (hooks/run-afters! frames sid (:scenario-ctx result) in-flight)
+        {after-records :records after-errors :errors claimed :attachments}
+        (hooks/run-afters! frames sid (:scenario-ctx result) in-flight extras)
 
+        ;; Finalize claims against the filesystem before capability
+        ;; cleanup — the earliest instant the claim set is complete.
+        {:keys [refs missing]} (when (seq claimed)
+                                 (attachments/finalize-refs!
+                                  (:artifacts-root opts) claimed))
+        _ (when (seq missing)
+            (binding [*out* *err*]
+              (doseq [path missing]
+                (println (str "WARN: attachment file not found: " path
+                              " (claimed by an After hook of '"
+                              (:name sid) "')")))))
         hook-records (into (vec before-records) after-records)
         result    (cond-> result
                     (seq hook-records) (assoc :hooks hook-records)
+                    ;; Hook-claim refs APPEND after capture refs (sl-3q9r
+                    ;; — chronological: drains fire pre-Afters).
+                    (seq refs) (update :attachments (fnil into []) refs)
                     ;; A failing :after makes the scenario :error even when
                     ;; all steps passed (round 2: harsh is correct). The
                     ;; first failure carries attribution; a pre-existing

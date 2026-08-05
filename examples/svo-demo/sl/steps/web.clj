@@ -54,8 +54,10 @@
 ;; Subject comes from first capture group (:$1)
 ;; Object is the field being filled (:$2)
 ;; The :with frame of :fill takes one arg slot, :value (:$3)
+;; Literals are single-quoted ('...') — the framework convention; double
+;; quotes are reserved.
 
-(defstep #"^(\w+) fills the (\w+) field with \"([^\"]+)\"$"
+(defstep #"^(\w+) fills the (\w+) field with '([^']+)'$"
   {:interface :web
    :svo {:subject :$1       ; First capture = subject (Alice, Bob, etc.)
          :verb :fill        ; Action being performed
@@ -93,7 +95,7 @@
   (println (str "[" subject "] Verifying visible: " element))
   ctx)
 
-(defstep #"^(\w+) sees (?:a |an )?(?:error )?message \"([^\"]+)\"$"
+(defstep #"^(\w+) sees (?:a |an )?(?:error )?message '([^']+)'$"
   {:interface :web
    :svo {:subject :$1
          :verb :see
@@ -136,8 +138,12 @@
 ;;    glossary/subjects.edn. Typos like "Alcie" will be caught.
 ;;
 ;; 2. VERB VALIDATION
-;;    Verbs like :fill, :click, :see are validated against the verb glossary
-;;    for the interface type. Using :smash would fail validation.
+;;    Verbs like :fill, :click, :see are validated against the built-in verb
+;;    vocabulary for the interface type. Using :smash would fail validation.
+;;    Verbs are INTERFACE-level actions and the built-in set covers almost
+;;    everything — a domain action like "logs in" is NOT a verb, it's a
+;;    macro (see macros/login.ini). Adding a project verb to a glossary is
+;;    rare, and only types the word; behavior always needs a step behind it.
 ;;
 ;; 2b. FRAME VALIDATION
 ;;    Each verb declares a closed set of frames (argument shapes) in the

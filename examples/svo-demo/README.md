@@ -28,21 +28,28 @@ SVO validation helps catch errors in your Gherkin step definitions by:
 
 ```
 svo-demo/
-├── shiftlefter.edn           # Configuration with interfaces and glossaries
-├── glossary/
-│   ├── subjects.edn          # Who can perform actions (types and instances)
-│   └── verbs/
-│       └── web.edn           # Project-specific verbs (extends defaults)
-├── features/
-│   └── login.feature         # Feature file using SVO patterns
-└── src/
-    └── stepdefs/
+└── sl/                       # The ShiftLefter project — everything in one dir
+    ├── shiftlefter.edn       # Configuration with interfaces and glossaries
+    ├── glossary/
+    │   └── subjects.edn      # Who can perform actions (types and instances)
+    ├── macros/
+    │   └── login.ini         # Domain actions as macros (INI registry)
+    ├── features/
+    │   └── login.feature     # Feature file using SVO patterns
+    └── steps/
         └── web.clj           # Step definitions with SVO metadata
 ```
 
-This is the canonical glossary layout — `glossary/` at the project root,
-`glossary/verbs/<interface>.edn` per interface — the same convention
-examples 04–06 and the docs use.
+This is the canonical layout — everything ShiftLefter lives in `sl/`, with
+`glossary/` next to the config — the same convention examples 04–06 and
+the docs use. The glossary path is spelled explicitly in this example's
+config for teaching; it matches the conventional path, so omitting
+`:glossaries` would discover the same file.
+
+Note what is *absent*: a project verbs glossary. The built-in interface
+verbs (fill, click, see, navigate, …) cover this example completely, and
+that's the normal case — see the next section for where domain actions
+live instead.
 
 ## Running the Example
 
@@ -54,7 +61,7 @@ binds, and SVO-validates all four scenarios against the glossaries.
 `bin/sl`.)
 
 ```bash
-sl run --dry-run features/
+sl run --dry-run sl/features/
 ```
 
 That dry-run is where every validation experiment below happens — no
@@ -67,11 +74,60 @@ For a real project, your directory would look like:
 
 ```
 my-project/
-├── shiftlefter.edn           # Copy from this example
-├── glossary/                 # Your glossaries (subjects.edn, verbs/, intents/)
-├── features/                 # Your feature files
-└── src/stepdefs/             # Your step definitions
+└── sl/
+    ├── shiftlefter.edn       # Copy from this example
+    ├── glossary/             # Your glossaries (subjects.edn, intents/)
+    ├── macros/               # Your domain actions (INI registries)
+    ├── features/             # Your feature files
+    └── steps/                # Your step definitions (if any — built-ins first)
 ```
+
+## Domain actions are macros, not interface verbs
+
+An earlier version of this example declared `:login`, `:logout`, `:search`,
+and `:filter` as project verbs in a `glossary/verbs/web.edn`. That's an
+anti-pattern, and it's gone. The vocabulary model has three tiers:
+
+1. **Built-in interface verbs** — `fill`, `click`, `see`, `navigate`, …
+   Interface-level actions; a closed set the adapter ships. You almost
+   never add to it.
+2. **Macros** — domain actions. "Logs in" isn't one interface action; it's
+   a *contraction* of several (fill, fill, click) wearing a domain name.
+   You author it as data (an INI registry entry), not code.
+3. **defstep-backed new interface verbs** — rare, adapter-author territory.
+
+A glossary entry only *types* a word — it never gives it behavior. Declaring
+`:login` as a verb made the validator accept a word that nothing could ever
+run. The macro does what that verb entry pretended to:
+
+```ini
+name = Alice logs in
+description = Contract the three-step UI login into one domain action
+steps =
+  When Alice fills the username field with 'alice@example.com'
+  And Alice fills the password field with 'correct-password'
+  And Alice clicks the login button
+```
+
+And the feature invokes it with a trailing ` +` — the provenance marker
+that says "this step expands":
+
+```gherkin
+When Alice logs in +
+```
+
+Macros are enabled in `shiftlefter.edn`:
+
+```clojure
+:runner {:macros {:enabled? true :registry-paths ["macros/login.ini"]}}
+```
+
+**The honest limitation:** today a macro is a fixed text match — `Alice
+logs in +` logs in Alice, and Bob can't borrow it (his scenario spells the
+steps out, deliberately, as the contrast). Named-argument macros — where
+one macro serves any subject — are the planned upgrade in the 0.6
+contracts arc. Use macros for domain shorthand now; expect them to get
+more powerful, not different.
 
 ## Key Concepts
 

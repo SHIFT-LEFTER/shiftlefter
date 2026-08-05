@@ -35,9 +35,20 @@
      this ctx key come from' is answerable from the report.
    - :after receives {:ctx <final ctx, capabilities live when alive>
      :scenario <identity> :result <in-flight result: status, step results
-     w/ durations, error>}. The return is IGNORED — reserved for the
-     attachments-era contract (an After returning attachment references)."
-  (:require [shiftlefter.stepengine.bindings :as bindings]
+     w/ durations, error>}. The return position is LIVE (sl-l9nj, the
+     attachments-era redemption): nil = no claim; {:attachments [ref …]}
+     is a spec-validated claim (closed map — see
+     shiftlefter.attachments/::after-return), each ref framework-stamped
+     :attachment/source [:hook <name>]. Anything else is
+     :hook/invalid-return => scenario :error (FULL-STRICT, Chair-ratified
+     2026-08-03 — Before symmetry; a malformed claim dies loudly, never
+     silently).
+   - Both payloads carry :artifacts-dir (absolute path, pre-created) when
+     the run has a results dir — the sanctioned place for hook-written
+     artifact files. Absent (not nil) otherwise."
+  (:require [clojure.spec.alpha :as s]
+            [shiftlefter.attachments :as attachments]
+            [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.stepengine.exec.provisioning :as prov]))
 
 (defn scenario-identity
@@ -71,11 +82,16 @@
     (instance? clojure.lang.ExceptionInfo t) (assoc :data (ex-data t))))
 
 (defn- invalid-return-error
-  [entry ret]
+  [entry phase ret]
   {:type :hook/invalid-return
-   :message (str "hook '" (:name entry) "' :before returned "
+   :message (str "hook '" (:name entry) "' " phase " returned "
                  (pr-str (type ret))
-                 " — a Before returns a map (merged into ctx) or nil")
+                 (case phase
+                   :before " — a Before returns a map (merged into ctx) or nil"
+                   :after (str " — an After returns nil or {:attachments"
+                               " [ref …]}, nothing else (full-strict;"
+                               " refs need :attachment/kind +"
+                               " :attachment/path)")))
    :hook (:name entry)
    :value (pr-str ret)})
 
@@ -90,26 +106,32 @@
    :frames is the unwind list in RUN order (run-afters! reverses it):
    every entry whose :before succeeded OR that has no :before (trivially
    succeeded). Stops at the first throwing :before — its entry gets NO
-   frame; later entries never run."
-  [hook-entries scenario ctx]
-  (loop [remaining hook-entries
-         ctx ctx
-         frames []
-         records []]
-    (if-let [{:keys [name before] :as entry} (first remaining)]
-      (if (nil? before)
-        ;; after-only entry: frame (its :after always unwinds), no record —
-        ;; nothing ran in the :before phase.
-        (recur (rest remaining) ctx (conj frames entry) records)
-        (let [start (System/nanoTime)
-              outcome (try
-                        {:ret (before {:ctx ctx :scenario scenario})}
-                        (catch Throwable t
-                          {:threw t}))
-              ret (:ret outcome)
-              err (cond
-                    (:threw outcome) (hook-error entry :before (:threw outcome))
-                    (and (some? ret) (not (map? ret))) (invalid-return-error entry ret))]
+   frame; later entries never run.
+
+   `extras` (optional) merges into every hook payload — the single-map
+   convention's extension point (sl-l9nj adds :artifacts-dir)."
+  ([hook-entries scenario ctx]
+   (run-befores! hook-entries scenario ctx nil))
+  ([hook-entries scenario ctx extras]
+   (loop [remaining hook-entries
+          ctx ctx
+          frames []
+          records []]
+     (if-let [{:keys [name before] :as entry} (first remaining)]
+       (if (nil? before)
+         ;; after-only entry: frame (its :after always unwinds), no record —
+         ;; nothing ran in the :before phase.
+         (recur (rest remaining) ctx (conj frames entry) records)
+         (let [start (System/nanoTime)
+               outcome (try
+                         {:ret (before (merge {:ctx ctx :scenario scenario}
+                                              extras))}
+                         (catch Throwable t
+                           {:threw t}))
+               ret (:ret outcome)
+               err (cond
+                     (:threw outcome) (hook-error entry :before (:threw outcome))
+                     (and (some? ret) (not (map? ret))) (invalid-return-error entry :before ret))]
           (if err
             {:ctx ctx
              :frames frames
@@ -134,36 +156,69 @@
                                   :duration-ms (elapsed-ms start)}
                            (and ret (seq ret))
                            (assoc :contributed (vec (keys ret)))))))))
-      {:ctx ctx :frames frames :records records :error nil})))
+      {:ctx ctx :frames frames :records records :error nil}))))
 
 (defn run-afters!
   "LIFO unwind of `frames` (reverse run order). NEVER throws; one failure
-   does not stop the rest (finally-style). The :after return is ignored.
+   does not stop the rest (finally-style).
 
-   Returns {:records [record ...] :errors [error ...]} — errors in unwind
-   order; the first carries scenario attribution (the caller flips the
-   scenario to :error when any are present)."
-  [frames scenario ctx result]
-  (reduce
-   (fn [acc {:keys [name after] :as entry}]
-     (if (nil? after)
-       acc
-       (let [start (System/nanoTime)
-             threw (try
-                     (after {:ctx ctx :scenario scenario :result result})
-                     nil
-                     (catch Throwable t t))]
-         (if threw
-           (let [err (hook-error entry :after threw)]
-             (-> acc
-                 (update :records conj {:name name :phase :after :status :failed
-                                        :duration-ms (elapsed-ms start)
-                                        :error err})
-                 (update :errors conj err)))
-           (update acc :records conj {:name name :phase :after :status :ok
-                                      :duration-ms (elapsed-ms start)})))))
-   {:records [] :errors []}
-   (reverse frames)))
+   The :after return position is LIVE (sl-l9nj): nil = no claim; a valid
+   {:attachments [ref …]} claim (attachments/::after-return, closed map)
+   has each ref stamped :attachment/source [:hook <name>] and accumulated;
+   any other return is :hook/invalid-return (FULL-STRICT — the caller
+   flips the scenario to :error, same as a throw).
+
+   Returns {:records [record ...] :errors [error ...] :attachments
+   [ref ...]} — errors in unwind order (the first carries scenario
+   attribution); attachments in unwind order, validated and stamped but
+   NOT yet finalized against the filesystem (the caller owns
+   attachments/finalize-refs! — this fn stays pure of IO).
+
+   `extras` (optional) merges into every hook payload (sl-l9nj adds
+   :artifacts-dir)."
+  ([frames scenario ctx result]
+   (run-afters! frames scenario ctx result nil))
+  ([frames scenario ctx result extras]
+   (reduce
+    (fn [acc {:keys [name after] :as entry}]
+      (if (nil? after)
+        acc
+        (let [start (System/nanoTime)
+              outcome (try
+                        {:ret (after (merge {:ctx ctx :scenario scenario
+                                             :result result}
+                                            extras))}
+                        (catch Throwable t
+                          {:threw t}))
+              ret (:ret outcome)
+              err (cond
+                    (:threw outcome)
+                    (hook-error entry :after (:threw outcome))
+
+                    (and (some? ret)
+                         (not (s/valid? ::attachments/after-return ret)))
+                    (invalid-return-error entry :after ret))]
+          (cond
+            err
+            (-> acc
+                (update :records conj {:name name :phase :after :status :failed
+                                       :duration-ms (elapsed-ms start)
+                                       :error err})
+                (update :errors conj err))
+
+            (some? ret)
+            (-> acc
+                (update :records conj {:name name :phase :after :status :ok
+                                       :duration-ms (elapsed-ms start)})
+                (update :attachments into
+                        (map #(attachments/stamp-source name %)
+                             (:attachments ret))))
+
+            :else
+            (update acc :records conj {:name name :phase :after :status :ok
+                                       :duration-ms (elapsed-ms start)})))))
+    {:records [] :errors [] :attachments []}
+    (reverse frames))))
 
 (defn error-scenario-result
   "Scenario result for a Before failure: status :error, ALL steps :skipped

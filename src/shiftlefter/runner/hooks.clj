@@ -35,7 +35,11 @@
    - `:before` — optional `(fn [{:keys [ctx scenario]}])`. A map return
                  merges into ctx (nil = no contribution).
    - `:after`  — optional `(fn [{:keys [ctx scenario result]}])`. Return
-                 IGNORED (reserved for the attachments-era contract).
+                 nil (no claim) or `{:attachments [ref …]}` — the
+                 attachments claim (sl-l9nj), FULL-STRICT: anything else
+                 is :hook/invalid-return => scenario :error. The payload
+                 carries `:artifacts-dir` (pre-created, absent when the
+                 run has no results dir) — write artifact files there.
    - `:global?` — applies to every scenario, stamped and previewed exactly
                  like a named hook; vector order = execution order among
                  globals.
@@ -92,6 +96,10 @@
    `load-config` actually loaded). If nil (built-in defaults, no config
    file present), there is no project root and therefore no hooks.clj.
    A missing file is silently fine — no hooks.
+
+   cross-repo-consumer: _docs/website/report/README-REGEN.md (the sample
+   regen recipe stages hooks.clj + config into the demo cwd because of
+   exactly this sibling rule — changing discovery invalidates the recipe)
 
    Returns absolute path string or nil."
   [config-or-path]

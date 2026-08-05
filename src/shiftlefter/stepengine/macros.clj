@@ -3,7 +3,9 @@
 
    Macros allow users to define reusable step sequences that expand
    during compilation. This module handles loading macro definitions
-   from INI files into a registry.
+   from INI files into a registry. Registry paths may name INI files
+   directly or directories; a directory loads every `.ini` file under
+   it, recursively, in sorted path order.
 
    ## Usage
 
@@ -59,6 +61,19 @@
       {:registry (assoc registry key macro)
        :error nil})))
 
+(defn- expand-registry-path
+  "Expand one registry path into the INI files it names.
+
+   A directory expands to every `.ini` file under it, recursively, in
+   sorted path order (deterministic duplicate-key detection). Anything
+   else — an existing file or a nonexistent path — passes through as-is,
+   so missing paths still surface as :macro/file-not-found downstream."
+  [path]
+  (let [resolved (resolve-path path)]
+    (if (fs/directory? resolved)
+      (mapv str (sort (fs/glob resolved "**.ini")))
+      [path])))
+
 (defn- process-file
   "Process a single file, returning macros and errors."
   [path]
@@ -75,14 +90,16 @@
 ;; -----------------------------------------------------------------------------
 
 (defn load-registries
-  "Load macro registries from a list of INI file paths.
+  "Load macro registries from a list of INI file or directory paths.
 
    Runner/config callers should pass paths already resolved against :config-root.
-   Direct relative paths are absolutized against CWD. Files are loaded in order.
-   Duplicate macro keys across any files result in a :macro/duplicate-key error.
+   Direct relative paths are absolutized against CWD. A directory loads every
+   `.ini` file under it, recursively, in sorted path order; a directory with no
+   INI files contributes nothing. Files are loaded in order. Duplicate macro
+   keys across any files result in a :macro/duplicate-key error.
 
    Parameters:
-   - registry-paths: vector of paths to INI files
+   - registry-paths: vector of paths to INI files or directories
 
    Returns:
    {:registry {\"macro-key\" {:macro/key ... :macro/definition ... :macro/steps ...} ...}
@@ -91,7 +108,7 @@
    On success: :errors is empty, :registry contains all macros.
    On failure: :errors contains issues, :registry may be partial."
   [registry-paths]
-  (loop [paths registry-paths
+  (loop [paths (mapcat expand-registry-path registry-paths)
          registry {}
          all-errors []]
     (if (empty? paths)

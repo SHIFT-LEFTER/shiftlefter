@@ -156,6 +156,25 @@
       (is (nil? (:binding result)))
       (is (empty? (:alternatives result))))))
 
+(deftest test-bind-step-prose-hint-suppressed-for-annotated-steps
+  (testing "sl-bav1: an interface annotation is authored step-evidence, so
+            the prose-as-step teaching hint is suppressed at the bind seam
+            (the classifier only ever sees the stripped text)"
+    (registry/register! #"waits" (fn [])
+                        {:ns 's :file "s.clj" :line 10 :interface :web})
+    (let [prose "the gateway degrades, the client retries."
+          plain (bind/bind-step (make-step prose) (registry/all-stepdefs))
+          annotated (bind/bind-step
+                     (-> (make-step (str "[:web] " prose))
+                         (assoc :step/declared-interface :web))
+                     (registry/all-stepdefs))]
+      (is (= :undefined (:status plain)))
+      (is (= :grammar/prose-as-step (-> plain :hint :type))
+          "unannotated: the prose hint fires through bind")
+      (is (= :undefined (:status annotated)))
+      (is (nil? (:hint annotated))
+          "annotated: same text, hint suppressed"))))
+
 (deftest test-bind-step-ambiguous
   (testing "Multiple matches returns :ambiguous with alternatives"
     (registry/register! #"I have (\d+) items"

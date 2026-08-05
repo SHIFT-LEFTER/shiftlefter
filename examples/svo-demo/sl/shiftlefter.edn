@@ -1,0 +1,51 @@
+;; ShiftLefter SVO Demo Configuration
+;;
+;; This example demonstrates the Subject-Verb-Object (SVO) validation system.
+;; Key concepts:
+;;
+;; - INTERFACE NAME: The key you use in config and stepdefs (e.g., :web, :customer-portal)
+;; - INTERFACE TYPE: The vocabulary category (e.g., :web, :api) - determines valid verbs
+;;
+;; Simple case: name = type (:web interface uses :web verbs)
+;; Advanced case: multiple names share a type (:legacy-app and :new-app both use :web verbs)
+;;
+;; Note there is NO project verbs glossary here. Verbs are interface-level
+;; actions (fill, click, see, navigate) and the framework's built-in set
+;; covers this example completely — most projects never add one. Domain
+;; actions like "logs in" are NOT verbs; they're macros (see :macros below
+;; and macros/login.ini).
+
+{:parser {:dialect "en"}
+
+ :runner {:step-paths ["steps/"]
+          :allow-pending? true
+
+          ;; Macros: domain shorthand as DATA, not code. A macro is a named
+          ;; contraction of interface steps, declared in an INI registry and
+          ;; invoked from Gherkin with a trailing ' +' (the provenance marker).
+          ;; This is where domain actions like "logs in" live — never in a
+          ;; verbs glossary.
+          :macros {:enabled? true
+                   :registry-paths ["macros/login.ini"]}}
+
+ ;; Glossary configuration, spelled EXPLICITLY for teaching. This is the
+ ;; conventional path (glossary/ next to this config, i.e. sl/glossary/) —
+ ;; omitting :glossaries entirely would discover the same file.
+ ;; Project glossaries extend (don't replace) framework defaults.
+ :glossaries {:subjects "glossary/subjects.edn"}
+
+ ;; Interface definitions
+ ;; Each interface NAME maps to:
+ ;; - :type — which verb vocabulary to use (determines valid verbs)
+ ;; - :adapter — which adapter to use for provisioning
+ ;; - :config — adapter-specific configuration
+ :interfaces {:web {:type :web              ; Uses the built-in :web verb set
+                    :adapter :etaoin        ; Browser automation
+                    :config {:headless true}}}
+
+ ;; SVO enforcement levels
+ ;; - :warn — log warning but continue execution
+ ;; - :error — fail at bind time (before execution)
+ :svo {:unknown-subject :warn    ; Typos in subject names
+       :unknown-verb :warn       ; Unknown verbs for interface type
+       :unknown-interface :error}} ; Misconfigured interfaces

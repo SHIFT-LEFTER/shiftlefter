@@ -30,14 +30,16 @@
   (project-context/resolve {:invocation-root dir}))
 
 (defn- make-project! [dir]
-  (write-edn! (fs/path dir "glossary" "subjects.edn")
+  ;; sl/ layout (sl-fcjm): config + corpus under <project>/sl/, corpus paths
+  ;; config-root-relative.
+  (write-edn! (fs/path dir "sl" "glossary" "subjects.edn")
               {:subjects {:user {:desc "Application user" :instances [:alice :bob]}
                           :guest {:desc "Visitor"}}})
-  (write-text! (fs/path dir "steps" "login.clj")
+  (write-text! (fs/path dir "sl" "steps" "login.clj")
                "(ns login.steps
                   (:require [shiftlefter.stepengine.registry :refer [defstep]]))
                 (defstep #\"a project custom step\" [ctx] ctx)")
-  (write-edn! (fs/path dir "shiftlefter.edn")
+  (write-edn! (fs/path dir "sl" "shiftlefter.edn")
               {:runner {:step-paths ["steps/"] :macros {:enabled? false}}
                :glossaries {:subjects "glossary/subjects.edn"}
                :interfaces {:web {:type :web :adapter :etaoin :config {:headless true}}}}))
@@ -84,7 +86,7 @@
   (with-temp-project
     (fn [dir]
       (make-project! dir)
-      (write-edn! (fs/path dir "shiftlefter.edn")
+      (write-edn! (fs/path dir "sl" "shiftlefter.edn")
                   {:runner {:step-paths ["steps/"] :macros {:enabled? false}}
                    :glossaries {:subjects "glossary/subjects.edn"}
                    :interfaces {:web {:type :web :adapter :etaoin :config {:headless true}}}
@@ -135,7 +137,7 @@
       (make-project! dir)
       (testing "dispatches through core/dispatch and resolves project context"
         (let [out (with-out-str
-                    (is (= 0 (core/dispatch ["orient" "-c" (str (fs/path dir "shiftlefter.edn"))]))))]
+                    (is (= 0 (core/dispatch ["orient" "-c" (str (fs/path dir "sl" "shiftlefter.edn"))]))))]
           (is (str/includes? out "# Orientation"))
           (is (str/includes? out "config-source: :explicit")))))))
 
@@ -149,8 +151,8 @@
       ;; Valid config with an empty subject glossary: vocabulary is genuinely
       ;; empty, and orient must report that honestly — zero subjects, a SIEVE
       ;; pointer — without inventing accepted truth.
-      (write-edn! (fs/path dir "glossary" "subjects.edn") {:subjects {}})
-      (write-edn! (fs/path dir "shiftlefter.edn")
+      (write-edn! (fs/path dir "sl" "glossary" "subjects.edn") {:subjects {}})
+      (write-edn! (fs/path dir "sl" "shiftlefter.edn")
                   {:runner {:macros {:enabled? false}}
                    :glossaries {:subjects "glossary/subjects.edn"}
                    :interfaces {:web {:type :web :adapter :etaoin}}})
@@ -173,7 +175,7 @@
           (let [out (with-out-str
                       (is (= 0 (orient/orient-cmd ["orient"] {} ctx))))]
             (is (str/includes? out "No ShiftLefter project here yet"))
-            (is (str/includes? out "Create shiftlefter.edn"))
+            (is (str/includes? out "Create sl/shiftlefter.edn"))
             (is (str/includes? out "sl agent-doc overview"))
             (is (str/includes? out "sl agent-doc examples")
                 "advertises the worked-examples topic (sl-c9qj)")
@@ -197,7 +199,7 @@
       (let [fp1 (-> (with-out-str (orient/orient-cmd ["orient"] {:edn true} (context dir)))
                     edn/read-string :fingerprint)]
         ;; Apply a working-tree change: add a subject.
-        (write-edn! (fs/path dir "glossary" "subjects.edn")
+        (write-edn! (fs/path dir "sl" "glossary" "subjects.edn")
                     {:subjects {:user {:desc "Application user" :instances [:alice :bob]}
                                 :guest {:desc "Visitor"}
                                 :admin {:desc "Administrator"}}})

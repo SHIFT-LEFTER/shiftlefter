@@ -53,11 +53,13 @@ nearest-enclosing-instance pruning.
 
 ## Run it
 
-> **Mode: Shifted** — the config carries `:svo` plus subject *and intent*
-> glossaries (`sl orient` will say `Mode: Shifted`).
+> **Mode: Shifted** — the config carries `:svo`; the subject *and intent*
+> glossaries are discovered at the conventional paths in `sl/glossary/`
+> (`sl orient` will say `Mode: Shifted`).
 
 This example is a mini-project pulling the framework via `:local/root`.
-Run from this directory so the relative glossary/feature paths resolve
+Run from this directory so the `sl/` project (config, glossary, features)
+resolves
 (needs a real browser — ChromeDriver on PATH or via
 `~/.shiftlefter/config.edn`):
 

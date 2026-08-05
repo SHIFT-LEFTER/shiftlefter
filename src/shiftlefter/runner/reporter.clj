@@ -99,9 +99,17 @@
 (s/def ::filter (s/map-of #{:include :exclude} (s/coll-of string? :kind set?)))
 (s/def ::selection (s/keys :req-un [::selected ::filtered-out ::filter]))
 
+;; sl-l9nj: where this run's outputs live (absolute paths, absent when the
+;; run has no results dir — :defaults contexts keep the historical shape).
+;; :artifacts-root is THIS run-scope's group root — attachment refs are
+;; group-root-relative, and the JUnit reporter absolutizes against it.
+(s/def ::results-dir string?)
+(s/def ::artifacts-root string?)
+
 (s/def ::run-ctx
   (s/keys :req-un [::run-id]
-          :opt-un [::started-at ::version ::mode ::project-name ::selection]))
+          :opt-un [::started-at ::version ::mode ::project-name ::selection
+                   ::results-dir ::artifacts-root]))
 
 (s/def ::scenario-result
   ;; The per-scenario envelope: today's execute-suite result map for one
@@ -257,7 +265,13 @@
                               (:duration-ms step-result)
                               (assoc :duration-ms (:duration-ms step-result))
                               (:error step-result)
-                              (assoc :error (error-envelope (:error step-result)))))
+                              (assoc :error (error-envelope (:error step-result)))
+                              ;; Attachment refs (sl-l9nj) — pure data by
+                              ;; construction (invariant 3). Step-level has
+                              ;; no producer until sl-3q9r; the contract is
+                              ;; live now.
+                              (seq (:attachments step-result))
+                              (assoc :attachments (:attachments step-result))))
                           (:steps scenario-result))}
      ;; Per-scenario wall clock (D5, sl-40to). Absent on the REPL path.
      (:duration-ms scenario-result)
@@ -283,6 +297,11 @@
                              (:error record)
                              (assoc :error (error-envelope (:error record)))))
                          (:hooks scenario-result)))
+     ;; Scenario-level attachment refs (sl-l9nj): finalized After-hook
+     ;; claims, group-root-relative when portable. Absent for claim-less
+     ;; scenarios — zero-attachment envelopes are byte-identical to before.
+     (seq (:attachments scenario-result))
+     (assoc :attachments (:attachments scenario-result))
      ;; sl-q9wp R4: absent only for hand-built plans with no pickle (tests).
      (-> scenario-result :plan :plan/pickle :pickle/id)
      (assoc :scenario/id (-> scenario-result :plan :plan/pickle :pickle/id)))))

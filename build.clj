@@ -12,7 +12,7 @@
             [clojure.java.shell :as shell]))
 
 (def lib 'com.shiftlefter/shiftlefter)
-(def version "0.5.3")
+(def version "0.5.4")
 (def class-dir "target/classes")
 (def uber-file "target/shiftlefter.jar")
 (def logback-version "1.5.16")
@@ -210,6 +210,9 @@
 (defn docs
   "Generate API documentation with the canonical build version."
   [_]
+  ;; Codox overlays the existing dir and never removes files — without this
+  ;; clean, pages for deleted/renamed namespaces persist forever (sl-pzec).
+  (b/delete {:path "docs/api"})
   (let [result (shell/sh "clj" "-X:codox" ":version" (pr-str version))]
     (print (:out result))
     (binding [*out* *err*]

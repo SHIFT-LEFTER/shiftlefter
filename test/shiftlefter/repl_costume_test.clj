@@ -14,25 +14,16 @@
             [shiftlefter.costume.browser :as cbrowser]
             [shiftlefter.repl :as repl]
             [shiftlefter.stepengine.registry :as registry :refer [defstep]]
-            [shiftlefter.webdriver.etaoin.browser :as ebrowser]
-            [shiftlefter.webdriver.session-store :as store]))
+            [shiftlefter.webdriver.etaoin.browser :as ebrowser]))
 
 (use-fixtures :each
   (fn [f]
     (registry/clear-registry!)
     (repl/reset-ctx!)
     (repl/reset-ctxs!)
-    (repl/reset-surfaces!)
     (reset! @#'repl/connected-subjects {})
     (repl/vanilla!)
     (f)))
-
-;; Null store so clear!/reset-ctxs! never touch the real EDN store on disk.
-(defrecord NullStore []
-  store/ISessionStore
-  (load-session-handle [_ _] nil)
-  (save-session-handle! [_ _ _] {:ok {}})
-  (delete-session-handle! [_ _] {:ok true}))
 
 (defn- make-stub-costume-browser [costume-name]
   (cbrowser/make-costume-browser
@@ -107,20 +98,19 @@
     (let [stub (make-stub-costume-browser :finance)
           seen (atom [])]
       (with-redefs [costume/connect-costume! (stub-connect stub)]
-        (binding [repl/*session-store* (delay (->NullStore))]
-          (repl/connect-costume! :finance)
-          (defstep #":(\w+) pokes the app" [ctx subject]
-            (swap! seen conj (cap/get-capability ctx :web (keyword subject)))
-            nil)
-          (is (= :passed (:status (repl/as :finance "pokes the app"))))
-          (is (identical? stub (first @seen)))
-          (repl/clear!)
-          (is (empty? @@#'repl/connected-subjects))
-          ;; clear! wiped the registry too — re-register the step, then prove
-          ;; injection no longer happens.
-          (defstep #":(\w+) pokes the app" [ctx subject]
-            (swap! seen conj (cap/get-capability ctx :web (keyword subject)))
-            nil)
-          (is (= :passed (:status (repl/as :finance "pokes the app"))))
-          (is (nil? (second @seen))
-              "After clear!, no costume browser is injected"))))))
+        (repl/connect-costume! :finance)
+        (defstep #":(\w+) pokes the app" [ctx subject]
+          (swap! seen conj (cap/get-capability ctx :web (keyword subject)))
+          nil)
+        (is (= :passed (:status (repl/as :finance "pokes the app"))))
+        (is (identical? stub (first @seen)))
+        (repl/clear!)
+        (is (empty? @@#'repl/connected-subjects))
+        ;; clear! wiped the registry too — re-register the step, then prove
+        ;; injection no longer happens.
+        (defstep #":(\w+) pokes the app" [ctx subject]
+          (swap! seen conj (cap/get-capability ctx :web (keyword subject)))
+          nil)
+        (is (= :passed (:status (repl/as :finance "pokes the app"))))
+        (is (nil? (second @seen))
+            "After clear!, no costume browser is injected")))))

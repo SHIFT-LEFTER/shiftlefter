@@ -21,7 +21,8 @@ one small Clojure file here, `setup.clj`, and it's *orchestration*, not test
 code: it starts the app the test drives, using classes already inside the
 ShiftLefter jar (no Clojure toolchain needed). That's the framework's
 run-level orchestration convention — a `setup.clj` next to `shiftlefter.edn`
-is loaded automatically; see `ARCHITECTURE.md` § Test Orchestration and
+(both inside `sl/`) is loaded automatically; see `ARCHITECTURE.md` § Test
+Orchestration and
 example [`04`](../04-sms-2fa/), where you first write one of your own.
 
 ## What You Get
@@ -39,7 +40,7 @@ All in plain Gherkin — no step definitions to write.
 ## The Feature File
 
 ```gherkin
-# features/login.feature
+# sl/features/login.feature
 Feature: Login page
 
   Scenario: Page loads with expected elements
@@ -64,7 +65,7 @@ user `alice` / password `secret1` and a login + dashboard page pair.
 ## The Config File
 
 ```clojure
-;; shiftlefter.edn
+;; sl/shiftlefter.edn
 {:interfaces {:web {:type :web
                     :adapter :etaoin}}}
 ```
@@ -90,11 +91,14 @@ substitute `bin/sl`):
 
 ```bash
 # Check that steps bind correctly — no browser opens, no server starts
-sl run --dry-run features/
+sl run --dry-run sl/features/
 
 # Run the tests (watch Chrome open and fill forms!)
-sl run features/
+sl run sl/features/
 ```
+
+(Bare `sl run` works too — with `setup.clj` present it runs the full
+declared plan.)
 
 ## Built-in Browser Steps
 

@@ -4,7 +4,7 @@
 
 An agent can write you a passing browser test in one shot today. That's not the hard part anymore. The hard part is the **second** shot, and the tenth: each regeneration re-derives your app from scratch — its own selectors, its own names, its own idea of who "the user" is — and the suite drifts faster the more agents (and models) touch it. ShiftLefter gives that loop something stable to stand on: a typed vocabulary you define once, shared by every agent and every human on the team, and validated before anything runs. ([The full problem statement and fit check →](docs/FIT.md))
 
-## Status: v0.5.3
+## Status: v0.5.4
 
 ShiftLefter is an early, openly-scoped foundation for driving real software behavior from Gherkin — multiple users, multiple interfaces, all checked before anything runs. The core — driving a browser with multiple independent actors over a typed glossary you control — is solid and meant to be built on. The surrounding test-suite machinery and the traceability graph are on the way.
 
@@ -85,7 +85,7 @@ Or unpack a release zip yourself:
    sl --help
    sl --version
    sl fmt --check your-file.feature
-   sl run features/ --step-paths steps/
+   sl run          # runs the sl/features/ corpus of the enclosing project
    ```
 
 This is all you need to run features, format files, start the REPL (`sl repl`), connect your IDE (`sl repl --nrepl`), and use built-in browser steps. No Clojure toolchain needed — just Java.
@@ -147,23 +147,26 @@ The `sl` command provides test execution, file validation, and formatting.
 ### Running Tests
 
 ```bash
+# Run the project's feature corpus (default: sl/features/)
+sl run
+
 # Run all feature files in a directory
-sl run features/ --step-paths steps/
+sl run sl/features/
 
 # Run specific files
-sl run features/login.feature features/checkout.feature --step-paths steps/
+sl run sl/features/login.feature sl/features/checkout.feature
 
 # Dry-run (verify bindings without executing)
-sl run features/ --step-paths steps/ --dry-run
+sl run --dry-run
 
 # Run only the @smoke subset
-sl run features/ --step-paths steps/ --tags @smoke
+sl run --tags @smoke
 
 # Machine-readable EDN output
-sl run features/ --step-paths steps/ --edn
+sl run --edn
 
 # Verbose output (show each step)
-sl run features/ --step-paths steps/ -v
+sl run -v
 ```
 
 **CLI Flags:**
@@ -171,7 +174,7 @@ sl run features/ --step-paths steps/ -v
 | Flag | Config equivalent | Description |
 |------|-------------------|-------------|
 | `--step-paths p1,p2` | `:runner {:step-paths [...]}` | Comma-separated paths to step definition directories |
-| `-c, --config FILE` | — | Path to config file (default: `shiftlefter.edn` in current directory) |
+| `-c, --config FILE` | — | Path to config file (default: the discovered `sl/shiftlefter.edn`) |
 | `--dry-run` | — | Bind steps but don't execute (verify all steps have definitions) |
 | `--tags TAGS` | — | Run only scenarios carrying any of these tags (comma-separated, repeatable; `@` optional). Filtering happens at planning time — deselected scenarios are never bound, and counts/reports cover only the selection. |
 | `--skip-tags TAGS` | — | Skip scenarios carrying any of these tags (same syntax; exclude wins over `--tags`) |
@@ -179,6 +182,7 @@ sl run features/ --step-paths steps/ -v
 | `--edn` | — | Output results as EDN to stdout |
 | `--junit-xml PATH` | `:runner {:report {:junit-xml "..."}}` | Write a CI-ingestible JUnit XML report (alongside console/EDN; flag wins over config). A planning error (exit 2) writes **no** file — gate CI on the exit code. See [docs/CI.md](docs/CI.md) for worked pipelines and [ERRATA E009](ERRATA.md) for format details. |
 | `--html PATH` | `:runner {:report {:html "..."}}` | Write a self-contained HTML run report (one file, works offline via double-click; flag wins over config). Embeds the full run data as a readable EDN island alongside the rendered view. |
+| `--capture k=v,…` | `:runner {:capture {...}}` | Capture artifacts into the run's results directory (e.g. `screenshot=on-failure,console=every-step`). Kinds: `screenshot`, `console`, `page-source` (browser). Policies: `never` (default), `on-failure` (the failing step's instant, all live browsers), `every-step` (film strip following the acting subject). Flag wins over config as a whole value. Capture failures on a green scenario flip it to `:error`, capture-attributed — evidence loss is never silent. |
 | `-v, --verbose` | — | Show each step as it executes |
 | `--version` | — | Print ShiftLefter version |
 
@@ -256,7 +260,7 @@ Override the logging configuration with the standard Logback system property:
 
 ```bash
 java -Dlogback.configurationFile=/path/to/logback.xml \
-  -jar shiftlefter.jar run features/ --step-paths steps/
+  -jar shiftlefter.jar run sl/features/
 ```
 
 ### Source-Dev Users
@@ -290,7 +294,7 @@ stack — tools.logging facade, no bound binding in source distribution.”
 Step definitions bind Gherkin steps to Clojure functions. Every step has a **subject** — a keyword like `:user`, `:alice`, `:cart` — extracted from the first word in the step text. Create `.clj` files in your step-paths directory:
 
 ```clojure
-;; steps/shopping_steps.clj
+;; sl/steps/shopping_steps.clj
 (ns my-project.steps.shopping
   (:require [shiftlefter.stepengine.registry :refer [defstep]]
             [shiftlefter.step :as step]))
@@ -366,10 +370,13 @@ Add type-checking to your step definitions with Subject-Verb-Object validation. 
   ...)
 ```
 
-Configure glossaries and enforcement in `shiftlefter.edn`:
+Configure enforcement in `sl/shiftlefter.edn`. Glossaries at the
+conventional paths next to the config (`sl/glossary/subjects.edn`,
+`sl/glossary/verbs/<type>.edn`, `sl/glossary/intents/`) are discovered
+automatically; an explicit `:glossaries` map overrides them:
 
 ```clojure
-{:glossaries
+{:glossaries                             ;; optional — these ARE the conventions
  {:subjects "glossary/subjects.edn"
   :verbs {:web "glossary/verbs/web.edn"}}
 
@@ -395,15 +402,29 @@ See `examples/02b-browser-multi-actor/` for a working example with glossary vali
 
 ## Configuration
 
-ShiftLefter looks for `shiftlefter.edn` in the current directory. Copy `shiftlefter.edn.example` to get started:
+ShiftLefter discovers `sl/shiftlefter.edn` — the nearest ancestor directory
+containing one is the project root, and everything ShiftLefter (config,
+features, glossaries, steps) lives in that `sl/` directory. Copy
+`shiftlefter.edn.example` to get started:
+
+```bash
+mkdir -p sl && cp shiftlefter.edn.example sl/shiftlefter.edn
+```
 
 ```clojure
-;; shiftlefter.edn
+;; sl/shiftlefter.edn
 {:parser {:dialect "en"}       ;; Language dialect (en, fr, de, etc.)
 
- :runner {:step-paths ["steps/"]      ;; Where to find step definitions
-          :allow-pending? false}}     ;; true = pending steps don't fail the run
+ :runner {:step-paths ["steps/"]      ;; Where to find step definitions (sl/steps/)
+          :features ["features/"]     ;; Feature corpus for bare `sl run` (sl/features/)
+          :allow-pending? false       ;; true = pending steps don't fail the run
+          ;; :capture {:screenshot :on-failure   ;; artifacts into sl/results/<run>/
+          ;;           :console :on-failure}     ;; policies: never|on-failure|every-step
+          }}
 ```
+
+Config-declared paths resolve from the config's own directory, so the
+defaults land at `sl/steps/` and `sl/features/`.
 
 **Browser backend** — the bundled WebDriver backend (`:etaoin`, the default) or Playwright (add to `lib/` or `deps.edn`); switching is one config line:
 
@@ -419,7 +440,7 @@ See [Browser Backend Configuration](docs/INSTALL-TIERS.md#browser-backend-config
 
 **Precedence:**
 1. CLI flags (e.g., `--step-paths`) override config file
-2. `./shiftlefter.edn` in current directory
+2. Discovered `sl/shiftlefter.edn` (nearest ancestor; `-c FILE` bypasses discovery)
 3. Built-in defaults
 
 ---
@@ -640,6 +661,7 @@ isn't), plus a task-based index of every guide. Highlights:
 - [docs/SVO.md](docs/SVO.md) — SVO validation guide (glossaries, defstep metadata, incremental adoption)
 - [docs/AGENT.md](docs/AGENT.md) — the agent surface: operating doctrine + built-in vocabulary (also packaged: `sl agent-doc`)
 - [docs/INSTALL-TIERS.md](docs/INSTALL-TIERS.md) — What you can do at each installation tier, bundled libraries, browser backend config
+- [docs/project-layout.md](docs/project-layout.md) — The project-contents contract: what you bring, what ShiftLefter writes into your repo
 - [docs/LOCATORS.md](docs/LOCATORS.md) — Choosing web locators that survive refactors
 - [docs/COSTUMES.md](docs/COSTUMES.md) — Costumes & wardrobe: durable authenticated browser sessions actors wear
 - [docs/multiple-actors.md](docs/multiple-actors.md), [docs/across-interfaces.md](docs/across-interfaces.md), [docs/extending-vocabulary.md](docs/extending-vocabulary.md) — capability guides
@@ -677,8 +699,8 @@ bin/                           # Dev scripts (kaocha, kondo, compliance, repl-ev
 
 **Configuration:**
 
-- `shiftlefter.edn.example` — Template config (tracked, copy to `shiftlefter.edn`)
-- `shiftlefter.edn` — User config (gitignored)
+- `shiftlefter.edn.example` — Template config (tracked, copy to `sl/shiftlefter.edn`)
+- `sl/shiftlefter.edn` — User config (gitignored)
 
 ---
 

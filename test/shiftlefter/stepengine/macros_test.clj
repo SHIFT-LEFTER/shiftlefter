@@ -1,5 +1,6 @@
 (ns shiftlefter.stepengine.macros-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [shiftlefter.stepengine.macros :as macros]))
 
 ;; -----------------------------------------------------------------------------
@@ -72,6 +73,54 @@
       ;; dupe.ini has internal duplicate, and auth.ini has "login as alice" too
       (is (seq errors))
       (is (some #(= :macro/duplicate-key (:type %)) errors)))))
+
+;; -----------------------------------------------------------------------------
+;; Directory-form registry paths (sl-g71p)
+;; -----------------------------------------------------------------------------
+
+(deftest test-load-registries-directory
+  (testing "A directory path loads every .ini under it, recursively; non-INI files ignored"
+    (let [{:keys [registry errors]} (macros/load-registries ["test/fixtures/macros/dir-form/"])]
+      (is (empty? errors))
+      (is (= 3 (count registry)))
+      (is (contains? registry "dir-form login"))
+      (is (contains? registry "dir-form navigate home"))
+      ;; nested/extra.ini found by recursive expansion
+      (is (contains? registry "dir-form nested macro")))))
+
+(deftest test-load-registries-directory-without-trailing-slash
+  (testing "Directory form works without a trailing slash too"
+    (let [{:keys [registry errors]} (macros/load-registries ["test/fixtures/macros/dir-form"])]
+      (is (empty? errors))
+      (is (= 3 (count registry))))))
+
+(deftest test-load-registries-directory-mixed-with-file
+  (testing "A path list may mix directories and files"
+    (let [{:keys [registry errors]} (macros/load-registries
+                                     ["test/fixtures/macros/dir-form/"
+                                      "test/fixtures/macros/auth.ini"])]
+      (is (empty? errors))
+      (is (= 4 (count registry)))
+      (is (contains? registry "dir-form login"))
+      (is (contains? registry "login as alice")))))
+
+(deftest test-load-registries-directory-not-found
+  (testing "A nonexistent directory-looking path stays loud: :macro/file-not-found"
+    (let [{:keys [registry errors]} (macros/load-registries ["nonexistent-macros-dir/"])]
+      (is (empty? registry))
+      (is (= 1 (count errors)))
+      (is (= :macro/file-not-found (-> errors first :type))))))
+
+(deftest test-load-registries-directory-duplicate-deterministic
+  (testing "Duplicate keys across a directory's files report in sorted path order"
+    (let [{:keys [errors]} (macros/load-registries ["test/fixtures/macros/dir-dup/"])
+          error (first errors)]
+      (is (= 1 (count errors)))
+      (is (= :macro/duplicate-key (:type error)))
+      (is (= "dir-dup duplicated macro" (:macro-key error)))
+      ;; sorted expansion: aaa-first.ini wins, zzz-second.ini is the duplicate
+      (is (str/ends-with? (-> error :first-definition :file) "aaa-first.ini"))
+      (is (str/ends-with? (-> error :second-definition :file) "zzz-second.ini")))))
 
 ;; -----------------------------------------------------------------------------
 ;; Acceptance Criteria (Task 2.4)

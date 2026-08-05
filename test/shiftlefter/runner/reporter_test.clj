@@ -288,6 +288,33 @@
           (is (nil? (-> env :plan :plan/steps)))
           (is (some? (-> env :plan :plan/pickle)) "reporters read the pickle"))))))
 
+(deftest envelope-carries-attachments-at-both-levels
+  ;; sl-l9nj: refs survive the allowlist at step AND scenario level (the
+  ;; step-level producer arrives with sl-3q9r; the contract is live now).
+  (let [ref #:attachment{:kind :screenshot
+                         :path "attachments/checkout/shot.png"
+                         :media-type "image/png"
+                         :bytes 42
+                         :source [:hook "shot"]}
+        raw {:status :passed
+             :plan {:plan/pickle {:pickle/name "checkout"}}
+             :steps [{:step {:step/text "s"} :binding {} :status :passed
+                      :attachments [ref]}]
+             :attachments [ref]
+             :scenario-ctx {:live-driver (Object.)}}
+        env (reporter/scenario-envelope raw)]
+    (is (= [ref] (:attachments env)) "scenario-level refs survive")
+    (is (= [ref] (-> env :steps first :attachments)) "step-level refs survive")
+    (is (reporter/edn-safe? env) "refs are pure data — invariant 3 holds")
+    (is (= env (edn/read-string (pr-str env))) "round-trips")
+    (testing "zero-attachment envelopes are keyless (byte-identity guard)"
+      (let [bare (reporter/scenario-envelope
+                  (-> raw
+                      (dissoc :attachments)
+                      (update-in [:steps 0] dissoc :attachments)))]
+        (is (not (contains? bare :attachments)))
+        (is (not (contains? (-> bare :steps first) :attachments)))))))
+
 (deftest execute!-keeps-the-raw-result-for-programmatic-callers
   (testing "envelopes are a projection for the report/observe planes only"
     (let [raw (first (:scenarios (:result (run-quiet {:paths ["test/fixtures/features/basic.feature"]}))))]

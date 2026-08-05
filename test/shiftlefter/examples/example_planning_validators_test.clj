@@ -44,9 +44,10 @@
                      (reduce + 0 (map #(count (:plans %)) groups))
                      (count plans))})))
 
-(def ^:private ex-02b "examples/02b-browser-multi-actor/")
-(def ^:private ex-03 "examples/03-custom-steps/")
-(def ^:private ex-svo "examples/svo-demo/")
+;; sl/ layout (sl-fcjm): each example's project lives under <example>/sl/.
+(def ^:private ex-02b "examples/02b-browser-multi-actor/sl/")
+(def ^:private ex-03 "examples/03-custom-steps/sl/")
+(def ^:private ex-svo "examples/svo-demo/sl/")
 
 (deftest multi-actor-primary-config-plans-clean
   (let [{:keys [exit plan-count]} (plan-example (str ex-02b "shiftlefter.edn")

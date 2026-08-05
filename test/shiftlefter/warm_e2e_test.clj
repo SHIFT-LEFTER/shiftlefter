@@ -116,10 +116,11 @@
   (spit (str (fs/path root "steps" "s.clj")) step-src))
 
 (defn- write-fixtures
-  "Feature fixtures + the shiftlefter.edn anchor that makes `root` an instance
-   root for find_instance_root."
+  "Feature fixtures + the sl/shiftlefter.edn anchor that makes `root` an
+   instance root for find_instance_root (the single discovered layout, sl-fcjm)."
   [root]
-  (spit (str (fs/path root "shiftlefter.edn")) "{}\n")
+  (fs/create-dirs (str (fs/path root "sl")))
+  (spit (str (fs/path root "sl" "shiftlefter.edn")) "{}\n")
   (write-feature-fixtures root))
 
 (defn- mk-root []
@@ -475,10 +476,9 @@
            (reap! root)))))))
 
 ;; -----------------------------------------------------------------------------
-;; 15. sl/shiftlefter.edn layout in a subdir of a git repo: both sides anchor at
-;;     the CONFIG's project root, not the enclosing git toplevel (the second
-;;     rule mismatch closed by sl-v7l6 — find_instance_root now knows the
-;;     sl-directory layout).
+;; 15. sl/shiftlefter.edn (the single discovered layout, sl-fcjm) in a subdir of
+;;     a git repo: both sides anchor at the CONFIG's project root, not the
+;;     enclosing git toplevel (the rule mismatch closed by sl-v7l6).
 ;; -----------------------------------------------------------------------------
 
 (deftest ^:daemon sl-layout-subdir-anchors-at-config
@@ -500,3 +500,99 @@
          (finally
            (try (run-sl sub ["daemon" "stop"]) (catch Exception _ nil))
            (try (fs/delete-tree root) (catch Exception _ nil))))))))
+
+;; -----------------------------------------------------------------------------
+;; 16. sl/lib/*.jar user classpath extension (sl-5ee5): a dropped jar is USABLE
+;;     (not merely present) through both real execution paths — the cold floor
+;;     (-cp mode) and the warm daemon JVM — and the daemon bounces when the lib
+;;     set changes, same treatment as a jar rebuild.
+;; -----------------------------------------------------------------------------
+
+(defn- write-lib-jar!
+  "Build a tiny jar at `path` containing one Clojure SOURCE ns, `<ns-seg>.core`,
+   whose `marker` fn returns `answer`. Pure JDK (JarOutputStream) — no shell,
+   no build tooling, mirroring the zero-build-tooling promise of sl/lib itself.
+   Distinct jars need distinct ns segments: classpath wildcard order within a
+   dir is alphabetical, so a duplicated ns would shadow."
+  [path ns-seg answer]
+  (let [src (str "(ns " ns-seg ".core)\n"
+                 "(defn marker [] \"" answer "\")\n")]
+    (with-open [jos (java.util.jar.JarOutputStream.
+                     (io/output-stream (io/file path)))]
+      (.putNextEntry jos (java.util.jar.JarEntry. (str ns-seg "/core.clj")))
+      (.write jos (.getBytes src "UTF-8"))
+      (.closeEntry jos))))
+
+(def ^:private lib-feature
+  "Feature: L\n\n  Scenario: S\n    Given the lib probe answers\n")
+
+(def ^:private lib-step-src
+  ;; The step's ns requires libprobe.core from the sl/lib jar and THROWS unless
+  ;; the marker answers — a green run is only possible with the jar on the
+  ;; running JVM's classpath.
+  (str "(ns libsteps\n"
+       "  (:require [libprobe.core :as probe]\n"
+       "            [shiftlefter.stepengine.registry :refer [defstep]]))\n"
+       "(defstep #\"the lib probe answers\" []\n"
+       "  (when-not (= \"LIB-JAR-LOADED\" (probe/marker))\n"
+       "    (throw (ex-info \"lib probe wrong answer\" {}))))\n"))
+
+(defn- write-lib-fixtures!
+  "Instance root with sl/lib/probe.jar + a feature/step pair that only passes
+   when the lib jar is on the classpath of the JVM executing the run."
+  [root]
+  (fs/create-dirs (str (fs/path root "sl")))
+  (spit (str (fs/path root "sl" "shiftlefter.edn")) "{}\n")
+  (spit (str (fs/path root "lib.feature")) lib-feature)
+  (fs/create-dirs (str (fs/path root "steps")))
+  (spit (str (fs/path root "steps" "libsteps.clj")) lib-step-src)
+  (fs/create-dirs (str (fs/path root "sl" "lib")))
+  (write-lib-jar! (str (fs/path root "sl" "lib" "probe.jar"))
+                  "libprobe" "LIB-JAR-LOADED"))
+
+(deftest ^:daemon lib-jar-usable-cold-and-warm
+  (skip-without-jar
+   (fn []
+     (let [root (str (fs/create-temp-dir))]
+       (try
+         (write-lib-fixtures! root)
+         (testing "cold floor (-cp mode): the step requiring the lib ns passes"
+           (let [r (run-sl root ["run" "lib.feature" "--step-paths" "steps"]
+                           :env {"SL_NO_DAEMON" "1"})]
+             (is (= 0 (:exit r)) (str "cold run failed: " (:err r)))))
+         (testing "warm path: the daemon JVM carries sl/lib on ITS classpath"
+           (let [r (run-sl root ["run" "lib.feature" "--step-paths" "steps"])]
+             (is (= 0 (:exit r)) (str "warm run failed: " (:err r)))
+             (is (some? (read-daemon root))
+                 "run went through a daemon (breadcrumb present)")))
+         (finally (reap! root)))))))
+
+(deftest ^:daemon lib-change-bounces-daemon
+  (skip-without-jar
+   (fn []
+     (let [root (str (fs/create-temp-dir))]
+       (try
+         (write-lib-fixtures! root)
+         (run-sl root ["run" "lib.feature" "--step-paths" "steps"])
+         (let [d1 (read-daemon root)]
+           (is (some? d1) "precondition: daemon running with libs")
+           (testing "adding a jar to sl/lib bounces (signature mismatch)"
+             (write-lib-jar! (str (fs/path root "sl" "lib" "extra.jar"))
+                             "extraprobe" "X")
+             (let [r (run-sl root ["run" "lib.feature" "--step-paths" "steps"])
+                   d2 (read-daemon root)]
+               (is (= 0 (:exit r)))
+               (is (some? d2))
+               (is (not= (:pid d1) (:pid d2)) "new pid — daemon bounced on lib add")
+               (testing "deleting the whole sl/lib dir bounces again (the
+                         signature-only-detectable case: nothing left to be
+                         newer than daemon.edn)"
+                 (fs/delete-tree (str (fs/path root "sl" "lib")))
+                 ;; the run itself now needs no lib (fmt does not touch steps)
+                 (let [r3 (run-sl root ["fmt" "--check" "lib.feature"])
+                       d3 (read-daemon root)]
+                   (is (= 0 (:exit r3)))
+                   (is (some? d3))
+                   (is (not= (:pid d2) (:pid d3))
+                       "new pid — daemon bounced on lib removal"))))))
+         (finally (reap! root)))))))

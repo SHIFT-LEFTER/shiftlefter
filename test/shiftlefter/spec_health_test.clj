@@ -13,6 +13,7 @@
             [clojure.spec.gen.alpha :as gen]
             [clojure.string :as str]
             ;; Require all namespaces that define specs to ensure they're loaded
+            [shiftlefter.attachments]
             [shiftlefter.gherkin.api]
             [shiftlefter.gherkin.compliance]
             [shiftlefter.gherkin.dialect]

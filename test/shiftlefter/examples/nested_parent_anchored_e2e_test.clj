@@ -19,7 +19,7 @@
             ;; Side-effect: registers the :catalog fixture page.
             [shiftlefter.demo.fixture.catalog]))
 
-(def ^:private intents-dir "examples/06-nested-parent-anchored/glossary/intents")
+(def ^:private intents-dir "examples/06-nested-parent-anchored/sl/glossary/intents")
 
 ;; -----------------------------------------------------------------------------
 ;; §7.5 fallback chain — load-time, no browser (sl-1ps acceptance #1)
@@ -46,33 +46,50 @@
 ;; Live resolution against the fixture DOM (^:e2e, gated)
 ;; -----------------------------------------------------------------------------
 
+(defn- parent-anchored-assertions
+  "Shared by the etaoin validator and the playwright × strategy variants
+   (sl-tnx) — same assertions, same live DOM, whichever backend resolves."
+  [browser resolve]
+  (testing "the same ProductCard resolves under three different wrappers"
+    (is (= "Widget A" (h/text-of browser (resolve "Dashboard.featured[1].title"))))
+    (is (= "$20"      (h/text-of browser (resolve "Dashboard.featured[2].price"))))
+    (is (= "Gadget X" (h/text-of browser (resolve "Dashboard.sidebar[1].title"))))
+    (is (= "Thing 1"  (h/text-of browser (resolve "Dashboard.results[1].title")))))
+
+  (testing "[-1] last and [*] whole-collection fan-out"
+    (is (= "Thing 3" (h/text-of browser (resolve "Dashboard.results[-1].title"))))
+    (is (= ["Thing 1" "Thing 2" "Thing 3"]
+           (h/texts-of browser (resolve "Dashboard.results[*].title")))))
+
+  (testing "heterogeneous-cell exclusion (§7.7): the .promo banner is not a card"
+    (is (= ["Gadget X" "Gadget Y"]
+           (h/texts-of browser (resolve "Dashboard.sidebar[*].title")))))
+
+  (testing "nested descent into a card's rating region"
+    (is (= "4.5" (h/text-of browser (resolve "Dashboard.featured[1].rating.stars")))))
+
+  (testing "out-of-range is a loud error, never nil (§5)"
+    (is (= :intent/index-out-of-range
+           (h/error-type (resolve "Dashboard.featured[9].title"))))))
+
 (deftest ^:e2e parent-anchored-resolution
   (if-not h/live?
     (is true "skipped — SHIFTLEFTER_LIVE_WEBDRIVER not set")
     (h/run-against
      {:intents-dir intents-dir :pages [:catalog] :path "/catalog"}
      (fn [browser _intents resolve]
-       (testing "the same ProductCard resolves under three different wrappers"
-         (is (= "Widget A" (h/text-of browser (resolve "Dashboard.featured[1].title"))))
-         (is (= "$20"      (h/text-of browser (resolve "Dashboard.featured[2].price"))))
-         (is (= "Gadget X" (h/text-of browser (resolve "Dashboard.sidebar[1].title"))))
-         (is (= "Thing 1"  (h/text-of browser (resolve "Dashboard.results[1].title")))))
+       (parent-anchored-assertions browser resolve)))))
 
-       (testing "[-1] last and [*] whole-collection fan-out"
-         (is (= "Thing 3" (h/text-of browser (resolve "Dashboard.results[-1].title"))))
-         (is (= ["Thing 1" "Thing 2" "Thing 3"]
-                (h/texts-of browser (resolve "Dashboard.results[*].title")))))
-
-       (testing "heterogeneous-cell exclusion (§7.7): the .promo banner is not a card"
-         (is (= ["Gadget X" "Gadget Y"]
-                (h/texts-of browser (resolve "Dashboard.sidebar[*].title")))))
-
-       (testing "nested descent into a card's rating region"
-         (is (= "4.5" (h/text-of browser (resolve "Dashboard.featured[1].rating.stars")))))
-
-       (testing "out-of-range is a loud error, never nil (§5)"
-         (is (= :intent/index-out-of-range
-                (h/error-type (resolve "Dashboard.featured[9].title")))))))))
+(deftest ^:e2e parent-anchored-resolution-playwright
+  (if-not h/live-playwright?
+    (is true "skipped — SHIFTLEFTER_LIVE_PLAYWRIGHT not set")
+    (doseq [pruning [:fast :safe]]
+      (testing (str "pruning strategy " pruning)
+        (h/run-against
+         {:intents-dir intents-dir :pages [:catalog] :path "/catalog"
+          :adapter :playwright :pruning pruning}
+         (fn [browser _intents resolve]
+           (parent-anchored-assertions browser resolve)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Live web capture into the data plane (^:e2e, gated) — sl-zgna

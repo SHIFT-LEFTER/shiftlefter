@@ -12,7 +12,7 @@ When built-in steps aren't enough, write your own in Clojure.
 ## The Feature File
 
 ```gherkin
-# features/cucumbers.feature
+# sl/features/cucumbers.feature
 Feature: Cucumber basket
 
   Scenario: Eating cucumbers
@@ -29,7 +29,7 @@ Feature: Cucumber basket
 ## The Step Definitions
 
 ```clojure
-;; steps/cucumbers.clj
+;; sl/steps/cucumbers.clj
 (ns steps.cucumbers
   (:require [shiftlefter.stepengine.registry :refer [defstep]]))
 
@@ -54,13 +54,14 @@ Feature: Cucumber basket
 ## The Config File
 
 ```clojure
-;; shiftlefter.edn
+;; sl/shiftlefter.edn
 {:runner {:step-paths ["steps/"]}}
 ```
 
-This tells ShiftLefter where to find your step definition files. (`"steps/"`
-also happens to be the default, but declaring it under `:runner` is the real
-config key — a bare top-level `:step-paths` is ignored.)
+This tells ShiftLefter where to find your step definition files, resolved
+next to the config — `sl/steps/`. (`"steps/"` also happens to be the
+default, but declaring it under `:runner` is the real config key — a bare
+top-level `:step-paths` is ignored.)
 
 ## Try It
 
@@ -68,8 +69,10 @@ From this directory (release zip installs `sl`; in a checkout of this repo
 substitute `bin/sl`):
 
 ```bash
-sl run features/
+sl run sl/features/
 ```
+
+(Bare `sl run` works too — `sl/features/` is the default corpus location.)
 
 ## How It Works
 
@@ -111,6 +114,6 @@ The error message and data will appear in the test output.
 
 ## What's Next?
 
-- Add more step files in `steps/` — they're all loaded automatically
+- Add more step files in `sl/steps/` — they're all loaded automatically
 - Use `sl run --dry-run` to check step bindings without executing
 - See `examples/02-browser-zero-code/` for built-in browser steps

@@ -10,9 +10,14 @@
 ;; override via :adapter-opts {:prefs {...}} (docs/INSTALL-TIERS.md
 ;; § adapter-opts).
 
+;; No :glossaries key — the subjects glossary is discovered at the
+;; conventional path next to this config (glossary/subjects.edn, i.e.
+;; sl/glossary/subjects.edn). An explicit :glossaries map would override
+;; the convention wholesale; :glossaries nil turns glossaries off (see
+;; shiftlefter-shifted-no-glossary.edn).
+
 {:interfaces {:web {:type :web
                     :adapter :etaoin}}
- :glossaries {:subjects "glossary/subjects.edn"}
  :svo {:unknown-subject :error
        :unknown-verb :warn
        :unknown-interface :error}}
