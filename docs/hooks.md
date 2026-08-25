@@ -75,13 +75,17 @@ thing you want is already happening, and your hook will fight it.
 down" is *run* orchestration, not scenario lifecycle, and it has its own file:
 `setup.clj`, sibling of your `shiftlefter.edn` (both in `sl/`). It defines `setups` — a vector
 of groups, each with a `:start` function (returning an optional `:stop` and an
-optional adapter registry) and the `:features` that group owns:
+optional adapter registry), an optional `:adapters` declaration (the pure-data
+face of that registry), and the `:features` that group owns:
 
 ```clojure
 (ns setup)
 
 (defn setups [config]
   [{:label    "sms-2fa"
+    :adapters [{:name :sms-mock                  ;; data only — no functions
+                :provides [:shiftlefter.sms.protocol/ISMS
+                           :shiftlefter.sms.protocol/ISMSInbound]}]
     :start    start-fixture-server   ;; (fn [config]) → {:stop .., :adapter-registry ..}
     :features ["features/password_reset_sms.feature"]}])
 ```
@@ -91,7 +95,9 @@ test plan — undeclared feature files are ignored, so the plan can't drift from
 the orchestration. One mechanism note worth knowing: `sl run --dry-run`
 previews the plan without running your `:start`/`:stop` or hooks, but the
 `setup.clj` file itself is loaded — so keep top-level forms pure; side effects
-belong inside `:start`.
+belong inside `:start`. The `:adapters` declaration is what keeps that preview
+honest for custom registries: dry-run binds against the declared shapes, and
+the registry `:start` returns is verified to match them.
 
 Honesty line: `setup.clj` is the sanctioned answer for run-level lifecycle
 today, and it works as described — but its full polish pass (failure-semantics
@@ -169,7 +175,10 @@ What the policy buys over a hand-rolled After hook:
   "which step said this" for free — with a final tail sweep so nothing
   logged after the last step is lost. Under `:on-failure` the console
   drains once, post-steps, only when the scenario is red — one
-  whole-scenario log.
+  whole-scenario log. "Red" is SCENARIO-level: a `:pending` step under
+  strict mode reddens the RUN (exit 1) but the scenario stays
+  `:pending`, not failed — no failure capture, no drain (a pending
+  step is a WIP declaration, not misbehavior).
 - **Timing honesty.** Capture cost is recorded on each ref
   (`:attachment/duration-ms`) and never pollutes *step* durations.
 - **The evidence contract (harsh on purpose).** If capture
@@ -179,28 +188,96 @@ What the policy buys over a hand-rolled After hook:
   evidence. Already-red scenarios keep their status; the ref records the
   miss visibly.
 
-Kind support is adapter-level: `:console` is a Chrome/Edge capability
-(other drivers no-op legibly), and the Playwright backend contributes no
-capture kinds yet — on Playwright, a configured `:screenshot` simply
-never fires. A configured kind that *no* registered adapter provides
-gets one stderr warning per run — a typo'd kind must not be a silent
-no-op.
+Kind support is adapter-level. The WebDriver backend (`:etaoin`)
+provides all three kinds (`:console` is a Chrome/Edge capability — other
+drivers no-op legibly). The Playwright backend provides `:screenshot`
+and `:page-source`; it does **not** provide `:console`, and that is a
+design fact, not a gap in effort: capture reads are destructive *drains*
+of a browser-side buffer, and Playwright has no browser-side console
+buffer to drain — its console messages are listener events delivered at
+fire time, so a pull-at-capture-time read finds nothing. Console capture
+for Playwright needs a subscription-shaped capture kind (attach a
+listener, buffer framework-side, drain our buffer); that design is
+sl-lam0.
 
-Dry runs never capture (nothing executes), and a run with no results
+**Composition is per capability, checked per group.** A capture kind
+fires on each live capability whose adapter supports it and is a quiet
+no-op on the rest — in a mixed run (say `:web` on Playwright and
+`:admin` on WebDriver, two `:web`-typed instances sharing the builtin
+vocabulary, steps picking the second with `[:admin]` —
+[SVO.md](SVO.md#step-binding-rules)) a configured `:console` captures
+the admin browser's console and nothing from the web browser, same
+config line, both truths. Two warnings keep this honest (under `--edn` both ride
+`:diagnostics :capture-lints` instead of stderr):
+
+- A configured kind that *no* registered adapter provides warns once per
+  run (`:capture/unknown-kind`) — a typo'd kind must not be a silent
+  no-op. It checks the group's live registry, custom adapters included,
+  so it fires on real runs.
+- A configured kind that exists but is supported by **none of the
+  adapters a group actually uses** warns per group at *plan* time
+  (`:capture/adapter-unsupported`) — it appears in `--dry-run` previews
+  too, so a pure-Playwright project with `:console` configured hears
+  that nothing is coming *before* a browser opens, and in a mixed
+  multi-group run the warning names exactly the group whose evidence
+  will be missing.
+
+Dry runs never capture (nothing executes) — but the plan-time
+capability warning above does fire there. A run with no results
 directory (no config file) warns once and captures nothing.
+
+### Contributing a capture kind — custom adapters
+
+The kind set is **open**: the built-in kinds are adapter-contributed, and
+a `setup.clj` custom adapter registry contributes yours the same way. A
+registry entry's `:capture` map is the whole extension surface — kind →
+`{:fn f, :scenario-scoped? bool}` — and the fn contract is about ten
+lines:
+
+- **In:** `{:handle h}` — the capability's cleanup handle (the full
+  factory result) or, when the entry declares no `:impl-key`, the impl
+  the factory returned.
+- **Out:** `{:data <bytes-or-String> :media-type "..." :ext "..."}`
+  (+ optional `:excerpt`) — the framework owns timing, file writes,
+  filenames, and ref construction; **`nil`** — nothing to capture, no
+  file, no ref; **throw** — the capture *failed*, and the evidence
+  contract above applies (capture-attributed `:error` on an
+  otherwise-green scenario).
+- `:scenario-scoped? true` marks destructive drain kinds (the built-in
+  `:console` shape); non-destructive reads omit it.
+
+The group's `:adapters` declaration carries the kinds as data
+(`:capture {my-kind {}}`) so dry-run previews and the plan-time
+capability warning see them; the live registry is spec-validated at the
+setup install boundary, so a malformed entry fails legibly before any
+factory runs. One dependency worth knowing: seeing the refs *rendered*
+requires the HTML report, which is off by default — set
+`[:runner :report :html]` (or pass `--html`); the refs land in the run
+directory and the `--edn` envelope either way. The worked example — a
+mock-SMS adapter contributing
+`:message-log`, browser-free, nothing to install — is
+[`examples/07-custom-capture-kind`](https://github.com/SHIFT-LEFTER/shiftlefter/tree/main/examples/07-custom-capture-kind).
 
 ### Custom captures — the After-hook attachments claim
 
-For evidence the framework doesn't own — DB dumps, API traces, anything
-beyond the built-in kinds — the After hook remains the sanctioned
-channel. Afters run before capability cleanup, so the browser is still
+For **one-off** evidence the framework doesn't own — a DB dump or API
+trace tied to one suite's needs — the After hook remains the sanctioned
+channel. (When the evidence belongs to a capability you provision,
+contribute a capture kind instead — the section above — and the policy,
+timing, and failure-attribution machinery comes free.) Afters run before
+capability cleanup, so the browser is still
 live; on-failure conditionality is a plain `when` on the result status.
+Both hook payloads also carry `:seed` — the run seed
+([lifecycle — The run seed](lifecycle.md#the-run-seed)), for seeding any
+randomness your hook's data setup draws.
+
 The After return is the **attachments claim**: write your file into the
 payload's `:artifacts-dir` (pre-created, absent when the run has no
 results directory) and return refs to what you wrote — they ride the
-scenario envelope and render in every human report surface (inline in
-HTML, Jenkins `[[ATTACHMENT|…]]` lines in JUnit, plain lines in console
-failures; the `--edn` summary does not carry attachment refs yet):
+scenario envelope and render in every report surface (inline in HTML,
+Jenkins `[[ATTACHMENT|…]]` lines in JUnit, plain lines in console
+failures, and refs in the `--edn` summary since 0.5.5 — see
+[Build your own report](REPORTS.md)):
 
 ```clojure
 {:name "failure-screenshot"

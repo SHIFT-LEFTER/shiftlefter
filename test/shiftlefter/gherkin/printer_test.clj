@@ -404,6 +404,19 @@
       (is (= "# only\n# comments\n" once))
       (is (= once (printer/canonical once))))))
 
+;; sl-ur58: the one rejected comment position — between a step and its
+;; table's FIRST row — now parses; the comment attaches to the first row.
+
+(deftest comment-before-tables-first-row
+  (testing "the bead's repro parses and emits the comment above the first row"
+    (let [once (printer/canonical
+                "Feature: x\n  Scenario: s\n    Given t\n      # c\n      | a |\n      | 1 |\n")]
+      (is (str/includes? once "    Given t\n      # c\n      | a |\n      | 1 |"))
+      (is (= once (printer/canonical once)))))
+  (testing "the position is preservation-complete (backstop stays empty)"
+    (is (= [] (printer/lost-comments
+               "Feature: x\n\n  Scenario: s\n    Given t\n      # c\n      | a |\n      | 1 |\n")))))
+
 (deftest top-comment-and-language-header-combo
   (testing "sl-lg8v fit-pass pin: a leading comment plus a # language:
             directive — comments emit first, the directive survives, and

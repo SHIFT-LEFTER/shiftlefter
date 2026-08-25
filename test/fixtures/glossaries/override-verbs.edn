@@ -1,0 +1,7 @@
+;; Verb glossary carrying the REMOVED :override-defaults flag (sl-h7c3) —
+;; input for the presence-diagnostic test: loading this must warn.
+{:override-defaults true
+ :verbs
+ {:tap {:desc "Tap an element"
+        :frames {:default {:args []
+                           :pattern "S taps O"}}}}}

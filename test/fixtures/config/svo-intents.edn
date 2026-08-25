@@ -1,0 +1,4 @@
+;; sl-femd: Shifted config with an :intents glossary and NO explicit
+;; :unknown-object — load-config's conditional default flips it to :warn.
+{:svo {}
+ :glossaries {:intents "glossary/intents"}}

@@ -44,7 +44,10 @@
    - :from-number — default sender number (optional)
 
    Returns:
-   - Success: {:ok {:sms TwilioSMS :from-number string-or-nil}}
+   - Success: {:ok {:sms TwilioSMS :from-number string-or-nil}} — the
+     registry entry declares `:impl-key :sms` (sl-uv3r), so provisioning
+     extracts the TwilioSMS as the step-facing impl and the bundle rides
+     `:cleanup-handle`.
    - Error:   {:error {:type :adapter/missing-config :missing [...] ...}}"
   [config]
   (let [creds   (resolve-creds config)

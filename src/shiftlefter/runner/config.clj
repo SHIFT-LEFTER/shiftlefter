@@ -22,7 +22,9 @@
     :svo {:unknown-subject :warn
           :unknown-verb :warn
           :unknown-interface :error
-          :unknown-object :off}}
+          :unknown-object :off}}   ; :warn when an :intents glossary is
+                                   ; configured (sl-femd); :error blocks
+                                   ; (:strict = deprecated alias)
    ```
 
    ## Usage
@@ -36,7 +38,8 @@
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [shiftlefter.gherkin.io :as io]
-            [shiftlefter.project-context :as project-context]))
+            [shiftlefter.project-context :as project-context]
+            [shiftlefter.svo.validate :as svo-validate]))
 
 ;; -----------------------------------------------------------------------------
 ;; Specs — Config Shape
@@ -87,9 +90,23 @@
 ;; all-kinds-:never (D2 — opt-in; goldens and behavior unchanged).
 (s/def ::capture-value #{:never :on-failure :every-step})
 (s/def ::capture (s/map-of keyword? ::capture-value))
+;; sl-08f7: the run seed. [:runner :seed] is the config mirror for the
+;; --seed flag (CLI wins); absent = a fresh seed is generated per
+;; invocation. Positive 64-bit long, decimal-printed; recorded in the run
+;; record (:run/seed) and handed down to hooks/steps/:start.
+(s/def ::seed pos-int?)
 (s/def ::runner (s/keys :req-un [::step-paths ::allow-pending?]
                         :opt-un [::features ::macros ::provisioning ::report
-                                 ::max-parallel ::capture]))
+                                 ::max-parallel ::capture ::seed]))
+
+;; Timing sub-config (sl-99u2) — the deadline substrate. Appears at the top
+;; level (global rung) and as a sibling key on interface entries (instance/
+;; interface rungs). Resolution ladder + framework defaults live in
+;; shiftlefter.step/timing; deliberately ABSENT from default-config so a
+;; :global source in a timeout record always means the user configured it.
+(s/def ::deadline-ms pos-int?)
+(s/def ::interval-ms pos-int?)
+(s/def ::timing (s/keys :opt-un [::deadline-ms ::interval-ms]))
 
 ;; Interface sub-config
 (s/def ::type keyword?)
@@ -107,14 +124,24 @@
 (s/def :interface/base-url string?)
 (s/def :interface/config (s/keys :opt-un [:interface/base-url]))
 (s/def ::interface-def (s/keys :req-un [::type ::adapter]
-                               :opt-un [:interface/config ::shared-impl?]))
+                               :opt-un [:interface/config ::shared-impl?
+                                        ::timing]))
 (s/def ::interfaces (s/map-of keyword? ::interface-def))
+
+;; Costumes sub-config (sl-1206): a costume declares the interface INSTANCE
+;; it belongs to — committed config, so wrong-world :wears fails statically
+;; (stepengine.costume-lint) instead of only at the runtime guard (sl-xbm).
+(s/def ::interface keyword?)
+(s/def ::costume-def (s/keys :req-un [::interface]))
+(s/def ::costumes (s/map-of keyword? ::costume-def))
 
 ;; SVO enforcement sub-config
 (s/def ::unknown-subject #{:warn :error :off})
 (s/def ::unknown-verb #{:warn :error :off})
 (s/def ::unknown-interface #{:warn :error :off})
-(s/def ::unknown-object #{:strict :warn :off})
+;; :error is the canonical blocking level (sl-femd, harmonized with the
+;; siblings above); :strict is a deprecated alias kept for existing configs.
+(s/def ::unknown-object #{:error :strict :warn :off})
 (s/def ::svo (s/keys :opt-un [::unknown-subject ::unknown-verb ::unknown-interface ::unknown-object]))
 
 ;; Glossaries sub-config
@@ -125,7 +152,8 @@
 
 ;; Top-level config
 (s/def ::config
-  (s/keys :opt-un [::parser ::runner ::glossaries ::interfaces ::svo]))
+  (s/keys :opt-un [::parser ::runner ::glossaries ::interfaces ::costumes
+                   ::svo ::timing]))
 
 ;; load-config-safe result
 (s/def ::status #{:ok :error})
@@ -173,7 +201,11 @@
    :interfaces {:web {:type :web
                       :adapter :etaoin
                       :config {}}}
-   ;; SVO enforcement settings (Shifted mode opt-in defaults — see docstring)
+   ;; SVO enforcement settings (Shifted mode opt-in defaults — see docstring).
+   ;; :unknown-object's :off here is the NO-INTENTS default only: load-config
+   ;; flips the effective default to :warn when an :intents glossary is
+   ;; configured and the user didn't set the key (sl-femd,
+   ;; apply-conditional-object-default).
    :svo {:unknown-subject :warn
          :unknown-verb :warn
          :unknown-interface :error
@@ -272,6 +304,21 @@
         (seq verbs) (assoc :verbs verbs)
         intents (assoc :intents intents)))))
 
+(defn- apply-conditional-object-default
+  "sl-femd: :unknown-object's default is CONDITIONAL — :warn when an :intents
+   glossary is configured (there is something to validate against), :off
+   otherwise (default-config's static value). Applies only when the user
+   didn't set the key themselves; evaluated on the MERGED config so
+   conventionally probed glossaries (sl-fcjm) count as configured.
+   Shifted-mode-only by construction: the caller only reaches this when the
+   user's config carries :svo (sl-ieie)."
+  [merged user-config]
+  (let [user-svo (:svo user-config)]
+    (if (and (get-in merged [:glossaries :intents])
+             (not (and (map? user-svo) (contains? user-svo :unknown-object))))
+      (assoc-in merged [:svo :unknown-object] :warn)
+      merged)))
+
 ;; -----------------------------------------------------------------------------
 ;; Public API
 ;; -----------------------------------------------------------------------------
@@ -294,6 +341,13 @@
    has :svo, the default enforcement levels are deep-merged under it; when
    it doesn't (or no config file exists), :svo is absent from the result and
    the run is Vanilla. `stepengine.compile/shifted-mode?` keys on this.
+
+   Conditional default (sl-femd): in Shifted mode, :unknown-object defaults
+   :warn when an :intents glossary is configured (explicit or conventionally
+   probed) and :off otherwise; an explicit user value always wins. This is
+   the ONE place the effective default is computed — downstream :off
+   fallbacks (stepengine.bind, svo.validate) are nothing-configured safety
+   nets, not defaults.
 
    Throws on:
    - Explicit config path doesn't exist
@@ -333,7 +387,7 @@
              ;; Shifted mode is user opt-in: keep :svo (with defaults merged
              ;; under it) only when the user's config has the key (sl-ieie).
              (if (contains? user-config :svo)
-               merged
+               (apply-conditional-object-default merged user-config)
                (dissoc merged :svo)))
            (throw (ex-info (:message result)
                            {:type (:type result)
@@ -471,7 +525,7 @@
    with the default). :webdriver/:webdriver-url are deliberately NOT here
    (sl-7kct): `normalize` validates them on the projection path but nothing
    consumes the result, so to `sl run` they are ignored keys like any other."
-  #{:parser :runner :glossaries :interfaces :svo})
+  #{:parser :runner :glossaries :interfaces :costumes :svo :timing})
 
 (def ^:private misplaced-key-paths
   ;; Known NESTED keys users plausibly write at the top level, mapped to the
@@ -484,6 +538,7 @@
    :provisioning      [:runner :provisioning]
    :report            [:runner :report]
    :max-parallel      [:runner :max-parallel]
+   :seed              [:runner :seed]
    :capture           [:runner :capture]
    :junit-xml         [:runner :report :junit-xml]
    :html              [:runner :report :html]
@@ -491,6 +546,8 @@
    :subjects          [:glossaries :subjects]
    :verbs             [:glossaries :verbs]
    :intents           [:glossaries :intents]
+   :deadline-ms       [:timing :deadline-ms]
+   :interval-ms       [:timing :interval-ms]
    :unknown-subject   [:svo :unknown-subject]
    :unknown-verb      [:svo :unknown-verb]
    :unknown-interface [:svo :unknown-interface]
@@ -506,24 +563,57 @@
    came from the user's file. WARNINGS ONLY, never errors — a newer config
    running on an older version must still work (forward compat, bead
    ruling). Top-level only by scope: nested maps (:interfaces entries,
-   adapter :config blocks) are open by design. Lint BEFORE `normalize`,
+   adapter :config blocks) are open by design — EXCEPT :timing, whose
+   inner keys are closed and validated as ERRORS at both rungs (sl-d3cz:
+   an unknown key there means the timing config is silently dead — see
+   `timing-problem`). Lint BEFORE `normalize`,
    whose synthetic :errors key would otherwise self-trigger."
   [config]
-  (->> (keys config)
-       (remove known-top-level-keys)
-       sort
-       (mapv (fn [k]
-               (if-let [path (get misplaced-key-paths k)]
-                 {:type :config/misplaced-key
-                  :key k
-                  :suggested-path path
-                  :message (str "config key " k " is not read at the top level"
-                                " and was ignored — did you mean "
-                                (pr-str path) "?")}
-                 {:type :config/unknown-key
-                  :key k
-                  :message (str "unknown top-level config key " k
-                                " was ignored")})))))
+  (-> (->> (keys config)
+           (remove known-top-level-keys)
+           sort
+           (mapv (fn [k]
+                   (if-let [path (get misplaced-key-paths k)]
+                     {:type :config/misplaced-key
+                      :key k
+                      :suggested-path path
+                      :message (str "config key " k " is not read at the top level"
+                                    " and was ignored — did you mean "
+                                    (pr-str path) "?")}
+                     {:type :config/unknown-key
+                      :key k
+                      :message (str "unknown top-level config key " k
+                                    " was ignored")}))))
+      ;; sl-xjx0 (Warden W9): the REVERSE direction of misplaced-key-paths —
+      ;; the release's two newest TOP-LEVEL keys, plausibly nested under
+      ;; :runner where they silently do nothing. Only these two: the rest of
+      ;; :runner's contents are its own vocabulary.
+      (into (for [k [:timing :costumes]
+                  :when (contains? (:runner config) k)]
+              {:type :config/misplaced-key
+               :key k
+               :found-path [:runner k]
+               :suggested-path [k]
+               :message (str "config key " k " is read at the TOP level, not"
+                             " under :runner — [:runner " k "] was ignored")}))
+      ;; sl-xjx0 (Warden W14, cheap warn — the real adapter-awareness is
+      ;; sl-bbqb): costume attach is hardwired etaoin this release; a costume
+      ;; declared for an interface whose adapter is anything else passes
+      ;; every lint and then hands an etaoin CostumeBrowser to that adapter
+      ;; at runtime. Warn at declaration time, run+projection channels alike.
+      (into (for [[cname cdef] (when (map? (:costumes config)) (:costumes config))
+                  :when (map? cdef)   ; malformed entries are the validator's job
+                  :let [iface (:interface cdef)
+                        adapter (get-in config [:interfaces iface :adapter])]
+                  :when (and adapter (not= :etaoin adapter))]
+              {:type :config/costume-adapter-unsupported
+               :key cname
+               :message (str "costume " (pr-str cname) " is declared for"
+                             " interface " (pr-str iface) " whose adapter is "
+                             (pr-str adapter) " — costume attach is"
+                             " etaoin-only this release: wearing it would hand"
+                             " an etaoin Chrome session to that adapter at"
+                             " runtime (adapter-aware costumes are sl-bbqb)")}))))
 
 (s/fdef lint-config
   :args (s/cat :config map?)
@@ -544,6 +634,41 @@
         (when (or (nil? paths) (empty? paths))
           {:type :macro/config-missing-registry-paths
            :message "Macros enabled but :registry-paths is missing or empty"})))))
+
+(def known-timing-keys
+  "The whole :timing inner vocabulary (sl-99u2). Closed set, validated as
+   an ERROR at both rungs (sl-d3cz): ::timing is open s/keys, so a typo'd
+   inner key would otherwise pass while the timing config sat silently
+   dead — {:timing {:interval 250}} ran on the framework default."
+  #{:deadline-ms :interval-ms})
+
+(defn- timing-problem
+  "Why a :timing map is invalid, or nil when it's fine. Checks the shape
+   (::timing) and then rejects unknown inner keys with a did-you-mean."
+  [timing]
+  (cond
+    (not (s/valid? ::timing timing))
+    (str "must be a map with positive-integer"
+         " :deadline-ms / :interval-ms, got: " (pr-str timing))
+
+    (seq (remove known-timing-keys (keys timing)))
+    (let [unknown (vec (remove known-timing-keys (keys timing)))
+          suggestion (svo-validate/suggest-similar
+                      (first unknown) (vec known-timing-keys) 3)]
+      (str "has unknown key" (when (next unknown) "s") " " (pr-str unknown)
+           " — known: " (pr-str (vec (sort known-timing-keys)))
+           (when suggestion
+             (str "; did you mean " (pr-str suggestion) "?"))))))
+
+(defn- validate-timing-config
+  "Validate the top-level :timing map (sl-99u2, global rung; inner keys
+   closed at sl-d3cz). Returns nil if valid or absent, error map if invalid."
+  [config]
+  (let [timing (:timing config)]
+    (when-let [problem (and (some? timing) (timing-problem timing))]
+      {:type :config/invalid-timing
+       :message (str ":timing " problem)
+       :data {:timing timing}})))
 
 (defn- validate-single-interface
   "Validate a single interface definition.
@@ -574,6 +699,17 @@
             :type (:type interface-def)
             :known-types known-interface-types}}
 
+    ;; :timing, when present, must be a CLOSED map of pos-int deadline/
+    ;; interval (sl-99u2 — the per-interface rung; inner keys closed at
+    ;; sl-d3cz, same rule as the global rung)
+    (let [timing (:timing interface-def)]
+      (and (some? timing) (some? (timing-problem timing))))
+    {:type :config/invalid-interface
+     :message (str "Interface :" (name interface-name)
+                   " :timing " (timing-problem (:timing interface-def)))
+     :data {:interface interface-name
+            :definition interface-def}}
+
     ;; :base-url, when present, must be a non-blank string (sl-3jr4)
     (let [base-url (get-in interface-def [:config :base-url])]
       (and (some? base-url)
@@ -597,10 +733,69 @@
               (validate-single-interface name def))
             interfaces))))
 
+(defn- validate-single-costume
+  "Validate one :costumes entry (sl-1206). Returns error map or nil."
+  [interfaces costume-name costume-def]
+  (cond
+    (not (s/valid? ::costume-def costume-def))
+    {:type :config/invalid-costume
+     :message (str "Costume :" (name costume-name)
+                   " must be a map with a keyword :interface naming the"
+                   " interface instance it belongs to, got: "
+                   (pr-str costume-def))
+     :data {:costume costume-name
+            :definition costume-def}}
+
+    (and (map? interfaces)
+         (not (contains? interfaces (:interface costume-def))))
+    (let [declared (:interface costume-def)
+          suggestion (svo-validate/suggest-similar declared (keys interfaces) 2)]
+      {:type :config/unknown-costume-interface
+       :message (str "Costume :" (name costume-name) " declares :interface "
+                     (pr-str declared) ", which is not a configured interface"
+                     " instance (known: " (pr-str (vec (sort (keys interfaces))))
+                     ")"
+                     (when suggestion (str " — did you mean " (pr-str suggestion) "?")))
+       :data (cond-> {:costume costume-name
+                      :declared-interface declared
+                      :known-interfaces (vec (sort (keys interfaces)))}
+               suggestion (assoc :suggestion suggestion))})
+
+    :else nil))
+
+(defn validate-costumes-config
+  "Validate the :costumes declaration map (sl-1206).
+   Returns a seq of errors (nil/empty when clean): :config/invalid-costume
+   for a malformed entry, :config/unknown-costume-interface (with
+   did-you-mean) for an entry naming no configured instance.
+
+   History: sl-st01 (Warden W2) made this public and wired it into
+   runner.core/load-config-stage directly, because `sl run` never reached
+   `normalize` and a malformed declaration silently disabled costume
+   enforcement. Since sl-74w8 load-config-stage runs `normalize` itself,
+   which subsumes that direct call — every normalize validator is now
+   reachable from both channels. Stays public for direct tests."
+  [config]
+  (let [costumes (:costumes config)]
+    (cond
+      (nil? costumes) nil
+      (not (map? costumes))
+      [{:type :config/invalid-costume
+        :message (str ":costumes must be a map of costume name -> "
+                      "{:interface <instance>}, got: " (pr-str costumes))
+        :data {:definition costumes}}]
+      :else
+      (keep (fn [[name def]]
+              (validate-single-costume (:interfaces config) name def))
+            costumes))))
+
 (defn normalize
   "Normalize and validate configuration.
 
    Takes a raw config map (already merged with defaults) and validates it.
+   Runs on BOTH channels: the projection (orient/explain, as :diagnostics)
+   and the run path (load-config-stage feeds :errors through
+   report-planning-error!, exit 2 — sl-74w8).
 
    Returns:
    - On success: the config map unchanged
@@ -611,6 +806,8 @@
      must be a non-empty vector, else error :macro/config-missing-registry-paths
    - Each interface must have :type and :adapter
    - Interface :type must be known (:web, :api, :sms, :email)
+   - :timing (top-level or per-interface), when present, must conform to
+     ::timing (sl-99u2)
    - Empty config is valid
 
    Top-level :webdriver/:webdriver-url are NOT validated or normalized here —
@@ -618,8 +815,11 @@
    vestigial normalization was removed in sl-w9wp."
   [config]
   (let [interface-errors (validate-interfaces-config config)
-        errors (concat (keep identity [(validate-macro-config config)])
-                       interface-errors)]
+        costume-errors (validate-costumes-config config)
+        errors (concat (keep identity [(validate-macro-config config)
+                                       (validate-timing-config config)])
+                       interface-errors
+                       costume-errors)]
     (if (seq errors)
       (assoc config :errors (vec errors))
       config)))
@@ -683,6 +883,16 @@
   (get-in config [:interfaces interface-name :config :base-url]))
 
 ;; -----------------------------------------------------------------------------
+;; Costume Config Accessors (sl-1206)
+;; -----------------------------------------------------------------------------
+
+(defn get-costumes
+  "Get the costume declaration map: costume name -> {:interface <instance>}.
+   Returns {} when the :costumes key is absent."
+  [config]
+  (get config :costumes {}))
+
+;; -----------------------------------------------------------------------------
 ;; SVO Config Accessors
 ;; -----------------------------------------------------------------------------
 
@@ -690,9 +900,12 @@
   "Get SVO enforcement settings.
 
    Returns map with enforcement levels:
-   - :unknown-subject — :warn or :error
-   - :unknown-verb — :warn or :error
-   - :unknown-interface — :warn or :error"
+   - :unknown-subject — :warn, :error, or :off
+   - :unknown-verb — :warn, :error, or :off
+   - :unknown-interface — :warn, :error, or :off
+   - :unknown-object — :error, :warn, or :off (:strict = deprecated alias
+     for :error; effective default computed by load-config — :warn when an
+     :intents glossary is configured, :off otherwise, sl-femd)"
   [config]
   (:svo config))
 
@@ -703,7 +916,7 @@
    - :unknown-subject — :warn, :error, or :off
    - :unknown-verb — :warn, :error, or :off
    - :unknown-interface — :warn, :error, or :off
-   - :unknown-object — :strict, :warn, or :off
+   - :unknown-object — :error, :warn, or :off (:strict = deprecated alias)
 
    Returns the configured enforcement level."
   [config check]

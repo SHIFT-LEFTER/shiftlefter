@@ -43,6 +43,17 @@ Core commands:
 - `sl agent-doc <topic>` prints one topic.
 - `sl orient` orients you in a project: resolved context, what would fail
   (static validation), validate/run commands, and pointers to these topics.
+- `sl doctor` probes the MACHINE (orient's machine-side counterpart):
+  chromedriver↔Chrome version lockstep, `~/.shiftlefter/config.edn` validity,
+  extra-dependency adapters present when configured, daemon health, orphaned
+  chromedriver processes, `sl/lib` jar sanity. `sl doctor --list` prints
+  exactly what is and isn't checked; `--edn` is machine-readable. Exit 0 =
+  healthy, 1 = issues found. When runs fail for machine-shaped reasons
+  (browser won't start, versions drifted), run doctor before debugging.
+- `sl glossary` lists the RESOLVED vocabulary (subjects, verbs, objects) with
+  per-entry provenance; `sl explain <name>` resolves one name — kind, def
+  site, frames, per-interface bindings including missing ones. See the
+  `resolution` topic.
 - `sl run <path>` executes features.
 - `sl run <path> --dry-run` binds every step without executing — the cheap
   validation pass to run before a real browser run.
@@ -54,9 +65,12 @@ Core commands:
   (console appends `; M filtered out by tags`; EDN gains a `:filtered-out` key).
 - `sl run <path> --junit-xml PATH` also writes a CI-ingestible JUnit XML report
   (config mirror `[:runner :report :junit-xml]`; the flag wins). It rides
-  alongside console/EDN. The XML holds a `<failure>`/`<error>` iff the run's exit
-  code is nonzero; a planning error (exit 2) writes no file, so gate CI on the
-  process exit code, not the report's presence (see ERRATA E009).
+  alongside console/EDN. In a single-group run the XML holds a
+  `<failure>`/`<error>` iff the run's exit code is nonzero, and a planning
+  error (exit 2) writes no file; in a multi-group run (setup.clj, N>1) the
+  file covers only the groups that ran and can be all green beside exit 2 —
+  so gate CI on the process exit code, not the report's presence or
+  greenness (see ERRATA E009).
 - `sl run <path> --html PATH` also writes a self-contained HTML run report
   (config mirror `[:runner :report :html]`; the flag wins). One file, no
   external requests — open it via double-click/`file://`, attach it to CI
@@ -69,8 +83,12 @@ Core commands:
   results directory (config mirror `[:runner :capture]`; the flag wins as a
   whole value). Kinds are adapter-contributed — the WebDriver backend
   (`:etaoin`, the default) provides `screenshot`, `console`, `page-source`;
-  the Playwright backend contributes no capture kinds yet, so a configured
-  kind never fires there; policies are `never` (default),
+  the Playwright backend provides `screenshot` and `page-source` but not
+  `console` (no browser-side buffer to drain there — Playwright console is
+  listener events; the subscription-shape design is sl-lam0). A configured
+  kind supported by none of a group's adapters gets a per-group plan-time
+  warning (`:capture/adapter-unsupported`, visible in dry-run previews);
+  policies are `never` (default),
   `on-failure` (fires at the failing step's instant, capturing ALL live
   browsers), `every-step` (the film strip: one capture per step, following
   the acting subject; no-SVO steps capture all live). Console is a
@@ -118,8 +136,8 @@ door:
 
 ```text
 <project>/
-  AGENTS.md              breadcrumb (yours, optional)
-  .shiftlefter/          framework operational state — gitignore it
+  AGENTS.md              agent on-ramp stanza (written by sl init, marker-guarded)
+  .shiftlefter/          framework operational state — self-ignoring under sl init
   sl/                    the ShiftLefter project (yours, committed)
     sl, shiftlefter-*.jar  launcher + jar (installer convention)
     shiftlefter.edn      the ONLY discovered config location
@@ -167,19 +185,34 @@ DSL and never will be: `:start` is arbitrary user Clojure, a throw means the
 group is skipped honestly and other groups run, and cleanup of half-started
 state is yours. Keep `setup.clj`'s top level pure (it is load-file'd even on
 `--dry-run`; side effects belong inside `:start`). Dry-run starts nothing —
-but binds against the default adapter registry, so custom-registry projects
-can bind differently in preview. The warm daemon re-load-files `setup.clj`
+and binds honestly: a group declares its custom adapters as pure data
+(`:adapters [{:name .. :provides [..]}]`, the delta vs the default registry);
+the preview binds against the declarations and the registry `:start` returns
+is verified to match them (mismatch = planning error
+`:setup/registry-mismatch`). An undeclared `:start`-returned registry still
+works this release with a preview-blind warning (deprecated shape). The warm
+daemon re-load-files `setup.clj`
 per dispatch — the framework re-derives everything and sees your file fresh;
 state your code establishes outside the file (spawned threads, system
 properties, open connections) is yours to manage.
 
 Custom reporting today = consume the machine record (`--edn` stdout stream,
-or the full record in `report.html`); live in-run reaction = hooks; bus
-observers have no user path. The data contracts (EDN summary shape, bus
+or the full record in `report.html`) — contract and runnable recipe in
+`docs/REPORTS.md`; live in-run reaction = hooks; bus observers have no user
+path. The data contracts (EDN summary shape, bus
 event envelope) are locked — code written against the data survives any
 future attachment mechanism.
 
 ### What the framework writes
+
+The framework writes only into places it owns (below); files the user owns
+are never written unprompted — changes arrive as proposals (SIEVE proposes,
+never applies): proposed, never written without an explicit yes. Two
+named, marker-guarded exceptions, both on explicit commands: `sl init`
+writes the agent on-ramp stanza into `AGENTS.md` (create-or-append between
+markers; an existing stanza is never edited — on a preexisting project the
+installer only prints it for you to paste), and `sl costume init` appends
+the protective wardrobe line to `.gitignore`.
 
 - `sl/results/<STAMP>/` per invocation: `report.html`, per-scenario
   `attachments/<slug>/`, per-group subdirs under `setup.clj`. Self-ignoring
@@ -189,9 +222,14 @@ future attachment mechanism.
 - `.shiftlefter/` at the project root: `wardrobe/<name>/` (costumes — fixed
   location, no config key), `daemon.edn`, `daemon.log`, `lib-sig`,
   `spawn.lock`, `dirty-teardown.edn` (failed `:stop` marker, announced next
-  run), `sieve/`. **Add `.shiftlefter/` to your `.gitignore`** — the
-  framework only self-ignores `results/` and (on `sl costume init`)
-  `wardrobe/`.
+  run), `sieve/`. Self-ignoring: `sl init` writes `.shiftlefter/.gitignore`
+  (`*`) at scaffold time, so a scaffolded project never commits it. A
+  project that never ran `sl init` adds `.shiftlefter/` to its own
+  `.gitignore` — the framework otherwise self-ignores only `results/`,
+  (on `sl costume init`) `wardrobe/`, and the installed binaries: the
+  installer writes an `sl/.gitignore` (if absent) covering the jar, the
+  `.jsa` CDS archive, and `lib/`, so authored files in `sl/` stay
+  committable.
 
 ### Environment variables
 
@@ -210,10 +248,17 @@ Subjects are actors. A subject instance is one actor session, such as
 the subject tells ShiftLefter who is acting and which session owns capability
 state. Different instances (`:user/alice`, `:user/bob`) get separate browser
 sessions automatically — the instance name is the session key, no setup code.
+A persona instance can carry a docstring and its own costume in the subjects
+glossary (`{:id :alice :desc "…" :wears :alice-chrome}`); run
+`sl explain user/alice` to see which persona to use in which circumstances.
 
-Shifted syntax may annotate a step with an interface, for example `[:web]`.
-Interfaces own verb vocabularies. Do not assume a verb valid for one interface is
-valid for another.
+Shifted syntax may annotate a step with an interface instance, for example
+`[:web]` or `[:admin-console]`. The annotation names an entry in the config's
+`:interfaces` map — an execution target; the entry's `:type` selects which
+verb vocabulary applies. Interface TYPES own verb vocabularies; every
+configured instance of a type shares that vocabulary. Do not assume a verb
+valid for one type is valid for another. Unannotated steps default to the
+type-named instance when a type has several instances.
 
 Step definitions bind text to code. Prefer steps that describe user intent and
 project vocabulary over implementation detail. Custom steps should match the
@@ -250,7 +295,9 @@ copy) — forgetting to return it breaks the chain. Throw to fail the step.
 ```
 
 In Shifted mode, attach `:svo` metadata so the step resolves to a typed triple.
-`:$1`, `:$2` reference capture groups by position:
+`:$1`, `:$2` reference capture groups by position. `:interface` names the
+interface TYPE the verb belongs to — never a config instance name or an
+adapter:
 
 ```clojure
 (defstep #"^(\S+) clicks (.+)$"
@@ -260,14 +307,43 @@ In Shifted mode, attach `:svo` metadata so the step resolves to a typed triple.
   ...)
 ```
 
+#### Timing: the three-clause doctrine
+
+Oracles retry patiently; mutations never retry; negation never waits. A custom
+step that OBSERVES something asynchronous never hand-rolls a sleep/poll loop —
+it calls the kernel in `shiftlefter.step`:
+
+```clojure
+(require '[shiftlefter.step :as step])
+
+(defstep #"the nightly report has landed"
+  [ctx]
+  (step/poll-until ctx #(.exists (java.io.File. "out/report.csv")))
+  ctx)
+```
+
+`poll-until` polls until truthy at the resolved interval/deadline (`:timing`
+config, instance > interface > global > default — 30s/500ms bare). On timeout
+it throws a structured `:step/poll-timeout` through normal step reporting:
+elapsed, deadline, deadline SOURCE, last observed value (pass `:until` when
+the predicate observes a value, e.g. `{:until #(<= 5 %)}`). Never wrap a
+mutation in it; never poll a bare negation (waiting-for-gone = poll a negated
+predicate, explicitly). `(step/timing ctx)` reads the budget without polling.
+
 ### Minimal config
 
 `sl/shiftlefter.edn` — the ONLY discovered location; everything ShiftLefter
 (config, features, glossaries, steps) lives in the project's `sl/` directory,
 and config-declared paths resolve from it (so `"steps/"` means `sl/steps/`).
 Note `:step-paths` lives **under `:runner`** — a top-level `:step-paths` is
-ignored (since 0.5.2 the runner prints a `Config warning:` with the correct
-path; older versions ignore it silently):
+ignored. This is one instance of a general lint: any plausible key placed at
+the top level (`:step-paths`, `:junit-xml`, `:dialect`, `:unknown-subject`,
+…) is ignored by every reader, and the runner warns with the correct nested
+path (`did you mean [:runner :step-paths]?`); a key it cannot place gets a
+plain unknown-key warning. Warnings, never errors — a newer config must
+still run on an older version. Under `--edn` the same lints ride the record
+as `:config-lints`, and `sl orient` reports them too. (Warned since 0.5.2;
+older versions ignore silently.)
 
 ```clojure
 {:runner {:step-paths ["steps/"]}
@@ -280,6 +356,12 @@ path; older versions ignore it silently):
  :svo {:unknown-subject :warn}}
 ```
 
+The built-in default `:web` instance deep-merges **under** your
+`:interfaces` map rather than being replaced by it — a project that
+declares only `:sms` still has the default `:web` instance, and
+`sl orient` shows it. These merge semantics are provisional: a future
+release may make a user `:interfaces` map replace the defaults wholesale.
+
 ### Common mistakes
 
 | DON'T | DO |
@@ -289,6 +371,8 @@ path; older versions ignore it silently):
 | `:step-paths` at config top level (warned since 0.5.2, ignored either way) | Nest it under `:runner` |
 | `When :login-form submits` | Subjects are actors: `When :user/alice clicks Login.submit` |
 | Compare a capture as a number | `(parse-long n)` first — captures are strings |
+| Hand-roll `Thread/sleep` or a polling loop in a step | `(step/poll-until ctx pred)` — rides the `:timing` ladder, fails legibly |
+| Retry a click/type/send that "flakes" | Mutations never retry — fix the oracle before it, or the app |
 
 ### URL assertions beyond the built-in frames
 
@@ -368,7 +452,8 @@ it holds in every slot, and it exists so that nobody ever has to guess:
 - Bare lowercase words — the step language itself (`fills`, `with`,
   `should see`).
 - `:alice` / `:user/alice` — the subject, the actor whose session runs the
-  step. `[:web]` at the head of a step — an interface tag.
+  step. `[:web]` at the head of a step — an interface tag naming the config
+  instance the step executes on (its `:type` picks the vocabulary).
 
 That's the whole grammar. A quoted token never resolves to anything; an
 unquoted capitalized token always must. You can read any step cold and know
@@ -604,8 +689,12 @@ the rest.
 Accepted vocabulary is project truth. Glossaries define subjects and verbs.
 Intent files define named objects, regions, and bindings that steps can address.
 
-Subjects are actors. Subject instances are sessions. Interfaces own verbs and
-their frames. Intents name objects or regions that an interface can target.
+Subjects are actors. Subject instances are sessions. Interface TYPES own
+verbs and their frames; configured interface instances of one type all share
+its vocabulary. Frames type argument shapes, never authorization — who may
+do what is discovered by substituting actors and observing the system's real
+response, not declared in vocabulary. Intents name objects or regions that an interface type can
+target.
 
 The subjects glossary is a plain EDN file. Types with `:instances` group
 sessions under a role (`:user/alice`, `:user/bob`); a type without `:instances`
@@ -618,11 +707,31 @@ is a singleton, used directly:
   :admin {:desc "Administrator"}}}
 ```
 
+An `:instances` entry may also be a persona map — a user with an optional
+costume and a docstring: `{:id :alicia :desc "Spanish-first admin reviewer"
+:wears :alicia}`. The `:desc` surfaces in `sl explain` and `sl glossary
+subjects` (use it to pick the right persona); `:wears` binds that persona to
+a costume, resolving instance > type — a type-level `:wears` is an
+inheritable default, a persona's own `:wears` wins, `:wears nil` opts out.
+
+Declare each costume's interface INSTANCE in `shiftlefter.edn`:
+`:costumes {:finance {:interface :web}}`. Plan-time lints then enforce the
+costume doctrine statically: wearing a costume on a different instance than
+it is declared for is an error (with a did-you-mean), two targets sharing a
+`:wears` in one scenario is an error, and a worn-but-undeclared costume is
+a warning that teaches the declaration to add.
+
 Project verbs extend the built-in set per interface type in
-`glossary/verbs/<type>.edn`; intents live under `glossary/intents/` (all under
+`glossary/verbs/<type>.edn` (a same-named project verb replaces the builtin
+entry wholesale, frames and all — `sl glossary` marks such entries
+`config-override`); intents live under `glossary/intents/` (all under
 `sl/`, next to the config — these conventional paths are discovered
-automatically when `:glossaries` is unset). The full file formats and
-validation model are in `docs/SVO.md`.
+automatically when `:glossaries` is unset). Once an intents glossary is
+configured (declared or discovered), object checking defaults on at `:warn`:
+an unresolvable intent reference is reported at planning time with the name
+and a did-you-mean (`:svo {:unknown-object …}` — `:error` blocks, `:off`
+silences; raw locators and quoted literals are exempt). The full file formats
+and validation model are in `docs/SVO.md`.
 
 Partial vocabulary is normal. A project may have accepted subjects but missing
 verbs, or accepted verbs but incomplete intents. Treat that as useful diagnostic
@@ -724,9 +833,19 @@ Diagnostics describe the gap between authored steps and accepted project truth.
 Treat them as first-class feedback, not noise.
 
 Unknown subject means the actor or instance is not accepted. Unknown interface
-means the step points at a capability vocabulary the project has not declared.
-Unknown verb means that interface does not own the action phrase. Unknown object
-means the step refers to a target the accepted intents or glossary do not know.
+means the step's annotation names an interface instance the config has not
+declared. Unknown verb means that interface type does not own the action
+phrase. Unknown object means the step refers to a target the accepted intents
+or glossary do not know. Ambiguous instance means an unannotated step's type
+has several configured instances and no type-named default — annotate the
+step with the instance it targets.
+
+Parse errors are collected, not thrown: the Gherkin parser accumulates every
+error in a file in one pass — invalid tags, bad keywords, orphan tags,
+out-of-order structure — and reports the full error vector alongside the
+partial AST it could still build. A repair loop can fix everything reported
+in one edit instead of fix-one-rerun-discover-the-next; each error renders
+with its own location.
 
 Respond by preserving the distinction:
 
@@ -738,6 +857,139 @@ Respond by preserving the distinction:
 
 Do not silence diagnostics by inventing accepted subjects, verbs, interfaces, or
 objects in place.
+
+---
+
+## Resolution Queries: sl glossary and sl explain
+
+The files are the DECLARED state; these two commands expose the RESOLVED
+state — what a run will believe, before the run. Both resolve through the
+run's own config and glossary loaders (never a parallel path), so their
+answers cannot disagree with the run they predict. Both accept
+`-c/--config` exactly as `sl run` does, and both take `--edn`.
+
+**EDN is the contract.** `--edn` output is the stable machine surface —
+one reader-readable map per invocation. The human format is EXPLICITLY
+UNSTABLE; do not parse it.
+
+### sl glossary
+
+```
+sl glossary [subjects|verbs|objects|duplicates] [path ...]
+            [--tags T] [--skip-tags T] [--edn] [-c FILE]
+```
+
+Bare `sl glossary` prints three sections; a narrowing argument selects
+one. Every entry carries a **provenance marker**:
+
+- `builtin` — shipped with the framework (default verb glossaries)
+- `user-file` — declared in a project glossary file
+- `config-override` — a project entry that replaced a builtin of the
+  same name
+- `interface-contributed` — vocabulary an interface family supplies
+  (the closed W3C key-name set for frames with `:object-kind :key`;
+  implicit objects such as `:sms-message`)
+
+Sections: **subjects** (types + instances), **verbs** (grouped per
+interface type, each frame shown as schema — frames are NOT step text),
+**objects** (intents plus the interface-contributed vocabulary above).
+
+The output header states the substrate the listing was computed against:
+the resolved config path and source, the git sha with a dirty marker
+(or an honest "not a repository"), and the EFFECTIVE `:svo` strictness
+levels — including the conditional `:unknown-object` default that flips
+to `:warn` when intents are configured, which is not readable from any
+file.
+
+### Usage markers and dead vocabulary
+
+Listings also bind the feature corpus (parse + bind, never execute — the
+same binder FUNCTION a run uses, over a different corpus: the config's
+feature tree, not the union a `setup.clj`'s groups would actually
+execute, so usage counts can include scenarios no run selects) and mark
+every entry with its usage: subjects
+and user vocabulary that nothing references show `[UNUSED]`; used
+entries show `[used ×N]`. **Builtin vocabulary is never dead** — it is
+globally provided, so builtins carry counts but never a deadness
+verdict. Deadness is a **full-corpus** fact at a named tree state: the
+header states the corpus (file/scenario counts, the git sha, the config
+path), and if any feature file fails to parse or any step fails to bind,
+the caveat is printed rather than silently under-counting. No corpus at
+all → markers are suppressed entirely (never "everything is unused").
+
+**Scoped selection**: positional paths and `--tags`/`--skip-tags` (the
+run's own selection grammar) restrict the corpus. Under a selection the
+wording weakens to `[not referenced within this selection]` and the EDN
+key changes from `:unused?` to `:referenced-in-selection?` — a scoped
+verdict is an impact-analysis fact, NEVER a deletion license. Only the
+full-corpus voice may say "unused".
+
+### sl glossary duplicates
+
+The on-demand locator-collision report: locator values owned by two or
+more intent addresses within one interface, grouped by confidence —
+same-intent collisions (`Login.foo` vs `Login.bar`) are high-confidence
+real duplicates; cross-intent collisions are likely page-scoped
+coincidence (the same `#submit` on different pages is the norm, which is
+why this report is never always-on). Equality is structural over the
+locator EDN value; semantic aliasing (two XPaths, one element) is out of
+scope. Owners cite their defining intent file.
+
+### sl explain NAME
+
+```
+sl explain NAME [path ...] [--tags T] [--skip-tags T] [--edn] [-c FILE]
+sl explain '{:css "#submit"}' [--edn]
+```
+
+One name in, full resolution out. Accepts `click`, `:click`,
+`user/alice`, `Login` — every matching kind is reported (subject type,
+subject instance, verb per interface type, intent, key name). Per match:
+kind, provenance, definition site, frames (schema), and **per-interface
+bindings including missing ones** — a frame with no stepdef on a
+configured interface is reported as MISSING, not silently omitted.
+
+Definition sites are file-precise for glossary and intent entries (EDN
+carries no line info) and file:line-precise where that truly exists —
+stepdef bindings and their `bind with:` examples.
+
+Every match also carries its corpus **USAGE**: subjects get the full
+actor view — per-instance hits (feature file:line, scenario, the step
+text and its pattern — authoring by example), the type rollup, a
+multi-actor flag, and co-occurrence pairs (which other actors share
+scenarios); verbs and intents get their reference hits. The same
+selection parameters apply, with the same wording discipline.
+
+**Explain a locator**: an argument that starts with `{` is read as a
+locator EDN value and reverse-looked-up — which intent addresses own it
+(element binding, region root, or collection selector), per interface.
+Check before minting a new intent binding: a hit means the element is
+already named; a miss says "free to mint". Structural equality only.
+
+On a miss: exit 1 with did-you-mean suggestions (edit distance plus
+surface-token lookup — `sl explain clicks` suggests `:click` from the
+frame pattern "S clicks O"). EDN mode reports `{:status :miss}` with
+`:suggestions` on stdout. A malformed invocation (no NAME) exits 2.
+
+### Merge semantics (verified, sl-0gfc)
+
+Project verb glossaries EXTEND the builtin set. On a name collision the
+project entry replaces the builtin entry **wholesale** — description and
+all frames; there is no frame-level merge, so restating a builtin verb
+to add one frame silently drops its other frames. `sl explain <verb>`
+shows exactly what survived and marks the entry `config-override`.
+`defstep` contributes step BINDINGS, never vocabulary — a stepdef naming
+a verb absent from the glossary is a planning error, not an addition.
+
+### Scope
+
+Shifted-only: in Vanilla mode there is no vocabulary contract, and both
+commands say so honestly (exit 0) instead of listing nothing. Macros
+contribute steps, not vocabulary — they do not appear here. The
+coverage-matrix renders (vocabulary × interface grids) are a future
+surface pending a second interface type in real use; the per-intent
+`missing bindings:` markers in the objects listing carry the hole data
+today.
 
 ---
 
@@ -853,8 +1105,12 @@ capability cleanup.**
   directory (no config file) — check, don't assume.
 - Before writing a screenshot/console/page-source After hook: DON'T — set
   the `[:runner :capture]` policy instead (see the CLI overview's
-  `--capture` entry). Hooks are for evidence the framework doesn't own
-  (DB dumps, API traces). With `:capture` console active, the framework
+  `--capture` entry). Hooks are for one-off evidence the framework
+  doesn't own (DB dumps, API traces); evidence owned by a capability you
+  provision can instead become a custom capture KIND — a `:capture` entry
+  on your setup.clj adapter registry, policy machinery included (worked
+  example: `examples/07-custom-capture-kind/`). With `:capture` console
+  active, the framework
   owns the destructive console drain — a hook reading the browser's log
   API gets leftovers; read the captured artifact, or use `:on-failure`
   (whose single post-steps drain fires before any After).
@@ -904,17 +1160,21 @@ assertion passes.
 
 The plan phase never invokes `:start`, `:stop`, or hooks, and never
 captures. `setup.clj` IS `load-file`'d so the plan is knowable — keep its
-top level pure; side effects belong inside `:start`. One caveat: the preview
-binds against the default adapter registry, so a project whose adapters
-exist only in a custom registry returned by `:start` can bind differently in
-preview than in a real run.
+top level pure; side effects belong inside `:start`. Custom adapters stay
+visible to this phase via the group's `:adapters` declaration (pure data,
+the delta vs the default registry): the preview binds against the declared
+shapes, and the registry `:start` returns is verified to match them
+(mismatch = planning error `:setup/registry-mismatch`; an undeclared
+returned registry is a deprecated shape that warns).
 
 ### The execution weave
 
 ```text
 group (declared order, one at a time)
   :start                      ← the world starts here, not earlier
-  parse + compile             ← against the adapter registry :start returned
+                                (its registry verified against :adapters)
+  parse + compile             ← against the group's adapter registry
+                                (declared data, live factories)
   scenarios (parallel-capable)
     Before hooks              ← no capabilities yet
     capability provisioning   ← browsers launch here
@@ -935,13 +1195,18 @@ envelope.
 
 - Planning failure (unresolved name, unknown frame, consumed binding without
   a producer, unknown `@hook=`, broken plan shape) → exit 2, nothing executes.
+- Empty selection (a tag filter matching 0 of N, feature files with no
+  scenarios, CLI paths narrowing every group away) → exit 2, checked before
+  any `:start` runs; the record carries counts and what was searched. A dry
+  run's exit 0 requires a nonempty selection too.
 - `:start` throws or returns a malformed shape → group-local planning
   failure; the group is skipped, other groups still run. Half-started state
   is user-owned — the framework can't know what half-started.
 - Before hook throws or returns a non-map → scenario `:error` (never
   `:failed`), steps skipped, only succeeded frames unwind.
-- Capability provisioning fails → scenario errors; Afters still unwind,
-  WITHOUT capabilities.
+- Capability provisioning fails → scenario `:error` — same family as a hook
+  throw (broken harness ≠ broken app); Afters still unwind, WITHOUT
+  capabilities.
 - Step fails → scenario `:failed`; `:on-failure` capture fires at that
   instant, before Afters.
 - After hook throws or its attachments claim is malformed → scenario
@@ -950,10 +1215,14 @@ envelope.
 - Capture infrastructure fails on an otherwise-green scenario → scenario
   `:error`, capture-attributed; an already-red scenario keeps its status and
   the ref records the miss.
-- `:stop` throws → reported (console + envelope), exit code unchanged; a
-  dirty-teardown marker is written, announced at the next run's start, then
-  cleared.
-- Exit codes aggregate worst-wins across groups.
+- `:stop` throws → reported (console + envelope), exit code unchanged: the
+  exit code is this run's verdict, already earned by the time teardown runs;
+  environment damage is the NEXT run's planning input — which is what the
+  dirty-teardown marker is (written now, announced at the next run's start,
+  then cleared).
+- Any scenario `:error` → exit 4 (run degraded: the harness broke, the run
+  proves nothing about the app), distinct from exit 1 (a scenario failed).
+- Exit codes aggregate worst-wins across groups: 2 > 4 > 1 > 0.
 
 ### Parallelism
 
@@ -975,6 +1244,31 @@ last drain, plus a final tail sweep), once post-steps under `:on-failure`,
 before any After runs. Capture cost is recorded on the ref
 (`:attachment/duration-ms`) and never pollutes step durations. Dry runs
 never capture.
+
+### The run seed
+
+Every invocation gets ONE seed (positive 64-bit long, decimal): `--seed N`
+beats config `:runner {:seed N}` beats generated. Recorded always —
+`:run/seed` in every group's `--edn` summary, `:seed` in run-ctx, the HTML
+header, one stderr line (`run seed: N`). One deliberate exception: the
+daemon's busy-reject summary (exit 2, nothing ran) carries no `:run/seed`
+— nothing was seeded. The framework draws no randomness
+from it; it is handed to user code: hook payloads carry `:seed`, step
+`ctx` carries `:seed`, and `:start` receives a `:seed` key on its config
+argument. Need several independent streams? Derive:
+`(bit-xor seed (hash scenario-id))` — the documented convention, not
+framework code.
+
+### Consuming the run record
+
+The run record = the `--edn` stdout form stream (redirect it — no summary
+file is written) plus the run-directory bytes. The summary's top-level
+`:attachments` index is the authoritative evidence walk (green-run evidence
+appears only there); `:failures` entries carry their own refs inline for
+join-free triage — same refs, deliberate duplication. `:run/seed` on every
+summary is the run's seed — rerun with `--seed <that value>` to reproduce
+user-code randomness. Building a custom rendering from the record:
+`docs/REPORTS.md` (contract + runnable recipe).
 
 Related topics: `hooks` (registration, payloads, attachments claim),
 `layout` (which files attach user code, what the framework writes).
@@ -1047,11 +1341,17 @@ _Verbatim from `examples/svo-demo/sl/shiftlefter.edn`._
 ;; This example demonstrates the Subject-Verb-Object (SVO) validation system.
 ;; Key concepts:
 ;;
-;; - INTERFACE NAME: The key you use in config and stepdefs (e.g., :web, :customer-portal)
-;; - INTERFACE TYPE: The vocabulary category (e.g., :web, :api) - determines valid verbs
+;; - INTERFACE NAME: The key in this config — a named INSTANCE of a type
+;;   (e.g., :web, :customer-portal). Feature steps select one with a leading
+;;   [name] annotation; stepdefs never reference names.
+;; - INTERFACE TYPE: The vocabulary category (e.g., :web, :api) — determines
+;;   valid verbs. Stepdef :interface metadata declares the TYPE (sl-s2oa).
 ;;
 ;; Simple case: name = type (:web interface uses :web verbs)
-;; Advanced case: multiple names share a type (:legacy-app and :new-app both use :web verbs)
+;; Advanced case: multiple names share a type (:storefront and :admin-console
+;; both :type :web) — every instance gets the full built-in :web vocabulary;
+;; steps pick the instance with [:storefront] / [:admin-console], and
+;; unannotated steps default to the type-named entry when several exist.
 ;;
 ;; Note there is NO project verbs glossary here. Verbs are interface-level
 ;; actions (fill, click, see, navigate) and the framework's built-in set
@@ -1079,10 +1379,11 @@ _Verbatim from `examples/svo-demo/sl/shiftlefter.edn`._
  :glossaries {:subjects "glossary/subjects.edn"}
 
  ;; Interface definitions
- ;; Each interface NAME maps to:
- ;; - :type — which verb vocabulary to use (determines valid verbs)
- ;; - :adapter — which adapter to use for provisioning
- ;; - :config — adapter-specific configuration
+ ;; Each interface NAME declares an INSTANCE:
+ ;; - :type — which verb vocabulary it speaks (determines valid verbs)
+ ;; - :adapter — which adapter materializes it (invisible to features)
+ ;; - :config — adapter-specific configuration (the instance's world:
+ ;;   base-url, headless, proxy, ...)
  :interfaces {:web {:type :web              ; Uses the built-in :web verb set
                     :adapter :etaoin        ; Browser automation
                     :config {:headless true}}}
@@ -1090,6 +1391,8 @@ _Verbatim from `examples/svo-demo/sl/shiftlefter.edn`._
  ;; SVO enforcement levels
  ;; - :warn — log warning but continue execution
  ;; - :error — fail at bind time (before execution)
+ ;; :unknown-object is deliberately unset: it defaults :warn once an
+ ;; :intents glossary exists, :off without one (nothing to validate against).
  :svo {:unknown-subject :warn    ; Typos in subject names
        :unknown-verb :warn       ; Unknown verbs for interface type
        :unknown-interface :error}} ; Misconfigured interfaces
@@ -1344,17 +1647,25 @@ This file is GENERATED from the framework's default glossaries
 registry. Do not edit it by hand — edit the source and regenerate with
 `clojure -T:build gen-builtins`.
 
-Sections are grouped by interface for targeted subreads. Within each
-interface: the adapters that back it, the verbs and their frames (each
+Sections are grouped by interface TYPE for targeted subreads. Within
+each type: the adapters that back it, the verbs and their frames (each
 frame is one accepted argument shape), then the step grammar (regex
 source) and the verb/frame each pattern maps to.
+
+TYPE vs INSTANCE (sl-s2oa): a step definition's `(type :web)` marker
+names the verb vocabulary it belongs to. Your `shiftlefter.edn`
+:interfaces map declares named INSTANCES of these types; every
+instance of a type gets this full vocabulary. A step targets an
+instance with a leading `[name]` annotation (e.g. `[:admin-console]`);
+unannotated steps default to the type-named instance when several
+exist. The annotation names an instance, never a type or an adapter.
 
 FRAMES ARE SCHEMA, NOT STEPS. A frame like `S navigates to O` names an
 argument shape — writing it in a feature file will NOT bind. The only
 step text this reference quotes is the `bind with:` example under each
 frame; every one of those is machine-verified to bind. Copy those.
 
-### Interface `:sms`
+### Interface type `:sms`
 
 #### Adapters
 
@@ -1393,14 +1704,14 @@ Reference grammar for each built-in step. To author a step, copy a
 `bind with:` example from the verb entries above — never this regex
 source.
 
-- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching /(.+)/` → `:receive`/`:default` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) since ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching /(.+)/` → `:receive`/`:since-iso` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) within the last (\d+ (?:seconds?|minutes?|hours?)) matching /(.+)/` → `:receive`/`:within-last` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) sends an MMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) with caption ('(?:[^']|'')*'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) and media ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:send-media`/`:to` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) sends an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) saying ('(?:[^']|'')*'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:send`/`:to` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) should see (\d+) messages to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:count` `[:sms]` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching /(.+)/` → `:receive`/`:default` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) since ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching /(.+)/` → `:receive`/`:since-iso` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) within the last (\d+ (?:seconds?|minutes?|hours?)) matching /(.+)/` → `:receive`/`:within-last` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) sends an MMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) with caption ('(?:[^']|'')*'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) and media ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:send-media`/`:to` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) sends an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) saying ('(?:[^']|'')*'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:send`/`:to` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) should see (\d+) messages to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:count` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
 
-### Interface `:web`
+### Interface type `:web`
 
 #### Adapters
 
@@ -1579,46 +1890,46 @@ Reference grammar for each built-in step. To author a step, copy a
 `bind with:` example from the verb entries above — never this regex
 source.
 
-- `:([\w./-]+) accepts the alert` → `:accept-alert`/`:default` `[:web]`
-- `:([\w./-]+) captures ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) matching /(.+)/` → `:capture`/`:default` `[:web]`
-- `:([\w./-]+) clears ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:clear`/`:default` `[:web]`
-- `:([\w./-]+) clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:click`/`:default` `[:web]`
-- `:([\w./-]+) dismisses the alert` → `:dismiss-alert`/`:default` `[:web]`
-- `:([\w./-]+) double-clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:doubleclick`/`:default` `[:web]`
-- `:([\w./-]+) drags ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:drag`/`:to` `[:web]`
-- `:([\w./-]+) fills ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:fill`/`:with` `[:web]`
-- `:([\w./-]+) goes back` → `:navigate-back`/`:default` `[:web]`
-- `:([\w./-]+) goes forward` → `:navigate-forward`/`:default` `[:web]`
-- `:([\w./-]+) hovers over ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:hover`/`:default` `[:web]`
-- `:([\w./-]+) maximizes the window` → `:maximize`/`:default` `[:web]`
-- `:([\w./-]+) moves to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:move`/`:default` `[:web]`
-- `:([\w./-]+) opens the browser to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}|[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)` → `:navigate`/`:to` `[:web]`
-- `:([\w./-]+) presses ([A-Z][A-Za-z0-9]*|'(?:[^']|'')+')` → `:press`/`:default` `[:web]`
-- `:([\w./-]+) refreshes the page` → `:refresh`/`:default` `[:web]`
-- `:([\w./-]+) resizes the window to (\d+)x(\d+)` → `:resize`/`:dimensions` `[:web]`
-- `:([\w./-]+) right-clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:rightclick`/`:default` `[:web]`
-- `:([\w./-]+) scrolls to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:scroll`/`:to-element` `[:web]`
-- `:([\w./-]+) scrolls to the (top|bottom)` → `:scroll`/`:to-position` `[:web]`
-- `:([\w./-]+) selects ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) from ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:select`/`:from` `[:web]`
-- `:([\w./-]+) should be on ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}|[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)` → `:be`/`:at` `[:web]`
-- `:([\w./-]+) should be on exactly ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:be`/`:at-exactly` `[:web]`
-- `:([\w./-]+) should not see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:not-see`/`:invisible` `[:web]`
-- `:([\w./-]+) should see '((?:[^']|'')+)'` → `:see`/`:on-page` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:see`/`:visible` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) disabled` → `:see`/`:disabled` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) enabled` → `:see`/`:enabled` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) matching /(.+)/` → `:see`/`:matching` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with attribute ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) equal to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:attribute` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with text ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:text` `[:web]`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with value ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:value` `[:web]`
-- `:([\w./-]+) should see (\d+) ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) elements` → `:see`/`:count` `[:web]`
-- `:([\w./-]+) should see an alert` → `:see`/`:alert` `[:web]`
-- `:([\w./-]+) should see an alert with ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:alert-with-text` `[:web]`
-- `:([\w./-]+) should see the title ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:title` `[:web]`
-- `:([\w./-]+) switches to frame ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:switch-frame`/`:into` `[:web]`
-- `:([\w./-]+) switches to the main frame` → `:switch-frame`/`:main` `[:web]`
-- `:([\w./-]+) switches to the next window` → `:switch-window`/`:default` `[:web]`
-- `:([\w./-]+) waits (\d+(?:\.\d+)?) seconds?` → `:wait`/`:duration` `[:web]`
-- `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:wait`/`:for-element` `[:web]`
-- `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to show ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:wait`/`:for-text` `[:web]`
-- `:([\w./-]+) waits for (\d+) ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:wait`/`:for-count` `[:web]`
+- `:([\w./-]+) accepts the alert` → `:accept-alert`/`:default` `(type :web)`
+- `:([\w./-]+) captures ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) matching /(.+)/` → `:capture`/`:default` `(type :web)`
+- `:([\w./-]+) clears ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:clear`/`:default` `(type :web)`
+- `:([\w./-]+) clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:click`/`:default` `(type :web)`
+- `:([\w./-]+) dismisses the alert` → `:dismiss-alert`/`:default` `(type :web)`
+- `:([\w./-]+) double-clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:doubleclick`/`:default` `(type :web)`
+- `:([\w./-]+) drags ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:drag`/`:to` `(type :web)`
+- `:([\w./-]+) fills ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:fill`/`:with` `(type :web)`
+- `:([\w./-]+) goes back` → `:navigate-back`/`:default` `(type :web)`
+- `:([\w./-]+) goes forward` → `:navigate-forward`/`:default` `(type :web)`
+- `:([\w./-]+) hovers over ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:hover`/`:default` `(type :web)`
+- `:([\w./-]+) maximizes the window` → `:maximize`/`:default` `(type :web)`
+- `:([\w./-]+) moves to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:move`/`:default` `(type :web)`
+- `:([\w./-]+) opens the browser to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}|[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)` → `:navigate`/`:to` `(type :web)`
+- `:([\w./-]+) presses ([A-Z][A-Za-z0-9]*|'(?:[^']|'')+')` → `:press`/`:default` `(type :web)`
+- `:([\w./-]+) refreshes the page` → `:refresh`/`:default` `(type :web)`
+- `:([\w./-]+) resizes the window to (\d+)x(\d+)` → `:resize`/`:dimensions` `(type :web)`
+- `:([\w./-]+) right-clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:rightclick`/`:default` `(type :web)`
+- `:([\w./-]+) scrolls to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:scroll`/`:to-element` `(type :web)`
+- `:([\w./-]+) scrolls to the (top|bottom)` → `:scroll`/`:to-position` `(type :web)`
+- `:([\w./-]+) selects ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) from ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:select`/`:from` `(type :web)`
+- `:([\w./-]+) should be on ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}|[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)` → `:be`/`:at` `(type :web)`
+- `:([\w./-]+) should be on exactly ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:be`/`:at-exactly` `(type :web)`
+- `:([\w./-]+) should not see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:not-see`/`:invisible` `(type :web)`
+- `:([\w./-]+) should see '((?:[^']|'')+)'` → `:see`/`:on-page` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:see`/`:visible` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) disabled` → `:see`/`:disabled` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) enabled` → `:see`/`:enabled` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) matching /(.+)/` → `:see`/`:matching` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with attribute ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) equal to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:attribute` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with text ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:text` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with value ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:value` `(type :web)`
+- `:([\w./-]+) should see (\d+) ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) elements` → `:see`/`:count` `(type :web)`
+- `:([\w./-]+) should see an alert` → `:see`/`:alert` `(type :web)`
+- `:([\w./-]+) should see an alert with ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:alert-with-text` `(type :web)`
+- `:([\w./-]+) should see the title ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:title` `(type :web)`
+- `:([\w./-]+) switches to frame ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:switch-frame`/`:into` `(type :web)`
+- `:([\w./-]+) switches to the main frame` → `:switch-frame`/`:main` `(type :web)`
+- `:([\w./-]+) switches to the next window` → `:switch-window`/`:default` `(type :web)`
+- `:([\w./-]+) waits (\d+(?:\.\d+)?) seconds?` → `:wait`/`:duration` `(type :web)`
+- `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:wait`/`:for-element` `(type :web)`
+- `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to show ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:wait`/`:for-text` `(type :web)`
+- `:([\w./-]+) waits for (\d+) ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:wait`/`:for-count` `(type :web)`

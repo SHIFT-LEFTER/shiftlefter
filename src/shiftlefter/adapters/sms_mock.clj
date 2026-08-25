@@ -14,8 +14,10 @@
   (:require [shiftlefter.sms.mock :as mock]))
 
 (defn create-sms
-  "Create a mock SMS capability. Config is optional; `:from-number` is
-   passed through for step-code compatibility.
+  "Create a mock SMS capability. Config is optional. The registry entry
+   declares `:impl-key :sms` (sl-uv3r), so provisioning extracts the
+   MockSMS as the step-facing impl; the whole bundle (with
+   `:from-number`) rides `:cleanup-handle`.
 
    Returns `{:ok {:sms MockSMS :from-number string-or-nil}}`."
   [config]

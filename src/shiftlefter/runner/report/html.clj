@@ -43,8 +43,12 @@
      materialized at on-run-end.
    - Loud failure (reporter invariant 4): a file-write error throws.
    - Multi-group runs (setup.clj): each group is its own run-scope with its
-     own reporter instance on the SAME path — last group wins, exactly like
-     JUnit. The artifact-per-group question is deferred to sl-oobu.
+     own reporter instance; per-group artifacts land under each group's run
+     dir, and the stable --html path carries the invocation-level TOC
+     (write-invocation-toc!, sl-n9c6) — not whichever group wrote last.
+     JUnit differs on purpose: it aggregates every group into one document
+     via invocation-shared state (sl-xjx0). Artifact-per-group questions
+     beyond the TOC stay deferred to sl-oobu.
 
    Emission is standalone by design (DP4): HTML is not XML (void elements,
    raw style/script blocks, doctype), so nothing is shared with junit.clj —
@@ -216,22 +220,8 @@
 ;; Reporter
 ;; -----------------------------------------------------------------------------
 
-(defn- write-atomically!
-  "Write `content` to `path`: spit to a temp sibling, then ATOMIC_MOVE over
-   the target (the daemon.clj write-edn! pattern — sl-luhn's torn-write fix
-   for the HTML half). A reader never sees a half-written report."
-  [^String path content]
-  (let [file (java.io.File. path)
-        dir (or (.getParentFile file) (java.io.File. "."))]
-    (.mkdirs dir)
-    (let [tmp (java.io.File/createTempFile "report" ".html" dir)]
-      (spit tmp content)
-      (java.nio.file.Files/move
-       (.toPath tmp) (.toPath file)
-       (into-array java.nio.file.CopyOption
-                    [java.nio.file.StandardCopyOption/ATOMIC_MOVE
-                     java.nio.file.StandardCopyOption/REPLACE_EXISTING])))
-    nil))
+;; Atomic fixed-path writes (sl-luhn's torn-write fix, HTML half via sl-l9nj)
+;; live in reporter/write-atomically! — lifted there so JUnit shares them.
 
 (defn- same-file-target?
   "True when two path strings name the same target file (the user pointed
@@ -273,10 +263,10 @@
                                 :diagnostics diagnostics
                                 :summary run-summary})]
       (if primary
-        (do (write-atomically! primary html)
+        (do (reporter/write-atomically! primary html)
             (when-not (same-file-target? primary path)
-              (write-atomically! path html)))
-        (write-atomically! path html))
+              (reporter/write-atomically! path html)))
+        (reporter/write-atomically! path html))
       nil)))
 
 (defn write-planning-failure!
@@ -291,12 +281,30 @@
   ;; Stable path ONLY, by design (sl-l9nj kept it): planning failures never
   ;; create a run dir (sl-y3wd — execute-and-report-stage is never reached),
   ;; so there is no primary to join.
-  (write-atomically! path
+  (reporter/write-atomically! path
                      (build-document {:run-ctx run-ctx
                                       :scenarios []
                                       :diagnostics (reporter/diagnostics-envelope
                                                     diagnostics)
                                       :summary summary}))
+  nil)
+
+(defn write-invocation-toc!
+  "Materialize the invocation-level TOC for a multi-group run (sl-n9c6):
+   the stable --html path represents the INVOCATION, not whichever group
+   wrote last. `island-data` carries {:run-ctx m :toc {:groups [rows]}
+   :summary m} — build-document is island-shape-agnostic, and the renderer
+   branches on :toc. `primary` is <run-dir>/report.html (byte copy to
+   `path`, the l9nj idiom); nil primary (no run dir exists — every group
+   planning-failed, sl-y3wd creates none) writes the stable path only:
+   verdicts stay visible, links degrade to labeled text."
+  [primary path island-data]
+  (let [html (build-document island-data)]
+    (if primary
+      (do (reporter/write-atomically! primary html)
+          (when-not (same-file-target? primary path)
+            (reporter/write-atomically! path html)))
+      (reporter/write-atomically! path html)))
   nil)
 
 (defn make-reporter

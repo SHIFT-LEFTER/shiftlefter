@@ -17,7 +17,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [shiftlefter.runner.core :as core]
-            [shiftlefter.runner.events :as events]
+            [shiftlefter.events :as events]
             [shiftlefter.runner.setup :as rsetup]))
 
 ;; -----------------------------------------------------------------------------
@@ -216,6 +216,58 @@
           (events/publish! @captured-bus {:type :probe/after-return :payload {}})
           (is (= 1 (events/dropped-events @captured-bus))
               "publish after return is a counted drop — the bus was closed"))))))
+
+(deftest junit-x-groups-aggregates-across-groups
+  ;; sl-xjx0 (Warden W7): the JUnit path is invocation-fixed but reporters
+  ;; were per-group — each group's :run-end atomically REPLACED the file, so
+  ;; a red group 1 vanished behind a green group 2: all-green XML beside a
+  ;; nonzero exit, breaking the ERRATA invariant (>=1 <failure>/<error> iff
+  ;; exit nonzero). Groups now share one invocation state; the final file
+  ;; carries every group. The setup.clj is load-bearing (sl-8cvd P2-1):
+  ;; without it this is a single implicit group, :junit-shared-state is
+  ;; never created, and every assertion passes with the fix reverted.
+  (with-temp-project
+    (fn [dir]
+      (spit-file dir "shiftlefter.edn" (pr-str {:runner {:step-paths []}}))
+      (spit-file dir "features/red.feature"
+                 "Feature: Red\n  Scenario: fails\n    Given a deliberate failure\n")
+      (spit-file dir "features/green.feature"
+                 "Feature: Green\n  Scenario: passes\n    Given a trivial assertion\n")
+      (spit-file dir "steps/probe.clj"
+                 "(ns probe-steps
+                    (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+                  (defstep #\"a trivial assertion\" [] nil)
+                  (defstep #\"a deliberate failure\" []
+                    (throw (ex-info \"boom\" {:type :test/deliberate})))")
+      (spit-file dir "setup.clj"
+                 "(ns setup)
+                  (def setups
+                    [{:label \"red-group\"
+                      :start (fn [_] nil)
+                      :features [\"features/red.feature\"]}
+                     {:label \"green-group\"
+                      :start (fn [_] nil)
+                      :features [\"features/green.feature\"]}])")
+      (let [xml-path (str (fs/path dir "out.xml"))
+            result (core/execute!
+                    {:paths       []
+                     :config-path (str (fs/path dir "shiftlefter.edn"))
+                     :step-paths  [(str (fs/path dir "steps"))]
+                     :junit-xml   xml-path
+                     :no-color    true})
+            xml (slurp xml-path)]
+        (is (= 1 (:exit-code result)) "red group 1 + green group 2 => exit 1")
+        (is (= 2 (count (:groups result)))
+            "two REAL groups ran — the multi-group shared-state path, not
+             the single-implicit-group branch (sl-8cvd P2-1)")
+        (testing "the ERRATA invariant: >=1 <failure>/<error> iff exit nonzero"
+          (is (or (str/includes? xml "<failure")
+                  (str/includes? xml "<error"))
+              "group 1's failure survives group 2's write"))
+        (testing "the final document carries BOTH groups' scenarios"
+          (is (str/includes? xml "Feature: Red"))
+          (is (str/includes? xml "Feature: Green"))
+          (is (= 2 (count (re-seq #"<testcase" xml)))))))))
 
 (deftest cli-path-not-declared-is-planning-error
   (testing "CLI path outside the declared union surfaces a planning error"
@@ -533,6 +585,7 @@
                 (:require [shiftlefter.test-helpers.adapter-registry :as mock]))
               (def setups
                 [{:label \"leaky-group\"
+                  :adapters [{:name :leaky :provides []}]
                   :start (fn [_]
                            {:adapter-registry
                             (mock/registry
@@ -611,6 +664,7 @@
                         :start (fn [_] {})
                         :features [\"features/clean.feature\"]}
                        {:label \"leaky-group\"
+                        :adapters [{:name :leaky :provides []}]
                         :start (fn [_] {:adapter-registry leaky-registry})
                         :features [\"features/leaky.feature\"]}])")
         (let [opts {:paths []
@@ -1073,3 +1127,517 @@
                     (get-in (second forms) [:planning :errors]))
               (str "planning block must carry the dead group; got "
                    (second forms))))))))
+
+;; -----------------------------------------------------------------------------
+;; Invocation TOC + durable planning-failure pages (sl-n9c6)
+;; -----------------------------------------------------------------------------
+
+(defn- island-edn-of
+  "Slice and parse the EDN data island out of a report document string."
+  [doc]
+  (let [marker "id=\"run-data\">"
+        start (long (+ (clojure.string/index-of doc marker) (count marker)))
+        end (long (clojure.string/index-of doc "</script>" start))]
+    (edn/read-string (subs doc start end))))
+
+(deftest multi-group-invocation-toc-and-durable-planning-failure
+  ;; The constructed F3 repro (sl-n9c6): alpha green, beta planning-fails at
+  ;; the binding gate (undefined step, the 6hsd HTML scope), gamma green,
+  ;; delta's :start throws (console/EDN-only scope). The bead's destruction
+  ;; scenario — gamma's copy destroying beta's only page — must be dead.
+  (with-temp-project
+    (fn [dir]
+      (spit-file dir "shiftlefter.edn" (pr-str {:runner {:step-paths []}}))
+      (spit-file dir "features/a.feature"
+                 "Feature: A\n  Scenario: A1\n    Given a trivial assertion\n")
+      (spit-file dir "features/b.feature"
+                 "Feature: B\n  Scenario: B1\n    Given a step nobody defined\n")
+      (spit-file dir "features/c.feature"
+                 "Feature: C\n  Scenario: C1\n    Given a trivial assertion\n")
+      (spit-file dir "steps/probe.clj"
+                 "(ns probe-steps
+                    (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+                  (defstep #\"a trivial assertion\" [] nil)")
+      (spit-file dir "setup.clj"
+                 "(ns setup)
+                  (defn- ok-start [_] {})
+                  (defn- throwing-start [_] (throw (ex-info \"boom\" {})))
+                  (def setups
+                    [{:label \"alpha\" :start ok-start :features [\"features/a.feature\"]}
+                     {:label \"beta\" :start ok-start :features [\"features/b.feature\"]}
+                     {:label \"gamma\" :start ok-start :features [\"features/c.feature\"]}
+                     {:label \"delta\" :start throwing-start :features [\"features/c.feature\"]}])")
+      (let [html-path (str (fs/path dir "out" "report.html"))
+            {:keys [result]} (run-captured
+                              {:paths       []
+                               :config-path (str (fs/path dir "shiftlefter.edn"))
+                               :step-paths  [(str (fs/path dir "steps"))]
+                               :html        html-path})
+            run-dir (:results-dir result)]
+        (is (= 2 (:exit-code result)) (str "suite aggregate; got " result))
+        (is (some? run-dir))
+        (let [toc-doc (slurp (str (fs/path run-dir "report.html")))
+              island (island-edn-of toc-doc)
+              rows (get-in island [:toc :groups])]
+          (testing "rows ride declaration order with per-group verdicts"
+            (is (= ["alpha" "beta" "gamma" "delta"] (mapv :label rows)))
+            (is (= [:passed :planning-failed :passed :planning-failed]
+                   (mapv :status rows)))
+            (is (= [0 2 0 2] (mapv :exit-code rows))))
+          (testing "invocation verdict is the 7c7i suite aggregate"
+            (is (= 2 (get-in island [:summary :exit-code])))
+            (is (= :planning-failed (get-in island [:summary :status]))))
+          (testing "executed and stashed rows link their pages; start-throw row has none"
+            (is (= "alpha/report.html" (:path (nth rows 0))))
+            (is (= "beta/report.html" (:path (nth rows 1))))
+            (is (= "gamma/report.html" (:path (nth rows 2))))
+            (is (nil? (:path (nth rows 3)))))
+          (testing "half A: beta's PLANNING FAILED page is durable beside its siblings"
+            (let [beta-island (island-edn-of
+                               (slurp (str (fs/path run-dir "beta" "report.html"))))]
+              (is (= :planning-failed (get-in beta-island [:summary :status])))))
+          (testing "the stable path holds the TOC byte copy, not the last group's page"
+            (is (= toc-doc (slurp html-path)))))))))
+
+(deftest single-group-setup-stable-path-unchanged
+  ;; sl-n9c6 guard: one group under setup.clj — no TOC, no suppression; the
+  ;; stable path holds that group's own report exactly as before.
+  (with-temp-project
+    (fn [dir]
+      (spit-file dir "shiftlefter.edn" (pr-str {:runner {:step-paths []}}))
+      (spit-file dir "features/a.feature"
+                 "Feature: A\n  Scenario: A1\n    Given a trivial assertion\n")
+      (spit-file dir "steps/probe.clj"
+                 "(ns probe-steps
+                    (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+                  (defstep #\"a trivial assertion\" [] nil)")
+      (spit-file dir "setup.clj"
+                 "(ns setup)
+                  (def setups
+                    [{:label \"solo\" :start (fn [_] {}) :features [\"features/a.feature\"]}])")
+      (let [html-path (str (fs/path dir "out" "report.html"))
+            {:keys [result]} (run-captured
+                              {:paths       []
+                               :config-path (str (fs/path dir "shiftlefter.edn"))
+                               :step-paths  [(str (fs/path dir "steps"))]
+                               :html        html-path})
+            island (island-edn-of (slurp html-path))]
+        (is (= 0 (:exit-code result)))
+        (testing "stable path holds the group report, not a TOC"
+          (is (nil? (:toc island)))
+          (is (= 1 (count (:scenarios island)))))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-e0ml: adapter declare/bind split — preview honesty, verify at :start,
+;; and the part-d migration warning. The fixture's stepdef gates on a
+;; protocol only the group's NOVEL adapter provides, so binding verdicts
+;; directly expose which registry the preview used.
+;; -----------------------------------------------------------------------------
+
+(defn- write-gated-adapter-project!
+  "Temp project: interface :sms → NOVEL adapter :custom-sms; one stepdef
+   gated on ISMSInbound via :requires-protocols. `declare?` puts the
+   :adapters declaration on the group; `live-provides` is what the mock
+   registry actually carries at :start. Returns opts for execute!."
+  [dir declare? live-provides]
+  (spit-file dir "shiftlefter.edn"
+             (pr-str {:runner {:step-paths []}
+                      :interfaces {:sms {:type :sms :adapter :custom-sms}}}))
+  (spit-file dir "features/gated.feature"
+             "Feature: G\n  Scenario: gated\n    Given a step gated on inbound sms\n")
+  (spit-file dir "steps/gated.clj"
+             "(ns gated-steps
+                (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+              (defstep #\"a step gated on inbound sms\"
+                {:interface :sms
+                 :requires-protocols [:shiftlefter.sms.protocol/ISMSInbound]}
+                [] nil)")
+  (spit-file dir "setup.clj"
+             (str "(ns setup
+                (:require [shiftlefter.test-helpers.adapter-registry :as mock]))
+              (def setups
+                [{:label \"gated-group\"\n"
+                  (when declare?
+                    "                  :adapters [{:name :custom-sms :provides [:shiftlefter.sms.protocol/ISMSInbound]}]\n")
+                  "                  :start (fn [_]
+                           {:adapter-registry
+                            (mock/registry {:custom-sms {:provides " (pr-str live-provides) "}})})
+                  :features [\"features/gated.feature\"]}])"))
+  {:paths       []
+   :config-path (str (fs/path dir "shiftlefter.edn"))
+   :step-paths  [(str (fs/path dir "steps"))]})
+
+(def ^:private inbound-protocol [:shiftlefter.sms.protocol/ISMSInbound])
+
+(deftest declared-adapters-make-dry-run-preview-honest
+  (testing "without the declaration the preview cannot JUDGE the novel
+            adapter — silent, per the sl-8cvd P2-2 ruling (registry
+            membership is owned by the live-only exact check, sl-kkoh; the
+            old dry-run exit 2 here was the capability arm's false 'only
+            provides []' story). With the declaration, preview and live
+            agree by actually binding — the honest half of sl-e0ml"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-gated-adapter-project! dir false inbound-protocol)]
+          (is (= 0 (:exit-code (:result (run-captured (assoc opts :dry-run true)))))
+              "undeclared: an adapter unknown to the preview registry draws
+               no capability claim — silence, not the false provides error")
+          (is (= 0 (:exit-code (:result (run-captured opts))))
+              "undeclared: the live run binds against :start's registry and passes"))))
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-gated-adapter-project! dir true inbound-protocol)]
+          (is (= 0 (:exit-code (:result (run-captured (assoc opts :dry-run true)))))
+              "declared: preview binds against the declaration → agrees with live")
+          (is (= 0 (:exit-code (:result (run-captured opts))))
+              "declared + matching live registry: run passes, no warning"))))))
+
+(deftest registry-mismatch-is-a-planning-error
+  (testing "declared contract, runtime-checked: :start returning a registry
+            that does not match the declaration exits 2 with
+            :setup/registry-mismatch in the EDN planning block"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-gated-adapter-project! dir true [])
+              {:keys [result out]} (run-captured (assoc opts :edn true))
+              summary (first (filter :run/exit-code (read-forms out)))]
+          (is (= 2 (:exit-code result)))
+          (is (= 2 (:run/exit-code summary)))
+          (is (= :setup/registry-mismatch
+                 (-> summary :planning :errors first :type)))
+          (is (= "gated-group"
+                 (-> summary :planning :errors first :group))))))))
+
+(deftest undeclared-registry-warns-but-works
+  (testing "part-d migration: a group returning an undeclared registry still
+            runs green, with the preview-blind warning on stderr (console)
+            and a supplementary :setup-lints form (--edn)"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-gated-adapter-project! dir false inbound-protocol)
+              {:keys [result err]} (run-captured opts)]
+          (is (= 0 (:exit-code result)))
+          (is (str/includes? err "Setup plan warning:"))
+          (is (str/includes? err "never declared")))))
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-gated-adapter-project! dir false inbound-protocol)
+              {:keys [result out]} (run-captured (assoc opts :edn true))
+              forms (read-forms out)
+              lint-form (first (filter #(get-in % [:diagnostics :setup-lints]) forms))]
+          (is (= 0 (:exit-code result)))
+          (is (some? lint-form) "supplementary :setup-lints form present")
+          (is (= :setup/undeclared-adapter-registry
+                 (-> lint-form :diagnostics :setup-lints first :type)))
+          (is (= "gated-group" (:group lint-form)))
+          (is (some #(= 0 (:run/exit-code %)) forms)
+              "the group's green summary is present alongside"))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-wntk: entry-shape validation at the custom-registry install boundary.
+;; The returned registry is external input; malformed entries fail with the
+;; spec's own legible explain instead of an incidental use-time throw.
+;; -----------------------------------------------------------------------------
+
+(defn- write-malformed-registry-project!
+  "Temp project whose setup :start returns a registry with a broken entry:
+   :factory is a string, :implkey is a typo'd key, :provides is not a coll —
+   one entry, three failure classes. `declare?` adds an :adapters declaration
+   so the ordering claim (shape check beats mismatch check) is testable."
+  [dir declare?]
+  (spit-file dir "shiftlefter.edn"
+             (pr-str {:runner {:step-paths []}
+                      :interfaces {:sms {:type :sms :adapter :broken}}}))
+  (spit-file dir "features/plain.feature"
+             "Feature: P\n  Scenario: plain\n    Given a plain step\n")
+  (spit-file dir "steps/plain.clj"
+             "(ns plain-steps
+                (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+              (defstep #\"a plain step\" [] nil)")
+  (spit-file dir "setup.clj"
+             (str "(ns setup)
+              (def setups
+                [{:label \"broken-registry\"\n"
+                  (when declare?
+                    "                  :adapters [{:name :broken :provides []}]\n")
+                  "                  :start (fn [_]
+                           {:adapter-registry
+                            {:broken {:factory \"not-a-fn\"
+                                      :implkey :browser
+                                      :provides :oops}}})
+                  :features [\"features/plain.feature\"]}])"))
+  {:paths       []
+   :config-path (str (fs/path dir "shiftlefter.edn"))
+   :step-paths  [(str (fs/path dir "steps"))]})
+
+(deftest malformed-custom-registry-is-a-planning-error
+  (testing "a malformed entry in :start's returned registry exits 2 with
+            :setup/invalid-adapter-registry and a legible explain naming
+            the adapter, the failed predicate, and the typo'd key"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-malformed-registry-project! dir false)
+              {:keys [result out]} (run-captured (assoc opts :edn true))
+              summary (first (filter :run/exit-code (read-forms out)))
+              error (-> summary :planning :errors first)]
+          (is (= 2 (:exit-code result)))
+          (is (= :setup/invalid-adapter-registry (:type error)))
+          (is (= "broken-registry" (:group error)))
+          (is (str/includes? (:message error) "adapter :broken"))
+          (is (str/includes? (:message error) "ifn?"))
+          (is (str/includes? (:message error) "unknown entry key :implkey"))))))
+  (testing "with a declaration present, the shape error still wins over the
+            mismatch check (which would throw incidentally on :provides :oops)"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-malformed-registry-project! dir true)
+              {:keys [result out]} (run-captured (assoc opts :edn true))
+              summary (first (filter :run/exit-code (read-forms out)))]
+          (is (= 2 (:exit-code result)))
+          (is (= :setup/invalid-adapter-registry
+                 (-> summary :planning :errors first :type)))))))
+  (testing "dry-run never runs :start, so the malformed registry is unseen
+            (preview exemption) and the plain scenario previews green"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-malformed-registry-project! dir false)
+              {:keys [result]} (run-captured (assoc opts :dry-run true))]
+          (is (= 0 (:exit-code result))))))))
+
+;; -----------------------------------------------------------------------------
+;; Plan-time per-group adapter-capability lint (sl-sehc)
+;; -----------------------------------------------------------------------------
+
+(deftest capture-adapter-unsupported-is-per-group
+  (testing "the mixed etaoin+playwright multi-group composition (the Warden
+            yynw tail row): the playwright group's silence gets ITS OWN
+            plan-time lint; the etaoin group stays clean — the once-per-run
+            registry-level warn could never see this (the kinds ARE
+            contributed by etaoin in the same registry)"
+    (with-temp-project
+      (fn [dir]
+        ;; Shifted mode, BUILTIN vocabulary on both groups (sl-s2oa: two
+        ;; :web-typed instances share the builtin browser steps; the
+        ;; [:admin] annotation selects the playwright-backed instance —
+        ;; before s2oa this composition needed a custom stepdef per
+        ;; interface name).
+        (spit-file dir "shiftlefter.edn"
+                   (pr-str {:runner {:step-paths []}
+                            :svo {:unknown-subject :warn}
+                            :glossaries {:subjects (str (fs/absolutize "test/fixtures/glossaries/subjects.edn"))}
+                            :interfaces {:web {:type :web :adapter :etaoin}
+                                         :admin {:type :web :adapter :playwright}}}))
+        (spit-file dir "features/web.feature"
+                   "Feature: W
+  Scenario: S
+    Given :user opens the browser to 'http://web.test/'
+")
+        (spit-file dir "features/admin.feature"
+                   "Feature: A
+  Scenario: S
+    Given [:admin] :user opens the browser to 'http://admin.test/'
+")
+        (spit-file dir "setup.clj"
+                   "(ns setup)
+                    (def setups
+                      [{:label \"etaoin-group\"
+                        :start (fn [_] nil)
+                        :features [\"features/web.feature\"]}
+                       {:label \"playwright-group\"
+                        :start (fn [_] nil)
+                        :features [\"features/admin.feature\"]}])")
+        (let [{:keys [result out]}
+              (run-captured {:paths []
+                             :config-path (str (fs/path dir "shiftlefter.edn"))
+                             :capture {:console :on-failure}
+                             :dry-run true
+                             :edn true})
+              forms (read-forms out)
+              by-group (into {} (comp (filter :group) (map (juxt :group identity)))
+                             forms)]
+          (is (= 0 (:exit-code result)))
+          (let [pw-lints (get-in by-group ["playwright-group" :diagnostics :capture-lints])]
+            (is (= 1 (count pw-lints)) "exactly one lint, on the playwright group")
+            (is (= :capture/adapter-unsupported (:type (first pw-lints))))
+            (is (= :console (:kind (first pw-lints))))
+            (is (= [:playwright] (:adapters (first pw-lints))))
+            (is (= "playwright-group" (:group (first pw-lints)))))
+          (is (nil? (get-in by-group ["etaoin-group" :diagnostics :capture-lints]))
+              "the etaoin group carries no capture lints"))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-kkoh: the plan-aware EXACT registry check. Shifted-mode fixture as a
+;; deliberate CONTROL, not a necessity (sl-8cvd P3-5): provisioning targets
+;; ride the bound step's :svo, and the BUILTIN browser stepdefs carry :svo
+;; metadata too — so even a vanilla plan binds them and can die of
+;; :setup/bound-adapter-missing (Warden pass-2, agent B case C). The
+;; explicit shifted project just keeps the touched adapter under the
+;; fixture's control.
+;; -----------------------------------------------------------------------------
+
+(defn- write-bound-adapter-project!
+  "Shifted-mode temp project with a setup.clj group. Interface :web →
+   NOVEL adapter :mock-web; `live-adapters` = adapter names the group's
+   :start puts in the mock registry; `opts`: :extra-interface? adds a
+   second interface :extra → :sms-mock (a DEFAULT-registry name) that no
+   scenario touches; :tag-toucher? tags the provisioning scenario @wip
+   and adds a second, target-free scenario; :requires-protocols? puts
+   `:requires-protocols [IBrowser]` on the stepdef (sl-8cvd P2-2 — the
+   shape every bundled stepdef has, which used to trip the suite-lint
+   capability arm ahead of the exact registry check). :start/:stop record
+   to lifecycle-events. Returns execute! opts."
+  [dir live-adapters {:keys [extra-interface? tag-toucher? requires-protocols?]}]
+  (let [verbs (str (fs/absolutize "test/fixtures/glossaries/verbs-web-project.edn"))]
+    (spit-file dir "glossary/subjects.edn"
+               (pr-str {:subjects {:user {:desc "u" :instances [{:id :alice}]}}}))
+    (spit-file dir "shiftlefter.edn"
+               (pr-str (cond-> {:runner {:step-paths []}
+                                :svo {}
+                                :glossaries {:subjects "glossary/subjects.edn"
+                                             :verbs {:web verbs}}
+                                :interfaces {:web {:type :web :adapter :mock-web}}}
+                         extra-interface?
+                         (assoc-in [:interfaces :extra]
+                                   {:type :sms :adapter :sms-mock}))))
+    (spit-file dir "features/bound.feature"
+               (str "Feature: B\n\n"
+                    (when tag-toucher? "  @wip\n")
+                    "  Scenario: touches\n    Given user/alice clicks the button\n"
+                    (when tag-toucher?
+                      "\n  Scenario: trivial\n    Given nothing happens\n")))
+    (spit-file dir "steps/bound.clj"
+               (str "(ns bound-steps
+                  (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+                (defstep #\"(.+) clicks (.+)\"
+                  {:interface :web
+                   "
+                    (when requires-protocols?
+                      ":requires-protocols [:shiftlefter.browser.protocol/IBrowser]
+                   ")
+                    ":svo {:subject :$1 :verb :swipe :frame :default :object :$2}}
+                  [ctx _s _t] ctx)
+                (defstep #\"nothing happens\" [] nil)"))
+    (spit-file dir "setup.clj"
+               (str "(ns setup
+                  (:require [shiftlefter.runner.core-setup-test :as t]
+                            [shiftlefter.test-helpers.adapter-registry :as mock]))
+                (def setups
+                  [{:label \"bound-group\"
+                    :start (fn [_]
+                             (t/record-event! :start)
+                             {:adapter-registry
+                              (mock/registry "
+                    (pr-str (into {} (map (fn [nm] [nm {}])) live-adapters))
+                    ")
+                              :stop (fn [] (t/record-event! :stop))})
+                    :features [\"features/bound.feature\"]}])"))
+    {:paths       []
+     :config-path (str (fs/path dir "shiftlefter.edn"))
+     :step-paths  [(str (fs/path dir "steps"))]}))
+
+(deftest bound-adapter-missing-is-a-planning-error-and-stop-runs
+  (testing "a bound scenario's adapter absent from the live registry: exit 2,
+            :setup/bound-adapter-missing in the EDN planning block — and
+            :stop STILL RUNS (:start ran, the world exists; unlike the
+            pre-compile registry branches, ruled deliberate)"
+    (with-temp-project
+      (fn [dir]
+        (reset! lifecycle-events [])
+        (let [opts (write-bound-adapter-project! dir [:other-adapter] {})
+              {:keys [result out]} (run-captured (assoc opts :edn true))
+              summary (first (filter :run/exit-code (read-forms out)))]
+          (is (= 2 (:exit-code result)))
+          (is (= 2 (:run/exit-code summary)))
+          (is (= :setup/bound-adapter-missing
+                 (-> summary :planning :errors first :type)))
+          (is (= :mock-web (-> summary :planning :errors first :data :adapter))
+              "--edn carries the adapter under :data (serialize-error projection)")
+          (is (= [:web] (-> summary :planning :errors first :data :interfaces)))
+          (is (= "bound-group" (-> summary :planning :errors first :group)))
+          (is (= [:start :stop] @lifecycle-events)
+              ":stop ran after the post-compile planning error"))))))
+
+(deftest unbound-removed-default-is-silent
+  (testing "silent-when-certainly-safe (the sl-kkoh behavior change): a
+            configured interface whose DEFAULT adapter is absent from the
+            live registry, but which no bound scenario touches, draws no
+            warn and no error — the config-referenced removal warn no
+            longer fires at the run seam"
+    (with-temp-project
+      (fn [dir]
+        (reset! lifecycle-events [])
+        (let [opts (write-bound-adapter-project! dir [:mock-web]
+                                                 {:extra-interface? true})
+              {:keys [result err]} (run-captured opts)]
+          (is (= 0 (:exit-code result)))
+          (is (not (str/includes? err "absent from the"))
+              "no removal warn and no bound-adapter error text")
+          (is (not (str/includes? err "sms-mock"))))))))
+
+(deftest filtered-out-toucher-is-silent
+  (testing "selection-exactness: when the only scenario touching the missing
+            adapter is tag-filtered out, the surviving selection is certainly
+            safe — exit 0"
+    (with-temp-project
+      (fn [dir]
+        (reset! lifecycle-events [])
+        (let [opts (write-bound-adapter-project! dir [:other-adapter]
+                                                 {:tag-toucher? true})]
+          (let [{:keys [result]} (run-captured opts)]
+            (is (= 2 (:exit-code result))
+                "control: unfiltered, the @wip toucher errors"))
+          (let [{:keys [result]} (run-captured
+                                  (assoc opts :tag-filter {:exclude #{"@wip"}}))]
+            (is (= 0 (:exit-code result))
+                "filtered: the toucher is deselected, the run is safe")))))))
+
+(deftest dry-run-skips-the-bound-adapter-check
+  (testing "dry-run has no :start and binds the preview — the live-only
+            check stays out of its way"
+    (with-temp-project
+      (fn [dir]
+        (reset! lifecycle-events [])
+        (let [opts (write-bound-adapter-project! dir [:other-adapter] {})
+              {:keys [result]} (run-captured (assoc opts :dry-run true))]
+          (is (= 0 (:exit-code result)))
+          (is (= [] @lifecycle-events) "dry-run never ran :start"))))))
+
+(deftest requires-protocols-step-with-missing-adapter-gets-the-exact-error
+  (testing "sl-8cvd (P2-2): a stepdef carrying :requires-protocols — the
+            bundled-stepdef shape — whose bound adapter is absent from the
+            live registry gets kkoh's exact :setup/bound-adapter-missing,
+            never the suite-lint capability arm's false 'only provides []'
+            remedy (which used to fire first and shadow it for every real
+            project)"
+    (with-temp-project
+      (fn [dir]
+        (reset! lifecycle-events [])
+        (let [opts (write-bound-adapter-project! dir [:other-adapter]
+                                                 {:requires-protocols? true})
+              {:keys [result out err]} (run-captured (assoc opts :edn true))
+              summary (first (filter :run/exit-code (read-forms out)))]
+          (is (= 2 (:exit-code result)))
+          (is (= :setup/bound-adapter-missing
+                 (-> summary :planning :errors first :type)))
+          (is (= :mock-web (-> summary :planning :errors first :data :adapter)))
+          (is (not (str/includes? (str out err) "only provides"))
+              "the false capability remedy never appears")
+          (is (empty? (get-in summary [:planning :suite-lint-issues]))
+              "no :stepdef/missing-capability shadow")
+          (is (= [:start :stop] @lifecycle-events)
+              ":stop still runs after the post-compile planning error"))))))
+
+(deftest requires-protocols-step-with-missing-adapter-dry-run-is-silent
+  (testing "the same shape under dry-run stays SILENT — deliberate, not a
+            gap (sl-8cvd plan-verdict fold-in): dry-run has no :start and
+            binds the declared preview, and the exact bound-adapter check
+            is live-only by the sl-kkoh ruling. Before the P2-2 fix this
+            path drew the false capability lint instead (exit 2)"
+    (with-temp-project
+      (fn [dir]
+        (reset! lifecycle-events [])
+        (let [opts (write-bound-adapter-project! dir [:other-adapter]
+                                                 {:requires-protocols? true})
+              {:keys [result]} (run-captured (assoc opts :dry-run true))]
+          (is (= 0 (:exit-code result)))
+          (is (= [] @lifecycle-events) "dry-run never ran :start"))))))

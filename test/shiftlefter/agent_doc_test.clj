@@ -6,7 +6,7 @@
 
 (deftest topics-test
   (testing "topics are stable and include the default overview"
-    (is (= ["intro" "overview" "layout" "authoring" "grammar" "vocabulary" "locators" "diagnostics" "hooks" "lifecycle" "sieve" "examples" "builtins"]
+    (is (= ["intro" "overview" "layout" "authoring" "grammar" "vocabulary" "locators" "diagnostics" "resolution" "hooks" "lifecycle" "sieve" "examples" "builtins"]
            (agent-doc/topic-names)))
     (is (= "overview" agent-doc/default-topic))))
 
@@ -30,8 +30,8 @@
       ;; classpath — the same lookup the jar uses (AC3/AC7).
       (is (= :ok (:status result)))
       (is (str/includes? (:content result) "# ShiftLefter Built-in Vocabulary"))
-      (is (str/includes? (:content result) "Interface `:web`"))
-      (is (str/includes? (:content result) "Interface `:sms`")))))
+      (is (str/includes? (:content result) "Interface type `:web`"))
+      (is (str/includes? (:content result) "Interface type `:sms`")))))
 
 (deftest format-topic-list-test
   (testing "list output includes every topic"

@@ -12,7 +12,6 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -20,11 +19,16 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * ShiftLefter warm-path dispatch client (sl-x6r).
+ * ShiftLefter warm-path dispatch client (sl-x6r; streaming restored sl-qwf).
  *
  * VERSION-INTERNAL: a private protocol between {@code bin/sl} and the jar it ships
  * with. Not part of the locked 0.5 surface; may change in any release. Lives INSIDE
- * the uberjar so it is always version-matched with the daemon it talks to.
+ * the uberjar so it is always version-matched with the daemon it talks to — and
+ * that match is MECHANICAL, not aspirational: {@code bin/sl}'s {@code read_daemon}
+ * bounces a daemon whose recorded jar-size differs from the jar this client loads
+ * from, or whose breadcrumb predates a jar rebuild (daemon suite test 8 pins it),
+ * so client and daemon always run the same jar. Invoking this class directly
+ * against a foreign daemon is outside the contract.
  *
  * <p>Why Java and not babashka: a class with zero Clojure on its classpath never
  * pays Clojure's ~800ms init — bare-JVM boot of one class out of the uberjar is
@@ -33,20 +37,35 @@ import java.util.regex.Pattern;
  * <p>Invocation: {@code java -cp shiftlefter.jar shiftlefter.client.NreplClient
  * <port> <cwd> <argv...>}. Connects to the daemon's nREPL server on
  * {@code 127.0.0.1:<port>}, evaluates a form that runs
- * {@code shiftlefter.daemon/dispatch!} with stdout/stderr CAPTURED into byte buffers
- * (NOT streamed — the bundled nREPL's CallbackBufferedOutputStream throws on any
- * multibyte flush; see sl-x6r / sl-qwf), base64s them into the eval value, then
- * writes those raw bytes to this process's stdout/stderr and exits with the
- * dispatched command's exit code.
+ * {@code shiftlefter.daemon/dispatch!} under the nREPL session's own
+ * {@code *out*}/{@code *err*}, so output STREAMS to this process's
+ * stdout/stderr as {@code :out}/{@code :err} messages while the command runs
+ * (raw byte passthrough — multibyte chars split across messages concatenate
+ * correctly). The eval value carries only {@code {:exit n}}. Historical: sl-x6r
+ * shipped this path capture+buffered because nREPL 1.5.0's
+ * CallbackBufferedOutputStream crashed on multibyte flushes; nREPL 1.7.0
+ * (sl-ddi6) fixed that, and sl-qwf restored streaming.
  *
- * <p>Exit codes: 0/1/2/3 are the dispatched command's (passed through). 69 means
+ * <p>Exit codes: 0/1/2/3/4 are the dispatched command's (passed through). 69 means
  * "could not reach the daemon" — {@code bin/sl} treats it as a signal to retry
- * cold (nothing has been written to stdout yet, so a cold retry is safe).
+ * cold. 69 is only returned while NOTHING has been streamed yet (connect/clone
+ * phase); once any output byte has been written, a transport failure exits 3
+ * (crash) instead — a cold retry would duplicate the already-streamed output.
  */
 public final class NreplClient {
 
     /** bin/sl contract: "daemon unreachable, fall back to a cold java -jar run". */
     private static final int EX_DAEMON_UNREACHABLE = 69;
+
+    /** Crash exit (matches the daemon/runner verdict contract's code 3). */
+    private static final int EX_CRASH = 3;
+
+    /**
+     * True once any out/err byte has been written to this process's streams.
+     * Gate for the 69-vs-3 decision on transport failure: cold retry is only
+     * safe while nothing has been streamed.
+     */
+    private static volatile boolean streamedAnything = false;
 
     private static final int CONNECT_TIMEOUT_MS = 2000;
 
@@ -70,11 +89,15 @@ public final class NreplClient {
         try {
             System.exit(dispatch(port, cwd, argv));
         } catch (IOException e) {
-            // Connect-refused or any transport failure. Because output is buffered
-            // (nothing reaches stdout until the value is decoded at the very end), a
-            // failure here means we have written nothing — safe for bin/sl to retry
-            // cold. Surface a quiet note to stderr only when it is a real fault, not
-            // a plain "no daemon" refusal.
+            // Transport failure. Before any output has streamed (connect/clone,
+            // or eval dying without producing a byte) nothing has been written,
+            // so bin/sl may safely retry cold (69). Once output HAS streamed, a
+            // cold retry would duplicate it — report and exit 3 (crash) instead.
+            if (streamedAnything) {
+                System.err.println("sl: warm dispatch lost the daemon mid-stream ("
+                                   + e.getMessage() + ")");
+                System.exit(EX_CRASH);
+            }
             if (!(e instanceof ConnectException)) {
                 System.err.println("sl: warm dispatch failed (" + e.getMessage()
                                    + "); falling back to cold");
@@ -89,6 +112,20 @@ public final class NreplClient {
      * (eval {@code (shiftlefter.daemon/stop!)}) rather than a dispatch.
      */
     private static final String STOP_SENTINEL = "--sl-internal-stop";
+
+    /**
+     * Internal sentinel: the custody half of {@code sl daemon status} routes here
+     * (sl-s35y). A READ of the daemon's live-costume registry — deliberately NOT
+     * the generic dispatch path, whose dispatch! resets the stepdef/intent
+     * registries per its per-dispatch contract; a status query must not mutate
+     * daemon state.
+     */
+    private static final String STATUS_SENTINEL = "--sl-internal-status";
+
+    private static final String STATUS_CODE =
+        "(let [r (try (do (shiftlefter.daemon/custody-status!) {:exit 0})"
+        + "          (catch Throwable t (.printStackTrace t *err*) {:exit 3}))]"
+        + "  (flush) (.flush ^java.io.Writer *err*) {:exit (:exit r)})";
 
     private static int dispatch(int port, String cwd, String[] argv) throws IOException {
         try (Socket sock = new Socket()) {
@@ -109,10 +146,30 @@ public final class NreplClient {
                 return awaitStop(in);
             }
 
-            // 2b. normal: eval the capture-and-base64 dispatch form.
+            // 2a'. custody read for `sl daemon status` (sl-s35y): plain eval +
+            //      the W5 close — no dispatch!, no state reset.
+            if (argv.length == 1 && STATUS_SENTINEL.equals(argv[0])) {
+                sendDict(out, "op", "eval", "session", session, "id", "2",
+                         "code", STATUS_CODE);
+                int statusRc = awaitResult(in);
+                sendDict(out, "op", "close", "session", session, "id", "3");
+                return statusRc;
+            }
+
+            // 2b. normal: eval the streaming dispatch form.
             sendDict(out, "op", "eval", "session", session, "id", "2",
                      "code", buildCode(cwd, argv));
-            return awaitResult(in);
+            int rc = awaitResult(in);
+            // 3. Release the session (sl-xjx0, Warden W5): nREPL retains every
+            //    cloned session (each with a parked SessionThread) until an
+            //    explicit close — one leaked session + thread per warm `sl`
+            //    invocation otherwise, with no reaper short of the 60-min idle
+            //    shutdown. One buffered close message, no ack-wait (the server
+            //    processes it after we disconnect; zero added latency). The
+            //    stop path skips this (daemon is shutting down) and exception
+            //    paths fall through to the socket close as before.
+            sendDict(out, "op", "close", "session", session, "id", "3");
+            return rc;
         }
     }
 
@@ -144,8 +201,10 @@ public final class NreplClient {
     }
 
     /**
-     * Read eval responses until status "done" for our id, writing any stray
-     * out/err (defensive — the captured form emits none) and decoding the value.
+     * Read eval responses until status "done" for our id, STREAMING out/err
+     * bytes to this process's stdout/stderr as they arrive (raw byte
+     * passthrough — a multibyte char split across two messages concatenates
+     * correctly), then decoding the {:exit n} value.
      */
     private static int awaitResult(PushbackInputStream in) throws IOException {
         String value = null;
@@ -157,11 +216,13 @@ public final class NreplClient {
             Map<?, ?> m = (Map<?, ?>) msg;
             Object o = m.get("out");
             if (o instanceof byte[]) {
+                streamedAnything = true;
                 System.out.write((byte[]) o);
                 System.out.flush();
             }
             Object e = m.get("err");
             if (e instanceof byte[]) {
+                streamedAnything = true;
                 System.err.write((byte[]) e);
                 System.err.flush();
             }
@@ -175,33 +236,23 @@ public final class NreplClient {
         }
     }
 
-    /** Decode the {:exit n :out b64 :err b64} value, write the bytes, return exit. */
-    private static int emit(String value) throws IOException {
-        if (value == null) {
-            System.err.println("sl: warm dispatch returned no value; falling back to cold");
-            return EX_DAEMON_UNREACHABLE;
+    /**
+     * Parse the {:exit n} value, return the exit code. The "no value /
+     * unparseable" fallbacks return 69 only while nothing has streamed
+     * (main()'s IOException gate can't see these paths, so they gate
+     * themselves): after streamed output a cold retry would duplicate it.
+     */
+    private static int emit(String value) {
+        Matcher exit = value == null
+            ? null
+            : Pattern.compile(":exit\\s+(-?\\d+)").matcher(value);
+        if (exit == null || !exit.find()) {
+            System.err.println(value == null
+                               ? "sl: warm dispatch returned no value"
+                               : "sl: unparseable warm response");
+            return streamedAnything ? EX_CRASH : EX_DAEMON_UNREACHABLE;
         }
-        Matcher exit = Pattern.compile(":exit\\s+(-?\\d+)").matcher(value);
-        if (!exit.find()) {
-            System.err.println("sl: unparseable warm response; falling back to cold");
-            return EX_DAEMON_UNREACHABLE;
-        }
-        writeBase64(System.out, group(value, ":out\\s+\"([A-Za-z0-9+/=]*)\""));
-        writeBase64(System.err, group(value, ":err\\s+\"([A-Za-z0-9+/=]*)\""));
-        System.out.flush();
-        System.err.flush();
         return Integer.parseInt(exit.group(1));
-    }
-
-    private static void writeBase64(OutputStream dst, String b64) throws IOException {
-        if (b64 != null && !b64.isEmpty()) {
-            dst.write(Base64.getDecoder().decode(b64));
-        }
-    }
-
-    private static String group(String s, String regex) {
-        Matcher m = Pattern.compile(regex).matcher(s);
-        return m.find() ? m.group(1) : null;
     }
 
     private static boolean statusContains(Object status, String want) {
@@ -217,11 +268,14 @@ public final class NreplClient {
     }
 
     /**
-     * The Clojure form sent to the daemon. Binds out/err to byte buffers so the
-     * dispatched command's output never reaches nREPL's (multibyte-broken) output
-     * stream, then base64s the captured bytes into the returned map. dispatch!
-     * already catches Throwable -> {:exit 3}; the extra try is belt-and-suspenders
-     * for the binding/capture scaffolding itself.
+     * The Clojure form sent to the daemon. Runs dispatch! under the nREPL
+     * session's own out and err writers so output streams back as :out/:err messages
+     * while the command executes (sl-qwf; the capture+buffer dodge died with
+     * nREPL 1.7.0, sl-ddi6). The explicit flushes push any trailing partial
+     * line BEFORE the value returns — nREPL forwards session writes
+     * synchronously on the eval thread, so every output message precedes
+     * {:exit n} on the wire. dispatch! already catches Throwable -> {:exit 3};
+     * the extra try is belt-and-suspenders for the scaffolding itself.
      */
     private static String buildCode(String cwd, String[] argv) {
         StringBuilder vec = new StringBuilder("[");
@@ -232,19 +286,12 @@ public final class NreplClient {
             vec.append(cljString(argv[i]));
         }
         vec.append(']');
-        return "(let [ob (java.io.ByteArrayOutputStream.)"
-             + "      eb (java.io.ByteArrayOutputStream.)"
-             + "      ow (java.io.PrintWriter. (java.io.OutputStreamWriter. ob \"UTF-8\") true)"
-             + "      ew (java.io.PrintWriter. (java.io.OutputStreamWriter. eb \"UTF-8\") true)"
-             + "      ex (binding [*out* ow *err* ew]"
-             + "           (let [r (try (shiftlefter.daemon/dispatch! {:argv " + vec
-             +                  " :cwd " + cljString(cwd) + "})"
-             + "                        (catch Throwable t (.printStackTrace t ew) {:exit 3}))]"
-             + "             (.flush ow) (.flush ew) (:exit r)))"
-             + "      enc (java.util.Base64/getEncoder)]"
-             + "  {:exit ex"
-             + "   :out (.encodeToString enc (.toByteArray ob))"
-             + "   :err (.encodeToString enc (.toByteArray eb))})";
+        return "(let [r (try (shiftlefter.daemon/dispatch! {:argv " + vec
+             +              " :cwd " + cljString(cwd) + "})"
+             + "             (catch Throwable t (.printStackTrace t *err*) {:exit 3}))]"
+             + "  (flush)"
+             + "  (.flush ^java.io.Writer *err*)"
+             + "  {:exit (:exit r)})";
     }
 
     /** A Clojure string literal: wrap in quotes, escape backslash and quote. */

@@ -1,6 +1,7 @@
 EXIT 1
 --- STDOUT ---
 --- STDERR ---
+run seed: 42
 FAILED Step throws exception
   ✓ I have 5 items in my cart
   ✗ I trigger an error — Intentional test error

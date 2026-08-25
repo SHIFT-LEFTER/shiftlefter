@@ -17,13 +17,13 @@
 (deftest live-coverage-test
   (testing "the generated reference covers both built-in interfaces (AC2/AC4)"
     (let [md (gen/generate)]
-      (is (str/includes? md "## Interface `:web`"))
-      (is (str/includes? md "## Interface `:sms`"))
-      (testing "verbs, frames, step patterns, and lane markers are present"
+      (is (str/includes? md "## Interface type `:web`"))
+      (is (str/includes? md "## Interface type `:sms`"))
+      (testing "verbs, frames, step patterns, and type markers are present (sl-s2oa)"
         (is (str/includes? md "#### `:click` — Click on an element"))
         (is (str/includes? md "frame `:with` — schema (not a step): S fills O with VALUE"))
-        (is (str/includes? md "`:fill`/`:with` `[:web]`"))
-        (is (str/includes? md "`:send`/`:to` `[:sms]`")))
+        (is (str/includes? md "`:fill`/`:with` `(type :web)`"))
+        (is (str/includes? md "`:send`/`:to` `(type :sms)`")))
       (testing "every frame is paired with a quotable bind-with example (sl-bqo)"
         (is (str/includes? md "  - bind with: `:alice opens the browser to '/login'`"))
         (is (str/includes? md "  - bind with: `:alice sends an SMS to '+15550100' saying 'On my way'`"))

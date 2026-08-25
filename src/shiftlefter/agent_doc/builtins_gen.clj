@@ -23,6 +23,7 @@
   (:require [clojure.string :as str]
             [shiftlefter.adapters.registry :as adapters]
             [shiftlefter.stepengine.registry :as registry]
+            [shiftlefter.svo.bindings-join :as bindings-join]
             [shiftlefter.svo.glossary :as glossary]))
 
 ;; -----------------------------------------------------------------------------
@@ -135,14 +136,16 @@
 
 (defn- step-line
   "Render one built-in step pattern: its regex source, the verb/frame it maps
-   to, the interface lane marker, and any required capability protocols."
+   to, the interface TYPE marker (sl-s2oa: stepdef metadata is the type; a
+   `[name]` annotation in a feature selects a config INSTANCE of it), and
+   any required capability protocols."
   [{:keys [pattern-src metadata]}]
   (let [{:keys [interface svo requires-protocols]} metadata]
     (str "- `" pattern-src "`"
          (when svo
            (str " → `" (:verb svo) "`/`" (:frame svo) "`"))
          (when interface
-           (str " `[" interface "]`"))
+           (str " `(type " interface ")`"))
          (when (seq requires-protocols)
            (str " — requires " (str/join ", " (map #(str "`" % "`")
                                                    (sort-by str requires-protocols))))))))
@@ -156,14 +159,12 @@
    frame paired with its bind-with example), and the step grammar, all
    sorted for stable output."
   [interface verbs adapters-for-iface stepdefs-for-iface]
-  (let [steps-by-verb-frame (group-by (fn [{:keys [metadata]}]
-                                        [(get-in metadata [:svo :verb])
-                                         (get-in metadata [:svo :frame])])
-                                      stepdefs-for-iface)]
+  (let [steps-by-verb-frame (bindings-join/steps-by-verb-frame
+                             stepdefs-for-iface)]
     (str/join
      "\n"
      (concat
-      [(str "## Interface `" interface "`")
+      [(str "## Interface type `" interface "`")
        ""
        "### Adapters"
        ""]
@@ -208,10 +209,18 @@
     "registry. Do not edit it by hand — edit the source and regenerate with"
     "`clojure -T:build gen-builtins`."
     ""
-    "Sections are grouped by interface for targeted subreads. Within each"
-    "interface: the adapters that back it, the verbs and their frames (each"
+    "Sections are grouped by interface TYPE for targeted subreads. Within"
+    "each type: the adapters that back it, the verbs and their frames (each"
     "frame is one accepted argument shape), then the step grammar (regex"
     "source) and the verb/frame each pattern maps to."
+    ""
+    "TYPE vs INSTANCE (sl-s2oa): a step definition's `(type :web)` marker"
+    "names the verb vocabulary it belongs to. Your `shiftlefter.edn`"
+    ":interfaces map declares named INSTANCES of these types; every"
+    "instance of a type gets this full vocabulary. A step targets an"
+    "instance with a leading `[name]` annotation (e.g. `[:admin-console]`);"
+    "unannotated steps default to the type-named instance when several"
+    "exist. The annotation names an instance, never a type or an adapter."
     ""
     "FRAMES ARE SCHEMA, NOT STEPS. A frame like `S navigates to O` names an"
     "argument shape — writing it in a feature file will NOT bind. The only"

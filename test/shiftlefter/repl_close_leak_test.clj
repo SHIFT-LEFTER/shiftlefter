@@ -50,6 +50,20 @@
   (swap! @#'repl/named-contexts assoc ctx-name
          (cap/assoc-capability {} :web record :ephemeral)))
 
+(defn- make-real-SHAPED-etaoin-record
+  "An EtaoinBrowser over the shape `eta/chrome` ACTUALLY returns — `:url`
+   plus a spawned `:process`, NO `:webdriver-url`. The pre-vmc5 close
+   path (`close-session!`) read `:webdriver-url`, NPE'd on this shape,
+   and reported :close-failed while leaking the driver process; the
+   hand-crafted record above masked it."
+  [session-id]
+  (ebrowser/make-etaoin-browser {:host "127.0.0.1"
+                                 :port 9515
+                                 :url "http://127.0.0.1:9515"
+                                 :session session-id
+                                 :type :chrome
+                                 :process :fake-process}))
+
 (defn- stub-costume-browser []
   (cbrowser/make-costume-browser
    (make-real-etaoin-record "costume-session")
@@ -69,6 +83,18 @@
           ;; Regression (sl-tss7 flip of the sl-8mz bug-2 pin): pre-fix this
           ;; was zero — close-session! short-circuited on (:session record),
           ;; nil for records, and the session leaked while reporting :closed.
+          (is (= 1 @quit-calls)))))))
+
+(deftest test-real-shaped-driver-is-actually-quit
+  (testing "cleanup closes the shape eta/chrome actually returns (sl-vmc5)"
+    (let [quit-calls (atom 0)
+          record (make-real-SHAPED-etaoin-record "session-real-shape")]
+      (with-redefs [eta/quit (fn [_] (swap! quit-calls inc))]
+        (inject-record-into-ctx! :carol record)
+        (let [actions (repl/reset-ctxs!)]
+          ;; Pre-fix: close-session! NPE'd on the missing :webdriver-url →
+          ;; :close-failed, zero quits, driver process leaked.
+          (is (= :closed (-> actions first :action)))
           (is (= 1 @quit-calls)))))))
 
 (deftest test-costume-survives-clear-by-mode-skip

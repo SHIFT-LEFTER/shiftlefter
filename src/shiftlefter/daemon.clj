@@ -23,11 +23,15 @@
             [shiftlefter.paths :as paths]
             [shiftlefter.project-context :as project-context]
             [shiftlefter.stepengine.registry :as registry]
+            [shiftlefter.costume :as costume]
+            [shiftlefter.runner.report.edn :as report-edn]
+            [shiftlefter.runner.verdict :as verdict]
             [shiftlefter.intent.state :as intent-state])
   (:import [java.io File PrintWriter]
            [java.nio.file Files CopyOption StandardCopyOption]
            [java.util.concurrent Executors ScheduledExecutorService
             ScheduledFuture TimeUnit ThreadFactory]
+           [java.util.concurrent.locks ReentrantLock]
            [java.time Instant]))
 
 ;; -----------------------------------------------------------------------------
@@ -54,8 +58,9 @@
   (s/keys :req-un [::argv ::cwd]))
 
 (s/def ::exit
-  ;; Locked CLI exit-code contract: 0=pass, 1=fail, 2=planning error, 3=crash.
-  #{0 1 2 3})
+  ;; The CLI exit-code contract (shiftlefter.runner.verdict, sl-7c7i):
+  ;; 0=pass, 1=fail, 2=planning error, 3=crash, 4=run degraded.
+  verdict/exit-codes)
 
 (s/def ::response
   ;; stdout/stderr are NOT in the response — they stream as nREPL :out/:err
@@ -100,6 +105,12 @@
 ;;     - webdriver.playwright.browser/imports-loaded?  (one-shot import latch)
 ;;   NOT ON THE CLI DISPATCH PATH (REPL-API only):
 ;;     - repl/{session-ctx,named-contexts,connected-subjects,repl-config}
+;;   DAEMON-SCOPED USER STATE, PERSISTENT BY DESIGN (sl-s35y, Warden W6):
+;;     - costume/live-drivers — a worn costume's driver surviving between
+;;       warm invocations IS costume persistence working (sl-tss7/sl-34fu);
+;;       NEVER reset per dispatch. Reapers: costume destroy/relaunch flows,
+;;       `sl daemon stop`, JVM exit. Inspect: `sl daemon status`
+;;       (custody-status! below).
 ;;   DAEMON CONTROL (this ns — lifecycle, not user state; reset by serve!):
 ;;     - daemon-state, shutdown-hook-registered (below)
 ;;
@@ -123,10 +134,14 @@
                  once per JVM (tests start/stop serve! repeatedly)."}
   shutdown-hook-registered (atom false))
 
-;; One monitor serializes dispatch!; global registries make concurrent dispatch
-;; unsafe (parallelism is post-0.5, F6). The idle-reap task also takes this lock,
-;; so a reap can never fire mid-dispatch.
-(def ^:private dispatch-lock (Object.))
+;; One lock serializes dispatch!; global registries make concurrent dispatch
+;; unsafe (parallelism is post-0.5, F6). The idle-reap task and stop! also take
+;; this lock (blocking), so a reap can never fire mid-dispatch and a graceful
+;; stop waits for the in-flight run. dispatch! itself only TRY-acquires
+;; (sl-luhn, Chair-ratified): a second invocation against a busy daemon is
+;; REJECTED with exit 2 / :daemon/busy instead of queueing silently — a silent
+;; queue is indistinguishable from a hang for the agents this surface serves.
+(def ^:private ^ReentrantLock dispatch-lock (ReentrantLock.))
 
 ;; -----------------------------------------------------------------------------
 ;; Helpers — filesystem / metadata
@@ -216,10 +231,12 @@
    fire mid-dispatch) and reaps only if `gen` is still current — a dispatch that
    landed after this task was scheduled bumps the generation and supersedes it."
   [gen]
-  (locking dispatch-lock
+  (.lock dispatch-lock)
+  (try
     (let [st @daemon-state]
       (when (and st (= gen (:idle-gen st)))
-        (stop-daemon! "idle timeout")))))
+        (stop-daemon! "idle timeout")))
+    (finally (.unlock dispatch-lock))))
 
 (defn- reset-idle-timer!
   "Cancel the pending reap and schedule a fresh one. No-op when no daemon is
@@ -247,13 +264,38 @@
     (delete-edn! (:edn-file st))
     (deliver (:done st) reason)))
 
+(defn custody-status!
+  "Print this daemon's costume custody (sl-s35y, Warden W6 ruled): one
+   line per live costume held by this JVM, off costume/custody-snapshot.
+   Read-only — the inspection half of the persistence design (a worn
+   costume surviving between warm invocations IS costume persistence
+   working, sl-tss7; `sl daemon stop` releases them). Evaluated by the
+   wrapper's `sl daemon status` via the --sl-internal-status sentinel."
+  []
+  (let [entries (costume/custody-snapshot)]
+    (if (empty? entries)
+      (println "live costumes: none")
+      (do
+        (println (str "live costumes (" (count entries) ") — held by this"
+                      " daemon; released by `sl daemon stop` (or costume"
+                      " destroy/relaunch):"))
+        (doseq [{:keys [costume driver-alive?]} entries]
+          (println (str "  " costume " — chromedriver "
+                        (case driver-alive?
+                          true "alive"
+                          false "DEAD (stale handle)"
+                          "unknown"))))))
+    (flush)))
+
 (defn stop!
   "Stop the running daemon if any (test/programmatic teardown). External callers
    normally kill the pid from daemon.edn; the shutdown hook then deletes the file.
    Returns the stop reason, or nil if no daemon was running."
   []
-  (locking dispatch-lock
-    (when @daemon-state (stop-daemon! "stopped"))))
+  (.lock dispatch-lock)
+  (try
+    (when @daemon-state (stop-daemon! "stopped"))
+    (finally (.unlock dispatch-lock))))
 
 (defn- ensure-shutdown-hook!
   "Register, once per JVM, a hook that deletes daemon.edn on exit — the backstop
@@ -268,12 +310,43 @@
 ;; API
 ;; -----------------------------------------------------------------------------
 
+(def ^:private busy-message
+  "another run is in progress for this project; retry when it completes")
+
+(defn- reject-busy!
+  "Busy reject (sl-luhn, Chair-ratified over message-and-wait): the dispatch
+   lock is held by an in-flight invocation, so this one exits 2 with the
+   structured error :daemon/busy instead of queueing silently. Output goes
+   to the *out*/*err* bound at eval time (the nREPL session's streaming
+   writers since sl-qwf): with --edn in
+   argv, the existing exit-2 planning-summary shape carries the error on
+   stdout (stderr stays silent, matching report-planning-error!'s
+   suppressed-under-edn convention); otherwise one stderr line. No
+   :run/seed — nothing was seeded (ruled at plan verdict, consistent with
+   the sl-08f7 runner-path guarantee). Exit 2 rides the normal value path,
+   NEVER 69: a 69 would make bin/sl retry cold and create the exact
+   mixed warm+cold concurrency this reject exists to prevent."
+  [argv]
+  (let [err {:type :daemon/busy :message busy-message}]
+    (if (some #(= "--edn" %) argv)
+      (report-edn/prn-summary
+       (report-edn/build-summary (str (java.util.UUID/randomUUID)) 2 nil
+                                 {:diagnostics {:errors [err]}}))
+      (binding [*out* *err*]
+        (println (str "sl: " busy-message))))
+    {:exit 2}))
+
 (defn dispatch!
   "Execute one CLI invocation inside the warm JVM. Returns ::response.
 
    Contract (in order):
-   1. Serialize — one dispatch at a time (dispatch-lock); global registries make
-      concurrent dispatch unsafe (parallelism is post-0.5, F6).
+   1. Serialize — one dispatch at a time (dispatch-lock, TRY-acquire); global
+      registries make concurrent dispatch unsafe (parallelism is post-0.5, F6).
+      Lock busy => REJECT, exit 2 with :daemon/busy (sl-luhn; see reject-busy!).
+      Uniform across all warm commands by construction — per-command queueing
+      would re-introduce the silent block. The reject path does NOT touch the
+      idle timer: reset-idle-timer! mutates daemon-state unsynchronized, and
+      the in-flight dispatch resets it on completion anyway.
    2. Reset accumulating global state: registry/clear-registry! +
       intent-state/clear-intents!. Persistent-safe caches (gherkin.dialect delays,
       playwright import latch) are left alone. The full defonce inventory and the
@@ -288,7 +361,8 @@
    6. Reset the idle timer (in a finally — any dispatch, even a rejected one,
       counts as activity)."
   [request]
-  (locking dispatch-lock
+  (if-not (.tryLock dispatch-lock)
+    (reject-busy! (:argv request))
     (try
       (let [argv (:argv request)
             cmd  (first argv)]
@@ -310,7 +384,8 @@
         (print-throwable! t)
         {:exit 3})
       (finally
-        (reset-idle-timer!)))))
+        (reset-idle-timer!)
+        (.unlock dispatch-lock)))))
 
 (s/fdef dispatch!
   :args (s/cat :request ::request)

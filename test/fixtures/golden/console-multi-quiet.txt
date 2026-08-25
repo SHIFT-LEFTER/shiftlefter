@@ -1,6 +1,7 @@
 EXIT 1
 --- STDOUT ---
 --- STDERR ---
+run seed: 42
 PASSED Basic passing scenario
 FAILED Step throws exception
 

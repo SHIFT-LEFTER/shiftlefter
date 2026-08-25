@@ -127,6 +127,39 @@
       (is (nil? (:adapter issue)))
       (is (= [:shiftlefter.sms.protocol/ISMS] (:missing issue))))))
 
+(deftest unknown-adapter-deferred-to-exact-registry-check
+  (testing "Adapter named but absent from the registry → NO capability issue:
+            registry membership is owned by the plan-aware exact check
+            (setup/bound-adapter-errors, sl-kkoh). Before sl-8cvd (P2-2)
+            this shape drew the false remedy 'only provides []' and
+            shadowed that check for every :requires-protocols stepdef"
+    (let [stepdefs   [(mk-stepdef
+                       "x"
+                       {:interface :sms
+                        :requires-protocols
+                        [:shiftlefter.sms.protocol/ISMSInbound]})]
+          interfaces {:sms {:type :sms :adapter :ghost-isms}}
+          issues     (suite-lint/lint-suite stepdefs nil interfaces fake-registry)]
+      (is (empty? issues)))))
+
+(deftest empty-provides-on-known-adapter-still-fires
+  (testing "A registry MEMBER that genuinely provides nothing keeps the
+            (now true) provides message — the sl-8cvd P2-2 skip is for
+            unknown adapters only"
+    (let [stepdefs   [(mk-stepdef
+                       "x"
+                       {:interface :sms
+                        :requires-protocols
+                        [:shiftlefter.sms.protocol/ISMS]})]
+          interfaces {:sms {:type :sms :adapter :nothing}}
+          issues     (suite-lint/lint-suite stepdefs nil interfaces fake-registry)
+          issue      (first issues)]
+      (is (= 1 (count issues)))
+      (is (= :stepdef/missing-capability (:type issue)))
+      (is (= :nothing (:adapter issue)))
+      (is (= #{} (:provides issue)))
+      (is (= [:shiftlefter.sms.protocol/ISMS] (:missing issue))))))
+
 (deftest capability-passes-when-adapter-provides-everything
   (testing ":test-isms provides ISMS+ISMSInbound; required protocols match → no issue"
     (let [stepdefs   [(mk-stepdef
@@ -310,3 +343,76 @@
       (is (= :stepdef/missing-capability (:type issue)))
       (is (= :sms-twilio (:adapter issue)))
       (is (= [:shiftlefter.sms.protocol/ISMSInbound] (:missing issue))))))
+
+;; ---------------------------------------------------------------------------
+;; sl-s2oa: stepdef :interface metadata = TYPE; instances checked per use
+;; ---------------------------------------------------------------------------
+
+(deftest s2oa-type-provided-by-renamed-instance-passes
+  (testing "Stepdef declaring TYPE :web passes when the only :web-typed
+            instance is renamed (:storefront) — pre-s2oa this errored on
+            name membership"
+    (let [stepdefs   [(mk-stepdef "x" {:interface :web})]
+          interfaces {:storefront {:type :web :adapter :etaoin}}
+          issues     (suite-lint/lint-suite stepdefs nil interfaces fake-registry)]
+      (is (empty? issues)))))
+
+(deftest s2oa-instance-name-metadata-is-migration-error
+  (testing "A pre-s2oa stepdef pinning a config instance NAME errors —
+            the reshaped check is the migration signal"
+    (let [stepdefs   [(mk-stepdef "x" {:interface :storefront})]
+          interfaces {:storefront {:type :web :adapter :etaoin}}
+          issues     (suite-lint/lint-suite stepdefs nil interfaces fake-registry)]
+      (is (= 1 (count issues)))
+      (let [{:keys [type interface configured]} (first issues)]
+        (is (= :stepdef/undefined-interface type))
+        (is (= :storefront interface))
+        (is (= [:web] configured) "configured TYPES, not names")))))
+
+(deftest s2oa-missing-capability-keys-on-used-instances
+  (testing "requires-protocols is checked against the instances the suite
+            actually resolves the stepdef to; the failing instance is named"
+    (let [stepdefs   [(assoc (mk-stepdef
+                              "x"
+                              {:interface :sms
+                               :requires-protocols
+                               [:shiftlefter.sms.protocol/ISMSInbound]})
+                             :used-instances #{:sms-b})]
+          interfaces {:sms-a {:type :sms :adapter :test-isms}
+                      :sms-b {:type :sms :adapter :real-isms}}
+          issues     (suite-lint/lint-suite stepdefs nil interfaces fake-registry)]
+      (is (= 1 (count issues)))
+      (let [{:keys [type interface interface-type adapter missing]} (first issues)]
+        (is (= :stepdef/missing-capability type))
+        (is (= :sms-b interface) "the failing INSTANCE is named")
+        (is (= :sms interface-type))
+        (is (= :real-isms adapter))
+        (is (= [:shiftlefter.sms.protocol/ISMSInbound] missing))))))
+
+(deftest s2oa-missing-capability-falls-back-to-all-instances-of-type
+  (testing "No :used-instances (raw registry stepdefs) -> every configured
+            instance of the type is checked; only the deficient one errors"
+    (let [stepdefs   [(mk-stepdef
+                       "x"
+                       {:interface :sms
+                        :requires-protocols
+                        [:shiftlefter.sms.protocol/ISMSInbound]})]
+          interfaces {:sms-a {:type :sms :adapter :test-isms}
+                      :sms-b {:type :sms :adapter :real-isms}}
+          issues     (suite-lint/lint-suite stepdefs nil interfaces fake-registry)]
+      (is (= 1 (count issues)))
+      (is (= :sms-b (:interface (first issues)))))))
+
+(deftest s2oa-used-stepdef-infos-unions-instances
+  (testing "used-stepdef-infos carries the union of resolved instances a
+            stepdef executes on across the suite"
+    (let [sd   (mk-stepdef "x" {:interface :web})
+          bs-a (assoc-in (mk-bound-step sd) [:binding :svo :interface] :web)
+          bs-b (assoc-in (mk-bound-step sd) [:binding :svo :interface] :admin)
+          plan {:plan/id (java.util.UUID/randomUUID)
+                :plan/pickle {:pickle/source-file "f.feature"}
+                :plan/steps [bs-a bs-b]
+                :plan/runnable? true}
+          infos (suite-lint/used-stepdef-infos [plan])]
+      (is (= 1 (count infos)))
+      (is (= #{:web :admin} (:used-instances (first infos)))))))

@@ -1,4 +1,5 @@
 EXIT 2
 --- STDOUT ---
-{:run/id "UUID", :run/exit-code 2, :run/status :planning-failed, :planning {:issues [{:type :undefined, :step/text "I do something undefined", :step/id #uuid "UUID", :uri "ROOT/test/fixtures/features/undefined.feature", :line 5, :column 5}], :counts {:undefined-count 1, :ambiguous-count 0, :invalid-arity-count 0, :svo-issue-count 0, :total-issues 1}}}
+{:run/id "UUID", :run/exit-code 2, :run/status :planning-failed, :run/seed 42, :counts {:passed 0, :failed 0, :pending 0, :skipped 0, :scenarios 0, :steps 0}, :planning {:issues [{:type :undefined, :step/text "I do something undefined", :step/id #uuid "UUID", :uri "ROOT/test/fixtures/features/undefined.feature", :line 5, :column 5}], :counts {:undefined-count 1, :ambiguous-count 0, :invalid-arity-count 0, :ambiguous-instance-count 0, :svo-issue-count 0, :total-issues 1}}}
 --- STDERR ---
+run seed: 42

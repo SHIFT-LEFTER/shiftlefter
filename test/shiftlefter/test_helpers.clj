@@ -10,7 +10,9 @@
 
 (def instrumented-namespaces
   "Namespaces with fdefs to instrument during tests."
-  '[shiftlefter.gherkin.api
+  '[shiftlefter.adapters.registry
+    shiftlefter.doctor
+    shiftlefter.gherkin.api
     shiftlefter.gherkin.compliance
     shiftlefter.gherkin.dialect
     shiftlefter.gherkin.io

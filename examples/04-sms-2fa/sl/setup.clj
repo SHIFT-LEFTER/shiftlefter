@@ -64,11 +64,21 @@
                      :sms-from "+15550000000"})
         stop!      (http/run-server handler {:ip "127.0.0.1" :port port})]
     {:adapter-registry
-     (assoc reg/default-registry :sms-mock
-            {:factory  (fn [_] {:ok shared-sms})
-             :cleanup  (fn [_] {:ok :closed})  ;; don't reset a shared mock
-             :provides [:shiftlefter.sms.protocol/ISMS
-                        :shiftlefter.sms.protocol/ISMSInbound]})
+     ;; UPDATE the default entry, don't rebuild it (sl-xjx0, Warden W22):
+     ;; rebuilding silently dropped the default's :on-provision hook — the
+     ;; per-scenario SMS time fence (:sms/scenario-start-ts) never ran, so
+     ;; count/see fell back to a now−1h window. The update preserves the
+     ;; hook; :impl-key is DELIBERATELY dropped because this factory
+     ;; returns the impl directly (no bundle to extract from) — and the
+     ;; :adapters declaration below records both facts, so the registry
+     ;; contract verifies them and the lossy-override warn stays silent.
+     (update reg/default-registry :sms-mock
+             (fn [entry]
+               (-> entry
+                   (dissoc :impl-key)
+                   (assoc :factory (fn [_] {:ok shared-sms})
+                          ;; don't reset a shared mock
+                          :cleanup (fn [_] {:ok :closed})))))
      :stop (fn [] (stop! :timeout 100))}))
 
 ;; ---------------------------------------------------------------------------
@@ -76,6 +86,20 @@
 ;; ---------------------------------------------------------------------------
 
 (def setups
+  ;; :adapters (sl-e0ml): the pure-data declaration of the custom registry
+  ;; :start returns — the plan-time face of the :sms-mock override above.
+  ;; Dry-run binds against this declaration (preview-honest); at :start the
+  ;; live registry is verified to match it.
   [{:label    "sms-2fa"
+    :adapters [{:name :sms-mock
+                :provides [:shiftlefter.sms.protocol/ISMS
+                           :shiftlefter.sms.protocol/ISMSInbound]
+                ;; sl-xjx0 (W20 grammar): the runtime-field declarations —
+                ;; :impl-key nil = this override's factory returns the impl
+                ;; directly (deliberate drop of the default's :sms key);
+                ;; :on-provision? true = the default's time-fence hook is
+                ;; preserved. Both are verified against the live registry.
+                :impl-key nil
+                :on-provision? true}]
     :start    start-sms-2fa
     :features ["features/password_reset_sms.feature"]}])

@@ -1,6 +1,7 @@
 EXIT 0
 --- STDOUT ---
 --- STDERR ---
+run seed: 42
 PASSED Basic passing scenario
   ✓ I have 5 items in my cart
   ✓ I add 3 more items

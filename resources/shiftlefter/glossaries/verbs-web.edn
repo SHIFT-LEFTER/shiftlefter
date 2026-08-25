@@ -1,5 +1,7 @@
 ;; ShiftLefter default verb glossary for :web interface type.
-;; Projects can extend or override via :glossaries config.
+;; Project verb glossaries EXTEND this set; a same-named project verb
+;; replaces the builtin entry WHOLESALE (desc + all frames — no frame-level
+;; merge). Verified sl-0gfc; see `sl glossary` for the resolved state.
 ;;
 ;; Each verb entry declares its valence as a closed set of frames.
 ;; A frame is one valid argument shape for the verb. Frames declare

@@ -9,7 +9,9 @@
    Lane (decisions/agent-surface.md): orient is the DYNAMIC validity lane. It
    points to `sl agent-doc` (including the generated `builtins` topic) for
    STATIC framework knowledge and leaves in-repo project vocab to grep. It does
-   NOT re-render subjects/verbs/intents/stepdefs/macros inventories.
+   NOT re-render subjects/verbs/intents/stepdefs/macros inventories. The
+   MACHINE-side counterpart is `sl doctor` (`shiftlefter.doctor`, sl-afsp):
+   orient validates the project, doctor validates the machine; no overlap.
 
    Two modes:
    - default (thin): resolved context, counts, static-validation diagnostics,

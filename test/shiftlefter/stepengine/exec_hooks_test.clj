@@ -267,6 +267,26 @@
             "no results dir -> key absent (destructures to nil), never a path"))
       (finally (fs/delete-tree root)))))
 
+(deftest run-seed-rides-hook-payloads-and-step-ctx
+  ;; sl-08f7 hand-down at the exec seam: :run-seed in exec opts reaches
+  ;; both hook payload phases as :seed and seeds the initial step ctx.
+  (let [payloads (atom {})
+        step-seed (atom ::unset)
+        hooks [{:name "watch"
+                :before (fn [p] (swap! payloads assoc :before (:seed p)) nil)
+                :after (fn [p] (swap! payloads assoc :after (:seed p)) nil)}]
+        step (make-bound-step (fn [ctx] (reset! step-seed (:seed ctx)) ctx) 1 [])]
+    (run-suite [(make-plan [step] :hooks hooks)] {:run-seed 424242})
+    (is (= {:before 424242 :after 424242} @payloads)
+        ":seed in both hook payload phases")
+    (is (= 424242 @step-seed) ":seed on the step ctx")
+    ;; Without :run-seed in opts nothing changes shape (bare-caller path).
+    (reset! payloads {}) (reset! step-seed ::unset)
+    (run-suite [(make-plan [step] :hooks hooks)] {})
+    (is (= {:before nil :after nil} @payloads)
+        "no run seed -> key absent, destructures to nil")
+    (is (nil? @step-seed) "ctx has no :seed without a run seed")))
+
 (deftest invalid-before-return-is-hook-error
   (let [events (atom [])
         plan (make-plan [(make-bound-step (fn [] nil))]
@@ -352,8 +372,8 @@
         result (first-scenario (run-suite [plan] {:interfaces interfaces
                                                   :adapter-registry registry
                                                   :provisioning :eager}))]
-    (is (= :failed (:status result))
-        "provisioning failure stays :failed — no hook threw")
+    (is (= :error (:status result))
+        "provisioning failure is :error — infrastructure family (sl-7c7i)")
     (is (= {:seed 1 :caps []} @after-saw)
         "ALL Afters unwound, seeing Before contributions but NO capabilities")
     (is (every? #(= :ok (:status %))
@@ -388,7 +408,7 @@
         result (first-scenario (run-suite [plan] {:interfaces interfaces
                                                   :adapter-registry registry
                                                   :provisioning :eager}))]
-    (is (= :failed (:status result)))
+    (is (= :error (:status result)))
     (is (= {:seed 1 :caps [:cap/web.alice]} @after-saw)
         "Afters see Before contributions AND the partially-provisioned capability")
     (is (= [{:action :closed :interface :web.alice :adapter :mock-web}]

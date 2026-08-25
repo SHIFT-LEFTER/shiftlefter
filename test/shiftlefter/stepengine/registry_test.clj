@@ -472,6 +472,35 @@
           (is (re-find #"first\.clj:1" msg))
           (is (re-find #"second\.clj:42" msg)))))))
 
+(deftest test-same-file-reload-after-edit-replaces
+  (testing "re-registration from the SAME file replaces — even at a shifted line (sl-9nzc)"
+    ;; The reload-after-edit case: the user reloads BECAUSE they edited
+    ;; the file, so line numbers shift. File identity, not line identity.
+    (let [old-fn (fn [_s] :old)
+          new-fn (fn [_s] :new)]
+      (registry/register! #"(\S+) opens the thing"
+                          old-fn
+                          {:ns 'my.steps :file "my/steps.clj" :line 594}
+                          {:interface :web
+                           :svo {:subject :$1 :verb :click :object "thing"}})
+      (let [replaced (registry/register! #"(\S+) opens the thing"
+                                         new-fn
+                                         {:ns 'my.steps :file "my/steps.clj" :line 601}
+                                         {:interface :web
+                                          :svo {:subject :$1 :verb :click :object "thing"}})]
+        (is (= 1 (count (registry/all-stepdefs))) "replaced, not duplicated")
+        (is (identical? new-fn (:fn replaced)) "the edited definition wins")
+        (is (= 601 (get-in (first (registry/all-stepdefs)) [:source :line]))
+            "the new source location is recorded")))))
+
+(deftest test-repl-inline-redefinition-replaces
+  (testing "re-evaluating a defstep at the REPL (NO_SOURCE_PATH both times) replaces (sl-9nzc)"
+    (registry/register! #"I poke it" (fn [] :v1)
+                        {:ns 'user :file "NO_SOURCE_PATH" :line 1})
+    (registry/register! #"I poke it" (fn [] :v2)
+                        {:ns 'user :file "NO_SOURCE_PATH" :line 1})
+    (is (= 1 (count (registry/all-stepdefs))))))
+
 (deftest test-interface-less-stepdef-keyed-independently
   (testing "Stepdef with no :interface metadata coexists with interface-tagged versions"
     ;; Interface-less — legacy "escape hatch" like `pauses for N seconds`

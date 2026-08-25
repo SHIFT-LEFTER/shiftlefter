@@ -57,6 +57,11 @@
                       :step-paths [corpus-steps-file]
                       :junit-xml junit-file
                       :edn edn?
+                      ;; sl-08f7: pin the RUN seed to the corpus seed — the
+                      ;; harness is seeded-determinism end to end, and the
+                      ;; console byte-identity test compares two invocations'
+                      ;; stderr (which now carries the run-seed line).
+                      :seed seed
                       :project-context pc}
                html-file (assoc :html html-file)
                (some? tag-filter) (assoc :tag-filter tag-filter)

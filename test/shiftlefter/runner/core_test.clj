@@ -9,7 +9,7 @@
             [shiftlefter.project-context :as project-context]
             [shiftlefter.runner.config :as config]
             [shiftlefter.runner.core :as runner]
-            [shiftlefter.runner.events :as events]
+            [shiftlefter.events :as events]
             [shiftlefter.stepengine.registry :as registry]
             [shiftlefter.test-helpers.adapter-registry :as mock]))
 
@@ -70,6 +70,54 @@
                "  ctx)\n"))
     (spit (str (fs/path project "features" "f.feature"))
           "Feature: F\n\n  Scenario: S\n    Given zorbo clicks the button\n")))
+
+(defn- write-costume-project!
+  "Write a temp Shifted-mode project whose persona :user/alice wears
+   :finance (sl-1206 lint fixtures). `costumes` is the :costumes config
+   value (nil = key absent)."
+  [project costumes]
+  (let [verbs (str (fs/absolutize "test/fixtures/glossaries/verbs-web-project.edn"))]
+    (fs/create-dirs (fs/path project "sl" "steps"))
+    (fs/create-dirs (fs/path project "sl" "glossary"))
+    (fs/create-dirs (fs/path project "features"))
+    (spit (str (fs/path project "sl" "glossary" "subjects.edn"))
+          (pr-str {:subjects {:user {:desc "Standard user"
+                                     :instances [{:id :alice :wears :finance}]}}}))
+    (spit (str (fs/path project "sl" "shiftlefter.edn"))
+          (pr-str (cond-> {:runner {:step-paths ["steps/"]
+                                    :allow-pending? false}
+                           :svo {}
+                           :glossaries {:subjects "glossary/subjects.edn"
+                                        :verbs {:web verbs}}
+                           :interfaces {:web {:type :web :adapter :mock-web}
+                                        :admin {:type :web :adapter :mock-web}}}
+                    costumes (assoc :costumes costumes))))
+    (spit (str (fs/path project "sl" "steps" "steps.clj"))
+          (str "(ns steps.costume-lint\n"
+               "  (:require [shiftlefter.stepengine.registry :refer [defstep]]))\n"
+               "(defstep #\"(.+) clicks (.+)\"\n"
+               "  {:interface :web\n"
+               "   :svo {:subject :$1 :verb :swipe :frame :default :object :$2}}\n"
+               "  [ctx _subject _target]\n"
+               "  ctx)\n"))
+    (spit (str (fs/path project "features" "f.feature"))
+          "Feature: F\n\n  Scenario: S\n    Given user/alice clicks the button\n")))
+
+(defn- write-shared-wears-project!
+  "write-costume-project! variant with TWO personas wearing :finance and
+   both acting in ONE scenario — the :costume/shared-wears trigger (the
+   lint is per-plan: the same two wearers across two scenarios never trip
+   it, costume_lint_test:92-98)."
+  [project costumes]
+  (write-costume-project! project costumes)
+  (spit (str (fs/path project "sl" "glossary" "subjects.edn"))
+        (pr-str {:subjects {:user {:desc "Standard user"
+                                   :instances [{:id :alice :wears :finance}
+                                               {:id :bob :wears :finance}]}}}))
+  (spit (str (fs/path project "features" "f.feature"))
+        (str "Feature: F\n\n  Scenario: S\n"
+             "    Given user/alice clicks the button\n"
+             "    And user/bob clicks the button\n")))
 
 ;; -----------------------------------------------------------------------------
 ;; Exit Code 0 - All Passed
@@ -228,6 +276,251 @@
                  (-> summary :diagnostics :svo-issues first :type))))
         (finally
           (fs/delete-tree project))))))
+
+;; -----------------------------------------------------------------------------
+;; Costume lints on the dry-run surfaces (sl-1206)
+;; -----------------------------------------------------------------------------
+
+(deftest test-dry-run-costume-declared-match-green
+  (testing "costume declared for the provisioned instance: dry-run exit 0, clean"
+    (let [project (str (fs/create-temp-dir))]
+      (try
+        (write-costume-project! project {:finance {:interface :web}})
+        (let [ctx (project-context/resolve {:invocation-root project})
+              result (runner/execute! {:project-context ctx
+                                       :paths ["features/f.feature"]
+                                       :dry-run true
+                                       :no-color true})]
+          (is (= 0 (:exit-code result)))
+          (is (= :dry-run (:status result))))
+        (finally
+          (fs/delete-tree project))))))
+
+(deftest test-dry-run-costume-wrong-interface-errors
+  (testing "wrong-world wear: exit 2, error on console AND in --edn planning"
+    (let [project (str (fs/create-temp-dir))]
+      (try
+        (write-costume-project! project {:finance {:interface :admin}})
+        (let [ctx (project-context/resolve {:invocation-root project})
+              output (java.io.StringWriter.)
+              result (binding [*err* output]
+                       (runner/execute! {:project-context ctx
+                                        :paths ["features/f.feature"]
+                                        :dry-run true
+                                        :no-color true}))]
+          (is (= 2 (:exit-code result)))
+          (is (= :planning-failed (:status result)))
+          (is (str/includes? (str output) "declared for interface :admin"))
+          (is (str/includes? (str output) "provisioned on :web")))
+        (write-costume-project! project {:finance {:interface :admin}})
+        (let [ctx (project-context/resolve {:invocation-root project})
+              stdout (with-out-str
+                       (runner/execute! {:project-context ctx
+                                         :paths ["features/f.feature"]
+                                         :dry-run true
+                                         :edn true}))
+              summary (edn/read-string stdout)]
+          (is (= 2 (:run/exit-code summary)))
+          (is (= :costume/wrong-interface
+                 (-> summary :planning :svo-issues first :type))))
+        (finally
+          (fs/delete-tree project))))))
+
+(deftest test-dry-run-costume-undeclared-warns
+  (testing "undeclared costume: dry-run exit 0, teaching WARN on console and in --edn"
+    (let [project (str (fs/create-temp-dir))]
+      (try
+        (write-costume-project! project nil)
+        (let [ctx (project-context/resolve {:invocation-root project})
+              output (java.io.StringWriter.)
+              result (binding [*err* output]
+                       (runner/execute! {:project-context ctx
+                                         :paths ["features/f.feature"]
+                                         :dry-run true
+                                         :no-color true}))]
+          (is (= 0 (:exit-code result)))
+          (is (= :dry-run (:status result)))
+          (is (str/includes? (str output) "is worn but not declared")))
+        (let [ctx (project-context/resolve {:invocation-root project})
+              stdout (with-out-str
+                       (runner/execute! {:project-context ctx
+                                         :paths ["features/f.feature"]
+                                         :dry-run true
+                                         :edn true}))
+              summary (edn/read-string stdout)]
+          (is (= 0 (:run/exit-code summary)))
+          (is (= :costume/undeclared
+                 (-> summary :diagnostics :svo-issues first :type)))
+          (is (= :warn (-> summary :diagnostics :svo-issues first :severity))))
+        (finally
+          (fs/delete-tree project))))))
+
+(deftest test-dry-run-costume-shared-wears-errors
+  (testing "two personas wearing one costume in one scenario: exit 2,
+            error on console AND in --edn planning (sl-d3cz, Warden W25 —
+            shared-wears previously had no above-unit exit-2 proof)"
+    (let [project (str (fs/create-temp-dir))]
+      (try
+        (write-shared-wears-project! project {:finance {:interface :web}})
+        (let [ctx (project-context/resolve {:invocation-root project})
+              output (java.io.StringWriter.)
+              result (binding [*err* output]
+                       (runner/execute! {:project-context ctx
+                                         :paths ["features/f.feature"]
+                                         :dry-run true
+                                         :no-color true}))]
+          (is (= 2 (:exit-code result)))
+          (is (= :planning-failed (:status result)))
+          (is (str/includes? (str output) ":finance")))
+        (write-shared-wears-project! project {:finance {:interface :web}})
+        (let [ctx (project-context/resolve {:invocation-root project})
+              stdout (with-out-str
+                       (runner/execute! {:project-context ctx
+                                         :paths ["features/f.feature"]
+                                         :dry-run true
+                                         :edn true}))
+              summary (edn/read-string stdout)]
+          (is (= 2 (:run/exit-code summary)))
+          (is (= :costume/shared-wears
+                 (-> summary :planning :svo-issues first :type)))
+          (is (= :error
+                 (-> summary :planning :svo-issues first :severity))))
+        (finally
+          (fs/delete-tree project))))))
+
+(deftest test-costume-config-malformed-is-a-planning-error
+  ;; sl-st01 (Warden W2, sl-p1op): the run path never reaches
+  ;; config/normalize, so a malformed :costumes entry used to pass silently
+  ;; — no error, no warn, and costume enforcement quietly OFF (the lint saw
+  ;; a nil declared interface; the undeclared-warn saw the key present).
+  ;; The definitive repro: the most-guessable shorthand must be a
+  ;; diagnostic from `sl run`, same envelope as every other config error.
+  (testing "malformed shorthand {:finance :web}: exit 2, console AND --edn diagnostics"
+    (let [project (str (fs/create-temp-dir))]
+      (try
+        (write-costume-project! project {:finance :web})
+        (let [ctx (project-context/resolve {:invocation-root project})
+              output (java.io.StringWriter.)
+              result (binding [*err* output]
+                       (runner/execute! {:project-context ctx
+                                        :paths ["features/f.feature"]
+                                        :dry-run true
+                                        :no-color true}))]
+          (is (= 2 (:exit-code result)))
+          (is (= :planning-failed (:status result)))
+          (is (str/includes? (str output) "Config error: Costume :finance must be a map")))
+        (let [ctx (project-context/resolve {:invocation-root project})
+              stdout (with-out-str
+                       (runner/execute! {:project-context ctx
+                                         :paths ["features/f.feature"]
+                                         :dry-run true
+                                         :edn true}))
+              summary (edn/read-string stdout)]
+          (is (= 2 (:run/exit-code summary)))
+          (is (= :planning-failed (:run/status summary)))
+          (is (= [:config/invalid-costume]
+                 (mapv :type (-> summary :planning :errors)))
+              "the --edn envelope carries the config error under :planning :errors"))
+        (finally
+          (fs/delete-tree project)))))
+  (testing "unknown interface instance: exit 2 with the did-you-mean"
+    (let [project (str (fs/create-temp-dir))]
+      (try
+        (write-costume-project! project {:finance {:interface :admn}})
+        (let [ctx (project-context/resolve {:invocation-root project})
+              output (java.io.StringWriter.)
+              result (binding [*err* output]
+                       (runner/execute! {:project-context ctx
+                                        :paths ["features/f.feature"]
+                                        :dry-run true
+                                        :no-color true}))]
+          (is (= 2 (:exit-code result)))
+          (is (str/includes? (str output) "did you mean :admin?")))
+        (finally
+          (fs/delete-tree project))))))
+
+(defn- write-config-error-project!
+  "Minimal runnable project whose sl/shiftlefter.edn is `config-map` as
+   written (sl-74w8 fixtures — config shapes that must be planning errors)."
+  [project config-map]
+  (fs/create-dirs (fs/path project "sl" "steps"))
+  (fs/create-dirs (fs/path project "features"))
+  (spit (str (fs/path project "sl" "shiftlefter.edn")) (pr-str config-map))
+  (spit (str (fs/path project "sl" "steps" "steps.clj"))
+        (str "(ns steps.config-errors\n"
+             "  (:require [shiftlefter.stepengine.registry :refer [defstep]]))\n"
+             "(defstep #\"a step\" [] nil)\n"))
+  (spit (str (fs/path project "features" "f.feature"))
+        "Feature: F\n\n  Scenario: S\n    Given a step\n"))
+
+(defn- execute-config-error-project!
+  "Run write-config-error-project! + execute! dry-run, returning
+   {:result ... :stderr ...}. Cleans up the temp project."
+  [config-map]
+  (let [project (str (fs/create-temp-dir))]
+    (try
+      (write-config-error-project! project config-map)
+      (let [ctx (project-context/resolve {:invocation-root project})
+            output (java.io.StringWriter.)
+            result (binding [*err* output]
+                     (runner/execute! {:project-context ctx
+                                       :paths ["features/f.feature"]
+                                       :dry-run true
+                                       :no-color true}))]
+        {:result result :stderr (str output)})
+      (finally
+        (fs/delete-tree project)))))
+
+(deftest test-config-validator-errors-are-planning-errors
+  ;; sl-74w8: load-config-stage runs config/normalize itself, so the
+  ;; validators that were projection-only (interfaces/timing/macro — the
+  ;; sl-st01 seam covered only costumes) are planning errors on `sl run`
+  ;; too: exit 2 through the same envelope, instead of loading silently
+  ;; and failing later (or not at all) with a less legible diagnostic.
+  (testing "interface missing :adapter: exit 2 planning error"
+    ;; A non-:web instance name — deep-merge fills :web's :type/:adapter
+    ;; from default-config, so :web can never repro a missing key.
+    (let [{:keys [result stderr]}
+          (execute-config-error-project!
+           {:runner {:step-paths ["steps/"]}
+            :interfaces {:api2 {:type :api}}})]
+      (is (= 2 (:exit-code result)))
+      (is (= :planning-failed (:status result)))
+      (is (str/includes? stderr "Interface :api2 missing required :adapter key"))))
+  (testing ":timing unknown inner key: exit 2 with the did-you-mean"
+    (let [{:keys [result stderr]}
+          (execute-config-error-project!
+           {:runner {:step-paths ["steps/"]}
+            :timing {:interval 250}})]
+      (is (= 2 (:exit-code result)))
+      (is (str/includes? stderr "did you mean :interval-ms?"))))
+  (testing ":timing error rides the --edn envelope under :planning :errors"
+    ;; One envelope proof for the family — the envelope path is shared
+    ;; with the proven st01 costume tests above.
+    (let [project (str (fs/create-temp-dir))]
+      (try
+        (write-config-error-project! project {:runner {:step-paths ["steps/"]}
+                                              :timing {:interval 250}})
+        (let [ctx (project-context/resolve {:invocation-root project})
+              stdout (with-out-str
+                       (runner/execute! {:project-context ctx
+                                         :paths ["features/f.feature"]
+                                         :dry-run true
+                                         :edn true}))
+              summary (edn/read-string stdout)]
+          (is (= 2 (:run/exit-code summary)))
+          (is (= :planning-failed (:run/status summary)))
+          (is (= [:config/invalid-timing]
+                 (mapv :type (-> summary :planning :errors)))))
+        (finally
+          (fs/delete-tree project)))))
+  (testing "macros enabled without :registry-paths: exit 2 planning error"
+    (let [{:keys [result stderr]}
+          (execute-config-error-project!
+           {:runner {:step-paths ["steps/"]
+                     :macros {:enabled? true}}})]
+      (is (= 2 (:exit-code result)))
+      (is (str/includes? stderr "Macros enabled but :registry-paths is missing or empty")))))
 
 (deftest test-execute-warn-svo-renders-on-console
   (testing "Warn-level SVO issues reach the console after the execute summary"
@@ -491,11 +784,15 @@
       (is (= {:passed 5 :failed 0 :pending 0 :skipped 0} (:counts unfiltered))))))
 
 (deftest test-tag-filter-zero-selected
-  (testing "over-narrow filter selects nothing: exit 0, zero counts"
+  (testing "over-narrow filter selects nothing: planning error (sl-7c7i,
+            the vacuity witness) — exit 0 is existential, so 0-of-N is
+            exit 2 with the selection story on the error"
     (let [result (run-tagged {:include #{"@nope"}})]
-      (is (= 0 (:exit-code result)))
-      (is (= :passed (:status result)))
-      (is (= {:passed 0 :failed 0 :pending 0 :skipped 0} (:counts result))))))
+      (is (= 2 (:exit-code result)))
+      (is (= :planning-failed (:status result)))
+      (is (= :selection/empty (-> result :error :type)))
+      (is (= {:selected 0 :total 5} (-> result :error :data (select-keys [:selected :total])))
+          "the record confesses what was searched and how much existed"))))
 
 (deftest test-tag-filter-invalid-shape
   (testing "invalid :tag-filter at the execute! boundary is a planning error"
@@ -674,6 +971,23 @@
                              {:paths [undefined-feature]})]
     (is (= 2 (:run/exit-code summary)))
     (is (= :step-paths (-> summary :planning :config-lints first :key)))))
+
+(deftest test-config-stage-exit-edn-summary-carries-config-lints
+  ;; sl-8cvd (Warden P2-5): the CONFIG-STAGE exit 2 — the path sl-74w8 made
+  ;; the home of every normalize validator — used to build :errors only,
+  ;; so a co-occurring lint vanished from machine mode exactly when a
+  ;; config error suppressed the stderr notice. Both must ride :planning.
+  (let [{:keys [summary err]}
+        (run-edn-with-config
+         "{:step-paths [\"nowhere/\"] :timing {:interval 250}}" {})]
+    (is (= 2 (:run/exit-code summary)))
+    (is (some #(str/includes? (:message %) ":timing")
+              (get-in summary [:planning :errors]))
+        "the config error rides :planning :errors")
+    (is (= :step-paths (-> summary :planning :config-lints first :key))
+        "the misplaced-key lint rides :planning :config-lints beside it")
+    (is (not (str/includes? err "Config warning:"))
+        "EDN mode stderr suppression still holds — the envelope is the carrier")))
 
 (deftest test-clean-config-edn-summary-has-no-diagnostics
   ;; byte-identity guard: the additive field is ABSENT on clean configs
@@ -998,6 +1312,129 @@
         "dry-run creates no run dir and captures nothing")
     (fs/delete-tree root)))
 
+;; -----------------------------------------------------------------------------
+;; Plan-time per-group adapter-capability lint (sl-sehc)
+;; -----------------------------------------------------------------------------
+
+(def browser-feature "test/fixtures/features/browser_smoke.feature")
+
+(deftest test-capture-adapter-unsupported-playwright-dry-run
+  ;; The silent-nothing edge, killed at PLAN time: a pure-Playwright project
+  ;; with :console configured learns under dry-run that the kind can never
+  ;; fire there — the registry-level unknown-kind check can't see it because
+  ;; etaoin contributes :console in the same registry. Agents live on
+  ;; dry-run; the test classpath has Playwright, so the probe passes.
+  (let [{:keys [out err root]}
+        (run-in-temp-project {:paths [browser-feature]
+                              :step-paths []
+                              :config-content {:runner {:step-paths []}
+                                               :interfaces {:web {:type :web
+                                                                  :adapter :playwright}}}
+                              :capture {:console :on-failure}
+                              :dry-run true
+                              :edn true})]
+    (is (not (str/includes? err "Capture warning"))
+        "stderr stays machine-clean under --edn")
+    (let [summary (edn/read-string out)
+          lints (get-in summary [:diagnostics :capture-lints])]
+      (is (= 1 (count lints)))
+      (is (= :capture/adapter-unsupported (:type (first lints))))
+      (is (= :console (:kind (first lints))))
+      (is (= [:playwright] (:adapters (first lints)))))
+    (fs/delete-tree root)))
+
+(deftest test-capture-adapter-unsupported-console-mode-wording
+  (let [{:keys [err root]}
+        (run-in-temp-project {:paths [browser-feature]
+                              :step-paths []
+                              :config-content {:runner {:step-paths []}
+                                               :interfaces {:web {:type :web
+                                                                  :adapter :playwright}}}
+                              :capture {:console :on-failure}
+                              :dry-run true
+                              :no-color true})]
+    (is (= 1 (count (re-seq #"kind :console is supported by none of the adapters this run uses \(:playwright\)" err)))
+        "one stderr warn, and only one")
+    (fs/delete-tree root)))
+
+(deftest test-capture-adapter-supported-is-clean
+  ;; etaoin contributes all three kinds — a pure-etaoin project stays
+  ;; lint-free even with every kind active.
+  (let [{:keys [out root]}
+        (run-in-temp-project {:paths [browser-feature]
+                              :step-paths []
+                              :config-content {:runner {:step-paths []}
+                                               :interfaces {:web {:type :web
+                                                                  :adapter :etaoin}}}
+                              :capture {:console :on-failure
+                                        :screenshot :every-step
+                                        :page-source :on-failure}
+                              :dry-run true
+                              :edn true})]
+    (is (nil? (get-in (edn/read-string out) [:diagnostics :capture-lints])))
+    (fs/delete-tree root)))
+
+(deftest test-capture-lint-split-typo-stays-runtime
+  ;; The old/new split (sl-sehc D2/D3): under dry-run the NEW per-group
+  ;; lint fires (plan-time by design) while the three sl-3q9r runtime
+  ;; lints stay execution-stage — a typo'd kind produces NO lint in the
+  ;; dry-run preview (it is not contributed anywhere, so it is the
+  ;; unknown-kind class, which fires live; test-capture-unknown-kind-warns-
+  ;; once covers that half).
+  (let [{:keys [out root]}
+        (run-in-temp-project {:paths [browser-feature]
+                              :step-paths []
+                              :config-content {:runner {:step-paths []}
+                                               :interfaces {:web {:type :web
+                                                                  :adapter :etaoin}}}
+                              :capture {:screenshoot :on-failure}
+                              :dry-run true
+                              :edn true})]
+    (is (nil? (get-in (edn/read-string out) [:diagnostics :capture-lints]))
+        "typo'd kinds are not the adapter-unsupported class")
+    (fs/delete-tree root)))
+
+(deftest test-capture-adapter-unsupported-live-channel
+  ;; LIVE-mode emission, no browser needed: a pure sms-mock run with a
+  ;; browser-only kind configured. The plan lint rides stderr (console
+  ;; mode) and the group diagnostics (--edn), composing with the runtime
+  ;; lint channel (the append path in execute-and-report-stage).
+  (let [tmp (str (fs/create-temp-dir))
+        feature (str tmp "/sms.feature")]
+    (try
+      (spit feature (str "Feature: F\n  Scenario: S\n"
+                         "    When :alice sends an SMS to '+15550100' saying 'hi'\n"))
+      (spit (str tmp "/shiftlefter.edn")
+            (pr-str {:runner {:step-paths []}
+                     :interfaces {:sms {:type :sms :adapter :sms-mock}}}))
+      (let [;; sl-uv3r: runs on the DEFAULT registry — the :sms-mock entry
+            ;; now declares :impl-key :sms, so the builtin send step gets
+            ;; the MockSMS impl (pre-fix this needed a bare-impl override
+            ;; registry to work around the wrapper-map bug).
+            run! (fn [edn?]
+                   (let [out (java.io.StringWriter.)
+                         err (java.io.StringWriter.)
+                         result (binding [*out* out *err* err]
+                                  (runner/execute!
+                                   (cond-> {:paths [feature]
+                                            :config-path (str tmp "/shiftlefter.edn")
+                                            :step-paths []
+                                            :capture {:screenshot :on-failure}
+                                            :no-color true}
+                                     edn? (assoc :edn true))))]
+                     {:result result :out (str out) :err (str err)}))
+            console (run! false)
+            edn-run (run! true)]
+        (is (= 0 (get-in console [:result :exit-code])) "the scenario passes")
+        (is (= 1 (count (re-seq #"kind :screenshot is supported by none of the adapters this run uses \(:sms-mock\)"
+                                (:err console)))))
+        (let [lints (get-in (edn/read-string (:out edn-run))
+                            [:diagnostics :capture-lints])]
+          (is (= [:capture/adapter-unsupported] (mapv :type lints)))
+          (is (= [:sms-mock] (:adapters (first lints))))))
+      (finally
+        (fs/delete-tree tmp)))))
+
 (deftest test-capture-invalid-boundary
   ;; sl-3q9r: the programmatic execute! boundary (CLI input is caught by
   ;; tools.cli). Config-FILE values are deliberately NOT gated here — they
@@ -1068,10 +1505,13 @@
 ;; Exit code for :error scenarios (sl-esq)
 ;; -----------------------------------------------------------------------------
 
-(deftest error-count-makes-the-run-red
-  (testing "scenario :error (hook threw) => exit 1, regardless of allow-pending"
-    (is (= 1 (#'runner/compute-exit-code {:counts {:passed 3 :error 1}} false)))
-    (is (= 1 (#'runner/compute-exit-code {:counts {:passed 3 :error 1}} true))))
+(deftest error-count-makes-the-run-degraded
+  (testing "scenario :error (infrastructure family) => exit 4, regardless
+            of allow-pending (sl-7c7i)"
+    (is (= 4 (#'runner/compute-exit-code {:counts {:passed 3 :error 1}} false)))
+    (is (= 4 (#'runner/compute-exit-code {:counts {:passed 3 :error 1}} true))))
+  (testing "execution worst-wins: degraded (4) beats failed (1)"
+    (is (= 4 (#'runner/compute-exit-code {:counts {:failed 2 :error 1}} false))))
   (testing "absent :error count leaves historical semantics untouched"
     (is (= 0 (#'runner/compute-exit-code {:counts {:passed 3}} false)))
     (is (= 1 (#'runner/compute-exit-code {:counts {:failed 1}} false)))))

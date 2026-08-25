@@ -67,6 +67,24 @@ session handles under one role — refer to them in Gherkin as `:user/alice`,
 `:user/bob`. A type without `:instances` is a **singleton**, used directly
 (`:guest`).
 
+An `:instances` entry may also be a **persona map** — a user with an optional
+costume and a docstring:
+
+```clojure
+{:subjects
+ {:user {:desc "Standard customer"
+         :instances [{:id :alicia :desc "Spanish-first admin reviewer"
+                      :wears :alicia}
+                     {:id :bob :wears :bob-jacket}
+                     :carol]}}}       ; bare keyword still fine
+```
+
+The `:desc` shows up wherever personas are listed (`sl explain user/alicia`,
+`sl glossary subjects`), so test writers can see which persona to use when.
+`:wears` binds that persona to a [costume](COSTUMES.md); a type-level `:wears`
+acts as an inheritable default, a persona's own `:wears` wins, and
+`:wears nil` on a persona opts out of the default.
+
 **`glossary/verbs/web.edn`** — project verbs that extend the built-in `:web`
 vocabulary. Each verb entry declares a `:desc` and a closed set of **frames**
 (the argument shapes the verb accepts); a verb with no extra arguments uses a
@@ -80,6 +98,16 @@ single `:default` frame:
   :search {:desc "Run a search query"
            :frames {:with {:args [:query] :pattern "S searches for QUERY"}}}}}
 ```
+
+**Frames type shapes, never authorization.** A frame says how a verb may be
+*said* — the argument shapes it accepts — not who may invoke it. Declaring
+"only admins may delete" in a verb frame would restate the application's
+permission rules in test vocabulary: a shadow of the system under test that
+drifts the moment the real rules change. ShiftLefter types the language used
+to exercise the system; it does not duplicate the system's domain
+permissions. Authorization is discovered, never declared — substitute one
+actor for another and observe the real outcome. Tests discover what the
+system can do; they never duplicate it.
 
 ### 2. Wire the glossaries (or let the convention do it)
 
@@ -102,7 +130,8 @@ turns glossaries off):
  :svo
  {:unknown-subject :warn       ; :warn or :error
   :unknown-verb    :warn       ; :warn or :error
-  :unknown-object  :off        ; :strict | :warn | :off
+  :unknown-object  :warn       ; :error | :warn | :off — defaults :warn when
+                               ; :intents is configured, :off otherwise
   :unknown-interface :error}}
 ```
 
@@ -161,19 +190,100 @@ extended.
 
 ### Interface NAME vs TYPE
 
-- **NAME** — the key in your config (`:web`, `:customer-portal`, `:legacy-app`).
-- **TYPE** — the verb vocabulary (`:web`, `:sms`, …).
+- **TYPE** — the verb vocabulary and protocol contract (`:web`, `:sms`, …).
+  The type is welded to the verb: step definitions declare `:interface
+  <type>`, and every glossary, intent binding, and named-location map is
+  keyed by type.
+- **NAME** — the key in your config (`:web`, `:storefront`,
+  `:admin-console`): a configured **instance** of a type, carrying its own
+  adapter and adapter config (base-url, proxy, headless, …). The `[name]`
+  step annotation selects an instance; the instance's declared `:type` then
+  scopes which step definitions can bind. The adapter is invisible behind
+  the instance — nothing in the vocabulary layer ever references it.
 
-Simple case: name `:web`, type `:web`. Advanced case — two interfaces sharing
+Simple case: name `:web`, type `:web`. Advanced case — two instances sharing
 one vocabulary:
 
 ```clojure
 {:interfaces
- {:legacy-app {:type :web :adapter :etaoin :config {...}}
-  :new-app    {:type :web :adapter :etaoin :config {...}}}}
+ {:storefront    {:type :web :adapter :etaoin :config {...}}
+  :admin-console {:type :web :adapter :etaoin :config {...}}}}
 ```
 
-Both use `:web`-type verbs.
+Both speak the full `:web` vocabulary — builtin steps included; `[:storefront]`
+and `[:admin-console]` pick which world a step executes in.
+
+### The three axes — one picture
+
+```
+               FEATURE FILE — requirements language only
+┌───────────────────────────────────────────────────────────────┐
+│    [:admin-console]     :user/alicia     clicks Refund.approve│
+└─────────┬────────────────────┬────────────────┬───────────────┘
+          │ names an           │ names a        │ a VERB,
+          │ INSTANCE           │ PERSONA        │ regex-matched
+~~~~~~~~~~┼~~~~~~~~ name-test waterline ~~~~~~~~┼~~~~~~~~~~~~~~~~
+          │   nothing below ever appears        │
+          ▼   in a feature file ▼               ▼
+  WORLD — where            ACTOR — who        VOCABULARY — what
+┌───────────────────┐  ┌────────────────────┐  ┌─────────────────────┐
+│ shiftlefter.edn   │  │ subjects glossary  │  │ TYPE :web  ◁┄┄(t)   │
+│ :admin-console    │  │ :user/alicia       │  │ owns the verb set:  │
+│  :type :web (t)┄┄▷│  │  :desc "Spanish-1st│  │  opens, clicks,     │
+│  :adapter :etaoin │  │   admin reviewer"  │  │  sees, …            │
+│  world config —   │  │  :wears :alicia    │  │ stepdefs declare    │
+│  proxy, Tor bin,  │  │       (0..1)       │  │ TYPE — never a name,│
+│  flaky net,       │  └─────────┬──────────┘  │ never an adapter    │
+│  headless         │            ▼             └─────────────────────┘
+└────────┬──────────┘  ┌────────────────────┐
+         ▼             │ COSTUME (=profile) │
+┌───────────────────┐  │ recipe (declared): │
+│ ADAPTER           │  │  language, plugins,│
+│ etaoin|playwright │  │  theme, PDF reader │
+│ factory spawns a  │  │ residue (accrued): │
+│ fresh session     │  │  auth, cookies     │
+└────────┬──────────┘  └─────────┬──────────┘
+         │ spawn fresh           │ attach to the authed session
+         │                       │ (adapter must support it — sl-bbqb)
+         └───────────┬───────────┘
+                     ▼
+┌────────────────────────────────────────────┐
+│ CAPABILITY  :cap/admin-console.alicia      │
+│ one per (instance × subject): the live     │
+│ browser that actually executes the verb    │
+└────────────────────────────────────────────┘
+
+binding chain:  [name] → instance → its :type (t) → stepdef candidates
+                → verb executes on the (instance × subject) capability
+unannotated:    one instance of the type → it; else the type-named
+                entry is the default; else planning error
+run matrix:     swap the ADAPTER under the same NAME for cross-driver
+                coverage — features never change
+```
+
+The three tokens in the feature line are names that reach across the
+waterline — an instance name, a persona name, a verb — and everything they
+point at is machinery that never crosses back up. Two common confusions
+dissolve here: the adapter sits two hops below the feature file behind the
+instance name (why a driver name can never leak up), and the costume hangs
+off the persona, not the world (why a language preference never touches the
+adapter). The (t) link is the binding fix itself — the instance's declared
+`:type` is what selects the vocabulary box, where the old system wired the
+stepdefs to the name. The capability at the bottom is the single point where
+all three axes meet, fed by exactly one of two paths: adapter-spawn (fresh
+world) or costume-attach (worn identity), with sl-bbqb guarding the seam
+between them.
+
+### The name test
+
+An interface instance name is legitimate iff it could appear in the prose
+requirement. Different **systems** (`:storefront`, `:admin-console`) pass;
+different **user-world conditions** (`:tor`, `:flaky-network` — the
+mechanism is rig, but the condition is what the requirement is *about*)
+pass; different **rigs for the same system** (`:pw`, `:wd`, `:headless`)
+fail — cross-driver coverage is a run-level matrix: same features,
+different config binding the same name to another adapter. Features mention
+names; config binds adapters to names.
 
 ### Placeholder substitution
 
@@ -206,9 +316,18 @@ When you configure `:intents`, the **Object** is validated too. Intent regions
 `:svo {:unknown-object …}` controls how strictly the object in a step is checked
 against them:
 
-- `:strict` — an object outside the loaded regions is a planning error.
-- `:warn` — log and continue.
-- `:off` — no object checking (the default).
+- `:error` — an object outside the loaded regions is a planning error, and raw
+  locators are disallowed. (`:strict` is a deprecated alias — same behavior.)
+- `:warn` — an unresolvable intent reference warns at planning time, with the
+  name and a did-you-mean; raw locators and quoted literals stay exempt (the
+  locator-policy escape hatch). The warning never blesses success — an
+  unresolvable name still fails at runtime; it just fails *before* the run too.
+- `:off` — no object checking.
+
+**The default is conditional:** `:warn` when an `:intents` glossary is
+configured (declared in `:glossaries` or found conventionally under
+`glossary/intents/`), `:off` when none is — nothing declared means nothing to
+validate against. Set `:unknown-object` explicitly to override either way.
 
 This is what lets `Login.submit`-style intent references stand in for brittle
 selectors and still be verified before a run.
@@ -220,26 +339,36 @@ annotation.
 
 **Rule 1 — no annotation.** The text is matched against *every* registered
 stepdef. Exactly one must match: 0 → `:undefined` (planning error), 1 → bound,
-2+ → `:ambiguous` (planning error).
+2+ → `:ambiguous` (planning error). The bound step then resolves its
+execution **instance** from the stepdef's type: exactly one configured
+instance of that type → it; several → the type-named entry is the default;
+several with no type-named entry → `:bind/ambiguous-instance` (planning
+error naming the candidates — annotate the step).
 
 ```gherkin
 When :user/alice clicks the submit button
 ```
 
-**Rule 2 — with `[:interface]` annotation.** A leading interface keyword narrows
-the candidate pool to stepdefs registered for that interface; the same 0/1/2+
-rule applies within it.
+**Rule 2 — with `[name]` annotation.** A leading keyword names a config
+**instance**; the instance's declared `:type` narrows the candidate pool to
+stepdefs of that type, and the same 0/1/2+ rule applies within it. The bound
+step executes on the named instance's capability.
 
 ```gherkin
 Then [:sms] :user/alice receives a message containing '(\d{6})'
+When [:admin-console] :user/alice opens the browser to Dashboard
 ```
 
-The annotation is also an assertion: if `:sms` isn't configured under
+The annotation is also an assertion: if the name isn't configured under
 `:interfaces`, you get `:annotation/unknown-interface` at planning time —
-catching typos and missing config early. Use it when the *same* step vocabulary
-legitimately spans channels (e.g. `(\S+) receives a message` under `:sms`,
-`:whatsapp`, and `:email`). Annotations are a Shifted-mode feature; without
-Shifted's `:svo` configuration, `[:foo]` is just literal text.
+catching typos and missing config early. Use it to cross channel types
+(`[:sms]` on a step between browser steps) and to pick one of several
+same-type instances (`[:admin-console]` vs `[:storefront]` — both speak the
+full `:web` vocabulary). Annotations are a Shifted-mode feature; without
+Shifted's `:svo` configuration, `[:foo]` is just literal text. When the
+annotation filters everything out, the planning diagnostic surfaces the
+resolution chain: `No [:admin] (type :web) stepdef matches, but type :sms
+does.`
 
 ---
 
@@ -270,11 +399,16 @@ provider, e.g. `:etaoin` for browsers), and adapter `:config`.
 {:svo
  {:unknown-subject :warn       ; :warn | :error
   :unknown-verb    :warn       ; :warn | :error
-  :unknown-object  :off        ; :strict | :warn | :off
+  :unknown-object  :warn       ; :error | :warn | :off (see below)
   :unknown-interface :error}}  ; :warn | :error
 ```
 
 `:warn` logs and continues; `:error` fails at bind time, before execution.
+
+`:unknown-object` defaults `:warn` when an `:intents` glossary is configured
+and `:off` otherwise (an explicit value always wins). Its blocking level is
+spelled `:error` like the siblings; `:strict` remains accepted as a deprecated
+alias.
 
 ---
 
@@ -292,6 +426,10 @@ provider, e.g. `:etaoin` for browsers), and adapter `:config`.
 
 Types with `:instances` group session handles (`:user/alice`, `:admin/pat`);
 singletons are used directly; namespaced keywords organize non-human actors.
+An `:instances` entry may be a bare keyword or a **persona map**
+(`{:id :alicia :desc "…" :wears :alicia}`) carrying a docstring and a
+per-persona costume — see [Lay out a glossary](#1-lay-out-a-glossary)
+above and [COSTUMES.md](COSTUMES.md).
 
 ### Verbs
 
@@ -319,7 +457,14 @@ page deliberately doesn't reproduce it). Two cautions before you add one:
   contraction of interface steps — a **macro**. See
   [Add Domain Language](extending-vocabulary.md).
 
-Your verbs add to the defaults; `:override-defaults true` replaces them.
+Your verbs add to the defaults. On a name collision your entry replaces the
+builtin entry **wholesale** (description and all frames — there is no
+frame-level merge, so restating a builtin verb to add one frame drops its
+other frames; `sl explain <verb>` shows the resolved entry and marks it
+`config-override`). The `:override-defaults` flag was removed (sl-h7c3;
+it never had an effect through the loaders) — a glossary file still
+carrying it draws a warning: glossaries always extend the defaults, and
+restating an entry is how you replace one.
 
 ---
 
@@ -336,7 +481,7 @@ Metadata is entirely optional. Recognized keys:
 
 | Key | Type | Description |
 |---|---|---|
-| `:interface` | keyword | interface name from config |
+| `:interface` | keyword | interface TYPE the step's vocabulary belongs to (`:web`, `:sms`) — never a config instance name, never an adapter |
 | `:svo` | map | `{:subject … :verb … :object …}` extraction |
 
 In the `:svo` map, `:subject` is usually a placeholder (`:$1`), `:verb` a literal
@@ -363,13 +508,18 @@ Adopt SVO incrementally:
 
 ## Auto-provisioning
 
-When a step declares an interface, the framework provisions the capability:
+When a bound step resolves an interface instance (annotation or default),
+the framework provisions the capability:
 
-1. Check the subject's context for `:cap/web`.
-2. If absent, look up `:web` in `:interfaces`.
-3. Call the adapter factory (`:etaoin`) with the config.
-4. Store it as `:cap/web`.
+1. Check the subject's context for `:cap/<instance>.<subject>` (e.g.
+   `:cap/admin-console.alicia`).
+2. If absent, look up the instance in `:interfaces`.
+3. Call the adapter factory (`:etaoin`) with the instance's config.
+4. Store it under the instance-keyed capability name.
 5. Execute the step.
+
+One capability exists per (instance × subject) — two same-type instances in
+one scenario give the same subject two independent live sessions.
 
 Capabilities are cleaned up at scenario end — **ephemeral mode**, the default: a
 capability is provisioned for the scenario and closed when it ends. A subject that

@@ -133,12 +133,18 @@ more powerful, not different.
 
 ### Interface NAME vs TYPE
 
-- **NAME**: The key you use in config (`:web`, `:customer-portal`)
-- **TYPE**: The verb vocabulary (`:web`, `:api`)
+- **NAME**: The key in config (`:web`, `:customer-portal`) — a configured
+  INSTANCE of a type. Feature steps select one with a leading `[name]`
+  annotation; step definitions never reference names.
+- **TYPE**: The verb vocabulary (`:web`, `:api`). Stepdef `:interface`
+  metadata declares the TYPE.
 
 Simple case: `:web` interface with `:web` type - name and type match.
 
-Advanced case: `:legacy-app` and `:new-app` both use `:web` type verbs.
+Advanced case: `:storefront` and `:admin-console` both `:type :web` — each
+gets the full built-in `:web` vocabulary; steps pick the instance with
+`[:storefront]` / `[:admin-console]`, and unannotated steps default to the
+type-named entry when several exist.
 
 ### Legacy vs Shifted Steps
 

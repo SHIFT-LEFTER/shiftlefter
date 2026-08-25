@@ -1,0 +1,12 @@
+;; Subject glossary — who can act in scenarios. In Shifted mode every
+;; scenario subject is checked against this file.
+;;
+;; Instances are personas: give each a :desc docstring so humans and agents
+;; know who they are. A persona may also wear a costume — a persistent
+;; logged-in browser profile (:wears; see `sl costume init`).
+{:subjects
+ {:user {:desc "Standard application user"
+         :instances [{:id :alice
+                      :desc "Baseline user — exercises the ordinary path"}
+                     {:id :bob
+                      :desc "Second actor — the counterparty in multi-user flows"}]}}}

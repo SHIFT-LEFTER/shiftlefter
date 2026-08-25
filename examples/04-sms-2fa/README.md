@@ -29,9 +29,10 @@ Feature: Two-factor password reset via SMS
     Then :user/alice should see 'Code verified for alice'
 ```
 
-That's it. Each step calls into one of two interfaces (`:web` via Etaoin,
-`:sms` via a mock adapter). The `[:sms]` annotation on the receive step
-narrows binding to the SMS interface — that's the lane marker.
+That's it. Each step calls into one of two interface instances (`:web` via
+Etaoin, `:sms` via a mock adapter). The `[:sms]` annotation on the receive
+step names the instance it executes on; the instance's `:sms` type narrows
+binding to the SMS vocabulary — that's the lane marker.
 
 ## The Handoff: Named Bindings
 
@@ -115,6 +116,10 @@ namespaces under the framework's `src/`, so the `:demo` alias just sets
 
 A Chrome window opens, drives the form through both stages, and exits
 clean. Test passes; setup.clj's `:stop` releases port 9090.
+
+Known warns: the two `should see '…'` steps report `Unknown object` at
+plan time — a frame-classification gap (sl-9gfg), not a vocabulary hole;
+they're harmless and will disappear when that bead lands.
 
 ### The receive window
 

@@ -198,7 +198,11 @@
                               (println (str "WARN: could not create artifacts dir for '"
                                             (:name sid) "': " (ex-message e))))
                             nil)))
-        extras    (when artifacts-dir {:artifacts-dir artifacts-dir})
+        ;; Hook-payload extras (the sl-l9nj single-map extension point);
+        ;; sl-08f7 adds :seed — the run seed, handed to every hook payload.
+        extras    (cond-> nil
+                    artifacts-dir (assoc :artifacts-dir artifacts-dir)
+                    (:run-seed opts) (assoc :seed (:run-seed opts)))
         ;; sl-3q9r: the per-scenario capture opts — threaded into the step
         ;; loop for the instant sites, reused below for the drains.
         capture-opts (when (and capture? artifacts-dir)
@@ -209,8 +213,12 @@
                         :interfaces (:interfaces opts)
                         :registry (:adapter-registry opts)})
         step-opts (cond-> opts capture-opts (assoc :capture capture-opts))
+        ;; sl-08f7: steps read the run seed off ctx — seeded here so it's
+        ;; present before any hook contribution merges in. Bare/REPL callers
+        ;; (no cleanup wrapper) own their ctx and are unaffected.
+        initial-ctx (if-let [sd (:run-seed opts)] {:seed sd} {})
         {befores-ctx :ctx :keys [frames] before-records :records before-error :error}
-        (hooks/run-befores! entries sid {} extras)
+        (hooks/run-befores! entries sid initial-ctx extras)
 
         result    (if before-error
                     (hooks/error-scenario-result plan befores-ctx before-error)
@@ -363,7 +371,9 @@
    Returns:
    - {:scenarios [{:status ... :plan ... :steps ... :capability-cleanup ...} ...]
       :counts {:passed N :failed N :pending N :skipped N
-               :error N}   ;; only when positive — a lifecycle hook threw (sl-esq)
+               :error N}   ;; only when positive — infrastructure failure
+                           ;; family: hook/provisioning/capture/harness
+                           ;; (sl-esq, sl-7c7i)
       :status :passed|:failed}
 
    `:scenarios` is in PLAN order at every :max-parallel.
@@ -392,8 +402,9 @@
          counts (frequencies (map :status results))
          suite-passed? (every? #(= :passed (:status %)) results)]
      {:scenarios results
-      ;; :error (sl-esq, hook threw) is emitted only when positive so
-      ;; hook-less runs keep the historical four-key map byte-identical.
+      ;; :error (sl-esq; family widened to hook/provisioning/capture/
+      ;; harness, sl-7c7i) is emitted only when positive so error-free
+      ;; runs keep the historical four-key map byte-identical.
       :counts (cond-> {:passed (get counts :passed 0)
                        :failed (get counts :failed 0)
                        :pending (get counts :pending 0)

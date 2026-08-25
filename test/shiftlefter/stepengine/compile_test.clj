@@ -444,6 +444,37 @@
         (is (= "[:sms] alice sends an SMS to '+15551234567' saying 'hi'"
                (-> step-result :step :step/text)))))))
 
+(deftest test-annotation-mixed-same-type-instances-end-to-end
+  (testing "THE sl-s2oa repro at compile level: two :web-typed instances;
+            [:admin] over the shared :web-TYPE vocabulary binds and stamps
+            the :admin instance; the unannotated line defaults to :web"
+    (registry/register! #"(\S+) opens the browser to '([^']+)'"
+                        (fn [_s _u] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :navigate :frame :to
+                               :object :$2}})
+    (let [config (assoc shifted-config-sms-web
+                        :interfaces {:web {:type :web :adapter :etaoin}
+                                     :admin {:type :web :adapter :playwright}})
+          pickle (make-pickle
+                  "mixed"
+                  ["alice opens the browser to 'http://web.test/'"
+                   "[:admin] alice opens the browser to 'http://admin.test/'"])
+          {:keys [runnable? plans]} (compile/compile-suite
+                                     config
+                                     [pickle]
+                                     (registry/all-stepdefs))]
+      (is runnable?)
+      (let [[web-step admin-step] (-> plans first :plan/steps)]
+        (is (= :matched (:status web-step)))
+        (is (= :web (-> web-step :binding :svo :interface))
+            "unannotated defaults to the type-named instance")
+        (is (= :matched (:status admin-step)))
+        (is (= :admin (-> admin-step :binding :svo :interface))
+            "[:admin] selects the renamed same-type instance")
+        (is (= :web (-> admin-step :filter-info :resolved-type)))))))
+
 (deftest test-annotation-unknown-interface-fails-compile
   (testing "[:whatsapp] with no :whatsapp in config → :annotation/unknown-interface"
     (registry/register! #"anything"

@@ -1,7 +1,8 @@
 (ns shiftlefter.runner.report.console-test
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
-            [shiftlefter.runner.report.console :as console]))
+            [shiftlefter.runner.report.console :as console]
+            [shiftlefter.runner.reporter :as reporter]))
 
 ;; -----------------------------------------------------------------------------
 ;; Helper to capture stderr
@@ -643,3 +644,23 @@
       (is (str/includes? output "Hook 'screenshot' failed"))
       (is (str/includes? output "I click the button"))
       (is (str/includes? output "no such element")))))
+
+;; -----------------------------------------------------------------------------
+;; Dropped-events line (sl-d7ks)
+;; -----------------------------------------------------------------------------
+
+(deftest test-on-run-end-dropped-events-line
+  (testing "Nonzero :dropped-events prints one stderr line"
+    (let [r (console/make-reporter {:no-color true})
+          output (with-err-str
+                   (reporter/on-run-end r {:run-id "r" :exit-code 0 :status :passed
+                                           :counts {:passed 1 :failed 0 :pending 0 :skipped 0}
+                                           :dropped-events 4}))]
+      (is (str/includes? output "4 observe-plane event(s) dropped"))
+      (is (str/includes? output "results unaffected"))))
+  (testing "Absent key -> silence (absent-when-zero)"
+    (let [r (console/make-reporter {:no-color true})
+          output (with-err-str
+                   (reporter/on-run-end r {:run-id "r" :exit-code 0 :status :passed
+                                           :counts {:passed 1 :failed 0 :pending 0 :skipped 0}}))]
+      (is (not (str/includes? output "dropped"))))))

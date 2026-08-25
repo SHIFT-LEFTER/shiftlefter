@@ -33,7 +33,9 @@
    - `:persistent/cdp-not-ready` — CDP endpoint didn't come up in time
    - `:persistent/no-port-available` — No available port found in search range"
   (:require [babashka.fs :as fs]
-            [cheshire.core :as json])
+            [cheshire.core :as json]
+            [clojure.java.shell :as shell]
+            [clojure.string :as str])
   (:import [java.net HttpURLConnection URL]
            [java.io IOException]))
 
@@ -517,6 +519,39 @@
         {:killed false :pid pid :reason :not-running}))
     (catch Exception e
       {:killed false :pid pid :reason :error :message (ex-message e)})))
+
+(defn port-listener-pids
+  "PIDs of processes listening on TCP `port`, resolved via
+   `lsof -t -i tcp:<port> -sTCP:LISTEN`.
+
+   This is the port-ownership truth destroy-costume! trusts over recorded
+   metadata: the process actually serving a costume's debug port, whatever
+   pid the meta file remembers (sl-7q7w).
+
+   Returns a vector of distinct pids (longs). Empty when nothing listens on
+   the port, or when the lookup itself is unavailable (no lsof) — callers
+   needing liveness must corroborate with `probe-cdp`.
+
+   Examples:
+   ```clojure
+   (port-listener-pids 9223)
+   ;; => [30906]
+   ```"
+  [port]
+  (try
+    (let [{:keys [exit out]} (shell/sh "lsof" "-t" "-i" (str "tcp:" port) "-sTCP:LISTEN")]
+      (if (zero? exit)
+        (->> (str/split-lines out)
+             (map str/trim)
+             (remove str/blank?)
+             (map #(Long/parseLong %))
+             (distinct)
+             (vec))
+        ;; lsof exits 1 when nothing matches — same answer as "no listener"
+        []))
+    (catch Exception _
+      ;; lsof missing or lookup failed — unknown, not "dead"
+      [])))
 
 ;; -----------------------------------------------------------------------------
 ;; Port Allocation

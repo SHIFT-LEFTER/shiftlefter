@@ -29,7 +29,9 @@
             [clojure.java.shell :refer [sh]]
             [clojure.java.io :as io]
             [clojure.edn :as edn]
-            [babashka.fs :as fs]))
+            [clojure.string :as str]
+            [babashka.fs :as fs]
+            [nrepl.core :as nrepl]))
 
 ;; -----------------------------------------------------------------------------
 ;; Paths / gating
@@ -168,7 +170,7 @@
           (is (= (:port d1) (:port d2)) "second call reused the same port")))))))
 
 ;; -----------------------------------------------------------------------------
-;; 2. Exit-code parity warm vs cold for 0 / 1 / 2 / 3
+;; 2. Exit-code parity warm vs cold for 0 / 1 / 2 / 3 (+ 4 below, sl-7c7i)
 ;; -----------------------------------------------------------------------------
 
 (deftest ^:daemon exit-code-parity-warm-vs-cold
@@ -187,6 +189,27 @@
               (is (= expected (:exit warm)) "warm exit")
               (is (= expected (:exit cold)) "cold exit")
               (is (= (:exit cold) (:exit warm)) "warm == cold")))))))))
+
+(deftest ^:daemon exit-4-parity-warm-vs-cold
+  ;; sl-7c7i: run degraded — a scenario :error (here: a Before hook throw)
+  ;; exits 4 on both paths. Rides its own fixtures: sl/hooks.clj is
+  ;; sibling-of-config and would otherwise be visible to every run in the
+  ;; shared root fixture set.
+  (skip-without-jar
+   (fn []
+     (with-root
+      (fn [root]
+        (spit (str (fs/path root "sl" "hooks.clj"))
+              (str "(ns hooks)\n"
+                   "(def hooks [{:name \"boom\""
+                   " :before (fn [_] (throw (ex-info \"db down\" {})))}])\n"))
+        (spit (str (fs/path root "deg.feature"))
+              "Feature: D\n\n  @hook=boom\n  Scenario: S\n    Given a thing happens\n")
+        (let [args ["run" "deg.feature" "--step-paths" "steps"]
+              warm (run-sl root args)
+              cold (run-sl root args :env {"SL_NO_DAEMON" "1"})]
+          (is (= 4 (:exit warm)) "warm exit")
+          (is (= 4 (:exit cold)) "cold exit")))))))
 
 ;; -----------------------------------------------------------------------------
 ;; 3. stdout = EDN / stderr = console separation preserved warm
@@ -567,6 +590,198 @@
                  "run went through a daemon (breadcrumb present)")))
          (finally (reap! root)))))))
 
+;; -----------------------------------------------------------------------------
+;; 17. Contention (sl-luhn): a second invocation against a BUSY daemon is
+;;     REJECTED — exit 2 with :daemon/busy (stderr one-liner bare, the exit-2
+;;     planning-summary shape under --edn) — and the first run completes
+;;     undisturbed on the same daemon (no bounce). Chair-ratified REJECT over
+;;     silent queueing: a silent block is indistinguishable from a hang.
+;; -----------------------------------------------------------------------------
+
+(defn- wait-for-file
+  "Poll for `path` to exist, up to timeout-ms; true if it appeared."
+  [path timeout-ms]
+  (loop [waited 0]
+    (cond
+      (.exists (io/file path)) true
+      (>= waited timeout-ms) false
+      :else (do (Thread/sleep 100) (recur (+ waited 100))))))
+
+(deftest ^:daemon busy-daemon-rejects-second-invocation
+  (skip-without-jar
+   (fn []
+     (with-root
+      (fn [root]
+        ;; Marker paths are ABSOLUTE inside the step source: the step executes
+        ;; in the daemon JVM, whose cwd is not the instance root.
+        (let [started (str (fs/path root "STARTED"))
+              release (str (fs/path root "RELEASE"))]
+          (spit (str (fs/path root "slow.feature"))
+                "Feature: SLOW\n\n  Scenario: S\n    Given a slow thing\n")
+          (spit (str (fs/path root "steps" "slow.clj"))
+                (str "(ns slowsteps (:require [shiftlefter.stepengine.registry :refer [defstep]]))\n"
+                     "(defstep #\"a slow thing\" []\n"
+                     "  (spit \"" started "\" \"x\")\n"
+                     "  (loop [i 0]\n"
+                     "    (when (and (< i 600)\n"
+                     "               (not (.exists (java.io.File. \"" release "\"))))\n"
+                     "      (Thread/sleep 100)\n"
+                     "      (recur (inc i)))))\n"))
+          (run-sl root ["fmt" "--check" "good.feature"])   ; prime the daemon
+          (let [d0  (read-daemon root)
+                fut (future (run-sl root ["run" "slow.feature" "--step-paths" "steps"]))]
+            (try
+              (is (some? d0) "precondition: daemon running before the slow run")
+              (is (wait-for-file started 30000)
+                  "precondition: the slow run is executing its blocking step")
+              (testing "bare reject: exit 2 + the busy one-liner on stderr"
+                (let [r (run-sl root ["run" "ok.feature" "--step-paths" "steps"])]
+                  (is (= 2 (:exit r)) "second run rejected, not queued")
+                  (is (re-find #"another run is in progress" (:err r))
+                      "stderr carries the busy line")))
+              (testing "--edn reject: the exit-2 planning-summary shape"
+                (let [r (run-sl root ["run" "ok.feature" "--step-paths" "steps" "--edn"])
+                      summary (try (edn/read-string (:out r))
+                                   (catch Exception _ ::unparseable))]
+                  (is (= 2 (:exit r)))
+                  (is (map? summary) "stdout is one parseable EDN map")
+                  (is (= :planning-failed (:run/status summary)))
+                  (is (= :daemon/busy
+                         (-> summary :planning :errors first :type))
+                      ":daemon/busy rides the planning block")))
+              (spit release "go")
+              (let [r1 (deref fut 90000 :timeout)]
+                (is (map? r1) "first run finished (no hang)")
+                (is (= 0 (:exit r1))
+                    "first run completed undisturbed by the rejected calls"))
+              (is (= (:pid d0) (:pid (read-daemon root)))
+                  "same daemon throughout — rejects never bounced it")
+              (finally
+                (spit release "go")
+                (deref fut 90000 :timeout))))))))))
+
+;; -----------------------------------------------------------------------------
+;; 18. Progressive output streaming (sl-qwf): warm invocations emit output AS
+;;     PRODUCED — the first scenario's PASSED line reaches the client's stdout
+;;     while the second scenario is still running. `sh` can't observe this (it
+;;     buffers to completion), so this harness reads the wrapper's stdout with
+;;     per-line arrival timestamps via ProcessBuilder. The scenario names are
+;;     multibyte on purpose: the streamed line arriving INTACT mid-run is the
+;;     live form of the sl-y3c/x6r multibyte guard.
+;; -----------------------------------------------------------------------------
+
+(def ^:private streaming-feature
+  (str "Feature: Streaming — ✓\n\n"
+       "  Scenario: first — ✓ 😀\n    Given a pause happens\n\n"
+       "  Scenario: second — ✓ 😀\n    Given a pause happens\n"))
+
+(def ^:private pause-step-src
+  (str "(ns pausesteps (:require [shiftlefter.stepengine.registry :refer [defstep]]))\n"
+       "(defstep #\"a pause happens\" [] (Thread/sleep 1500))\n"))
+
+(defn- run-sl-timestamped
+  "Run bin/sl via ProcessBuilder from `dir`, reading output lines with arrival
+   timestamps (ms since spawn). Streams are MERGED: the human run report goes
+   to stderr by design (stdout is reserved for machine output — cold does the
+   same, verified split-stream), and the streaming property under test is
+   per-line arrival time, which the merged read preserves.
+   Returns {:exit n :end-ms n :lines [{:ms n :line s}]}."
+  [dir args]
+  (let [pb (doto (ProcessBuilder. ^java.util.List (into [] (cons sl-bin args)))
+             (.directory (io/file dir))
+             (.redirectErrorStream true))
+        t0 (System/nanoTime)
+        ms #(quot (- (System/nanoTime) t0) 1000000)
+        proc (.start pb)
+        lines (with-open [rdr (io/reader (.getInputStream proc))]
+                (into [] (map (fn [l] {:ms (ms) :line l})) (line-seq rdr)))]
+    (.waitFor proc)
+    {:exit (.exitValue proc) :end-ms (ms) :lines lines}))
+
+(deftest ^:daemon warm-output-streams-progressively
+  (skip-without-jar
+   (fn []
+     (with-root
+      (fn [root]
+        (spit (str (fs/path root "stream.feature")) streaming-feature)
+        (spit (str (fs/path root "steps" "pause.clj")) pause-step-src)
+        (run-sl root ["fmt" "--check" "good.feature"])   ; prime the daemon
+        (is (some? (read-daemon root)) "precondition: daemon running")
+        (let [{:keys [exit end-ms lines]}
+              (run-sl-timestamped root ["run" "stream.feature" "--step-paths" "steps"])
+              first-line (first (filter #(.contains ^String (:line %) "first — ✓ 😀")
+                                        lines))]
+          (is (= 0 exit) "warm streamed run passes")
+          (is (some? first-line) "first scenario's PASSED line reached stdout")
+          (is (<= 1000 (- end-ms (:ms first-line)))
+              (str "first scenario's line must arrive while the second is still "
+                   "running (>=1000ms before exit; the step sleeps 1500ms). "
+                   "Arrivals: " (pr-str (map #(select-keys % [:ms]) lines))
+                   " end-ms " end-ms))
+          (is (some? (read-daemon root))
+              "run went through the daemon (this proves the WARM path streamed")))))))
+
+;; -----------------------------------------------------------------------------
+;; 19. Mid-stream daemon loss → exit 3, never a cold retry (sl-qwf design
+;;     point, automated at sl-d3cz / Warden W25). Once ANYTHING has streamed,
+;;     the client's `streamedAnything` gate (NreplClient) must turn a
+;;     transport failure into EX_CRASH (3) — a 69 would make bin/sl fall
+;;     back to a cold run and DUPLICATE the already-streamed output, the
+;;     exact defect the gate exists to prevent. Neither EX_CRASH branch had
+;;     automated coverage before this test.
+;; -----------------------------------------------------------------------------
+
+(deftest ^:daemon mid-stream-daemon-loss-exits-3-no-duplicate-output
+  (skip-without-jar
+   (fn []
+     (with-root
+      (fn [root]
+        (let [started2 (str (fs/path root "STARTED2"))
+              release  (str (fs/path root "RELEASE"))]
+          ;; Scenario 1 passes fast (its PASSED line streams); scenario 2
+          ;; blocks on a file marker so the kill lands mid-stream.
+          ;; Marker paths are ABSOLUTE: the step runs in the daemon JVM.
+          (spit (str (fs/path root "midstream.feature"))
+                (str "Feature: Midstream\n\n"
+                     "  Scenario: streamed-first\n    Given a quick thing\n\n"
+                     "  Scenario: doomed-second\n    Given a blocking thing\n"))
+          (spit (str (fs/path root "steps" "mid.clj"))
+                (str "(ns midsteps (:require [shiftlefter.stepengine.registry :refer [defstep]]))\n"
+                     "(defstep #\"a quick thing\" [] nil)\n"
+                     "(defstep #\"a blocking thing\" []\n"
+                     "  (spit \"" started2 "\" \"x\")\n"
+                     "  (loop [i 0]\n"
+                     "    (when (and (< i 600)\n"
+                     "               (not (.exists (java.io.File. \"" release "\"))))\n"
+                     "      (Thread/sleep 100)\n"
+                     "      (recur (inc i)))))\n"))
+          (run-sl root ["fmt" "--check" "good.feature"])   ; prime the daemon
+          (let [d0 (read-daemon root)
+                fut (future (run-sl-timestamped
+                             root ["run" "midstream.feature" "--step-paths" "steps"]))]
+            (try
+              (is (some? d0) "precondition: daemon running before the run")
+              (is (wait-for-file started2 30000)
+                  "precondition: scenario 2 is blocking — scenario 1's line
+                   already streamed to the client")
+              (sh "kill" "-9" (str (:pid d0)))
+              (let [{:keys [exit lines] :as r} (deref fut 90000 :timeout)]
+                (is (map? r) "client exited after the daemon died (no hang)")
+                (when (map? r)
+                  (is (= 3 exit)
+                      "EX_CRASH: streamed output makes a cold retry unsafe —
+                       69 (silent cold fallback) would duplicate it")
+                  (is (= 1 (count (filter #(.contains ^String (:line %) "streamed-first")
+                                          lines)))
+                      (str "scenario 1's line appears EXACTLY once — a wrongful"
+                           " cold retry would print it twice. Lines: "
+                           (pr-str (map :line lines))))
+                  (is (some #(.contains ^String (:line %) "mid-stream") lines)
+                      "the client names the mid-stream loss on stderr")))
+              (finally
+                (spit release "go")
+                (deref fut 90000 :timeout))))))))))
+
 (deftest ^:daemon lib-change-bounces-daemon
   (skip-without-jar
    (fn []
@@ -596,3 +811,60 @@
                    (is (not= (:pid d2) (:pid d3))
                        "new pid — daemon bounced on lib removal"))))))
          (finally (reap! root)))))))
+
+;; -----------------------------------------------------------------------------
+;; 12. Session hygiene: warm dispatches release their nREPL sessions (sl-xjx0,
+;;     Warden W5). Pre-fix the client cloned a session per dispatch and never
+;;     sent close — nREPL retains each (with a parked SessionThread) until the
+;;     60-min idle reaper. The regression pin: after several warm dispatches
+;;     the daemon's retained-session count stays bounded, checked through
+;;     nREPL's own ls-sessions op (sessionless, so the probe adds none).
+;; -----------------------------------------------------------------------------
+
+(deftest ^:daemon warm-dispatches-release-nrepl-sessions
+  (skip-without-jar
+   (fn []
+     (with-root
+       (fn [root]
+         (dotimes [_ 3]
+           (is (= 0 (:exit (run-sl root ["run" "ok.feature" "--step-paths" "steps"])))))
+         (let [{:keys [port]} (read-daemon root)]
+           (is (some? port) "daemon breadcrumb carries the nREPL port")
+           (with-open [conn (nrepl/connect :host "127.0.0.1" :port port)]
+             (let [client (nrepl/client conn 5000)
+                   session-count (fn []
+                                   (-> (nrepl/message client {:op "ls-sessions"})
+                                       first
+                                       :sessions
+                                       count))
+                   ;; close is a buffered fire-and-forget from the client —
+                   ;; give the server a beat to process the last one.
+                   bounded? (loop [tries 20]
+                              (cond
+                                (<= (session-count) 1) true
+                                (zero? tries) false
+                                :else (do (Thread/sleep 100) (recur (dec tries)))))]
+               (is bounded?
+                   (str "3 warm dispatches must not retain 3 sessions —"
+                        " ls-sessions reports " (session-count)
+                        " (pre-W5 each dispatch leaked one)"))))))))))
+
+;; -----------------------------------------------------------------------------
+;; 13. Custody visibility (sl-s35y, Warden W6 ruled): `sl daemon status` on a
+;;     live daemon reports costume custody through the --sl-internal-status
+;;     sentinel — the full wrapper -> client -> daemon wiring, no browser
+;;     needed (a costume-less daemon truthfully reports none).
+;; -----------------------------------------------------------------------------
+
+(deftest ^:daemon daemon-status-lists-costume-custody
+  (skip-without-jar
+   (fn []
+     (with-root
+       (fn [root]
+         (is (= 0 (:exit (run-sl root ["run" "ok.feature" "--step-paths" "steps"])))
+             "warm run spawns the daemon")
+         (let [r (run-sl root ["daemon" "status"])]
+           (is (= 0 (:exit r)))
+           (is (str/includes? (:out r) "alive"))
+           (is (str/includes? (:out r) "live costumes: none")
+               "the custody query reached the daemon JVM and reported")))))))

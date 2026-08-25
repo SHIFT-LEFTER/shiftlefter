@@ -62,24 +62,35 @@
                              :edn true :dry-run true}]])
 
 (defn- capture
-  "Run the pipeline with stdout/stderr captured, rendered in the golden format."
+  "Run the pipeline with stdout/stderr captured, rendered in the golden format.
+   The seed is PINNED (sl-08f7): the run seed is recorded on every summary
+   and printed as a console line, so goldens need a deterministic one —
+   pinning also exercises the --seed acceptance path on every case."
   [opts]
   (let [o (java.io.StringWriter.)
         e (java.io.StringWriter.)
         result (binding [*out* o *err* e]
-                 (rc/execute! (merge {:step-paths step-paths} opts)))]
+                 (rc/execute! (merge {:step-paths step-paths :seed 42} opts)))]
     (str "EXIT " (:exit-code result) "\n"
          "--- STDOUT ---\n" (normalize (str o))
          "--- STDERR ---\n" (normalize (str e)))))
 
 (deftest output-is-byte-identical-to-pre-protocol-golden
+  ;; Deliberate re-capture (sl-08f7): SL_UPDATE_GOLDENS=1 rewrites the
+  ;; fixtures from the current tree instead of comparing. Eyeball the diff
+  ;; before committing — a golden update is a reviewed decision, never a
+  ;; reflex.
   (doseq [[label opts] cases]
     (testing label
       (let [golden-file (io/file "test/fixtures/golden" (str label ".txt"))]
-        (is (.exists golden-file)
-            (str "missing golden fixture for " label))
-        (is (= (slurp golden-file) (capture opts))
-            (str label ": output drifted from the pre-sl-21z golden"))))))
+        (if (System/getenv "SL_UPDATE_GOLDENS")
+          (do (spit golden-file (capture opts))
+              (is (.exists golden-file) (str label ": golden rewritten")))
+          (do
+            (is (.exists golden-file)
+                (str "missing golden fixture for " label))
+            (is (= (slurp golden-file) (capture opts))
+                (str label ": output drifted from the pre-sl-21z golden"))))))))
 
 (deftest edn-failure-output-stays-edn-native
   (testing "R4: --edn keeps #uuid tagged literals and bare symbols"

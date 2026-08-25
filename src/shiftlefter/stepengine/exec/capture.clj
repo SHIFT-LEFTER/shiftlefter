@@ -90,6 +90,38 @@
   :args (s/cat :policy (s/nilable map?) :registry (s/nilable map?))
   :ret (s/coll-of keyword? :kind vector?))
 
+(defn adapter-unsupported-kinds
+  "Configured ACTIVE kinds contributed by at least one adapter in
+   `registry` but by NONE of `used-adapters` (the adapters a group's
+   plans actually touch), sorted. The per-group plan-time warn feeds
+   from this (sl-sehc): registry-wide `unsupported-kinds` cannot see a
+   per-adapter gap when another adapter in the same registry contributes
+   the kind (the pure-Playwright silent-nothing and the mixed multi-group
+   composition). Disjoint from `unsupported-kinds` by construction —
+   kinds contributed by nobody stay the unknown-kind (typo) class.
+   Empty `used-adapters` (a fully unbound suite) returns [] — nothing
+   will be captured from, and unbound suites scream elsewhere."
+  [policy used-adapters registry]
+  (if (empty? used-adapters)
+    []
+    (let [contributed (into #{} (mapcat (comp keys :capture val)) registry)
+          supported (into #{}
+                          (mapcat #(keys (get-in registry [% :capture])))
+                          used-adapters)]
+      (->> policy
+           (filter (fn [[_kind pol]] (not= :never pol)))
+           (map key)
+           (filter contributed)
+           (remove supported)
+           sort
+           vec))))
+
+(s/fdef adapter-unsupported-kinds
+  :args (s/cat :policy (s/nilable map?)
+               :used-adapters (s/nilable (s/coll-of keyword? :kind set?))
+               :registry (s/nilable map?))
+  :ret (s/coll-of keyword? :kind vector?))
+
 (defn capture-error
   "Scenario-level error for D4: the FIRST capture failure carries the
    attribution (kind, capability, cause — same first-error-wins rule as

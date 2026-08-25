@@ -1,0 +1,20 @@
+;; Worked intent example — scaffolded by `sl init`.
+;;
+;; Intents give page elements NAMES so features can say Login.username
+;; instead of repeating raw locators. An unquoted Capitalized.dotted name
+;; (Intent.element) is a glossary reference, resolved at planning time — an
+;; unknown name is a plan error with a did-you-mean. (Curly braces mean
+;; something else: {name} is a value from the scenario data plane, captured
+;; earlier; '…' in single quotes is literal content.)
+;;
+;; The intent loader reads every *.edn file in this directory; this file's
+;; .example suffix keeps it INVISIBLE to the loader. Rename it to login.edn
+;; (and match the locators to your app) to activate.
+;;
+;; This intent describes the login page the starter feature
+;; (features/login.feature) drives — once active, its steps can become e.g.:
+;;   And :user/alice fills Login.username with 'alice'
+{:intent "Login"
+ :elements {:username {:bindings {:web {:id "username"}}}
+            :password {:bindings {:web {:id "password"}}}
+            :submit   {:bindings {:web {:css "button[type=\"submit\"]"}}}}}

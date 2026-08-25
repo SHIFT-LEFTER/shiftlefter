@@ -445,6 +445,13 @@ is_cold_command() {
     case "${1:-}" in
         repl)   return 0 ;;
         daemon) return 0 ;;  # serve/status/stop/bare — status+stop intercepted earlier
+        init)   return 0 ;;  # scaffolds sl/shiftlefter.edn — the very anchor the
+                             # daemon keys on; never spawn a JVM daemon just to
+                             # scaffold a project that doesn't exist yet (sl-cn7)
+        doctor) return 0 ;;  # pre-flight must observe the daemon from OUTSIDE (a warm
+                             # doctor probes the daemon it runs inside: liveness is
+                             # trivially yes, staleness unanswerable) and must not
+                             # depend on the warm path it may be diagnosing (sl-afsp)
     esac
     [[ "${1:-}" == "costume" && "${2:-}" == "init" ]] && return 0
     if [[ "${1:-}" == "verify" ]]; then
@@ -472,8 +479,11 @@ ensure_warm_port() {
 
 # Routing gate. Either runs the warm client (and exits with its code), or returns
 # so the caller falls through to the cold exec_jar. A 69 from the client means the
-# daemon vanished between our liveness check and the connect — safe to retry cold
-# because the client buffers all output (nothing was written yet).
+# daemon vanished before anything streamed — safe to retry cold because the
+# client's streamedAnything gate (NreplClient) guarantees a 69 only while its
+# stdout/stderr are still untouched; once output has streamed (sl-qwf) a
+# transport loss is exit 3 instead, which we pass through un-retried below —
+# a cold retry then would duplicate the already-streamed output.
 maybe_route_warm() {
     local java_cmd="$1"; shift
     [[ "$SL_NO_DAEMON_FLAG" == 1 || -n "${SL_NO_DAEMON:-}" ]] && return 0
@@ -490,9 +500,13 @@ maybe_route_warm() {
     exit $rc
 }
 
-# `sl daemon status` — wrapper-owned (not wired in the jar). Pure bash, no JVM.
+# `sl daemon status` — wrapper-owned (not wired in the jar). Pure bash, no JVM
+# — EXCEPT the custody query (sl-s35y): when the daemon is ALIVE, one client
+# round-trip evaluates daemon/custody-status! so the costumes/drivers the
+# daemon holds are inspectable (Warden W6 ruled: persistence stands, custody
+# becomes visible). Dead/absent daemon stays JVM-free and byte-identical.
 do_daemon_status() {
-    local root edn pid live
+    local root edn pid port live java_cmd
     root="$(find_instance_root "$USER_CWD")" \
         || { echo "sl daemon: no instance root above $USER_CWD (need sl/shiftlefter.edn or .git)"; return 0; }
     edn="$root/.shiftlefter/daemon.edn"
@@ -505,6 +519,15 @@ do_daemon_status() {
     echo "sl daemon for $root: $live"
     cat "$edn"
     echo
+    if [[ "$live" == "alive" ]]; then
+        port="$(edn_num "$edn" port)"
+        java_cmd="$(find_java)"
+        if [[ -n "$java_cmd" && -n "$port" && -n "$JAR_FILE" && -f "$JAR_FILE" ]]; then
+            "$java_cmd" -cp "$JAR_FILE" shiftlefter.client.NreplClient "$port" "$root" \
+                --sl-internal-status 2>/dev/null \
+                || echo "sl daemon: custody query failed (daemon unreachable)"
+        fi
+    fi
     return 0
 }
 

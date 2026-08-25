@@ -1,6 +1,7 @@
 EXIT 1
 --- STDOUT ---
 --- STDERR ---
+run seed: 42
 PENDING Step returns pending
   ✓ I have 5 items in my cart
   ? I return pending

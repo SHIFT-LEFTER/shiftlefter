@@ -1,0 +1,9 @@
+{
+  "name": "report-smoke",
+  "private": true,
+  "description": "jsdom harness for the report.js runtime smoke (sl-t0r9); driven by test/shiftlefter/report_smoke_test.clj",
+  "type": "commonjs",
+  "dependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

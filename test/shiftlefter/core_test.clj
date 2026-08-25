@@ -515,10 +515,11 @@
       (is (= 0 code))
       (is (= {:config-path "test/fixtures/config/minimal.edn"} @captured))))
 
-  (testing "parse error returns 1 and writes to *err*"
+  (testing "parse error returns 2 (un-runnable invocation, sl-7c7i) and
+            writes to *err*"
     (let [err (java.io.StringWriter.)
           code (binding [*err* err] (core/dispatch ["--bogus-flag"]))]
-      (is (= 1 code))
+      (is (= 2 code))
       (is (str/includes? (str err) "Use --help for usage."))))
 
   (testing "unknown command returns 2, hint on *err*, stdout clean (sl-von)"
@@ -771,10 +772,10 @@
                                             {:status :launched :costume n :port 9300 :pid 1})]
         (is (= 0 (silent-costume-cmd ["costume" "init" "x"] {:chrome-path "/opt/chrome"})))
         (is (= [:x {:chrome-path "/opt/chrome"}] @called)))))
-  (testing "init without a name returns 1 and does not provision"
+  (testing "init without a name returns 2 (usage, sl-7c7i) and does not provision"
     (let [called (atom false)]
       (with-redefs [costume/init-costume! (fn [_ _] (reset! called true) {:status :launched})]
-        (is (= 1 (silent-costume-cmd ["costume" "init"] {})))
+        (is (= 2 (silent-costume-cmd ["costume" "init"] {})))
         (is (false? @called)))))
   (testing "init returns 1 when init-costume! errors"
     (with-redefs [costume/init-costume! (fn [_ _] {:error {:type :costume/already-exists
@@ -793,23 +794,39 @@
       (is (= 0 (silent-costume-cmd ["costume" "list"] {}))))))
 
 (deftest costume-cmd-destroy-test
-  (testing "destroy dispatches to destroy-costume! and returns 0 on success"
+  (testing "destroy dispatches to destroy-costume! (no force by default) and returns 0 on success"
     (let [called (atom nil)]
-      (with-redefs [costume/destroy-costume! (fn [n] (reset! called n)
+      (with-redefs [costume/destroy-costume! (fn [n opts] (reset! called [n opts])
                                                {:status :destroyed :costume n})]
         (is (= 0 (silent-costume-cmd ["costume" "destroy" "x"] {})))
-        (is (= :x @called)))))
-  (testing "destroy without a name returns 1 and does not call destroy-costume!"
+        (is (= [:x {:force false}] @called)))))
+  (testing "destroy threads --force through as {:force true} (sl-7q7w)"
+    (let [called (atom nil)]
+      (with-redefs [costume/destroy-costume! (fn [n opts] (reset! called [n opts])
+                                               {:status :destroyed :costume n})]
+        (is (= 0 (silent-costume-cmd ["costume" "destroy" "x"] {:force true})))
+        (is (= [:x {:force true}] @called)))))
+  (testing "destroy without a name returns 2 (usage, sl-7c7i) and does not call destroy-costume!"
     (let [called (atom false)]
-      (with-redefs [costume/destroy-costume! (fn [_] (reset! called true) {:status :destroyed})]
-        (is (= 1 (silent-costume-cmd ["costume" "destroy"] {})))
+      (with-redefs [costume/destroy-costume! (fn [_ _] (reset! called true) {:status :destroyed})]
+        (is (= 2 (silent-costume-cmd ["costume" "destroy"] {})))
         (is (false? @called)))))
   (testing "destroy returns 1 when destroy-costume! errors"
-    (with-redefs [costume/destroy-costume! (fn [_] {:error {:type :costume/not-found
-                                                            :message "no such costume"}})]
-      (is (= 1 (silent-costume-cmd ["costume" "destroy" "x"] {}))))))
+    (with-redefs [costume/destroy-costume! (fn [_ _] {:error {:type :costume/not-found
+                                                              :message "no such costume"}})]
+      (is (= 1 (silent-costume-cmd ["costume" "destroy" "x"] {})))))
+  (testing "browser-live refusal renders the --force rerun hint on stderr (sl-7q7w)"
+    (with-redefs [costume/destroy-costume!
+                  (fn [_ _] {:error {:type :costume/browser-live
+                                     :message "Costume x's browser is still running"}})]
+      (let [err (java.io.StringWriter.)
+            code (binding [*out* (java.io.StringWriter.)
+                           *err* err]
+                   (core/costume-cmd ["costume" "destroy" "x"] {}))]
+        (is (= 1 code))
+        (is (str/includes? (str err) "sl costume destroy x --force"))))))
 
 (deftest costume-cmd-unknown-subcommand-test
-  (testing "missing or unknown subcommand returns 1"
-    (is (= 1 (silent-costume-cmd ["costume"] {})))
-    (is (= 1 (silent-costume-cmd ["costume" "bogus"] {})))))
+  (testing "missing or unknown subcommand returns 2 (usage, sl-7c7i)"
+    (is (= 2 (silent-costume-cmd ["costume"] {})))
+    (is (= 2 (silent-costume-cmd ["costume" "bogus"] {})))))

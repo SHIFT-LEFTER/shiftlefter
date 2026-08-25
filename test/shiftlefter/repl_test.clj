@@ -5,6 +5,7 @@
             [shiftlefter.stepengine.registry :as registry :refer [defstep]]
             [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.costume.wardrobe :as wardrobe]
+            [shiftlefter.browser.chrome :as chrome]
             [babashka.fs :as fs]))
 
 ;; Clear registry, contexts, and reset to vanilla mode before each test
@@ -369,10 +370,31 @@ Feature: Test
         (wardrobe/ensure-dirs! :doomed)
         (wardrobe/save-costume-meta! :doomed repl-test-meta)
         (is (wardrobe/costume-exists? :doomed))
-        ;; Destroy via repl function
-        (let [result (repl/destroy-costume! :doomed)]
-          (is (= :destroyed (:status result)))
-          (is (not (wardrobe/costume-exists? :doomed))))))))
+        ;; Browser dead — destroy proceeds without force (sl-7q7w)
+        (with-redefs [chrome/port-listener-pids (constantly [])
+                      chrome/probe-cdp (constantly {:status :dead})]
+          (let [result (repl/destroy-costume! :doomed)]
+            (is (= :destroyed (:status result)))
+            (is (not (wardrobe/costume-exists? :doomed)))))))))
+
+(deftest test-costume-reexports-destroy-force-passthrough
+  (testing "destroy-costume! passes {:force true} through to the core fn (sl-7q7w)"
+    (with-temp-wardrobe-for-costumes
+      (fn []
+        (wardrobe/ensure-dirs! :live-doomed)
+        (wardrobe/save-costume-meta! :live-doomed repl-test-meta)
+        (let [live (atom true)]
+          (with-redefs [chrome/port-listener-pids (fn [_] (if @live [30906] []))
+                        chrome/probe-cdp (fn [& _] (if @live {:status :alive} {:status :dead}))
+                        chrome/kill-by-pid! (fn [pid] (reset! live false) {:killed true :pid pid})]
+            ;; Without force: refusal, data surfaces to the REPL caller
+            (let [refused (repl/destroy-costume! :live-doomed)]
+              (is (= :costume/browser-live (get-in refused [:error :type])))
+              (is (wardrobe/costume-exists? :live-doomed)))
+            ;; With force: kill + destroy
+            (let [forced (repl/destroy-costume! :live-doomed {:force true})]
+              (is (= :destroyed (:status forced)))
+              (is (not (wardrobe/costume-exists? :live-doomed))))))))))
 
 (deftest test-costume-reexports-not-found
   (testing "re-exports return proper errors"
@@ -497,3 +519,27 @@ Feature: Test
       (is (contains? result :status))
       ;; Reset to vanilla for other tests
       (repl/vanilla!))))
+
+;; -----------------------------------------------------------------------------
+;; Exec-opts parity with the runner (sl-xjx0, Warden W8)
+;; -----------------------------------------------------------------------------
+
+(deftest test-run-mirrors-timing-and-seed
+  (testing "repl/run threads the global :timing rung and a run seed into the
+            engine, mirroring the runner's exec-opts (pre-fix both silently
+            dropped: :timing fell to :default, ctx carried no :seed)"
+    (let [observed (atom nil)]
+      (defstep #"I observe the ctx" [ctx]
+        (reset! observed {:seed (:seed ctx)
+                          :timing (cap/get-run-timing ctx)})
+        nil)
+      (repl/shifted! {:timing {:deadline-ms 1234 :interval-ms 77}})
+      (let [result (repl/run "Feature: T\n  Scenario: S\n    Given I observe the ctx")]
+        (is (= :ok (:status result)))
+        (is (= 1 (-> result :summary :passed)))
+        (testing "the global :timing rung reaches step ctx"
+          (is (= {:deadline-ms 1234 :interval-ms 77} (:timing @observed))))
+        (testing "a fresh positive run seed reaches step ctx AND the result"
+          (is (pos? (long (:seed @observed))))
+          (is (= (:seed @observed) (:seed result))
+              "the returned :seed is the one the run actually used"))))))

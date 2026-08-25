@@ -8,12 +8,26 @@
  :runner {:step-paths ["steps/"]      ;; Where to find step definitions
           :features ["features/"]     ;; Feature corpus for bare `sl run`
           :allow-pending? false       ;; Exit 0 even with pending steps?
-          ;; Capture artifacts into the run's results dir (sl/results/<run>/).
+          ;; Capture artifacts into the run's results dir (sl/results/<stamp>/).
           ;; Kinds: :screenshot :console :page-source (browser); policies:
           ;; :never (default) | :on-failure | :every-step. Recommended:
           ;; :capture {:screenshot :on-failure
           ;;           :console :on-failure}
           }
+
+ ;; --- Timing (the deadline substrate) ---
+ ;; How long oracle steps (should-see, waits-for, receive) poll before a
+ ;; legible timeout, and how often they poll. Unset = per-class defaults
+ ;; (browser verify 3s/100ms, :wait frames 5s/100ms, SMS receive 30s/500ms,
+ ;; custom poll-until 30s/500ms). Resolution: interface-entry :timing >
+ ;; this global map > defaults; every timeout report names the rung that
+ ;; decided it. Mutations never retry; this budget is oracles-only.
+ ;;
+ ;; :timing {:deadline-ms 30000 :interval-ms 500}
+ ;;
+ ;; Per-interface override — a :timing sibling on any :interfaces entry:
+ ;; :interfaces {:sms {:type :sms :adapter :twilio
+ ;;                    :timing {:deadline-ms 60000}}}
 
  ;; --- Shifted mode (the advertised path) ---
  ;; Uncomment to validate scenarios against a project glossary at planning

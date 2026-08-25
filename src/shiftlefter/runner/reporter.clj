@@ -7,7 +7,7 @@
      plan-ordered, lossless. Console, EDN, and JUnit (sl-40to) implement
      `Reporter` and are invoked directly by the runner at lifecycle
      moments. Reporters are NOT bus subscribers.
-   - OBSERVE plane (shiftlefter.runner.events): the async core.async bus —
+   - OBSERVE plane (shiftlefter.events): the async core.async bus —
      fire-and-forget, loss-tolerant, actual completion order. Graph fact
      emission (sl-yia), telemetry, and future out-of-process / remote /
      foreign-language workers live there.
@@ -71,7 +71,8 @@
    return values are ignored."
   (:require [clojure.edn :as edn]
             [clojure.spec.alpha :as s]
-            [clojure.spec.gen.alpha :as gen]))
+            [clojure.spec.gen.alpha :as gen]
+            [shiftlefter.runner.verdict :as verdict]))
 
 ;; -----------------------------------------------------------------------------
 ;; Specs — deliberately open maps; keys added by later beads must extend,
@@ -80,8 +81,10 @@
 ;; -----------------------------------------------------------------------------
 
 (s/def ::run-id string?)
-;; :error (sl-esq): a lifecycle hook threw — infrastructure failure, distinct
-;; from :failed (a step assertion). Scenario-level only; steps never carry it.
+;; :error (sl-esq, family widened sl-7c7i): infrastructure failure — a
+;; lifecycle hook threw, capability provisioning failed, capture failed, or
+;; the harness crashed — distinct from :failed (a step assertion; valid
+;; test, app wrong). Scenario-level only; steps never carry it.
 (s/def ::status #{:passed :failed :pending :skipped :error})
 (s/def ::exit-code int?)
 (s/def ::counts (s/map-of keyword? int?))
@@ -106,10 +109,15 @@
 (s/def ::results-dir string?)
 (s/def ::artifacts-root string?)
 
+;; sl-08f7: the run seed — ALWAYS present on runner-built contexts
+;; (core-record family beside :run-id); opt-un here so bare/defaults
+;; contexts keep their historical shape (the sl-l9nj precedent).
+(s/def ::seed pos-int?)
+
 (s/def ::run-ctx
   (s/keys :req-un [::run-id]
           :opt-un [::started-at ::version ::mode ::project-name ::selection
-                   ::results-dir ::artifacts-root]))
+                   ::results-dir ::artifacts-root ::seed]))
 
 (s/def ::scenario-result
   ;; The per-scenario envelope: today's execute-suite result map for one
@@ -117,8 +125,21 @@
   ;; anything capability/driver-shaped before it reaches this seam.
   (s/keys :req-un [::status]))
 
+;; Run-level status is the verdict projection (sl-7c7i), NOT the scenario
+;; ::status vocabulary — :degraded/:planning-failed/:crashed never appear
+;; on a scenario, and :pending/:skipped/:error never on a run.
+(s/def :shiftlefter.runner.run/status verdict/run-statuses)
+
+;; sl-d7ks: observe-plane events the bus refused at admission during this
+;; run-scope (full buffer — drops over blocking, by design). Absent-when-zero
+;; (anomaly-marker convention): presence is the signal, so pos-int?, not
+;; nat-int?. Results are never affected; observations may be gapped.
+(s/def ::dropped-events pos-int?)
+
 (s/def ::run-summary
-  (s/keys :req-un [::run-id ::exit-code ::counts ::status]))
+  (s/keys :req-un [::run-id ::exit-code ::counts
+                   :shiftlefter.runner.run/status]
+          :opt-un [::dropped-events]))
 
 (def ^:private safe-token-part-re
   ;; Fast-path charset for keyword/symbol name parts (sl-27uh): names made
@@ -276,8 +297,9 @@
      ;; Per-scenario wall clock (D5, sl-40to). Absent on the REPL path.
      (:duration-ms scenario-result)
      (assoc :duration-ms (:duration-ms scenario-result))
-     ;; Scenario-level hook failure (sl-esq): a lifecycle hook threw. Lives
-     ;; on the scenario, never on a step; absent everywhere else.
+     ;; Scenario-level :error (sl-esq/sl-7c7i): the infrastructure-failure
+     ;; family (hook/provisioning/capture/harness). Lives on the scenario,
+     ;; never on a step; absent everywhere else.
      (:error scenario-result)
      (assoc :error (error-envelope (:error scenario-result)))
      ;; Derived-scheduling surfacing (sl-esq round-5 unification): effective
@@ -313,6 +335,30 @@
    untouched."
   [diagnostics]
   (scrub diagnostics))
+
+;; -----------------------------------------------------------------------------
+;; Artifact writes
+;; -----------------------------------------------------------------------------
+
+(defn write-atomically!
+  "Write `content` to `path`: spit to a temp sibling, then ATOMIC_MOVE over
+   the target (the daemon.clj write-edn! pattern). A reader never sees a
+   half-written artifact, and under concurrent invocations a fixed-path
+   write is last-writer-wins instead of torn (sl-luhn; lifted from html.clj
+   where it landed for the HTML half via sl-l9nj). Creates parent dirs.
+   A write/rename failure throws (reporter invariant 4: loud failure)."
+  [^String path content]
+  (let [file (java.io.File. path)
+        dir (or (.getParentFile file) (java.io.File. "."))]
+    (.mkdirs dir)
+    (let [tmp (java.io.File/createTempFile "report" ".tmp" dir)]
+      (spit tmp content)
+      (java.nio.file.Files/move
+       (.toPath tmp) (.toPath file)
+       (into-array java.nio.file.CopyOption
+                   [java.nio.file.StandardCopyOption/ATOMIC_MOVE
+                    java.nio.file.StandardCopyOption/REPLACE_EXISTING])))
+    nil))
 
 ;; -----------------------------------------------------------------------------
 ;; Protocol

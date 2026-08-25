@@ -139,9 +139,10 @@ Feature: Hooked
           (is (= 2 (:exit-code result)))
           (is (str/includes? err "duplicate")))))))
 
-(deftest before-failure-is-red-run-with-error-rendering
-  (testing "a throwing :before = exit 1, scenario :error, console shows the
-            hook failure with dual attribution and the error summary segment"
+(deftest before-failure-is-degraded-run-with-error-rendering
+  (testing "a throwing :before = exit 4 (run degraded, sl-7c7i), scenario
+            :error, console shows the hook failure with dual attribution
+            and the error summary segment"
     (with-temp-project
       (fn [dir]
         (let [fpath (project! dir trivial-feature
@@ -153,7 +154,7 @@ Feature: Hooked
                                     {:paths [fpath]
                                      :config-path (str (fs/path dir "shiftlefter.edn"))
                                      :step-paths [(str (fs/path dir "steps"))]})]
-          (is (= 1 (:exit-code result)) "red run — never exit 2")
+          (is (= 4 (:exit-code result)) "degraded run — never exit 2, never exit 1")
           (is (= :error (-> result :result :scenarios first :status)))
           (is (str/includes? err "ERROR Trivial") "live status line renders ERROR")
           (is (str/includes? err "Hook 'reset-db' failed"))

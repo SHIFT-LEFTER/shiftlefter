@@ -311,7 +311,15 @@
       (is (str/includes? js ".includes(\"..\")")
           "dot-dot segments rejected explicitly")
       (is (str/includes? js ":attachment/error")
-          "failed captures render visibly"))))
+          "failed captures render visibly"))
+    (testing "sl-t86d: the header badge speaks the whole verdict vocabulary"
+      (is (str/includes? js "TOC_STATUS[status]")
+          "renderHeader consults TOC_STATUS — exit 3 reads CRASHED, never FAILED")
+      (is (str/includes? js "\":crashed\": [\"CRASHED\", \"st-error\"]")))
+    (testing "sl-t86d: the st-error badge is actually styled"
+      (is (str/includes? (slurp (io/resource "report/report.css"))
+                         ".run-status.st-error")
+          "PLANNING FAILED / DEGRADED / CRASHED badges need a background"))))
 
 ;; -----------------------------------------------------------------------------
 ;; AC5: macro golden parity — the same real-expansion scenario the JUnit
@@ -419,8 +427,8 @@
         by-name (into {} (map (fn [e] [(-> e :plan :plan/pickle :pickle/name) e]))
                       envs)
         entries (:scenarios manifest)]
-    (testing "run executed as designed"
-      (is (= 1 (:exit-code result)))
+    (testing "run executed as designed (hook-error scenario => degraded, sl-7c7i)"
+      (is (= 4 (:exit-code result)))
       (is (fs/exists? html-file)))
     (testing "every manifest scenario present in the island, none extra"
       (is (= (set (map :name entries)) (set (keys by-name)))))
@@ -529,3 +537,43 @@
       (is (= {:include #{"@corpus-suite"}} (:filter selection))))
     (testing "island scenarios are exactly the selected subset"
       (is (= expected-selected (count (:scenarios island)))))))
+
+;; -----------------------------------------------------------------------------
+;; Invocation TOC (sl-n9c6)
+;; -----------------------------------------------------------------------------
+
+(deftest toc-island-round-trips
+  (let [island-data {:run-ctx {:run-id "r-1" :project-name "proj" :version "0.5.5"
+                               :started-at "2026-08-10T00:00:00"}
+                     :toc {:groups [{:label "alpha" :path "alpha/report.html"
+                                     :exit-code 0 :status :passed
+                                     :counts {:passed 2 :failed 0 :pending 0 :skipped 0}}
+                                    {:label "beta" :path "beta/report.html"
+                                     :exit-code 2 :status :planning-failed}
+                                    {:label "gamma" :exit-code 2 :status :planning-failed}]}
+                     :summary {:run-id "r-1" :exit-code 2 :status :planning-failed}}
+        doc (html/build-document island-data)
+        island (edn/read-string (island-of doc))]
+    (testing "TOC island round-trips: declaration order, statuses, link paths"
+      (is (= (:toc island-data) (:toc island)))
+      (is (= (:summary island-data) (:summary island)))
+      (is (= ["alpha" "beta" "gamma"]
+             (mapv :label (get-in island [:toc :groups])))))))
+
+(deftest write-invocation-toc-primary-and-copy
+  (let [dir (str (fs/create-temp-dir {:prefix "sl-toc-test-"}))]
+    (try
+      (let [primary (str (fs/path dir "run" "report.html"))
+            stable (str (fs/path dir "stable.html"))
+            island {:run-ctx {:run-id "r"} :toc {:groups []}
+                    :summary {:run-id "r" :exit-code 0 :status :passed}}]
+        (html/write-invocation-toc! primary stable island)
+        (testing "primary written; stable path is a byte copy (l9nj idiom)"
+          (is (fs/exists? primary))
+          (is (= (slurp primary) (slurp stable))))
+        (testing "nil primary writes the stable path only (all-groups-planning-failed edge)"
+          (fs/delete primary)
+          (html/write-invocation-toc! nil stable island)
+          (is (not (fs/exists? primary)))
+          (is (fs/exists? stable))))
+      (finally (fs/delete-tree dir)))))

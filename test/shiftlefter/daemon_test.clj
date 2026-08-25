@@ -217,6 +217,75 @@
         "daemon serve cannot recurse into the daemon")))
 
 ;; -----------------------------------------------------------------------------
+;; dispatch! — contention: busy = REJECT, never a silent queue (sl-luhn)
+;; -----------------------------------------------------------------------------
+
+(defn- capturing
+  "Run thunk with *out*/*err* captured; return {:ret r :out s :err s}."
+  [thunk]
+  (let [ow (java.io.StringWriter.)
+        ew (java.io.StringWriter.)]
+    (binding [*out* ow *err* ew]
+      (let [r (thunk)]
+        {:ret r :out (str ow) :err (str ew)}))))
+
+(deftest dispatch-busy-rejects-second-invocation
+  ;; tryLock semantics at the unit level (the cross-process half lives in the
+  ;; ^:daemon warm-e2e suite): while dispatch A executes a run whose step
+  ;; blocks on a release file, dispatch B is rejected with exit 2 /
+  ;; :daemon/busy — stderr one-liner bare, the exit-2 planning-summary shape
+  ;; under --edn — and A completes undisturbed. Marker paths are ABSOLUTE:
+  ;; the step runs with the test JVM's cwd, not the bound *user-cwd*.
+  (let [proj    (str (fs/create-temp-dir))
+        started (str (fs/path proj "STARTED"))
+        release (str (fs/path proj "RELEASE"))
+        sdir    (str (fs/path proj "steps"))]
+    (fs/create-dirs sdir)
+    (spit (str (fs/path proj "f.feature"))
+          "Feature: F\n\n  Scenario: S\n    Given a slow thing\n")
+    (spit (str (fs/path sdir "slow.clj"))
+          (str "(ns slow (:require [shiftlefter.stepengine.registry :refer [defstep]]))\n"
+               "(defstep #\"a slow thing\" []\n"
+               "  (spit \"" started "\" \"x\")\n"
+               "  (loop [i 0]\n"
+               "    (when (and (< i 300)\n"
+               "               (not (.exists (java.io.File. \"" release "\"))))\n"
+               "      (Thread/sleep 50)\n"
+               "      (recur (inc i)))))\n"))
+    (let [fut (future (silently #(daemon/dispatch!
+                                  {:argv ["run" "f.feature" "--step-paths" "steps"]
+                                   :cwd proj})))]
+      (try
+        (is (wait-for #(.exists (jio/file started)) 15000)
+            "precondition: the first run is executing its blocking step")
+        (testing "bare busy reject: exit 2 + one stderr line"
+          (let [{:keys [ret err]} (capturing #(daemon/dispatch!
+                                              {:argv ["fmt" "--check" "f.feature"]
+                                               :cwd proj}))]
+            (is (= {:exit 2} ret) "second dispatch rejected, not queued")
+            (is (re-find #"another run is in progress" err)
+                "stderr carries the busy one-liner")))
+        (testing "--edn busy reject: exit-2 planning-summary shape on stdout"
+          (let [{:keys [ret out err]} (capturing #(daemon/dispatch!
+                                                  {:argv ["run" "f.feature" "--edn"]
+                                                   :cwd proj}))
+                summary (edn/read-string out)]
+            (is (= {:exit 2} ret))
+            (is (= 2 (:run/exit-code summary)))
+            (is (= :planning-failed (:run/status summary)))
+            (is (= :daemon/busy (-> summary :planning :errors first :type))
+                "structured error type rides the planning block")
+            (is (not (re-find #"another run is in progress" err))
+                "stderr line suppressed under --edn (machine contract)")))
+        (spit release "go")
+        (is (= {:exit 0} (deref fut 30000 :timeout))
+            "first run completed undisturbed by the rejected dispatches")
+        (finally
+          (spit release "go")
+          (deref fut 30000 :timeout)
+          (fs/delete-tree proj))))))
+
+;; -----------------------------------------------------------------------------
 ;; serve! — idle timeout reaps and cleans up
 ;; -----------------------------------------------------------------------------
 

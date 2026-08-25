@@ -170,11 +170,16 @@
         (is (= 0 (:exit-code result)))
         (is (some? run-dir) "the top-level setup-run result carries :results-dir")
         (let [report-a (str (fs/path run-dir "group-a" "report.html"))
-              report-b (str (fs/path run-dir "group-b" "report.html"))]
+              report-b (str (fs/path run-dir "group-b" "report.html"))
+              toc (str (fs/path run-dir "report.html"))]
           (is (fs/exists? report-a) "each explicit group gets its own primary")
           (is (fs/exists? report-b))
-          (is (= (slurp report-b) (slurp stable))
-              "stable path = copy of the LAST group's report (last-writer-wins)")
-          (is (not= (slurp report-a) (slurp stable))
-              "and not the first group's")))
+          ;; sl-n9c6: the stable path is the INVOCATION's, not the last
+          ;; group's — a run-root TOC listing every group, byte-copied to
+          ;; the stable path (last-writer-wins died with the F3 fix).
+          (is (fs/exists? toc) "multi-group run writes the run-root TOC")
+          (is (= (slurp toc) (slurp stable))
+              "stable path = byte copy of the invocation TOC")
+          (is (not= (slurp report-a) (slurp stable)))
+          (is (not= (slurp report-b) (slurp stable)))))
       (finally (fs/delete-tree tmp)))))

@@ -47,10 +47,13 @@
    - `reset-ctx!` — reset session context to empty
    - `reset-ctxs!`— reset all named contexts
 
-   ### Costumes (Chrome-owned authenticated sessions that survive JVM restarts)
+   ### Costumes (authenticated sessions durable across JVM restarts —
+   ### the persisted profile survives; Chrome itself is a JVM child and
+   ### is relaunched on connect, sl-t8bj)
    - `init-costume!`    — create new costume
    - `connect-costume!` — reconnect to existing costume
-   - `destroy-costume!` — kill Chrome and delete costume
+   - `relaunch-costume!` — launch-only reopen of an existing costume (human re-login)
+   - `destroy-costume!` — delete costume (refuses while live; `{:force true}` kills)
    - `list-costumes`    — list all costumes with status
 
    ### Utilities
@@ -64,6 +67,7 @@
             [shiftlefter.runner.config :as config]
             [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.capabilities.ctx :as cap]
+            [shiftlefter.step :as step]
             [shiftlefter.costume :as costume]
             [shiftlefter.costume.browser :as cbrowser]
             [shiftlefter.webdriver.etaoin.browser :as ebrowser]
@@ -109,8 +113,11 @@
 (defn reset-ctxs!
   "Reset all named contexts, closing each context's browser sessions first.
 
-   Persistent (costume) capabilities are deliberately skipped — a costume's
-   Chrome outlives the REPL session; use `destroy-costume!` to kill one.
+   Persistent (costume) capabilities are deliberately skipped — a costume
+   outlives a context reset, so cleanup must not close it; the costume's
+   Chrome and profile are managed by init/connect/destroy-costume!
+   (Chrome itself is a JVM child and dies with the REPL — durability is
+   the persisted profile plus relaunch, sl-t8bj).
 
    Returns a vector of cleanup actions, one per :web capability:
    :closed, :skipped-persistent, :close-failed (with :error), or :none."
@@ -306,8 +313,9 @@
   "Close the :web browser sessions of a named context (sl-tss7).
 
    Mode-aware: a `:persistent` capability (a worn costume) is deliberately
-   SKIPPED — a costume's Chrome outlives the REPL session, and only
-   `destroy-costume!` kills it. Everything else is unwrapped to its raw
+   SKIPPED — a costume outlives a context reset, and its Chrome and
+   profile belong to init/connect/destroy-costume!, not to context
+   cleanup (sl-t8bj). Everything else is unwrapped to its raw
    driver map and actually closed; a failed close is reported as such,
    never as :closed.
 
@@ -324,7 +332,14 @@
       (mapv (fn [[k {:keys [impl mode]}]]
               (if (= :persistent mode)
                 {:action :skipped-persistent :ctx-name ctx-name :capability k}
-                (let [r (session/close-session! (unwrap-driver impl))]
+                ;; quit-driver! (sl-vmc5): the full reap — session deleted
+                ;; AND the spawned chromedriver process killed. The prior
+                ;; close-session! could not close a REAL raw etaoin driver
+                ;; (it reads :webdriver-url, which real drivers don't carry,
+                ;; and its rebuilt map dropped :process), so a provisioned
+                ;; ephemeral would have reported :close-failed and leaked
+                ;; its driver.
+                (let [r (session/quit-driver! (unwrap-driver impl))]
                   (if (:error r)
                     {:action :close-failed :ctx-name ctx-name :capability k
                      :error (:error r)}
@@ -402,7 +417,11 @@
 
    Assumes step definitions are already loaded via `defstep`.
 
-   In Shifted mode (see `shifted!`), SVO validation is performed.
+   In Shifted mode (see `shifted!`), SVO validation is performed, and the
+   config's `:interfaces` drive the engine's capability provisioning
+   exactly as in the runner (sl-vmc5): bare browsers (and other
+   capabilities) provision on demand and ephemeral ones are cleaned up at
+   each scenario's end. Vanilla mode provisions nothing.
 
    Returns:
    - {:status :ok :results {...} :summary {...}}
@@ -438,9 +457,33 @@
                 (bind/bind-suite pickles stepdefs))]
           (if-not runnable?
             {:status :bind-error :diagnostics diagnostics}
-            (let [results (exec/execute-suite plans)]
+            ;; Thread the loaded config's :interfaces so the engine's lazy
+            ;; provisioning + per-scenario ephemeral cleanup run exactly as
+            ;; in the runner (sl-vmc5). Vanilla (no config) → nil, engine
+            ;; skips provisioning as before.
+            ;;
+            ;; sl-xjx0 (Warden W8): mirror the runner's exec-opts subset the
+            ;; ENGINE consumes — the global :timing rung (sl-99u2 ladder;
+            ;; without it repl/run silently fell to :default while sl run
+            ;; honored the config) and a fresh run seed (sl-08f7; hook
+            ;; payloads + step ctx carry it, sub-seeds derive from it).
+            ;; MIRROR NOTE: the runner builds its exec-opts at
+            ;; runner/core.clj (search :run-seed). The engine consumes
+            ;; five: :interfaces :timing :run-seed (mirrored here) plus
+            ;; :provisioning and :max-parallel — skipped here ON PURPOSE:
+            ;; repl/run stays lazy + sequential (sl-vmc5) while sl run
+            ;; defaults :eager. A new engine-consumed exec-opt added
+            ;; there must be hand-mirrored here — or its omission
+            ;; recorded — and vice versa.
+            (let [run-seed (.nextLong (java.util.concurrent.ThreadLocalRandom/current)
+                                      1 Long/MAX_VALUE)
+                  results (exec/execute-suite plans
+                                              {:interfaces (:interfaces config)
+                                               :timing (:timing config)
+                                               :run-seed run-seed})]
               {:status :ok
                :results results
+               :seed run-seed
                :diagnostics diagnostics  ; Include any SVO warnings
                :summary {:scenarios (count (:scenarios results))
                          :passed (count (filter #(= :passed (:status %)) (:scenarios results)))
@@ -573,9 +616,33 @@
       (cap/assoc-capability current-ctx :web (:browser subject-info) :persistent ctx-name)
       current-ctx)))
 
+(defn- ensure-step-capability
+  "Bare-caller lazy provisioning (sl-vmc5): when the matched stepdef
+   declares an :interface, a loaded config (`shifted!`) has an
+   `:interfaces` entry for the resolved instance, and the ctx lacks the
+   capability, provision it via the engine's lazy primitive — the exact
+   path the :lazy mode was built for (runner/config.clj's own comment:
+   bare REPL callers have no plan to scan). The capability lands
+   :ephemeral in the NAMED ctx, so `reset-ctxs!`/`clear!` close it (the
+   sl-tss7 :closed branch, now REPL-reachable). No config, or no entry
+   for the instance → ctx unchanged (the step's own no-session error,
+   with its hint, still speaks).
+
+   Returns {:ok ctx'} or {:error {...}}."
+  [ctx ctx-name stepdef]
+  (let [iface-type (get-in stepdef [:metadata :interface])
+        interfaces (:interfaces @repl-config)
+        instance (when iface-type (step/interface-instance ctx iface-type))]
+    (if (and instance (get interfaces instance))
+      (exec/ensure-capability-for-svo ctx {:interface instance :subject ctx-name}
+                                      interfaces nil)
+      {:ok ctx})))
+
 (defn- execute-step-in-context
   "Execute a step with a given context, returning updated context and result.
-   If ctx-name matches a connected persistent subject, its browser is injected."
+   If ctx-name matches a connected persistent subject, its browser is
+   injected; otherwise, with a loaded `:interfaces` config, a bare
+   capability is lazily provisioned (sl-vmc5)."
   [text current-ctx ctx-name]
   (let [ctx-with-browser (inject-subject-browser ctx-name current-ctx)
         stepdefs (registry/all-stepdefs)
@@ -584,19 +651,32 @@
       0 {:status :undefined :text text :ctx current-ctx}
 
       1 (let [{:keys [stepdef captures]} (first matches)
-              step-map {:step/text text}
-              exec-ctx {:step step-map :scenario ctx-with-browser}
-              result (exec/invoke-step {:fn (:fn stepdef)
-                                        :arity (:arity stepdef)
-                                        :captures captures}
-                                       captures
-                                       exec-ctx)
-              new-ctx (if (= :passed (:status result))
-                        (or (:scenario result) current-ctx)
-                        current-ctx)]
-          {:status (:status result)
-           :ctx new-ctx
-           :error (:error result)})
+              provisioned (ensure-step-capability ctx-with-browser ctx-name stepdef)]
+          (if (:error provisioned)
+            {:status :failed :text text :ctx current-ctx :error (:error provisioned)}
+            (let [step-map {:step/text text}
+                  exec-ctx {:step step-map :scenario (:ok provisioned)}
+                  result (exec/invoke-step {:fn (:fn stepdef)
+                                            :arity (:arity stepdef)
+                                            :captures captures}
+                                           captures
+                                           exec-ctx)
+                  new-ctx (cond
+                            (= :passed (:status result))
+                            (or (:scenario result) current-ctx)
+                            ;; Provisioning no-oped → prior behavior: failed
+                            ;; steps leave the ctx untouched.
+                            (identical? (:ok provisioned) ctx-with-browser)
+                            current-ctx
+                            ;; A capability was provisioned and the step then
+                            ;; failed: KEEP the provisioned ctx — dropping it
+                            ;; would strand a live browser where reset-ctxs!/
+                            ;; clear! can never close it.
+                            :else
+                            (:ok provisioned))]
+              {:status (:status result)
+               :ctx new-ctx
+               :error (:error result)})))
 
       {:status :ambiguous
        :text text
@@ -621,6 +701,13 @@
 
    If the step text already starts with `:ctx-name`, no prepending occurs
    (idempotent — you can also write the full step text explicitly).
+
+   Browsers (sl-vmc5): a connected costume's browser is injected for its
+   subject; otherwise, when a loaded config (`shifted!`) declares the
+   step's interface under `:interfaces`, a BARE capability is provisioned
+   on demand (the engine's lazy path) and lives in this named context
+   until `reset-ctxs!`/`clear!` closes it. With neither, browser steps
+   fail with `:browser/no-session` naming both options.
 
    In Shifted mode with `:unknown-subject :warn`, warns but proceeds.
    In Shifted mode with `:unknown-subject :error`, returns error without executing.
@@ -732,28 +819,65 @@
       (swap! connected-subjects assoc costume-name {:browser (:browser result)}))
     result))
 
+(defn relaunch-costume!
+  "Launch-only relaunch of an existing costume — the human re-login flow.
+
+   Opens the costume's Chrome with NO WebDriver session attached, so a
+   human can re-authenticate an expired credential. The arc:
+
+   ```clojure
+   (relaunch-costume! :finance)   ; browser opens on the persisted profile
+   ;; ... human logs in by hand ...
+   (connect-costume! :finance)    ; attach and drive as usual
+   ```
+
+   Already-running Chrome is an idempotent success
+   (`{:status :already-running ...}`); relaunch never kills a running
+   browser (use `destroy-costume!` + `init-costume!` for a fresh start).
+   Launch-only: nothing to register in connected-subjects until
+   `connect-costume!`.
+
+   Returns:
+   - `{:status :launched | :already-running :costume <name> :port <int> :pid <long>}`
+   - Error: `{:error {:type :costume/... ...}}`
+
+   See `shiftlefter.costume/relaunch-costume!` for full documentation."
+  ([costume-name]
+   (relaunch-costume! costume-name {}))
+  ([costume-name opts]
+   (costume/relaunch-costume! costume-name opts)))
+
 (defn destroy-costume!
   "Destroy a costume.
 
-   Kills the Chrome process and deletes the entire costume directory
-   (including Chrome user data like cookies, history, etc.).
+   Deletes the costume directory (Chrome user data: cookies, history, etc.)
+   once its browser is confirmed dead. While the browser is still live —
+   verified against the debug port, not the recorded pid — it REFUSES with
+   `:costume/browser-live` unless called with `{:force true}`, which kills
+   the port's actual owner first (sl-7q7w).
 
    Returns:
    - Success: `{:status :destroyed :costume <name>}`
-   - Error: `{:error {:type :costume/not-found ...}}`
+   - Refusal/error: `{:error {:type :costume/not-found | :costume/browser-live
+                              | :costume/meta-unreadable | :costume/destroy-failed
+                              ...}}`
 
    Example:
    ```clojure
    (destroy-costume! :finance)
+   ;; => {:error {:type :costume/browser-live ...}}   ; still running
+   (destroy-costume! :finance {:force true})
    ;; => {:status :destroyed :costume :finance}
    ```
 
    See `shiftlefter.costume/destroy-costume!` for full documentation."
-  [costume-name]
-  (let [result (costume/destroy-costume! costume-name)]
-    (when (= :destroyed (:status result))
-      (swap! connected-subjects dissoc costume-name))
-    result))
+  ([costume-name]
+   (destroy-costume! costume-name {}))
+  ([costume-name opts]
+   (let [result (costume/destroy-costume! costume-name opts)]
+     (when (= :destroyed (:status result))
+       (swap! connected-subjects dissoc costume-name))
+     result)))
 
 (defn list-costumes
   "List all costumes with their status.

@@ -1,6 +1,7 @@
 EXIT 0
 --- STDOUT ---
 --- STDERR ---
+run seed: 42
 2 scenario(s) bound successfully (dry run)
 hooks:
   Seeded scenario: audit, reset-db

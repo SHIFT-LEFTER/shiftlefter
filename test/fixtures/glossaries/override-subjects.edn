@@ -1,4 +1,5 @@
-;; Subject glossary with override flag
+;; Subject glossary carrying the REMOVED :override-defaults flag (sl-h7c3) —
+;; input for the presence-diagnostic test: loading this must warn.
 {:override-defaults true
  :subjects
  {:bob {:desc "Only Bob allowed"}}}

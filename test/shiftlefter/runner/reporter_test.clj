@@ -6,7 +6,7 @@
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [shiftlefter.runner.core :as rc]
-            [shiftlefter.runner.events :as events]
+            [shiftlefter.events :as events]
             [shiftlefter.runner.reporter :as reporter]))
 
 (defrecord ExampleRecord [a b])

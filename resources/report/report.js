@@ -288,19 +288,24 @@ function el(tag, className, textContent) {
 
 function renderHeader(runCtx, summary, scenarios) {
   const header = el("header", "run-header");
-  const failed = summary ? k(summary, ":exit-code") !== 0 : null;
-  // sl-6hsd: exit 2 before execution — nothing ran; the badge must not
-  // pretend scenarios failed.
-  const planningFailed = summary && k(summary, ":status") === ":planning-failed";
 
   const h1 = el("h1", null, k(runCtx, ":project-name") || "ShiftLefter run");
-  if (failed !== null) {
-    const badge = el(
-      "span",
-      "run-status " + (planningFailed ? "st-error" : failed ? "st-failed" : "st-passed"),
-      planningFailed ? "PLANNING FAILED" : failed ? "FAILED" : "PASSED",
-    );
-    h1.appendChild(badge);
+  // sl-6hsd: exit 2 before execution — nothing ran; the counts and duration
+  // blocks below stay off. (Still consumed at two sites further down; the
+  // sl-t86d badge rewrite dropped this binding and blanked every report —
+  // caught at the sl-73lb site regen, the first browser render since.)
+  const planningFailed = summary && k(summary, ":status") === ":planning-failed";
+  if (summary) {
+    // One status vocabulary for header badge and TOC alike (sl-t86d):
+    // TOC_STATUS carries all five verdict statuses, so exit 2 never
+    // pretends scenarios failed (sl-6hsd), exit 4 never pretends the app
+    // failed a valid test (sl-7c7i), and exit 3 reads CRASHED — not the
+    // FAILED misattribution the old boolean chain produced.
+    const status = k(summary, ":status");
+    const entry =
+      TOC_STATUS[status] ||
+      (k(summary, ":exit-code") !== 0 ? ["FAILED", "st-failed"] : ["PASSED", "st-passed"]);
+    h1.appendChild(el("span", "run-status " + entry[1], entry[0]));
   }
   header.appendChild(h1);
 
@@ -310,6 +315,7 @@ function renderHeader(runCtx, summary, scenarios) {
     fmtMs(totalMs),
     k(runCtx, ":version") ? "v" + k(runCtx, ":version") : null,
     k(runCtx, ":mode") ? k(runCtx, ":mode").slice(1) + " mode" : null,
+    k(runCtx, ":seed") ? "seed " + k(runCtx, ":seed") : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -766,6 +772,83 @@ function renderDiagnostics(runCtx, diagnostics) {
   return section;
 }
 
+// --- Invocation TOC (sl-n9c6) -----------------------------------------------
+// Multi-group runs embed {:toc {:groups [...]}} instead of :scenarios; the
+// stable-path copy is byte-identical to the run-root primary, so links are
+// RELATIVE and resolve only inside the run dir — the anchor text IS the
+// path, so at the stable location the label still names the target (the
+// renderAttachment degradation pattern).
+
+const TOC_STATUS = {
+  ":passed": ["PASSED", "st-passed"],
+  ":failed": ["FAILED", "st-failed"],
+  ":planning-failed": ["PLANNING FAILED", "st-error"],
+  ":degraded": ["DEGRADED", "st-error"],
+  ":crashed": ["CRASHED", "st-error"],
+};
+
+function tocCountsLine(counts) {
+  if (!counts) return "—";
+  const parts = [];
+  for (const status of [":passed", ":failed", ":error", ":pending", ":skipped"]) {
+    const n = k(counts, status) || 0;
+    if (n > 0) parts.push(n + " " + status.slice(1));
+  }
+  return parts.length ? parts.join(", ") : "0 scenarios";
+}
+
+function renderTocPage(runCtx, summary, toc) {
+  const app = document.getElementById("app");
+  const header = el("header", "run-header");
+  const h1 = el("h1", null, (k(runCtx, ":project-name") || "ShiftLefter") + " — invocation");
+  const [statusWord, statusCls] = TOC_STATUS[k(summary, ":status")] || ["", "st-error"];
+  if (statusWord) h1.appendChild(el("span", "run-status " + statusCls, statusWord));
+  header.appendChild(h1);
+  const meta = [
+    k(runCtx, ":started-at"),
+    k(runCtx, ":version") ? "v" + k(runCtx, ":version") : null,
+    k(runCtx, ":seed") ? "seed " + k(runCtx, ":seed") : null,
+    k(summary, ":run-id") ? "run " + k(summary, ":run-id") : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  header.appendChild(el("p", "run-meta", meta));
+  app.appendChild(header);
+
+  const table = el("table", "toc-table");
+  const thead = el("thead");
+  const headRow = el("tr");
+  for (const label of ["Group", "Status", "Scenarios", "Report"]) {
+    headRow.appendChild(el("th", null, label));
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = el("tbody");
+  for (const g of k(toc, ":groups") || []) {
+    const row = el("tr");
+    row.appendChild(el("td", "toc-group", k(g, ":label") || "(unlabeled)"));
+    const [word, cls] = TOC_STATUS[k(g, ":status")] || [String(k(g, ":status") || ""), "st-error"];
+    const statusCell = el("td");
+    statusCell.appendChild(el("span", "run-status " + cls, word));
+    statusCell.appendChild(el("span", "toc-exit", " exit " + k(g, ":exit-code")));
+    row.appendChild(statusCell);
+    row.appendChild(el("td", "toc-counts", tocCountsLine(k(g, ":counts"))));
+    const pageCell = el("td", "toc-page");
+    const path = k(g, ":path");
+    if (safeRelPath(path)) {
+      const a = el("a", "toc-link", path);
+      a.href = path; // property assignment on a created node — see SAFETY
+      pageCell.appendChild(a);
+    } else {
+      pageCell.appendChild(el("span", "toc-no-page", "(no page — see console/EDN output)"));
+    }
+    row.appendChild(pageCell);
+    tbody.appendChild(row);
+  }
+  table.appendChild(tbody);
+  app.appendChild(table);
+}
+
 function render() {
   const island = document.getElementById("run-data");
   const data = parseEdn(island.textContent);
@@ -774,6 +857,20 @@ function render() {
   const summary = k(data, ":summary");
 
   const app = document.getElementById("app");
+  const toc = k(data, ":toc");
+  if (toc) {
+    renderTocPage(runCtx, summary, toc);
+    app.appendChild(
+      el(
+        "footer",
+        "run-footer",
+        "Generated by ShiftLefter" +
+          (k(runCtx, ":version") ? " v" + k(runCtx, ":version") : "") +
+          (k(runCtx, ":run-id") ? " · run " + k(runCtx, ":run-id") : ""),
+      ),
+    );
+    return;
+  }
   app.appendChild(renderHeader(runCtx, summary, scenarios));
   if (k(summary, ":status") === ":planning-failed") {
     app.appendChild(

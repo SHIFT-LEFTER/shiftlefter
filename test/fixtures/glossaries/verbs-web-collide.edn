@@ -1,0 +1,8 @@
+;; Collides with the builtin :click on purpose — provenance tests (sl-0gfc)
+;; assert the :config-override marker and the wholesale-override semantics.
+
+{:type :web
+ :verbs
+ {:click {:desc "Project click override"
+          :frames {:default {:args []
+                             :pattern "S clicks O"}}}}}

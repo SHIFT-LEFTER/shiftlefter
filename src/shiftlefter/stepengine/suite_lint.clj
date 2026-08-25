@@ -14,17 +14,27 @@
    (vanilla mode is exempt).
 
    - `:stepdef/undefined-interface`
-     A matched stepdef declares `:interface :foo` but no `:foo` entry
-     exists in the resolved `:interfaces` config. Surfaced once at the
-     stepdef's source file:line.
+     A matched stepdef declares `:interface :foo` — an interface TYPE
+     since sl-s2oa — but no configured interface instance provides that
+     type (an entry without :type reads as an instance of the type named
+     by its own key). Surfaced once at the stepdef's source file:line.
+     This is also the migration signal for pre-s2oa custom stepdefs that
+     pinned a config instance NAME in their metadata.
 
    - `:stepdef/missing-capability`
      A matched stepdef declares `:requires-protocols [...]` but the
-     configured adapter for its interface doesn't `:provides` them.
-     Lifted from sl-ewn's per-step bind-time check: same shape, but
-     reported once per stepdef, against the stepdef's source — not once
-     per use. Skipped for stepdefs whose interface is itself undefined
-     (the undefined-interface issue subsumes it).
+     adapter of an interface INSTANCE the suite actually resolves it to
+     doesn't `:provides` them (sl-s2oa: bound plans carry resolved
+     instances; a stepdef with no resolvable instances falls back to
+     every instance of its type). Lifted from sl-ewn's per-step
+     bind-time check: same shape, but reported once per (stepdef,
+     instance), against the stepdef's source — not once per use.
+     Skipped for stepdefs whose interface type is itself undefined
+     (the undefined-interface issue subsumes it). Also skipped when the
+     instance's adapter is absent from the registry (sl-8cvd P2-2):
+     registry membership is owned by the plan-aware exact check
+     (`setup/bound-adapter-errors`, sl-kkoh) — this lint only judges
+     the capabilities of adapters that exist.
 
    - `:glossary/orphan-type`
      A user-declared verb glossary path targets `:type :foo` but no
@@ -72,72 +82,119 @@
 ;; Check 1 — :stepdef/undefined-interface
 ;; -----------------------------------------------------------------------------
 
+(defn configured-types
+  "The set of interface TYPES the config provides (sl-s2oa): each entry's
+   :type, an entry without :type reading as the type named by its own key
+   (the run path never normalizes config, so type-less entries exist)."
+  [interfaces]
+  (into #{} (map (fn [[nm idef]] (or (:type idef) nm))) interfaces))
+
 (defn- check-undefined-interface
-  "Returns an issue if `stepdef`'s declared interface isn't configured.
-   Stepdefs without a declared interface (legacy / cross-interface) are
-   silently skipped."
-  [stepdef configured-iface-keys]
+  "Returns an issue if no configured interface instance provides
+   `stepdef`'s declared interface TYPE (sl-s2oa: stepdef :interface
+   metadata means the TYPE — a stepdef still pinning a pre-s2oa config
+   instance NAME lands here, which is the migration signal). Stepdefs
+   without a declared interface (legacy / cross-interface) are silently
+   skipped."
+  [stepdef configured-type-set]
   (when-let [iface (get-in stepdef [:metadata :interface])]
-    (when-not (contains? configured-iface-keys iface)
+    (when-not (contains? configured-type-set iface)
       {:type       :stepdef/undefined-interface
        :severity   :error
        :stepdef    (stepdef-summary stepdef)
        :interface  iface
-       :configured (vec configured-iface-keys)
+       :configured (vec (sort configured-type-set))
        :message    (str "Stepdef at " (format-source (:source stepdef))
                         " declares :interface " iface
-                        " but no interface with that name is configured."
-                        " Configured interfaces: "
-                        (pr-str (vec configured-iface-keys)) ".")})))
+                        " but no configured interface provides that type"
+                        " (stepdef :interface metadata names an interface"
+                        " TYPE; the [name] step annotation selects an"
+                        " instance). Configured types: "
+                        (pr-str (vec (sort configured-type-set))) ".")})))
 
 ;; -----------------------------------------------------------------------------
 ;; Check 2 — :stepdef/missing-capability
 ;; -----------------------------------------------------------------------------
 
+(defn- instances-of-type
+  "Sorted names of configured instances providing `iface-type` (same
+   name-as-type fallback as `configured-types`)."
+  [interfaces iface-type]
+  (->> interfaces
+       (keep (fn [[nm idef]] (when (= iface-type (or (:type idef) nm)) nm)))
+       sort
+       vec))
+
+(defn- check-instance-capability
+  "One `:stepdef/missing-capability` issue if `instance`'s configured
+   adapter doesn't provide all of `stepdef`'s `:requires-protocols`."
+  [stepdef interfaces adapter-registry instance]
+  (let [required     (get-in stepdef [:metadata :requires-protocols])
+        iface        (get-in stepdef [:metadata :interface])
+        adapter-name (get-in interfaces [instance :adapter])
+        provides     (adapters/provides adapter-name adapter-registry)
+        missing      (vec (remove provides required))]
+    (cond
+      (nil? adapter-name)
+      {:type      :stepdef/missing-capability
+       :severity  :error
+       :stepdef   (stepdef-summary stepdef)
+       :interface instance
+       :interface-type iface
+       :adapter   nil
+       :missing   (vec required)
+       :provides  #{}
+       :message   (str "Stepdef at " (format-source (:source stepdef))
+                       " requires protocols " (pr-str required)
+                       " under interface " instance " (type " iface ")"
+                       " but no adapter is configured for that interface.")}
+
+      ;; Adapter named but absent from the registry: registry MEMBERSHIP is
+      ;; owned by the plan-aware exact check (setup/bound-adapter-errors,
+      ;; sl-kkoh) — `provides` returns the empty set for an unknown adapter,
+      ;; so falling through to the arm below told the false story "only
+      ;; provides []. Configure an adapter that supports the missing
+      ;; capability" and shadowed the exact check (sl-8cvd, P2-2).
+      (not (contains? adapter-registry adapter-name))
+      nil
+
+      (seq missing)
+      {:type      :stepdef/missing-capability
+       :severity  :error
+       :stepdef   (stepdef-summary stepdef)
+       :interface instance
+       :interface-type iface
+       :adapter   adapter-name
+       :missing   missing
+       :provides  (set provides)
+       :message   (str "Stepdef at " (format-source (:source stepdef))
+                       " requires " (pr-str missing)
+                       " under interface " instance " (type " iface ")"
+                       " but configured adapter " adapter-name
+                       " only provides " (pr-str (vec provides))
+                       ". Configure an adapter that supports the missing"
+                       " capability.")})))
+
 (defn- check-missing-capability
-  "Returns an issue if `stepdef`'s `:requires-protocols` aren't all
-   provided by the adapter configured for its `:interface`. Skips
-   stepdefs whose interface is itself undefined (those are subsumed by
-   `:stepdef/undefined-interface`) and stepdefs without an interface."
+  "Returns issues for each configured interface INSTANCE the stepdef
+   resolves to whose adapter doesn't provide the stepdef's
+   `:requires-protocols` (sl-s2oa). Instances checked are the
+   `:used-instances` the bound plans resolved this stepdef to (falling
+   back to every configured instance of the stepdef's type when none —
+   e.g. a stepdef without :svo metadata). Unconfigured instance names
+   (type-as-name fallbacks) are skipped — `:stepdef/undefined-interface`
+   subsumes them. Stepdefs without an interface are skipped."
   [stepdef interfaces adapter-registry]
   (let [meta     (:metadata stepdef)
         iface    (:interface meta)
         required (:requires-protocols meta)]
-    (when (and (seq required)
-               iface
-               (contains? interfaces iface))
-      (let [adapter-name (get-in interfaces [iface :adapter])
-            provides     (adapters/provides adapter-name adapter-registry)
-            missing      (vec (remove provides required))]
-        (cond
-          (nil? adapter-name)
-          {:type      :stepdef/missing-capability
-           :severity  :error
-           :stepdef   (stepdef-summary stepdef)
-           :interface iface
-           :adapter   nil
-           :missing   (vec required)
-           :provides  #{}
-           :message   (str "Stepdef at " (format-source (:source stepdef))
-                           " requires protocols " (pr-str required)
-                           " under interface " iface
-                           " but no adapter is configured for that interface.")}
-
-          (seq missing)
-          {:type      :stepdef/missing-capability
-           :severity  :error
-           :stepdef   (stepdef-summary stepdef)
-           :interface iface
-           :adapter   adapter-name
-           :missing   missing
-           :provides  (set provides)
-           :message   (str "Stepdef at " (format-source (:source stepdef))
-                           " requires " (pr-str missing)
-                           " under interface " iface
-                           " but configured adapter " adapter-name
-                           " only provides " (pr-str (vec provides))
-                           ". Configure an adapter that supports the missing"
-                           " capability.")})))))
+    (when (and (seq required) iface)
+      (let [candidates (or (seq (sort (:used-instances stepdef)))
+                           (instances-of-type interfaces iface))
+            configured (filter #(contains? interfaces %) candidates)]
+        (seq (keep #(check-instance-capability stepdef interfaces
+                                               adapter-registry %)
+                   configured))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Check 3 — :glossary/orphan-type
@@ -174,8 +231,11 @@
 
 (defn used-stepdef-infos
   "Project bound steps in `plans` to the unique stepdef-info maps the
-   lint checks need (`:pattern-src`, `:source`, `:metadata`). Dedupe by
-   `:stepdef/id` so a stepdef matched by N steps yields one info map.
+   lint checks need (`:pattern-src`, `:source`, `:metadata`, plus
+   `:used-instances` — the set of resolved interface INSTANCES the
+   suite's bound SVOs execute this stepdef on, sl-s2oa). Dedupe by
+   `:stepdef/id` so a stepdef matched by N steps yields one info map
+   with the union of its used instances.
 
    Only stepdefs from `:status :matched` bound steps are included —
    undefined/ambiguous/synthetic steps don't carry a stepdef to lint."
@@ -189,17 +249,26 @@
                    {:stepdef/id  (:stepdef/id b)
                     :pattern-src (:pattern-src b)
                     :source      (:source b)
-                    :metadata    (:metadata b)}))))
+                    :metadata    (:metadata b)
+                    :used-instances (if-let [inst (-> b :svo :interface)]
+                                      #{inst}
+                                      #{})}))))
        (group-by :stepdef/id)
        vals
-       (map first)))
+       (map (fn [infos]
+              (assoc (first infos)
+                     :used-instances
+                     (into #{} (mapcat :used-instances) infos))))))
 
 (defn lint-suite
   "Run the suite-load lint pass over a collection of stepdef-info maps.
 
-   Each `stepdef-info` must carry `:pattern-src`, `:source`, `:metadata`.
-   Both raw stepdefs (from `registry/all-stepdefs`) and the projection
-   produced by `used-stepdef-infos` satisfy this shape.
+   Each `stepdef-info` must carry `:pattern-src`, `:source`, `:metadata`,
+   and may carry `:used-instances` (sl-s2oa — resolved instances to check
+   `:requires-protocols` against; absent/empty falls back to every
+   configured instance of the stepdef's type). Both raw stepdefs (from
+   `registry/all-stepdefs`) and the projection produced by
+   `used-stepdef-infos` satisfy this shape.
 
    Parameters:
    - `stepdef-infos`           — seq of stepdef-info maps to lint
@@ -222,11 +291,11 @@
   (if (nil? interfaces)
     []
     (let [registry   (or adapter-registry adapters/default-registry)
-          iface-keys (set (keys interfaces))
-          undefined  (keep #(check-undefined-interface % iface-keys)
+          type-set   (configured-types interfaces)
+          undefined  (keep #(check-undefined-interface % type-set)
                            stepdef-infos)
-          missing    (keep #(check-missing-capability % interfaces registry)
-                           stepdef-infos)
+          missing    (mapcat #(check-missing-capability % interfaces registry)
+                             stepdef-infos)
           orphans    (check-glossary-orphan-types project-glossary-types
                                                   interfaces)]
       (vec (concat undefined missing orphans)))))

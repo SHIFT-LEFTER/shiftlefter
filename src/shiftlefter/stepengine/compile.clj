@@ -28,7 +28,8 @@
        (exec/execute-suite plans)
        (report-diagnostics diagnostics)))
    ```"
-  (:require [shiftlefter.stepengine.annotations :as annotations]
+  (:require [shiftlefter.runner.config :as config]
+            [shiftlefter.stepengine.annotations :as annotations]
             [shiftlefter.stepengine.bind :as bind]
             [shiftlefter.stepengine.macros :as macros]
             [shiftlefter.stepengine.suite-lint :as suite-lint]
@@ -95,6 +96,7 @@
           glossary-result
           {:ok (cond-> {:glossary (:ok glossary-result)
                         :interfaces (:interfaces config)
+                        :costumes (config/get-costumes config)
                         :svo (:svo config)}
                  adapter-registry (assoc :adapter-registry adapter-registry))})))))
 
@@ -134,6 +136,13 @@
    - opts (optional): {:adapter-registry r} forwarded to binding for
      capability gating with a custom adapter registry. Defaults to nil →
      bind uses adapters.registry/default-registry.
+     {:suite-lint-mode :warn} keeps the bound plans when suite-load lint
+     finds issues, attaching them as :diagnostics :suite-lint-issues data
+     instead of the :suite-lint/failed error (sl-hyey: the corpus-bind
+     surfaces — a LISTING is not a run, so gating informs rather than
+     suppresses every usage marker). Default (:error / absent) is the
+     existing kill: lint issues empty the plans and block planning —
+     every run-path caller is byte-identical, none passes the key.
 
    Returns:
    - :plans - seq of run plans (one per pickle), ready for executor
@@ -159,7 +168,9 @@
         ;; there's nothing to cross-check against.
         stepdef-issues      (when binding-opts
                               (validate/validate-stepdefs-against-glossary
-                               stepdefs (:glossary binding-opts)))]
+                               stepdefs
+                               (:glossary binding-opts)
+                               (:interfaces binding-opts)))]
     (cond
       binding-error
       {:plans      []
@@ -277,21 +288,26 @@
                                     (keys (get-in config [:glossaries :verbs]))
                                     (:interfaces config)
                                     adapter-registry)))]
-              (let [counts (suite-lint/issue-counts iss)
-                    diag   (:diagnostics bind-result)]
-                {:plans      []
-                 :runnable?  false
-                 :diagnostics (-> diag
-                                  (assoc :suite-lint-issues iss)
-                                  (update :errors (fnil conj [])
-                                          {:type    :suite-lint/failed
-                                           :issues  iss
-                                           :message (str "Suite-load lint found "
-                                                         (count iss)
-                                                         " issue(s)")})
-                                  (update :counts merge
-                                          (assoc counts
-                                                 :total-issues
-                                                 (+ (or (:total-issues (:counts diag)) 0)
-                                                    (:total counts)))))})
+              (if (= :warn (:suite-lint-mode opts))
+                ;; Corpus-bind mode (sl-hyey): a listing is not a run —
+                ;; keep the plans, carry the issues as data. The caller
+                ;; surfaces them (warn, never silent).
+                (assoc-in bind-result [:diagnostics :suite-lint-issues] iss)
+                (let [counts (suite-lint/issue-counts iss)
+                      diag   (:diagnostics bind-result)]
+                  {:plans      []
+                   :runnable?  false
+                   :diagnostics (-> diag
+                                    (assoc :suite-lint-issues iss)
+                                    (update :errors (fnil conj [])
+                                            {:type    :suite-lint/failed
+                                             :issues  iss
+                                             :message (str "Suite-load lint found "
+                                                           (count iss)
+                                                           " issue(s)")})
+                                    (update :counts merge
+                                            (assoc counts
+                                                   :total-issues
+                                                   (+ (or (:total-issues (:counts diag)) 0)
+                                                      (:total counts)))))}))
               bind-result)))))))

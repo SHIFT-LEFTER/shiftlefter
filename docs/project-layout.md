@@ -102,12 +102,19 @@ Truths about `setup.clj` worth knowing before you write one:
 - **Keep the top level pure.** `setup.clj` is `load-file`'d to make the plan
   knowable — its top-level forms evaluate even on `--dry-run`. Side effects
   belong inside `:start`.
-- **Dry-run starts nothing.** `sl run --dry-run` previews the full plan —
-  groups, features, hooks — and never invokes `:start`, `:stop`, or hooks.
-  One caveat, stated rather than softened: the preview binds steps against
-  the *default* adapter registry, so a project whose adapters exist only in a
-  custom registry from `:start` can bind differently in preview than in a
-  real run.
+- **Dry-run starts nothing — and still binds honestly.** `sl run --dry-run`
+  previews the full plan — groups, features, hooks — and never invokes
+  `:start`, `:stop`, or hooks. Custom adapters stay visible to the preview
+  because their *data* is declared on the group, not locked inside `:start`:
+  an `:adapters` vector of pure-data declarations
+  (`{:name :my-sms :provides [...]}`) covering whatever differs from the
+  default registry. The preview binds against the declarations; `:start`
+  still builds the real registry (factories may close over runtime state);
+  and at `:start` the framework **verifies** the live registry matches what
+  was declared — a mismatch is a planning error (`:setup/registry-mismatch`).
+  Declare the data, bind the factories, and preview and live can never
+  disagree. (A `:start`-returned registry with no declaration still works
+  this release, with a preview-blind warning; that shape is deprecated.)
 - **The warm daemon re-load-files `setup.clj` on every dispatch.** The
   framework re-derives everything per dispatch and sees your file fresh, the
   same way a jar bounce would give it to a cold JVM — but state your code
@@ -136,6 +143,16 @@ open, out loud: the file layout, whether reporters and observers are one
 mechanism or two, and the timing — demand-driven, unscheduled.
 
 ## What the framework writes
+
+**The write boundary first:** the framework writes into places it owns —
+the results root and `.shiftlefter/`, both below — and never writes files
+you own unprompted. Anything ShiftLefter wants in one of your files arrives
+as a proposal: the installer *prints* the AGENTS.md stanza for you to
+paste, SIEVE *proposes* vocabulary changes and never applies them.
+Proposed, never written without your explicit yes. The one touch of a file
+you own is protective: `sl costume init` appends the wardrobe line to your
+`.gitignore` so credentials can't be committed (idempotent — see Git
+posture below).
 
 **Run results — `results/<STAMP>/` under the config root** (`sl/results/`).
 One directory per runner invocation, named by a UTC stamp
@@ -177,7 +194,9 @@ wired to any command — you should never see it appear.)
 `.gitignore`. The framework self-ignores only `results/` (always) and
 `wardrobe/` (a line appended to your project `.gitignore` on first
 `sl costume init`); everything else in `.shiftlefter/` relies on you having
-the directory ignored.
+the directory ignored. The installer additionally writes an `sl/.gitignore`
+(if absent) covering only the binaries it lands — the jar, the CDS archive
+(`.jsa`), and `lib/` — so the files you author in `sl/` stay committable.
 
 ## Environment variables
 
@@ -232,8 +251,8 @@ command entries are user-runnable demonstrations.
 | dirty-teardown.edn append/announce/clear (dry-run keeps) | `src/shiftlefter/runner/teardown_marker.clj:1-21,33-76`; `src/shiftlefter/runner/core.clj:1174-1195` |
 | sieve store location | `src/shiftlefter/sieve/store.clj:9,20-33` |
 | env vars incl. the `SHIFTLEFTER_*` prefix rule | `bin/sl:479-480`; `docs/daemon.md` § env; `src/shiftlefter/runner/report/console.clj:47-50`; `src/shiftlefter/adapters/twilio.clj:26-27` |
-| EDN summary + form-stream contract (the locked data contract) | `src/shiftlefter/runner/report/edn.clj:7-46` |
-| bus event envelope spec | `src/shiftlefter/runner/events.clj:54-67` |
+| EDN summary + form-stream contract (the locked data contract) | `src/shiftlefter/runner/report/edn.clj:7-77` |
+| bus event envelope spec | `src/shiftlefter/events.clj:53-69` |
 
 Related pages: [Hooks](hooks.md) · [Costumes](COSTUMES.md) ·
 [Install tiers](INSTALL-TIERS.md) · [Daemon](daemon.md) ·

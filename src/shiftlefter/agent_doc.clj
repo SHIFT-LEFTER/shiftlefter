@@ -25,6 +25,8 @@
     :summary "Intent references, raw locator fallback, and brittleness policy."}
    {:topic "diagnostics"
     :summary "Unknown subject, verb, interface, and object diagnostics."}
+   {:topic "resolution"
+    :summary "sl glossary + sl explain: the resolved vocabulary, provenance, bindings."}
    {:topic "hooks"
     :summary "Scenario lifecycle hooks: hooks.clj registry, @hook= tags, ordering, failure semantics."}
    {:topic "lifecycle"

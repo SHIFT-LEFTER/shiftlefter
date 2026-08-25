@@ -17,7 +17,15 @@
 
    ## Cleanup
 
-   `close-browser` closes the browser and releases Playwright resources.")
+   `close-browser` closes the browser and releases Playwright resources.
+
+   ## Capture (sl-sehc)
+
+   `capture-screenshot` and `capture-page-source` are the adapter's
+   registry-contributed capture kinds, resolved through the same lazy
+   boundary. No `:console` — impossible in the drain shape (no browser-side
+   buffer; Playwright console messages are listener events); the
+   subscription-shape design is sl-lam0.")
 
 ;; -----------------------------------------------------------------------------
 ;; Factory
@@ -139,3 +147,41 @@
              :message (str "No :browser in capability — nothing was closed. "
                            "Pass the unwrapped map (the value under :ok of "
                            "create-browser's return), not the wrapped {:ok {...}} result.")}}))
+
+;; -----------------------------------------------------------------------------
+;; Capture (sl-sehc)
+;; -----------------------------------------------------------------------------
+
+(defn- require-browser
+  "The PlaywrightBrowser from a capture request's handle, or throw (a
+   handle without the browser is a capture infrastructure failure — D4
+   converts the throw to a capture-attributed error)."
+  [{:keys [handle]}]
+  (or (:browser handle)
+      (throw (ex-info "no :browser in capture handle"
+                      {:type :capture/no-browser}))))
+
+(defn capture-screenshot
+  "PNG screenshot of the current page, as bytes. Resolved through the
+   lazy-load boundary like create-browser — capture only ever runs after
+   the factory succeeded, so the require is a cache hit."
+  [req]
+  (let [browser (require-browser req)
+        _ (require 'shiftlefter.webdriver.playwright.browser)
+        shot-fn (resolve 'shiftlefter.webdriver.playwright.browser/screenshot-bytes)
+        data ^bytes (shot-fn browser)]
+    (when-not (and data (pos? (alength data)))
+      (throw (ex-info "empty screenshot response" {:type :capture/empty-screenshot})))
+    {:data data
+     :media-type "image/png"
+     :ext "png"}))
+
+(defn capture-page-source
+  "The current page's full HTML source."
+  [req]
+  (let [browser (require-browser req)
+        _ (require 'shiftlefter.webdriver.playwright.browser)
+        content-fn (resolve 'shiftlefter.webdriver.playwright.browser/page-content)]
+    {:data (content-fn browser)
+     :media-type "text/html"
+     :ext "html"}))

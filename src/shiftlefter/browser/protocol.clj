@@ -46,7 +46,7 @@
 
    - `clear!`       — clear input field
    - `select!`      — select dropdown option by visible text
-   - `press-key!`   — send key press (string produced by etaoin.keys)
+   - `press-key!`   — send key press (W3C key name or single character)
 
    ## Element Queries (added 0.3.6)
 
@@ -179,8 +179,10 @@
     "Select option by visible text from dropdown matching locator. Returns this.")
 
   (press-key! [this key-str]
-    "Send a key press to the active element. `key-str` is a string produced
-     by etaoin.keys (single key or chord). Returns this.")
+    "Send a key press to the active element. `key-str` is a W3C
+     KeyboardEvent.key name from the closed set (shiftlefter.svo.keys)
+     or a single literal character; each backend owns the translation to
+     its vendor's representation (sl-52ly). Returns this.")
 
   ;; --- Element Queries (0.3.6) ---
 

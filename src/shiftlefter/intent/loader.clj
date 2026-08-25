@@ -508,12 +508,12 @@
   [intents-dir]
   (if-not (fs/exists? intents-dir)
     ;; Directory doesn't exist — intents are optional
-    {:ok {:lookup {} :regions {} :intents []}}
+    {:ok {:lookup {} :regions {} :intents [] :intent-files {}}}
     (let [edn-files (fs/glob intents-dir "*.edn")
           file-paths (map str edn-files)]
       (if (empty? file-paths)
         ;; No files — empty but valid
-        {:ok {:lookup {} :regions {} :intents []}}
+        {:ok {:lookup {} :regions {} :intents [] :intent-files {}}}
         ;; Load and merge all files
         (let [results (map load-intent-file file-paths)
               merged (merge-intent-lookups results)]
@@ -531,7 +531,11 @@
                     {:ok {:lookup (:ok merged)
                           :regions (:regions merged)
                           :boundaries (:ok boundaries)
-                          :intents (:intents merged)}}))))))))))
+                          :intents (:intents merged)
+                          ;; sl-mpu5: per-intent def-site files (built during
+                          ;; merge, previously dropped) — duplicates report and
+                          ;; explain :def-site cite files, not the directory.
+                          :intent-files (:intent-files merged)}}))))))))))
 
 (defn get-binding
   "Look up the binding for an intent/element/interface combination.

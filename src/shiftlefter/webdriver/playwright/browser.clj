@@ -496,3 +496,19 @@
    Used for testing or when lifecycle is managed externally."
   [page pw-context]
   (->PlaywrightBrowser page pw-context))
+
+;; -----------------------------------------------------------------------------
+;; Capture (sl-sehc)
+;; -----------------------------------------------------------------------------
+
+(defn screenshot-bytes
+  "PNG screenshot of the browser's current page, as bytes. The no-arg
+   Page.screenshot() overload — plain reflective interop like every other
+   Page call in this ns, so no import is needed at compile time."
+  [pw-browser]
+  (.screenshot (:page pw-browser)))
+
+(defn page-content
+  "The current page's full HTML source, as a String (Page.content())."
+  [pw-browser]
+  (.content (:page pw-browser)))

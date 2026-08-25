@@ -18,6 +18,7 @@
             [shiftlefter.browser.target :as target]
             [shiftlefter.browser.locators :as locators]
             [clojure.string :as str]
+            [shiftlefter.webdriver.etaoin.keys :as et-keys]
             [etaoin.api :as eta]
             [etaoin.keys :as k]))
 
@@ -246,7 +247,7 @@
     this)
 
   (press-key! [this key-str]
-    (eta/fill-active driver key-str)
+    (eta/fill-active driver (et-keys/->key-str key-str))
     this)
 
   ;; --- Element Queries ---

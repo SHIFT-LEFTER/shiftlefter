@@ -17,17 +17,19 @@
 
    ## Registry Storage
 
-   Keyed by the pair `[pattern-sig, interface-keyword]` where:
+   Keyed by the pair `[pattern-sig, interface-type-keyword]` where:
    - `pattern-sig` = pattern source string + flags
-   - `interface-keyword` = `:interface` metadata value, or `nil` for
-     interface-less stepdefs
+   - `interface-type-keyword` = `:interface` metadata value — an interface
+     TYPE since sl-s2oa (the vocabulary a verb belongs to, never a config
+     instance name) — or `nil` for interface-less stepdefs
 
-   This lets the same regex register under multiple interfaces (e.g.,
+   This lets the same regex register under multiple interface types (e.g.,
    `receives a message` under `:sms`, `:whatsapp`, `:email`) — vocabulary
    symmetry across channels. Duplicate detection still fires when the same
-   regex is registered twice under the same interface (or twice with no
+   regex is registered twice under the same type (or twice with no
    interface). The binder disambiguates at bind-time via step-level
-   `[:interface]` annotations; see `stepengine.annotations`.
+   `[instance]` annotations, whose configured :type narrows candidates;
+   see `stepengine.annotations` and `stepengine.bind`.
 
    ## Usage
 
@@ -196,8 +198,20 @@
    - source: map with :ns, :file, :line (and optionally :var)
    - metadata: optional map with :interface and :svo keys
 
+   Redefinition rule (sl-9nzc): a registration whose key ([pattern-sig
+   interface]) is already held by a stepdef from the SAME `:file`
+   REPLACES it — `defn` semantics for source-owned definitions. This is
+   what makes `require :reload` of a stepdefs namespace (and
+   re-evaluating a `defstep` form at the REPL) work instead of the
+   registry colliding with itself; the file is the identity, not the
+   line, so an edited file whose definitions shifted reloads cleanly.
+   The trade, stated: a same-pattern+interface duplicate WITHIN one
+   file is last-wins, exactly like defining the same `defn` name twice
+   in one file. A duplicate from a DIFFERENT file still throws — the
+   cross-namespace vocabulary-collision protection is unchanged.
+
    Throws on:
-   - Duplicate pattern (same pattern-sig already registered)
+   - Duplicate pattern (same pattern-sig + interface) from a different file
    - Variadic function
 
    Returns the stepdef map."
@@ -217,9 +231,12 @@
                         :pattern-src pattern-src
                         :source source})))
 
-     ;; Check for duplicate — same pattern AND same interface
+     ;; Check for duplicate — same pattern AND same interface. Same-FILE
+     ;; re-registration falls through to the store and replaces (the
+     ;; sl-9nzc redefinition rule; see docstring).
      (when-let [existing (get @registry-atom key)]
-       (throw (ex-info (str "Duplicate step definition for pattern: " pattern-src
+       (when-not (= (:file (:source existing)) (:file source))
+         (throw (ex-info (str "Duplicate step definition for pattern: " pattern-src
                             (when iface
                               (str " under interface " iface))
                             "\n  First defined at: " (format-source (:source existing))
@@ -228,7 +245,7 @@
                         :pattern-src pattern-src
                         :interface iface
                         :existing-source (:source existing)
-                        :duplicate-source source})))
+                        :duplicate-source source}))))
 
      ;; Create stepdef map
      (let [stepdef {:stepdef/id (stepdef-id pattern-src)
@@ -320,7 +337,9 @@
    ```
 
    Metadata keys:
-   - :interface — which interface this step uses (e.g., :web, :api)
+   - :interface — the interface TYPE this step's vocabulary belongs to
+     (e.g., :web, :sms; sl-s2oa — never a config instance name; the
+     [name] step annotation selects the instance at bind time)
    - :svo — subject/verb/object extraction map with :$1, :$2 placeholders
 
    ## step-meta Local Binding

@@ -1,3 +1,854 @@
+# Changelog: 0.5.5
+
+**Release Date:** 2026-08-25
+
+The theme of this release is **never guess before the run** — ask the tool
+what the run will believe: the resolved state has commands, provenance
+rides every entry, declarations are verified against the live world, and
+what the tool cannot know it marks — never guesses.
+
+## Stats
+
+```
+2372 tests, 8841 assertions, 0 failures (./bin/kaocha unit — the fast suite)
+23 tests, 110 assertions, 0 failures (./bin/kaocha daemon — warm-path shell E2E through the built jar)
+11 tests, 42 assertions, 0 failures (SHIFTLEFTER_LIVE_WEBDRIVER=1 ./bin/kaocha e2e — live-browser example validators)
+Cucumber compliance: 46/46 good, 11/11 bad (100%)
+Verified against Chrome 151 / ChromeDriver 151
+```
+
+## Highlights
+
+- **`sl init` scaffolds a working project** — install to first green
+  `--dry-run` in one command.
+- **Ask the tool what the run will believe:** `sl glossary` and
+  `sl explain NAME` — the resolved vocabulary with provenance, usage
+  counts, and did-you-mean, before anything runs.
+- **The timing doctrine is now callable** — `poll-until` plus a config
+  `:timing` ladder; timeouts report which config rung decided them, and
+  the anti-flaky machinery stops being something you hand-roll.
+- **Exit codes that mean something:** 0 is existential, 1 is "the app is
+  wrong," 2 is "nothing ran," 4 is "the run proves nothing" — and the
+  `--edn` envelope carries evidence pointers for every one.
+- **Custom adapters are a spec'd contract** — declare the data, bind the
+  factories; dry-run sees your registry, and a scenario that cannot
+  provision refuses up front.
+- **Every run has a seed, streams live, and writes one aggregated
+  report** — reproduction handles, warm-path output, multi-group
+  JUnit/HTML that never eats a red group.
+
+<!-- no-entry: sl-t8bj (docs-only mechanism correction: costume Chrome is a JVM child, durability = profile + relaunch; docstrings/COSTUMES.md rewording, no behavioral surface) -->
+<!-- no-entry: sl-0m4q (chew/process bead: positioning-doctrine dispositions — beads, rulings, doc homes only; no shipped surface) -->
+<!-- no-entry: sl-y5qw (shiftlefter.com homepage Java-floor correction — site repo, no SL shipped surface) -->
+<!-- no-entry: sl-8yfe (shiftlefter.com Argument theme + analytics snippet — site repo, no SL shipped surface) -->
+<!-- no-entry: sl-hshb (homepage known-false clause struck in the sl-8yfe theme pass — site repo, no SL shipped surface) -->
+<!-- no-entry: sl-aoya (design-doc errata fold for the derivation engine — grooming prerequisite, no shipped surface) -->
+<!-- no-entry: sl-245y (folded into sl-sl-init-scaffold-cn7 at the batch-2 sitting rulings 08-09; the .shiftlefter/.gitignore ships via sl init and rides cn7's entry) -->
+<!-- no-entry: sl-3kto (changelog head-format fix so the version guard reads 0.5.5 as unreleased; process file only, no shipped surface) -->
+<!-- no-entry: sl-xy18 (notesview doc server: external tooling at ~/bin/notesview, lives outside the SL repo per its charter; no shipped surface) -->
+<!-- no-entry: sl-lskf (Chair's machine remediation: chromedriver 150->151 fetch to restore Chrome lockstep; the automated lockstep probe itself shipped with sl-afsp's doctor entry; no additional shipped surface — line added by trench-zebra to clear the guard after the parallel close, flagged for Tower review) -->
+<!-- no-entry: sl-dix8 (architecture-series docs artifact: docs/architecture/invocation-map.md + ARCHITECTURE.md pointer — repo docs only, no shipped surface) -->
+<!-- no-entry: sl-cdnt (architecture-series docs artifact: docs/architecture/repl-lifetimes.md + pointers — repo docs only, no shipped surface) -->
+<!-- no-entry: sl-37xz (architecture-series docs artifact: docs/architecture/data-shapes.md + pointers — repo docs only, no shipped surface) -->
+<!-- no-entry: sl-78md (docs-pass collector: 13 dispositions — index rows, non-goal statements, under-taught-feature paragraphs across docs/ + agent_docs; teaches existing behavior, changes none) -->
+<!-- no-entry: sl-ygtj (architecture-series docs artifact: docs/architecture/control-loop.md + sibling cross-links + ARCHITECTURE.md index — repo docs only, no shipped surface) -->
+<!-- no-entry: sl-2rhl (propose-only notes/ re-groom: inventory + disposition proposal file, zero movements — process record, no shipped surface) -->
+<!-- no-entry: sl-uo0v (process/docs-only: roadmap process-law promoted to durable homes, roadmap shrunk to charter + pointers, gen-roadmap.bb + release-roadmap.md moved to board/ — no shipped surface) -->
+<!-- no-entry: sl-2b2k (changelog-guard hardening: label-blind span arm, current-section coverage scoping, marker-anchors-prose, exactly-one-gate assertion — dev-repo test infra, self-skips in the public export, no shipped runtime surface) -->
+<!-- no-entry: sl-j2aq (closed deduped into sl-h7c3: the :override-defaults removal ships under h7c3's Breaking Changes entry; no separate surface — the future wholesale-override want is sl-t2ht) -->
+<!-- no-entry: sl-xzom (shiftlefter.com /docs/ section — curated human docs + architecture series synced to the site; sync tooling is dev-repo scripts/, no SL shipped surface) -->
+<!-- no-entry: sl-cvow (shiftlefter.com light/dark toggle + llms.txt additions — site repo only, no SL shipped surface) -->
+<!-- no-entry: sl-73lb (website /report sample regen through the 0.5.5-preview jar — exit-4 DEGRADED + whole-vocabulary badge — plus the planning-pair homepage link; the report.js blank-page regression it caught was introduced and fixed inside the unreleased span, so no release reader ever saw it; site-repo artifact refresh, no SL shipped surface) -->
+<!-- no-entry: sl-rktz (pass-2 docs-truth batch: JUnit no-file/iff claims scoped to single-group with multi-group partial-file semantics stated at all five surfaces, W8 MIRROR NOTEs completed, data-shapes ex04 re-worked vs HEAD, html/resolution docstring truth, plus ONE shipped cosmetic string — the bin/sl custody message reworded to unreachable-only; no behavior change, nothing a release reader could act on) -->
+<!-- no-entry: sl-8cvd (Warden pass-2 condition batch A: suite-lint unknown-adapter deferral to the exact bound-adapter check, config-stage --edn :config-lints, real two-group JUnit pin, guard blank-line lost-bullet arm, dead accessor removal — corrections to unreleased 0-5-5-span behavior already described by the sl-kkoh/sl-xjx0/sl-74w8/sl-2b2k entries and the shipped sl-lnj1 contract; no separate feature surface) -->
+<!-- no-entry: sl-t0r9 (report.js runtime smoke: node+jsdom renders every verdict status in the unit suite; dev/test infra closing the t86d escape class — the regression itself never shipped and its fix was already ruled no-entry, so an entry would tell release readers about a bug no release ever had) -->
+<!-- no-entry: sl-8i5r (the release-tail hands-on drive: Chair + fresh agents drove install, first-ever :api interface authoring, and live runs against a real service — validation/process bead; findings ledger at notes/sl-8i5r-live-drive-findings.md; the gate fixes it produced ship as sl-zjf5; no shipped surface of its own) -->
+
+## Features
+
+<!-- entry: sl-qwf -->
+- **Warm runs stream their output live.** Through 0.5.4 the warm path
+  delivered all output at command end (a workaround for a multibyte crash in
+  the bundled nREPL 1.5.0's output stream, fixed by the 0.5.3 nREPL 1.7.0
+  bump). The dispatch client now runs commands under the nREPL session's own
+  output streams, so warm invocations print exactly like cold: per-scenario
+  results as each scenario finishes, fuzz progress as it happens, and partial
+  output stays visible on Ctrl-C. Multibyte output (emoji, CJK, `—`, `✓`)
+  streams clean and remains byte-identical to cold; exit-code parity
+  (0/1/2/3/4) is unchanged, and a mid-stream transport failure now exits 3
+  instead of silently re-running the command cold (which would duplicate the
+  already-printed output).
+<!-- entry: sl-1206 -->
+- **Costumes declare their interface, and wrong-world wear fails at plan
+  time.** A new committed-config key — `:costumes {:finance {:interface
+  :storefront}}` in `shiftlefter.edn` — binds each costume to the interface
+  *instance* it belongs to. Two static lints ride validation and
+  `--dry-run` (human and `--edn` output alike): wearing a costume on a
+  different instance than it is declared for is a plan-time error with a
+  did-you-mean, and two personas sharing a `:wears` in one scenario is a
+  plan-time error (one logged-in identity cannot be two actors). A
+  worn-but-undeclared costume warns and teaches the declaration to add, so
+  existing wardrobes and REPL ad-hoc flows keep working; the runtime
+  refusals stay as the backstop for paths that bypass planning. The `sl
+  init` starter config gains a commented `:costumes` exemplar.
+
+<!-- entry: sl-sl-init-scaffold-cn7 -->
+- **The installer now scaffolds a working project (`sl init`).** A fresh
+  `release/install.sh` run creates `sl/` with a commented starter
+  `shiftlefter.edn` (Shifted mode from birth, explicit conventional glossary
+  paths, the off-by-default capture/report/timing knobs shown), a subjects
+  glossary seeding two documented personas (alice — the ordinary path, bob —
+  the counterparty), a loader-invisible worked intent
+  (`glossary/intents/login.edn.example`), and a starter feature that proves
+  the whole pipeline: `sl run --dry-run` exits 0 on a fresh scaffold, pinned
+  by a test. The agent on-ramp stanza is now WRITTEN into `AGENTS.md`
+  (marker-guarded create-or-append, reusing the installer's single stanza
+  source) instead of only printed. `sl init` is a low-profile entrypoint (not
+  in `--help`; the public surface waits for sl-f1ir) and bails untouched when
+  `sl/shiftlefter.edn` already exists. Folds sl-245y: the scaffold writes a
+  self-ignoring `.shiftlefter/.gitignore` (`*`) so the runtime state dir never
+  shows up as git litter — one write moment, at init.
+<!-- entry: sl-mpu5 -->
+- **`sl glossary` and `sl explain` now answer usage questions, not just
+  resolution.** The listings bind the feature corpus (parse + bind, never
+  execute — the same binder a run uses) and mark every entry: subjects
+  and user vocabulary nothing references show `[UNUSED]`, used entries
+  show `[used ×N]`, and builtin vocabulary is never dead (it carries
+  counts, never a verdict). `sl explain <name>` gains a usage section —
+  per-hit feature `file:line`, scenario, the step text and its pattern
+  (authoring by example), per-instance and per-type rollups, a
+  multi-actor flag, and co-occurrence pairs. Positional paths and
+  `--tags`/`--skip-tags` (the run's own selection grammar) scope any of
+  it, and the wording weakens accordingly: a selection says
+  `not referenced within this selection` — never "unused" — with the EDN
+  key changing from `:unused?` to `:referenced-in-selection?` so a
+  machine consumer cannot mistake an impact partition for a deletion
+  license. Deadness is a full-corpus fact at a named tree state (the
+  substrate header already says which); no corpus means markers are
+  suppressed, never "everything is unused". Two locator surfaces join:
+  `sl explain '{:css "#submit"}'` reverse-looks-up which intent
+  addresses own a locator value (check before you mint a duplicate), and
+  `sl glossary duplicates` is the on-demand collision report, grouped by
+  confidence (same-intent collisions are high-confidence real; the same
+  `#submit` across page-scoped intents is the norm, which is why the
+  report is never always-on). Intent listings also name their
+  per-interface-type binding holes (`missing bindings: :sms`), and
+  `sl explain <intent>` now reports those holes on the interface TYPE
+  axis (previously instance names — a mis-report for renamed instances).
+  The engine underneath is the SVO reverse index over bound plan steps:
+  (S,V,O) + file:line tuples — prepaid vocabulary for the graph era.
+
+<!-- entry: sl-99u2 -->
+- **Custom steps can now call the timing doctrine instead of
+  reimplementing it.** The doctrine — oracles retry patiently, mutations
+  never retry, negation never waits — used to live only inside the
+  built-in steps; a custom `defstep` that needed to wait hand-rolled its
+  own sleep loop and silently diverged. Now `shiftlefter.step/poll-until`
+  is the public oracle kernel: poll a predicate until truthy (or pass
+  `:until` when the predicate observes a value worth reporting), and on
+  deadline get a structured, legible timeout through normal step
+  reporting — elapsed time, the deadline, **which config rung decided
+  it**, and the last observed value. Deadlines and intervals resolve down
+  one ladder from the new `:timing` config key (`{:timing {:deadline-ms
+  30000 :interval-ms 500}}`, lint-aware, with a `:timing` sibling on any
+  `:interfaces` entry for per-interface overrides): explicit override >
+  interface instance > interface type > global > per-class defaults. The
+  built-in browser verification, `:wait`, and SMS receive steps all ride
+  the same substrate now (their old defaults — 3s/100ms, 5s/100ms,
+  30s/500ms — are the ladder's bottom rung, and the old dynamic vars
+  still rebind as top-rung overrides), so one config entry retunes the
+  whole suite's patience coherently — and browser timeouts, which
+  previously rethrew the last assertion error with no timing information
+  at all, now say they were timeouts. The doctrine itself is taught in
+  [extending-vocabulary](docs/extending-vocabulary.md); declared
+  operation classes on `defstep` are the 0.6 contracts arc.
+
+<!-- entry: sl-4e91 -->
+- **Costumes now bind per persona instance, and personas carry
+  docstrings.** An `:instances` entry in the subjects glossary may be a
+  persona map — a user with an optional costume and a docstring:
+  `{:id :alicia :desc "Spanish-first admin reviewer" :wears :alicia}`
+  (bare keywords still work; the shape change is additive, no
+  migration). Costume resolution is instance > type: a persona's own
+  `:wears` wins, a type-level `:wears` becomes an inheritable default,
+  and an explicit `:wears nil` on a persona opts out of it. This is
+  what lets `:user/alicia` and `:user/bob` act in one scenario wearing
+  different jackets — previously `:wears` bound only at the subject
+  TYPE, so with the one-wearer-per-costume guard, type-level wear was
+  usable only by effectively-singleton types (the already-worn error
+  now teaches the per-instance fix). Persona docstrings and effective
+  wear surface everywhere personas are listed: `sl explain
+  user/alicia` shows the description and `Wears: :alicia` (inherited
+  defaults are marked), `sl glossary subjects` renders per-persona
+  sub-lines, and the `--edn` instance rows carry
+  `:description`/`:wears`/`:wears-source`.
+
+<!-- entry: sl-wntk -->
+- **Custom adapter registries are now a spec'd, boundary-validated
+  contract.** The registry entry shape — `:factory`/`:cleanup`/`:provides`
+  required (an explicit `[]` is a truthful "provides no protocols"),
+  `:impl-key`, `:on-provision`, `:capture`, and the not-bundled trio
+  optional — has been informal prose since the adapter registry landed;
+  now it's clojure.spec (`::adapter-entry` in `adapters/registry.clj`,
+  the single source of truth, with the shipped `default-registry` as the
+  spec's own first conformance test). A custom registry handed over by
+  `setup.clj` `:start` is external input (house boundary-validation
+  rule), so it's validated at the install boundary: a malformed entry —
+  a `:factory` that isn't invokable, an unqualified `:provides` keyword,
+  a typo'd key like `:implkey` (caught by an unknown-key check alongside
+  the spec, since open `s/keys` can't see it) — fails as the per-group
+  planning error `:setup/invalid-adapter-registry` carrying the spec's
+  own `s/explain` output plus the known-key vocabulary, before any
+  factory runs, instead of an incidental throw at first provisioning.
+  The check deliberately precedes the sl-e0ml declaration-mismatch
+  verify (whose data comparison would itself trip over a malformed
+  `:provides`) and never touches dry-run's data-only preview registries.
+  The factory contract (`{:ok …} | {:error …}`) is registered as
+  `s/fdef`s on `create-capability`/`cleanup-capability` and instrumented
+  in the test suite, so every custom registry flowing through tests is
+  shape-checked on each call. No behavior change for valid registries.
+  The symmetric typo-catch for `:adapters` declarations is recorded as
+  sl-k15d (found, not built — outside this bead's boundary scope).
+
+<!-- entry: sl-s2oa -->
+- **Two same-type interfaces now share the builtin vocabulary: stepdefs
+  bind by interface TYPE, and the `[name]` annotation selects the
+  instance.** A config like `{:web {:type :web :adapter :etaoin} :admin
+  {:type :web :adapter :playwright}}` previously could not drive the
+  second entry with builtin steps — builtins pinned `:interface :web`
+  and the binder compared the `[:admin]` annotation against that
+  metadata raw, so the step went `:undefined` ("No [:admin] stepdef
+  matches, but [:web] does"). The model is now split along its real
+  joints: stepdef `:interface` metadata names the TYPE (the vocabulary a
+  verb belongs to — welded to the verb, never an adapter, never a config
+  name), the annotation names a configured INSTANCE, and binding
+  resolves name → config entry → its `:type` narrows candidates → the
+  verb executes on the named instance's capability
+  (`:cap/<instance>.<subject>`, per-instance `:base-url` honored).
+  Unannotated steps of a multi-instance type default to the type-named
+  entry; with no such default the plan fails loudly
+  (`:bind/ambiguous-instance`, naming the candidate instances) instead
+  of guessing. Planning diagnostics surface the resolution chain
+  (`No [:admin] (type :web) stepdef matches, but type :sms does.`), the
+  `--edn` planning counts gain `:ambiguous-instance-count`, and
+  suite-lint's undefined-interface check now validates stepdef TYPES
+  against configured types — which is also the migration signal: a
+  custom stepdef that pinned an interface NAME in `:interface` metadata
+  (the only way to drive a renamed interface before this) now fails that
+  lint and should declare its TYPE instead, with the `[name]` annotation
+  doing the instance selection in the feature. Intent bindings, named
+  locations, and glossaries stay TYPE-keyed throughout.
+
+<!-- entry: sl-afsp -->
+- **`sl doctor`: machine pre-flight as a declarative probe registry —
+  when a machine misbehaves, run it and paste the output.** Doctor
+  validates the MACHINE; `sl orient` validates the project; the lanes
+  deliberately don't overlap. The design is a single-source-of-truth
+  registry of named probes (`{:probe … :desc … :scar … :fn …}`): the
+  runner iterates it, `sl doctor --list` prints it, and nothing is
+  checked that isn't declared there — so what doctor does and does NOT
+  check is always discoverable. Scope is bitten-things-only: every seed
+  probe carries its `:scar`, the documented failure that earned it.
+  The six seeds: chromedriver presence + Chrome major-version lockstep
+  (the 149→150 drift, previously a manual audit line — and the probe
+  caught a REAL 150→151 drift on its very first live run);
+  `~/.shiftlefter/config.edn` validity (parse errors are silently
+  swallowed into PATH fallback on every other path — triage is
+  sl-26yo); extra-dependency adapters present when configured
+  (the sl-gcdu Playwright class); daemon health (`daemon.edn` vs live
+  pid, jar/lib-sig staleness noted; routed COLD in `bin/sl` so doctor
+  observes the daemon from outside rather than answering from inside
+  it); orphaned-chromedriver scan (parent-is-PID-1 discriminator —
+  scan only, reaping stays sl-34fu); and `sl/lib` jar sanity
+  (readable archives + lib-sig drift). Output is a human table, `--edn`
+  through the pinned printer seam with `:doctor/version 1`, and doctor
+  carries its own tiny exit contract — 0 healthy / 1 issues found — a
+  machine verdict deliberately outside the run-verdict table (sl-7c7i).
+  The chartered adjacent verification confirmed config validation fires
+  on every config-parsing invocation (cold commands exempt via the
+  single `needs-project-context?` allowlist; `run` exits 2, the
+  orient family deliberately exits 1); the one gap found was dead code,
+  filed as sl-v8cu.
+
+<!-- entry: sl-sehc -->
+- **Playwright captures now: `screenshot` and `page-source` — and a
+  configured kind that can't fire tells you so before a browser opens.**
+  The Playwright backend contributes both pull-at-capture kinds through
+  the same lazy-load boundary as the rest of the adapter (nothing new on
+  the default classpath). `console` is deliberately absent there: capture
+  reads are destructive drains of a browser-side buffer, and Playwright
+  has no such buffer — its console messages are listener events, so a
+  pull-at-capture read finds nothing; the subscription-shape design that
+  fixes this properly is sl-lam0. And the warn granularity finally
+  matches the composition: alongside the run-level unknown-kind (typo)
+  warning, a new plan-time, per-group check
+  (`:capture/adapter-unsupported`) fires when a configured kind is
+  supported by none of the adapters a group actually uses — computed
+  from the declared adapter data (sl-e0ml), so it appears in `--dry-run`
+  previews and rides `:diagnostics :capture-lints` under `--edn`. That
+  kills two silent edges at once: a pure-Playwright project with capture
+  configured no longer gets nothing-and-no-warning, and a mixed
+  etaoin+playwright multi-group run warns on exactly the group whose
+  evidence would be missing (the old registry-level check could never
+  see either, because the kinds ARE contributed — by the other adapter).
+
+<!-- entry: sl-0gfc -->
+- **Ask the tool what the run will believe: `sl glossary` and
+  `sl explain NAME`.** The files are the declared state; these commands
+  expose the RESOLVED state — the effective vocabulary after config
+  resolution, glossary merging, and interface wiring, before anything
+  runs. `sl glossary` lists subjects, verbs (per interface type, frames
+  as schema), and objects/intents, every entry carrying a provenance
+  marker (`builtin` / `user-file` / `config-override` /
+  `interface-contributed`); narrowing arguments (`sl glossary verbs`)
+  select one section. `sl explain NAME` resolves one name across every
+  kind — subject type, instance, verb, intent, key name — with its
+  definition site, provenance, frames, and per-interface bindings
+  INCLUDING missing ones; a miss gets did-you-mean suggestions
+  (edit-distance plus surface-token lookup: `sl explain clicks` suggests
+  `:click`) and exit 1. Both commands resolve through the run's own
+  config path (`-c/--config` behaves exactly as `sl run` — proven by
+  test), take `--edn` as the stable machine contract (human format
+  explicitly unstable), and stamp their output with the substrate it was
+  computed against: config path + source, git sha with dirty marker, and
+  the EFFECTIVE `:svo` strictness levels — including the conditional
+  `:unknown-object` default no file can show. Shifted-only, with an
+  honest Vanilla message. Alongside: the long-documented
+  `:override-defaults` glossary flag was verified DEAD through the
+  public loaders (docs corrected — and later in this release the flag
+  was removed outright: see Breaking Changes, sl-h7c3), and the real
+  merge semantics are now documented where they live: project verbs
+  extend the builtin set, a same-named verb replaces the builtin entry
+  wholesale.
+
+<!-- entry: sl-e0ml -->
+- **Custom adapter registries are now visible to dry-run — declare the data,
+  bind the factories.** A `setup.clj` group's custom adapter registry used to
+  exist only as a return value of `:start`, so `sl run --dry-run` (which
+  never runs `:start`, deliberately) bound against the default registry — a
+  custom-registry project could bind differently in preview than live, and
+  agents live on dry-run. Groups now declare the registry's *data half* as a
+  new optional `:adapters` key: a vector of pure-data declarations
+  (`{:name :my-sms :provides [...] :capture {...}}` — no functions), covering
+  only what differs from the default registry. The preview binds against the
+  declarations, `:start` still builds the real registry (factories closing
+  over runtime state stay legal — the `04-sms-2fa` shared-mock pattern), and
+  at `:start` the framework verifies the live registry matches the
+  declaration: a mismatch is a loud planning error
+  (`:setup/registry-mismatch`) — a declared contract, runtime-checked. A
+  novel adapter name must declare `:provides` (an explicit `[]` is legal and
+  truthful); malformed declarations fail plan-shape linting, visible to
+  dry-run. **Migration:** a `:start`-returned registry with no declaration
+  keeps working this release, with a preview-blind warning
+  (`:setup/undeclared-adapter-registry` — one stderr line, or a supplementary
+  `:setup-lints` form under `--edn`); add the `:adapters` declaration to
+  silence it. The undeclared shape becomes an error in a future release.
+
+<!-- entry: sl-08f7 -->
+- **Every run has a seed — recorded, and handed to your code.** One seed
+  per invocation (positive 64-bit integer): `--seed N` wins over
+  `:runner {:seed N}` in config, and with neither set one is generated.
+  It is recorded everywhere the run is: `:run/seed` in every group's
+  `--edn` summary (core-record family — always present; a record without
+  one is an old record), the run context reporters see, the HTML report
+  header, and one console line (`run seed: N`, stderr — deliberately, so
+  every run's reproduction handle is visible). The framework draws no
+  randomness from it, on purpose: it is the datum your code seeds from —
+  hook payloads carry `:seed`, step `ctx` carries `:seed`, and a
+  `setup.clj` group's `:start` receives it on its config argument — so
+  fixture generators and randomized libraries draw from one reproducible
+  source instead of each inventing its own. Deriving independent
+  per-scenario streams is a documented one-liner
+  (`(bit-xor seed (hash scenario-id))`, docs/lifecycle.md § The run seed);
+  the framework provides the datum, consumers choose. Groundwork for
+  rerun-from-report.
+
+<!-- entry: sl-n9c6 -->
+- **Multi-group stable path becomes the invocation report.** With a
+  multi-group `setup.clj`, the fixed `--html` path no longer holds
+  whichever group's report was written last: it now carries an
+  invocation-level TOC — run-root `report.html` above the group dirs,
+  invocation verdict up top (7c7i suite precedence), one row per group in
+  declaration order with status, exit code, counts, and a relative link to
+  the group's own page. Links navigate inside the run directory and
+  degrade to labeled text in the fixed-path copy; verdicts stay visible
+  either way. A group that fails planning mid-run now keeps its PLANNING
+  FAILED page durably at its own `<group-slug>/report.html` — previously a
+  later green group's copy destroyed the only copy in existence.
+  Single-group and implicit runs are byte-identical to before.
+
+<!-- entry: sl-femd -->
+- **Unknown-object checking now defaults on — when there's something to check
+  against.** With an `:intents` glossary configured (declared under
+  `:glossaries` or conventionally discovered at `glossary/intents/`),
+  `:svo {:unknown-object …}` now defaults `:warn`: an unresolvable intent
+  reference is reported at planning time with the name and a did-you-mean,
+  instead of dying minutes into a browser run as an element error. Without an
+  intents glossary the default stays `:off` — nothing declared means nothing
+  to validate against. The warning never blesses success: an unresolvable name
+  still fails at runtime; it now also fails before the run. Raw locators and
+  quoted literals stay exempt (the locator-policy escape hatch, deliberate).
+  Naming harmonized while here: the key's blocking level is now spelled
+  `:error` like its `:unknown-subject`/`:unknown-verb` siblings, and `:strict`
+  keeps working as a deprecated alias. **Migration:** a project with `:svo`
+  configured and an intents glossary that relied on the silent `:off` will see
+  new plan-time warnings (warnings only — nothing blocks, exit codes are
+  unchanged); set `:svo {:unknown-object :off}` explicitly to restore silence.
+
+<!-- entry: sl-d7ks -->
+- **The bus counts its drops out loud.** The observe-plane bus already
+  counted every event it refused at admission (full buffer — drops over
+  blocking, by design), but the count only reached a log line. Each
+  run-scope's summary now carries its own drop delta as `:dropped-events` —
+  in the `--edn` record, the programmatic result map, and a console stderr
+  line when nonzero. Absent when zero. Results are never affected by drops;
+  the key means observations may be gapped.
+
+<!-- entry: sl-oxiz -->
+- **The `--edn` summary now carries attachment refs — the machine surface
+  gets its evidence pointers.** Every other report surface already showed
+  attachments; the one surface agents consume didn't. Now an executed
+  summary (exit 0/1/4) with any captured or hook-claimed evidence carries a
+  top-level `:attachments` index — one entry per evidence-bearing scenario,
+  `{:scenario/name … :scenario/id … :attachments [ref …] :steps [{:step/id
+  … :step/text … :attachments [ref …]}]}` — the authoritative complete
+  evidence walk, covering green scenarios too (`every-step` captures,
+  After-hook claims on passing runs). Failure entries additionally carry
+  their own step's/scenario's refs inline for join-free triage; a failed
+  step's refs appear in both places, verbatim, on purpose. Refs are the
+  same `:attachment/*` maps the envelope carries — kind + group-root-
+  relative path, media-type, bytes — so a consumer can resolve every
+  artifact from the summary alone. Additive and seq-guarded: runs with no
+  evidence produce byte-identical output; consumers already skipping
+  unknown keys (the form-stream contract) need no changes.
+
+<!-- entry: sl-e01m -->
+- **Build your own report: docs/REPORTS.md documents the machine record.**
+  The `--edn` summary stream plus the run-directory bytes are the extension
+  contract — no plugin API, on purpose. The new page inventories the built-in
+  outputs, documents the attachment-ref anatomy and the evidence walk (the
+  authoritative `:attachments` index vs inline failure refs), and ships a
+  complete runnable babashka recipe rendering a markdown digest with resolved
+  evidence links. The in-tree JUnit reporter is the proof of the pattern.
+  Also: agent-doc "Consuming the run record" subsection, and the hooks.md
+  claim that `--edn` lacked attachment refs (stale since sl-oxiz) corrected.
+
+<!-- entry: sl-2de7 -->
+- **`relaunch-costume!` / `sl costume relaunch` — the human re-login flow
+  for an existing costume.** Once a costume existed there was no
+  supported way to open its browser with no WebDriver session attached —
+  exactly what re-authenticating an expired credential needs
+  (`init-costume!` refuses existing costumes by design;
+  `connect-costume!` relaunches and attaches in one step; the workaround
+  was dropping to `chrome/launch!` internals). The new launch-only
+  relaunch opens the existing profile's browser for a human to log into;
+  the next connect (or `sl run` via `:wears`) attaches as usual. An
+  already-running browser is an idempotent success (`:already-running`,
+  recorded pid trued up from the port's actual owner) — relaunch never
+  kills a live browser (that compound remains destroy + init), spawns no
+  chromedriver, and never touches the costume driver registry. This is
+  the missing primitive for the costume expiry/refresh story; the
+  policy half stays future work.
+
+<!-- entry: sl-9od5 -->
+- **Worked example: your adapter contributes a capture kind.** New
+  `examples/07-custom-capture-kind/` demonstrates the CONTRIBUTE side of
+  the capture contract — the half that makes the kind set open rather
+  than a feature toggle. A mock-SMS adapter registry in `setup.clj`
+  contributes a custom `:message-log` kind (the ~10-line capture-fn
+  contract: `{:handle}` in; `{:data :media-type :ext}` out, nil = nothing
+  to capture, throw = capture failed), the config's `:every-step` policy
+  captures it after each step of a green scenario, refs land in the
+  envelope, and the report renders them — the full arc, browser-free,
+  nothing to install (`sl run sl/features/`). First consumer of the
+  registry-entry contract's boundary validation: the example's README
+  walks the two guardrails (`:setup/registry-mismatch` for an undeclared
+  kind, `:setup/invalid-adapter-registry` for a malformed entry).
+  `docs/hooks.md` gains a "Contributing a capture kind" section and the
+  After-hook routing rule sharpens to one-off evidence vs
+  capability-owned evidence. The example is validated in the bare unit
+  suite — a planning validator plus a LIVE full-arc run (no browser
+  needed), so this teaching surface can't rot silently. Pairs with
+  `docs/REPORTS.md` (sl-e01m): produce evidence here, consume the record
+  there.
+
+## Breaking Changes
+
+<!-- entry: sl-h7c3 -->
+- **The `:override-defaults` glossary flag is gone — glossaries always
+  extend the defaults.** The flag was documented for wholesale
+  replacement but had been parsed-then-dropped by both public loaders
+  through every real path for its whole life (verified during the 0.5.5
+  audit cycle): no project ever got override behavior from it. Rather
+  than wire up a capability nobody has, the flag is removed outright —
+  the merge functions always extend, and a glossary file still carrying
+  the key now draws a load-time warning naming the truth (not supported;
+  glossaries always extend defaults — restate an entry to replace it
+  wholesale), in lenient and Shifted mode alike. "Breaking" in letter
+  only: behavior is identical for every file that ever loaded; what
+  breaks is the false promise. A real wholesale-override design remains
+  tracked separately.
+
+<!-- entry: sl-luhn -->
+- **A busy daemon now rejects a second invocation instead of queueing it
+  silently.** Concurrent `sl` calls against one project were always serialized
+  by the warm daemon, but the second caller just blocked with no output until
+  the first run finished — for an agent, indistinguishable from a hang. It now
+  fails fast: exit 2 with the structured error `:daemon/busy`, one stderr line
+  (`another run is in progress for this project; retry when it completes`),
+  and under `--edn` the standard exit-2 planning summary carrying the error
+  type. The first run is undisturbed; nothing queues. Applies to every warm
+  command; `sl daemon status`/`stop` stay wrapper-handled, so a busy daemon
+  remains inspectable and stoppable. Also in this bead's floor: the fixed-path
+  `--junit-xml` write is now atomic (temp sibling + rename, like the HTML
+  report since 0.5.4) — concurrent cold runs get last-writer-wins, never a
+  torn file — and the docs now state the concurrency contract plainly
+  (docs/CI.md § Concurrent invocations, docs/daemon.md § One run at a time /
+  § Aborting a run — including the live-verified fact that Ctrl-C does not
+  stop a warm run). First-class abort is sl-617t; kill-leaked drivers are
+  sl-34fu. **Migration:** anything that relied on the silent queueing must
+  retry on exit 2 / `:daemon/busy` (or serialize its own calls); a plain
+  rerun when the first run completes behaves exactly as before.
+
+<!-- entry: sl-7c7i -->
+- **The verdict contract: exit codes strengthened.** The 0/1/2/3 contract was
+  reopened strengthen-only for this release, and locks hard from here:
+  - **New exit 4 — run degraded.** A scenario `:error` (infrastructure
+    failure: lifecycle hook throw, capability provisioning, capture, harness)
+    now exits 4 with run status `:degraded`, no longer 1. Exit 1 now means
+    exactly "at least one scenario failed — valid tests, app wrong."
+  - **Provisioning failures join the `:error` family.** A capability
+    provisioning failure makes the scenario `:error` (was `:failed`); its
+    JUnit element moves from `<failure>` to `<error>`.
+  - **Empty selection exits 2.** A run selecting zero scenarios (0-of-N tag
+    filter, feature files with no scenarios, CLI paths narrowing every
+    `setup.clj` group away — checked before any `:start` runs) is a planning
+    error, never a silent green; exit 0 is now existential (≥1 scenario
+    selected). Applies to dry runs too. No allow-empty knob: the record's
+    `:data` carries selected/total/searched/filter so a CI wrapper can decide
+    upstream (dry-run-first pattern, docs/CI.md).
+  - **Arg-parse and usage errors exit 2** (were 1): a typo'd flag or missing
+    subcommand argument is an un-runnable invocation, like an unknown command.
+  - **Counts ride every `--edn` summary**, including exit-2/3 records (zeros).
+  - **Migration:** CI that gates on "nonzero = fail" is unaffected. Scripts
+    testing `== 1` must also handle 4; scripts treating an empty selection as
+    green must adopt the dry-run-first wrapper. Canonical table:
+    `shiftlefter.runner.verdict` + README § Return Codes, guarded by
+    `exit-contract-guard-test`.
+
+<!-- entry: sl-7q7w -->
+- **`destroy-costume!` now refuses while the browser is live — and never
+  deletes a profile it can't confirm is dead.** Destroy trusted the pid
+  recorded in `browser-meta.edn`; when that pid was stale it reported
+  `:destroyed`, deleted the credential-bearing profile, and left the real
+  browser running, still authenticated. Liveness is now verified against the
+  debug port (the process actually serving it), never the recorded pid:
+  - **Live browser → structured refusal** `:costume/browser-live`, naming the
+    pid actually serving the port. Override with `--force` (CLI) /
+    `{:force true}` (REPL/programmatic), which kills the port's real owner and
+    re-verifies death before deleting; if the browser survives the kill, the
+    profile is kept (`:costume/destroy-failed`). Unreadable metadata also
+    refuses (`:costume/meta-unreadable`) — no port, no confirmation.
+  - **Dead browser → no kill at all.** The old path killed the recorded pid
+    even when nothing served the port — a pid the OS may have reused for an
+    unrelated process.
+  - `connect-costume!` now refreshes the recorded pid on the
+    attach-to-already-alive path (relaunch always did), so `costume list`
+    stops reporting a dead pid for a live browser.
+  - **Migration:** scripts and agents destroying live costumes must close the
+    browser first or pass `--force`; a bare `sl costume destroy` on a live
+    costume now exits 1 with the rerun hint.
+
+## Fixes
+
+<!-- entry: sl-zjf5 -->
+- **A fresh install no longer offers ~96MB of binaries to your first
+  `git add`.** `release/install.sh` now writes a binaries-only
+  `sl/.gitignore` (the jar, the `.jsa` CDS archive, `lib/`) when none
+  exists, so everything you author in `sl/` — config, features, glossary,
+  steps — stays committable while the installed tooling stays out of your
+  history; a `.gitignore` you wrote yourself is never touched. The same
+  release-tail pass trued three doc claims: the exit-code docs now state
+  that an infrastructure failure surfacing inside a step (a connection
+  refused mid-run) reports as exit 1 today and may classify into the
+  degraded exit 4 in a future release, and the config reference marks the
+  default `:web` interface's deep-merge under user `:interfaces` as
+  provisional.
+
+<!-- entry: sl-t86d -->
+- **A crashed run's HTML report says CRASHED, the API docs stop rotting
+  silently, and two docstrings tell the truth.** Audit-tail tidies. The
+  HTML report's header badge now speaks the whole verdict vocabulary
+  (one table with the TOC): exit 3 reads CRASHED instead of
+  misattributing FAILED, and the previously-unstyled error badge family
+  (PLANNING FAILED / DEGRADED / CRASHED) is actually visible. The
+  committed codox API docs (`docs/api`) were regenerated — killing a
+  retired costume-durability overclaim and the pre-0.5.5 exit table that
+  had shipped stale — and a new drift-guard test holds them fresh from
+  now on: the stamped version must match build.clj's (the release-cut
+  regen step, made mechanical) and sampled load-bearing docstrings must
+  match their generated pages, with failures naming the remedy
+  (`bin/docs`). Docstring truth fixes: `shiftlefter.costume` no longer
+  claims a costume "survives JVM restarts" (Chrome is a JVM child;
+  durability is the profile plus relaunch), and
+  `registry-problems` documents that its not-a-map arm serves direct
+  callers only — at the runner boundary the start-result spec catches a
+  non-map registry first.
+
+<!-- entry: sl-kkoh -->
+- **A run now refuses up front when a scenario it selected cannot
+  provision — and `sl orient` reports declared runtime facts instead of
+  shrugging.** Two precision refinements on the 0.5.5 declaration
+  contract. First, the registry check went plan-aware: when a group's
+  `:start` returns a registry missing an adapter that a bound, selected
+  scenario actually references, the run is a planning error (exit 2,
+  `:setup/bound-adapter-missing`) instead of a mid-run
+  `:adapter/unknown` death — and, exactness cutting both ways, a
+  configured-but-untouched interface whose adapter is absent no longer
+  draws the removal warning (that config-scoped warning remains only as
+  the fallback for surfaces without compiled plans). The check follows
+  the selection: a tag-filtered-out scenario cannot trip it, and
+  `--dry-run` (which never runs `:start`) is unaffected. `:stop` still
+  runs on this new error — `:start` ran, so the world it built is torn
+  down. Second, `sl orient`/`--edn` adapter metadata now reads the
+  declaration's optional runtime fields: a declared `:impl-key`
+  (including the deliberate `nil`) and `:on-provision?` replace the
+  `:runtime-unknown` marker for exactly the fields the declaration
+  speaks to; undeclared fields stay marked, never guessed.
+
+<!-- entry: sl-s35y -->
+- **`sl daemon status` shows costume custody, and the docs say who holds
+  what.** A warm run's worn costume staying alive inside the daemon
+  between invocations is costume persistence working (same design as the
+  dev REPL JVM) — but the custody was invisible. `status` on a live
+  daemon now lists the costumes and driver liveness the daemon holds
+  (a pure read through a dedicated status query — never the dispatch
+  path, so it mutates nothing; no daemon still means no JVM). The
+  daemon JVM joins the lifetime map (docs/architecture/repl-lifetimes.md)
+  with its reapers named, COSTUMES.md/daemon.md state the custody rule
+  in one sentence each, and docs/CI.md gains the ratified guidance:
+  prefer the cold path in CI (`SL_NO_DAEMON=1`) — the daemon is a
+  development-loop tool.
+
+<!-- entry: sl-xjx0 -->
+- **The audit C1 batch — ten truth fixes across the surface** (v0.5.5
+  pre-tag audit, sl-p1op). Multi-group runs write ONE aggregated JUnit XML
+  instead of each group replacing the file (a red early group no longer
+  vanishes behind a green last group). The warm client releases its nREPL
+  session after every dispatch (previously one leaked session + thread
+  per warm invocation until the idle reaper). `repl/run` honors the
+  global `:timing` budget and threads a run seed exactly like `sl run`
+  (and returns the `:seed`). Config lint warns on `:timing`/`:costumes`
+  nested under `:runner` (silently dead) and on a costume declared for a
+  non-etaoin-adapter interface (attach is etaoin-only this release).
+  `sl doctor`'s ChromeDriver lockstep probes every binary the runtime
+  could use, including per-interface `:adapter-opts` pins. Costume lint
+  messages tell the truth: a typo'd `:costumes` key gets a did-you-mean
+  instead of a prescription to declare the typo, and the cross-interface
+  wear messages describe the actual situation. Adapter declarations gain
+  pure-data runtime-field faces (`:impl-key` — nil declares deliberate
+  absence — and `:on-provision?`), verified against the live registry;
+  a builtin-name override that silently drops the default entry's
+  runtime keys warns naming them, and a removed default adapter a
+  configured interface still references warns before provisioning fails
+  live (later scoped by sl-kkoh, above: at the run seam the exact
+  bound-adapter check owns removal; the warn remains for plan-less
+  surfaces). Both custom-registry examples now update the default `:sms-mock`
+  entry instead of rebuilding it, restoring the per-scenario SMS time
+  fence they had silently lost.
+<!-- entry: sl-d3cz -->
+- **`sl doctor` no longer fails your machine over a key it merely doesn't
+  know, and `:timing` typos stop dying silently.** Two config-truth fixes
+  from the pre-0.5.5 audit's docs+tests batch. Doctor: an unknown key in
+  `~/.shiftlefter/config.edn` is now a `[WARN]` (the config still works —
+  every consumer ignores the key), while invalid VALUES (bad type,
+  missing or non-executable file, parse errors) still `[FAIL]`; warns
+  never flip exit 0. Timing: the `:timing` map's inner keys are now a
+  closed set at both rungs (global and per-interface) — an unknown key
+  like `{:interval 250}` was previously accepted and silently dead; it is
+  now a config error with a did-you-mean. The same batch closed audit
+  coverage gaps (an automated mid-stream daemon-loss exit-3 guard, run
+  end-to-end proofs for `:costume/shared-wears` exit 2 and the
+  capture-failure exit 4, a scaffold zero-config-lints assertion, and the
+  exit-code guard extended to every surface stating the table) and swept
+  stale claims from README, the architecture maps, and the lifecycle /
+  hooks / daemon / resolution docs.
+
+<!-- entry: sl-hyey -->
+- **The resolved state stops lying about custom adapter registries.**
+  `sl orient`/`sl glossary`/`sl explain` built their picture from a
+  hardcoded default registry, so on a project whose setup.clj installs a
+  custom adapter the `--edn` `:adapter-metadata` reported runtime fields
+  the project's own `:start` replaces, and the usage index could bind the
+  corpus against the wrong registry — spurious capability failures then
+  silently emptied every usage marker. The projection now reads
+  setup.clj's `:adapters` declarations (the same declared-preview model
+  `--dry-run` binds against) and stamps metadata with provenance: a
+  builtin entry keeps its full fields; a declared entry carries the
+  declaration's data half with `:impl-key`/`:has-on-provision?` absent
+  and named in `:runtime-unknown` — never guessed (since refined by
+  sl-kkoh, above: fields the declaration speaks to now carry their
+  declared values; only undeclared fields stay marked). The corpus bind
+  threads the declared registry, and capability gating on the listing
+  surfaces is warn-not-kill: a listing is not a run, so a genuine gap
+  rides the output as a visible caveat (and the `--edn` corpus block)
+  instead of suppressing the markers; `sl orient` still reports
+  `:status :error` exactly where a run would fail planning. setup.clj
+  now also rides the projection fingerprint.
+
+<!-- entry: sl-st01 -->
+- **A malformed `:costumes` declaration is now a config error from `sl
+  run`, not a silent off-switch.** The costume validators (`:config/
+  invalid-costume`, `:config/unknown-costume-interface` with did-you-mean)
+  were reachable only from `sl orient`/`explain`; the run path never called
+  them, so a guessable shorthand like `{:finance :web}` produced no error,
+  no warning, and quietly disabled every costume lint. They now run at the
+  config stage of every run — stderr `Config error:`, `--edn`
+  `:planning :errors`, exit 2 — alongside the existing adapter-availability
+  check. Pre-tag batch from the v0.5.5 release audit (sl-p1op); same batch:
+  the live-browser e2e arm re-pinned to the timing-substrate capture-miss
+  contract, the `sl init` worked intent teaches `fills Login.username`
+  (the old `{username}` exemplar parsed as a raw locator and collided with
+  the data-plane `{name}` syntax), the layout doctrine matches what `sl
+  init` writes, and ARCHITECTURE's registry-entry example passes the
+  shipped validator.
+
+<!-- entry: sl-74w8 -->
+- **Every config validator now runs on `sl run`, not just the projection.**
+  The remaining `normalize` validators — invalid or unknown-type interface
+  definitions, malformed `:timing` maps (with did-you-mean), and
+  macros-enabled-without-`:registry-paths` — were reachable only from
+  `sl orient`/`explain`: a config the projection reported as `:error`
+  still loaded under `sl run` and failed later, or not at all, with a
+  less legible diagnostic. The run path's config stage now runs the
+  whole validation aggregator (subsuming the direct costume-validator
+  call it gained in the sl-st01 fix), so those shapes fail planning the
+  same way every other config error does — stderr `Config error:`,
+  `--edn` `:planning :errors`, exit 2 — and any validator added in the
+  future is reachable from both channels by construction. Second wave of
+  the v0.5.5 release-audit findings (sl-p1op).
+
+<!-- entry: sl-52ly -->
+- **Playwright key presses no longer round-trip through etaoin's key
+  representation.** The press path used to resolve W3C key names to
+  etaoin's private-use unicode constants and have the Playwright backend
+  decode them back into names — a double translation in which the other
+  vendor's dialect was the accidental interchange format. Each backend
+  now translates the W3C name directly (Playwright is identity on every
+  name but `Space`), and a parity test pins every vendor table to the
+  closed key-name set, so a future key name missing from a backend fails
+  the build instead of surfacing at runtime. Invisible when correct —
+  the observable behavior of every press step is unchanged.
+
+<!-- entry: sl-9nzc -->
+- **Stepdef namespaces can be reloaded — the registry no longer collides
+  with itself.** `require :reload` of any stepdefs namespace (and
+  re-evaluating a `defstep` form at the REPL) threw
+  `:stepdef/duplicate` against its own previous load; the only escape
+  was `clear!`, which wipes the whole registry AND disconnects every
+  costume — a reconnect tax on every stepdef edit. Registration now has
+  redefinition semantics keyed on the SOURCE FILE: a stepdef from the
+  same file replaces its previous registration (line-independent, so an
+  edited file whose definitions shifted reloads cleanly), while a
+  duplicate from a different file still throws — the cross-namespace
+  vocabulary-collision protection is unchanged. The stated trade: a
+  same-pattern duplicate within one file is now last-wins, exactly like
+  defining the same `defn` name twice in one file.
+
+<!-- entry: sl-vmc5 -->
+- **The REPL can now provision a bare (non-costume) browser — the
+  bare-caller path lazy provisioning was built for actually works.**
+  Previously the only way to a live browser in the REPL was
+  `connect-costume!`: both `repl/as` and `repl/run` failed
+  `:browser/no-session` for costume-less subjects, even though the
+  engine's lazy provisioning exists precisely for plan-less bare callers
+  (the config docs' own words). Now `run` threads the loaded config's
+  `:interfaces` to the engine (provision on demand, ephemeral cleanup at
+  each scenario's end — runner semantics exactly), and `as` provisions
+  the step's interface lazily into the named context, where
+  `reset-ctxs!`/`clear!` close it. That last part also makes the cleanup
+  vocabulary's `:closed` branch reachable from public REPL calls for the
+  first time — and carrying that exposed a real defect, fixed here: the
+  REPL close path could not close the driver shape provisioning actually
+  produces (it read a `:webdriver-url` key real drivers don't carry, and
+  its rebuilt map dropped the `:process`), so it now uses the full
+  driver reap (session deleted, chromedriver process killed, Chrome
+  closed). The `:browser/no-session` error also stops dead-ending: it
+  names both remedies (`connect-costume!` for an authenticated costume;
+  a config with `:interfaces` for a bare browser).
+
+<!-- entry: sl-34fu -->
+- **Costume chromedriver processes are now reaped — a long REPL session
+  no longer accumulates one live WebDriver endpoint per
+  connect/reconnect.** Every costume driver spawn leaked its
+  chromedriver: scenario cleanup deliberately skips persistent
+  capabilities, and `destroy-costume!` killed only Chrome — so drivers
+  piled up unbounded in exactly the long-lived REPL sessions costumes
+  are for (measured: +1 per connect, per auto-reconnect, and — the
+  widest route — per worn-scenario provision), each one a live WebDriver
+  endpoint still pointed at the costume's authenticated Chrome. The
+  costume now owns its driver handle: each successful
+  connect/reconnect/provision **replaces** the prior driver (session
+  deleted, process killed; the debuggerAddress-attached Chrome is never
+  touched — verified live), and destroy reaps the last one, so nothing
+  drivable outlives the costume. Transparent auto-reconnect is
+  unchanged and re-verified post-fix (driver killed mid-session → next
+  command rebuilds and answers, process count still net one). One
+  consequence made explicit in COSTUMES.md: one live driver per costume
+  is the contract — driving one costume through two handles
+  concurrently causes reconnect thrash (each reaps the other's driver),
+  not breakage.
+
+<!-- entry: sl-uv3r -->
+- **The default `:sms-mock` (and `:sms-twilio`) registry entries now
+  declare `:impl-key :sms` — builtin SMS steps get the protocol impl,
+  not the factory's wrapper map.** Both SMS factories return
+  `{:ok {:sms <impl> :from-number ...}}`, but their registry entries
+  omitted `:impl-key`, so a project using the DEFAULT `:sms-mock` (no
+  `setup.clj` override) stored the wrapper map as the capability and the
+  first builtin SMS step threw `No implementation of method: :send! ...
+  PersistentArrayMap`. Example 04 never saw it because its registry
+  override returns the bare impl — the masking case. With `:impl-key`
+  declared, provisioning extracts the impl (the bundle rides
+  `:cleanup-handle`, unchanged for cleanup fns), and the entries' 
+  `:provides` promises are now actually verified at provision time —
+  `check-extracted-impl` only runs for entries with an `:impl-key`, so
+  the SMS protocol declarations had been unenforced. `:sms-twilio`
+  carried the identical defect and gets the identical fix; bare-impl
+  override registries (example 04's shape) are unaffected — `:impl-key`
+  is per-entry and their entries don't declare one.
+
+<!-- entry: sl-sfb1 -->
+- **Stepdef↔glossary validation now fires for renamed interfaces.** The
+  tier-2 cross-check (verb exists, frame exists, args match) looked up
+  glossary verbs by the stepdef's `:interface` NAME against the
+  TYPE-keyed glossary map, so any project whose interface name differs
+  from its type (`:storefront {:type :web}`) silently skipped the entire
+  check for those stepdefs — no unknown-verb, unknown-frame, or
+  args-mismatch errors, ever. Under the sl-s2oa model (Features, above)
+  the gap cannot recur by construction: stepdef `:interface` metadata
+  names the TYPE directly — instance names live in the step's `[name]`
+  annotation, never in stepdef metadata — so the glossary lookup is
+  direct and covers renamed projects with no resolution step. Issues
+  carry `:interface-type` alongside `:interface` for shape stability;
+  the two are equal under that model. Found and filed during the
+  sl-0gfc collision verification. **Note:** a project that renames
+  its interfaces may see NEW validation errors on upgrade — that is the
+  fix working; the errors were always true and previously invisible.
+
+<!-- entry: sl-ur58 -->
+- **A comment between a step and its table's first row now parses.** Upstream
+  Gherkin treats standalone comment lines as legal anywhere, and comments
+  between table rows already worked — but this one position ended the step
+  at the comment and orphaned the table into `:unexpected-token` errors.
+  Comment and blank lines there now attach the table to the step, matching
+  upstream. Canonical formatting emits the comment above the table's first
+  row (following-node attachment, as everywhere else). This unlocks the
+  natural provenance spot: a `# why:` annotating the table it sits on. The
+  fuzz generator now sprinkles this position too.
+
+---
+
 # Changelog: 0.5.4
 
 **Release Date:** 2026-08-05

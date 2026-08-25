@@ -9,7 +9,6 @@
             [shiftlefter.browser.protocol :as bp]
             [shiftlefter.browser.intent :as browser-intent]
             [shiftlefter.intent.state :as intent-state]
-            [etaoin.keys]
             [shiftlefter.stepdefs.browser]))
 
 ;; -----------------------------------------------------------------------------
@@ -526,7 +525,7 @@
       (is (map? result))
       (let [call (first (get-calls browser))]
         (is (= :press-key (:op call)))
-        (is (= (str etaoin.keys/enter) (:key-str call)))))))
+        (is (= "Enter" (:key-str call)))))))
 
 (deftest test-presses-quoted-single-char
   (testing ":alice presses 'g' sends the character g"
@@ -766,6 +765,9 @@
                (catch clojure.lang.ExceptionInfo e e))]
       (is (some? ex))
       (is (.contains (ex-message ex) "No browser session for subject: bob"))
+      ;; sl-vmc5: the error names both remedies instead of dead-ending.
+      (is (.contains (ex-message ex) "connect-costume!"))
+      (is (.contains (ex-message ex) ":interfaces"))
       (let [data (ex-data ex)]
         (is (= :browser/no-session (:type data)))
         (is (= "bob" (:subject data)))
@@ -907,7 +909,8 @@
             ctx (make-ctx-with-subject :alice browser)
             e (try (invoke-step ":alice should be on exactly '/p'" ctx)
                    (catch clojure.lang.ExceptionInfo e e))]
-        (is (= :not-a-full-url (:reason (ex-data e))))
+        (is (= :not-a-full-url (get-in (ex-data e) [:last-error :data :reason]))
+            "sl-99u2: the teaching error rides the timeout record's :last-error")
         (is (re-find #"requires a full URL" (ex-message e)))
         (is (re-find #"add :base-url" (ex-message e)) "first exit named")
         (is (re-find #"absolute URL" (ex-message e)) "second exit named")))))
@@ -981,7 +984,7 @@
                     (bindings/merge-bindings {:myUrl "http://h:9092/p"}))
             e (try (invoke-step ":alice should be on exactly '{myUrl}'" ctx)
                    (catch clojure.lang.ExceptionInfo e e))]
-        (is (= "{myUrl}" (:expected (ex-data e)))
+        (is (= "{myUrl}" (get-in (ex-data e) [:last-error :data :expected]))
             "the literal text {myUrl} must not resolve to the bound URL — a
              resolved (quote-wrapped) URL here would also throw, so assert
              on WHAT the assertion compared, not that it failed"))))
@@ -1387,7 +1390,8 @@
         (is (= {:id "order"} (-> call :locator :q)))))))
 
 (deftest test-capture-failure-is-structured-step-failure
-  (testing "no match within the retry budget = :bindings/capture-failure with pattern, excerpt, locator"
+  (testing "no match within the retry budget = :step/poll-timeout carrying the
+            :bindings/capture-failure with pattern, excerpt, locator (sl-99u2)"
     (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 250]
       (let [browser (make-fake-browser {:page-text "nothing relevant here"})
             ctx (make-ctx-with-subject :alice browser)
@@ -1396,11 +1400,13 @@
                     ctx)
                    (catch clojure.lang.ExceptionInfo e e))
             data (ex-data e)]
-        (is (= :bindings/capture-failure (:type data)))
-        (is (= "(?<code>\\d{6})" (:pattern data)))
-        (is (= "nothing relevant here" (:text data))
+        (is (= :step/poll-timeout (:type data)))
+        (is (= :override (:deadline-source data)) "a bound var reads as override")
+        (is (= :bindings/capture-failure (get-in data [:last-error :type])))
+        (is (= "(?<code>\\d{6})" (get-in data [:last-error :data :pattern])))
+        (is (= "nothing relevant here" (get-in data [:last-error :data :text]))
             "the text actually seen rides the error")
-        (is (= "{:id \"order\"}" (:locator data))
+        (is (= "{:id \"order\"}" (get-in data [:last-error :data :locator]))
             "the capture step stamps the locator onto capture!'s error")
         (is (> (count (get-calls browser)) 1)
             "the miss polls (wait-then-assert) before surfacing")))))
@@ -1459,8 +1465,8 @@
       (is (= :get-text (:op (first (get-calls browser))))))))
 
 (deftest test-should-see-matching-failure-is-structured
-  (testing "no match within the retry budget = structured assertion failure
-            with pattern, actual text, locator"
+  (testing "no match within the retry budget = :step/poll-timeout carrying the
+            structured assertion failure with pattern, actual text, locator"
     (binding [shiftlefter.stepdefs.browser/*retry-timeout-ms* 250]
       (let [browser (make-fake-browser {:page-text "nothing relevant"})
             ctx (make-ctx-with-subject :alice browser)
@@ -1469,10 +1475,11 @@
                     ctx)
                    (catch clojure.lang.ExceptionInfo e e))
             data (ex-data e)]
-        (is (= :browser/assertion-failed (:type data)))
-        (is (= "Order \\d+" (:pattern data)))
-        (is (= "nothing relevant" (:actual data)))
-        (is (= "{:id \"order\"}" (:locator data)))
+        (is (= :step/poll-timeout (:type data)))
+        (is (= :browser/assertion-failed (get-in data [:last-error :type])))
+        (is (= "Order \\d+" (get-in data [:last-error :data :pattern])))
+        (is (= "nothing relevant" (get-in data [:last-error :data :actual])))
+        (is (= "{:id \"order\"}" (get-in data [:last-error :data :locator])))
         (is (> (count (get-calls browser)) 1)
             "the miss polls (wait-then-assert) before surfacing")))))
 

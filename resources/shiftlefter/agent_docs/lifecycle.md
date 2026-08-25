@@ -16,17 +16,21 @@ assertion passes.
 
 The plan phase never invokes `:start`, `:stop`, or hooks, and never
 captures. `setup.clj` IS `load-file`'d so the plan is knowable — keep its
-top level pure; side effects belong inside `:start`. One caveat: the preview
-binds against the default adapter registry, so a project whose adapters
-exist only in a custom registry returned by `:start` can bind differently in
-preview than in a real run.
+top level pure; side effects belong inside `:start`. Custom adapters stay
+visible to this phase via the group's `:adapters` declaration (pure data,
+the delta vs the default registry): the preview binds against the declared
+shapes, and the registry `:start` returns is verified to match them
+(mismatch = planning error `:setup/registry-mismatch`; an undeclared
+returned registry is a deprecated shape that warns).
 
 ## The execution weave
 
 ```text
 group (declared order, one at a time)
   :start                      ← the world starts here, not earlier
-  parse + compile             ← against the adapter registry :start returned
+                                (its registry verified against :adapters)
+  parse + compile             ← against the group's adapter registry
+                                (declared data, live factories)
   scenarios (parallel-capable)
     Before hooks              ← no capabilities yet
     capability provisioning   ← browsers launch here
@@ -47,13 +51,18 @@ envelope.
 
 - Planning failure (unresolved name, unknown frame, consumed binding without
   a producer, unknown `@hook=`, broken plan shape) → exit 2, nothing executes.
+- Empty selection (a tag filter matching 0 of N, feature files with no
+  scenarios, CLI paths narrowing every group away) → exit 2, checked before
+  any `:start` runs; the record carries counts and what was searched. A dry
+  run's exit 0 requires a nonempty selection too.
 - `:start` throws or returns a malformed shape → group-local planning
   failure; the group is skipped, other groups still run. Half-started state
   is user-owned — the framework can't know what half-started.
 - Before hook throws or returns a non-map → scenario `:error` (never
   `:failed`), steps skipped, only succeeded frames unwind.
-- Capability provisioning fails → scenario errors; Afters still unwind,
-  WITHOUT capabilities.
+- Capability provisioning fails → scenario `:error` — same family as a hook
+  throw (broken harness ≠ broken app); Afters still unwind, WITHOUT
+  capabilities.
 - Step fails → scenario `:failed`; `:on-failure` capture fires at that
   instant, before Afters.
 - After hook throws or its attachments claim is malformed → scenario
@@ -62,10 +71,14 @@ envelope.
 - Capture infrastructure fails on an otherwise-green scenario → scenario
   `:error`, capture-attributed; an already-red scenario keeps its status and
   the ref records the miss.
-- `:stop` throws → reported (console + envelope), exit code unchanged; a
-  dirty-teardown marker is written, announced at the next run's start, then
-  cleared.
-- Exit codes aggregate worst-wins across groups.
+- `:stop` throws → reported (console + envelope), exit code unchanged: the
+  exit code is this run's verdict, already earned by the time teardown runs;
+  environment damage is the NEXT run's planning input — which is what the
+  dirty-teardown marker is (written now, announced at the next run's start,
+  then cleared).
+- Any scenario `:error` → exit 4 (run degraded: the harness broke, the run
+  proves nothing about the app), distinct from exit 1 (a scenario failed).
+- Exit codes aggregate worst-wins across groups: 2 > 4 > 1 > 0.
 
 ## Parallelism
 
@@ -87,6 +100,31 @@ last drain, plus a final tail sweep), once post-steps under `:on-failure`,
 before any After runs. Capture cost is recorded on the ref
 (`:attachment/duration-ms`) and never pollutes step durations. Dry runs
 never capture.
+
+## The run seed
+
+Every invocation gets ONE seed (positive 64-bit long, decimal): `--seed N`
+beats config `:runner {:seed N}` beats generated. Recorded always —
+`:run/seed` in every group's `--edn` summary, `:seed` in run-ctx, the HTML
+header, one stderr line (`run seed: N`). One deliberate exception: the
+daemon's busy-reject summary (exit 2, nothing ran) carries no `:run/seed`
+— nothing was seeded. The framework draws no randomness
+from it; it is handed to user code: hook payloads carry `:seed`, step
+`ctx` carries `:seed`, and `:start` receives a `:seed` key on its config
+argument. Need several independent streams? Derive:
+`(bit-xor seed (hash scenario-id))` — the documented convention, not
+framework code.
+
+## Consuming the run record
+
+The run record = the `--edn` stdout form stream (redirect it — no summary
+file is written) plus the run-directory bytes. The summary's top-level
+`:attachments` index is the authoritative evidence walk (green-run evidence
+appears only there); `:failures` entries carry their own refs inline for
+join-free triage — same refs, deliberate duplication. `:run/seed` on every
+summary is the run's seed — rerun with `--seed <that value>` to reproduce
+user-code randomness. Building a custom rendering from the record:
+`docs/REPORTS.md` (contract + runnable recipe).
 
 Related topics: `hooks` (registration, payloads, attachments claim),
 `layout` (which files attach user code, what the framework writes).

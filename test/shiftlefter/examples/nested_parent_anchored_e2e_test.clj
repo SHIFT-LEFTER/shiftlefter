@@ -139,17 +139,22 @@
              (testing "a named group captured off the live DOM lands in the data plane"
                (is (= "Widget A"
                       (get-in result [bindings/bindings-key :widgetName]))))
-             (testing "a live no-match is the structured capture failure, locator stamped"
+             (testing "a live no-match polls to deadline and surfaces as the
+                       :step/poll-timeout record carrying the structured capture
+                       failure under :last-error, locator stamped (sl-99u2 contract —
+                       the unit twin is stepdefs/browser_test.clj)"
                (let [e (try (binding [browser-steps/*retry-timeout-ms* 250]
                               (invoke-registered-step
                                ":alice captures Dashboard.featured[1].title matching /(?<code>\\d{6})/"
                                ctx))
                             (catch clojure.lang.ExceptionInfo e e))
                      data (ex-data e)]
-                 (is (= :bindings/capture-failure (:type data)))
-                 (is (= "Widget A" (:text data))
+                 (is (= :step/poll-timeout (:type data)))
+                 (is (= :bindings/capture-failure (get-in data [:last-error :type])))
+                 (is (= "Widget A" (get-in data [:last-error :data :text]))
                      "the error carries the text actually seen on the page")
-                 (is (= "Dashboard.featured[1].title" (:locator data))))))))
+                 (is (= "Dashboard.featured[1].title"
+                        (get-in data [:last-error :data :locator]))))))))
         (finally
           (intent-state/clear-intents!)
           (registry/clear-registry!))))))

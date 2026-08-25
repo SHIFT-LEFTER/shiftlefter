@@ -1,8 +1,10 @@
 (ns shiftlefter.runner.setup-test
   "Unit tests for the setup.clj convention loader."
   (:require [babashka.fs :as fs]
+            [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [shiftlefter.adapters.registry :as adapters]
             [shiftlefter.runner.setup :as setup]))
 
 ;; -----------------------------------------------------------------------------
@@ -103,6 +105,23 @@
               {:keys [error]} (setup/load-setup setup-path {})]
           (is (= :setup/invalid-shape (:type error)))
           (is (some? (:explain error))))))))
+
+(deftest load-setup-rejects-malformed-adapter-decl
+  (testing "AC3 (sl-wntk) covering test: a malformed :adapters declaration —
+            unqualified :provides keyword — fails at LOAD via ::setup-list
+            with the s/explain in the message (existing behavior, pinned)"
+    (with-temp-dir
+      (fn [dir]
+        (let [setup-path (spit-file dir "setup.clj"
+                                    "(ns setup)
+                                     (def setups
+                                       [{:label \"decl\"
+                                         :adapters [{:name :novel :provides [:unqualified]}]
+                                         :start (fn [_] {})
+                                         :features [\"a.feature\"]}])")
+              {:keys [error]} (setup/load-setup setup-path {})]
+          (is (= :setup/invalid-shape (:type error)))
+          (is (str/includes? (:message error) "qualified-keyword?")))))))
 
 (deftest load-setup-syntax-error-surfaces
   (testing "Syntax error in setup.clj surfaces as :setup/load-failed"
@@ -312,3 +331,243 @@
                       {:label "sms-2fa" :start start-noop
                        :features ["features/password_reset_sms.feature"]}]]
           (is (= {:errors [] :warnings []} (setup/lint-setups setups dir))))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-e0ml — adapter declarations: spec shapes, lints, preview overlay, verify
+;; red side FIRST (guard-family law)
+;; -----------------------------------------------------------------------------
+
+(deftest adapter-decl-spec-shapes
+  (testing "an entry with a well-formed :adapters vector is spec-valid"
+    (is (s/valid? :shiftlefter.runner.setup/setup-entry
+                  {:start start-noop
+                   :features ["f.feature"]
+                   :adapters [{:name :custom-sms
+                               :type :sms
+                               :provides [:shiftlefter.sms.protocol/ISMS]}]})))
+  (testing "explicitly-empty :provides is legal (truthful no-protocols decl)"
+    (is (s/valid? :shiftlefter.runner.setup/adapter-decl
+                  {:name :leaky :provides []})))
+  (testing "a decl without :name is invalid"
+    (is (not (s/valid? :shiftlefter.runner.setup/adapter-decl
+                       {:provides [:shiftlefter.sms.protocol/ISMS]}))))
+  (testing "unqualified :provides keywords are invalid"
+    (is (not (s/valid? :shiftlefter.runner.setup/adapter-decl
+                       {:name :x :provides [:not-qualified]}))))
+  (testing "an empty :adapters vector is invalid (omit the key instead)"
+    (is (not (s/valid? :shiftlefter.runner.setup/setup-entry
+                       {:start start-noop
+                        :features ["f.feature"]
+                        :adapters []})))))
+
+(deftest lint-novel-decl-without-provides-fires
+  (testing "a NOVEL adapter declared without the :provides KEY is a plan ERROR"
+    (with-temp-dir
+      (fn [dir]
+        (spit-file dir "features/a.feature" "Feature: A\n")
+        (let [setups [{:label "g" :start start-noop
+                       :adapters [{:name :custom-thing}]
+                       :features ["features/a.feature"]}]
+              {:keys [errors]} (setup/lint-setups setups dir)]
+          (is (= [:setup/adapter-decl-missing-provides] (mapv :type errors)))
+          (is (= :custom-thing (:adapter (first errors))))))))
+  (testing "explicit :provides [] on a novel adapter lints clean"
+    (with-temp-dir
+      (fn [dir]
+        (spit-file dir "features/a.feature" "Feature: A\n")
+        (let [setups [{:label "g" :start start-noop
+                       :adapters [{:name :custom-thing :provides []}]
+                       :features ["features/a.feature"]}]]
+          (is (= [] (:errors (setup/lint-setups setups dir))))))))
+  (testing "a DEFAULT adapter name declared without :provides lints clean"
+    (with-temp-dir
+      (fn [dir]
+        (spit-file dir "features/a.feature" "Feature: A\n")
+        (let [setups [{:label "g" :start start-noop
+                       :adapters [{:name :sms-mock}]
+                       :features ["features/a.feature"]}]]
+          (is (= [] (:errors (setup/lint-setups setups dir))))))))
+  (testing "duplicate decl names in one group is a plan ERROR"
+    (with-temp-dir
+      (fn [dir]
+        (spit-file dir "features/a.feature" "Feature: A\n")
+        (let [setups [{:label "g" :start start-noop
+                       :adapters [{:name :x :provides []}
+                                  {:name :x :provides []}]
+                       :features ["features/a.feature"]}]
+              {:keys [errors]} (setup/lint-setups setups dir)]
+          (is (= [:setup/duplicate-adapter-decl] (mapv :type errors))))))))
+
+(deftest declared-preview-registry-overlays-defaults
+  (let [decls [{:name :custom-sms :provides [:shiftlefter.sms.protocol/ISMS]}
+               {:name :etaoin :provides [:some.ns/IOther]}]
+        reg (setup/declared-preview-registry decls)]
+    (testing "novel decl becomes a data-only entry"
+      (is (= [:shiftlefter.sms.protocol/ISMS] (get-in reg [:custom-sms :provides]))))
+    (testing "override decl replaces the default entry's declared keys"
+      (is (= [:some.ns/IOther] (get-in reg [:etaoin :provides])))
+      (is (some? (get-in reg [:etaoin :factory]))
+          "non-declared keys of the default entry survive"))
+    (testing "untouched default entries pass through"
+      (is (some? (get-in reg [:sms-mock :factory]))))))
+
+(deftest verify-declared-registry-cases
+  (let [isms :shiftlefter.sms.protocol/ISMS
+        inbound :shiftlefter.sms.protocol/ISMSInbound
+        live-entry (fn [provides] {:factory (fn [_] {:ok {}})
+                                   :cleanup (fn [_] {:ok :closed})
+                                   :provides provides})]
+    (testing "RED: declared adapter absent from the live registry"
+      (let [r (setup/verify-declared-registry
+               [{:name :custom-sms :provides [isms]}]
+               {})]
+        (is (= :setup/registry-mismatch (:type r)))
+        (is (= [:declared-adapter-missing] (mapv :mismatch (:mismatches r))))))
+    (testing "RED: live :provides differs from the declaration"
+      (let [r (setup/verify-declared-registry
+               [{:name :custom-sms :provides [isms inbound]}]
+               {:custom-sms (live-entry [isms])})]
+        (is (= [:declared-data-differs] (mapv :mismatch (:mismatches r))))
+        (is (str/includes? (:message r) "custom-sms"))))
+    (testing "RED: declared capture kinds differ from live"
+      (let [r (setup/verify-declared-registry
+               [{:name :custom-sms :provides [isms]
+                 :capture {:screenshot {}}}]
+               {:custom-sms (live-entry [isms])})]
+        (is (= [:declared-data-differs] (mapv :mismatch (:mismatches r))))))
+    (testing "RED: a live delta vs the default registry that is not declared"
+      (let [r (setup/verify-declared-registry
+               [{:name :custom-sms :provides [isms]}]
+               {:custom-sms (live-entry [isms])
+                :stowaway (live-entry [])})]
+        (is (= [:undeclared-adapter] (mapv :mismatch (:mismatches r))))))
+    (testing "RED: name-only decl of a default adapter pins the default data"
+      ;; silence is not a wildcard: {:name :sms-mock} means 'default shape'
+      (let [r (setup/verify-declared-registry
+               [{:name :sms-mock}]
+               {:sms-mock (live-entry [isms])})]   ; default has ISMS+ISMSInbound
+        (is (= [:declared-data-differs] (mapv :mismatch (:mismatches r))))))
+    (testing "GREEN: matching novel decl"
+      (is (nil? (setup/verify-declared-registry
+                 [{:name :custom-sms :provides [isms]}]
+                 {:custom-sms (live-entry [isms])}))))
+    (testing "GREEN: no live registry returned, decls pin default shapes"
+      (is (nil? (setup/verify-declared-registry
+                 [{:name :sms-mock}]
+                 nil))))
+    (testing "GREEN: the 04-sms-2fa shape — default overlaid with a same-provides override"
+      (is (nil? (setup/verify-declared-registry
+                 [{:name :sms-mock :provides [isms inbound]}]
+                 (assoc adapters/default-registry :sms-mock
+                        {:factory (fn [_] {:ok :shared})
+                         :cleanup (fn [_] {:ok :closed})
+                         :provides [isms inbound]})))))))
+
+;; -----------------------------------------------------------------------------
+;; W20+21 (sl-xjx0): optional runtime-field declarations, lossy-override
+;; warns, removed-default detection
+;; -----------------------------------------------------------------------------
+
+(deftest verify-declared-runtime-fields
+  (let [isms :shiftlefter.sms.protocol/ISMS
+        live-entry (fn [m] (merge {:factory (fn [_] {:ok {}})
+                                   :cleanup (fn [_] {:ok :closed})
+                                   :provides [isms]}
+                                  m))]
+    (testing "GREEN: declared :impl-key matches the live key"
+      (is (nil? (setup/verify-declared-registry
+                 [{:name :custom-sms :provides [isms] :impl-key :sms}]
+                 {:custom-sms (live-entry {:impl-key :sms})}))))
+    (testing "GREEN: :impl-key nil declares deliberate absence"
+      (is (nil? (setup/verify-declared-registry
+                 [{:name :custom-sms :provides [isms] :impl-key nil}]
+                 {:custom-sms (live-entry {})}))))
+    (testing "RED: declared :impl-key differs from live"
+      (let [r (setup/verify-declared-registry
+               [{:name :custom-sms :provides [isms] :impl-key :sms}]
+               {:custom-sms (live-entry {})})]
+        (is (= [:declared-impl-key-differs] (mapv :mismatch (:mismatches r))))))
+    (testing "RED: declared :on-provision? true vs hookless live entry"
+      (let [r (setup/verify-declared-registry
+               [{:name :custom-sms :provides [isms] :on-provision? true}]
+               {:custom-sms (live-entry {})})]
+        (is (= [:declared-on-provision-differs] (mapv :mismatch (:mismatches r))))))
+    (testing "GREEN: :on-provision? true with a live hook"
+      (is (nil? (setup/verify-declared-registry
+                 [{:name :custom-sms :provides [isms] :on-provision? true}]
+                 {:custom-sms (live-entry {:on-provision (fn [ctx _] ctx)})}))))
+    (testing "spec: the new decl fields validate (and nil impl-key is legal)"
+      (is (s/valid? :shiftlefter.runner.setup/adapter-decl
+                    {:name :x :impl-key nil :on-provision? false}))
+      (is (not (s/valid? :shiftlefter.runner.setup/adapter-decl
+                         {:name :x :on-provision? "yes"}))))))
+
+(deftest lossy-override-warnings-cases
+  (let [isms :shiftlefter.sms.protocol/ISMS
+        override (fn [m] (merge {:factory (fn [_] {:ok {}})
+                                 :cleanup (fn [_] {:ok :closed})
+                                 :provides [isms]}
+                                m))]
+    (testing "WARN: builtin-name override dropping :impl-key AND :on-provision"
+      (let [ws (setup/lossy-override-warnings
+                [{:name :sms-mock :provides [isms]}]
+                (assoc adapters/default-registry :sms-mock (override {}))
+                [:sms-mock])
+            [w] ws]
+        (is (= 1 (count ws)))
+        (is (= :setup/lossy-adapter-override (:type w)))
+        (is (= [:impl-key :on-provision] (:dropped w)) "names the dropped keys")
+        (is (str/includes? (:message w) "deliberate?"))
+        (is (str/includes? (:message w) "update-dont-rebuild"))))
+    (testing "SILENT: the declaration records the drop as deliberate"
+      (is (empty? (setup/lossy-override-warnings
+                   [{:name :sms-mock :provides [isms]
+                     :impl-key nil :on-provision? false}]
+                   (assoc adapters/default-registry :sms-mock (override {}))
+                   [:sms-mock]))))
+    (testing "SILENT: update-dont-rebuild preserves the default keys"
+      (is (empty? (setup/lossy-override-warnings
+                   [{:name :sms-mock :provides [isms]}]
+                   (update adapters/default-registry :sms-mock merge (override {}))
+                   [:sms-mock]))))
+    (testing "WARN: a referenced default adapter removed entirely (W21)"
+      (let [ws (setup/lossy-override-warnings [] {} [:etaoin])
+            [w] ws]
+        (is (= 1 (count ws)))
+        (is (= :setup/default-adapter-removed (:type w)))
+        (is (= :etaoin (:adapter w)))
+        (is (str/includes? (:message w) ":adapter/unknown"))))
+    (testing "SILENT: minimal registry covering every referenced adapter"
+      (is (empty? (setup/lossy-override-warnings
+                   [] {:mock-web (override {})} [:mock-web]))))
+    (testing "SILENT: empty registry with nothing referenced (harmless)"
+      (is (empty? (setup/lossy-override-warnings [] {} []))))))
+
+;; sl-kkoh: the plan-aware EXACT check — the run seam's replacement for
+;; the removal warn above (which stays as the plans-not-in-hand fallback).
+
+(deftest bound-adapter-errors-cases
+  (testing "ERROR: a bound default adapter removed — with the teaching tail"
+    (let [[e :as es] (setup/bound-adapter-errors {:etaoin #{:web}} {})]
+      (is (= 1 (count es)))
+      (is (= :setup/bound-adapter-missing (:type e)))
+      (is (= :etaoin (:adapter e)))
+      (is (= [:web] (:interfaces e)))
+      (is (str/includes? (:message e) ":adapter/unknown"))
+      (is (str/includes? (:message e) "build on the defaults"))))
+  (testing "ERROR: a bound NOVEL adapter missing — same death, no defaults tail"
+    (let [[e :as es] (setup/bound-adapter-errors
+                      {:my-mail #{:mail :mail-admin}}
+                      {:etaoin {}})]
+      (is (= 1 (count es)))
+      (is (= :my-mail (:adapter e)))
+      (is (= [:mail :mail-admin] (:interfaces e)) "instances sorted")
+      (is (str/includes? (:message e) "interfaces :mail, :mail-admin"))
+      (is (not (str/includes? (:message e) "build on the defaults")))))
+  (testing "SILENT: every bound adapter present (minimal registry is fine)"
+    (is (empty? (setup/bound-adapter-errors
+                 {:mock-web #{:web}} {:mock-web {:factory identity}}))))
+  (testing "SILENT: nil live registry verifies against the default registry"
+    (is (empty? (setup/bound-adapter-errors {:etaoin #{:web}} nil))))
+  (testing "SILENT: nothing bound (empty touched map — exactness both ways)"
+    (is (empty? (setup/bound-adapter-errors {} {})))))

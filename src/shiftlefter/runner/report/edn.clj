@@ -8,13 +8,44 @@
 
    ```clojure
    {:run/id \"uuid-string\"
-    :run/exit-code 0|1|2|3
-    :run/status :passed|:failed|:planning-failed|:crashed
+    :run/seed 1234567     ;; the run's seed (sl-08f7) — positive 64-bit long,
+                          ;; CORE-RECORD family: always present on runner-
+                          ;; produced summaries (identical in every group
+                          ;; summary of one invocation); absence only ever
+                          ;; means an old record
+    :run/exit-code 0|1|2|3|4
+    :run/status :passed|:failed|:planning-failed|:crashed|:degraded
     :counts {:passed N :failed N :pending N :skipped N
-             :error N          ;; only when positive (hook threw, sl-esq)
+             :error N          ;; only when positive — infrastructure-
+                               ;; failure family (sl-esq, sl-7c7i)
              :scenarios N :steps N}
+                        ;; counts ride EVERY summary (sl-7c7i AC):
+                        ;; all-zero on exit 2/3, where nothing executed
+    :dropped-events N   ;; observe-plane events the bus refused at admission
+                        ;; during THIS run-scope (sl-d7ks); absent when zero.
+                        ;; Results are never affected — the report plane
+                        ;; doesn't ride the bus; observations may be gapped.
     :planning {...}     ;; present when exit-code 2 (may carry :config-lints)
-    :failures [{...}]   ;; present when exit-code 1
+    :failures [{...}]   ;; present when exit-code 1 or 4; entries may carry
+                        ;; :attachments — the failing step's/scenario's own
+                        ;; refs, inline for join-free triage
+    :attachments [{:scenario/name \"..\" :scenario/id #uuid \"..\"
+                   :attachments [ref ...]     ;; scenario-level claims
+                   :steps [{:step/id #uuid \"..\" :step/text \"..\"
+                            :attachments [ref ...]}]}]
+                        ;; sl-oxiz — the AUTHORITATIVE complete evidence
+                        ;; walk (the surface sl-e01m documents): one entry
+                        ;; per scenario carrying any attachment refs,
+                        ;; regardless of status — green-run evidence
+                        ;; (:every-step policy, After-hook claims) appears
+                        ;; ONLY here. A failed step's refs appear BOTH here
+                        ;; and inline on its :failures entry — deliberate
+                        ;; duplication, same refs verbatim. Refs are
+                        ;; :attachment/* maps (:attachment/kind +
+                        ;; :attachment/path required; path group-root-
+                        ;; relative when portable — see shiftlefter.
+                        ;; attachments for the portability contract).
+                        ;; Absent when the run produced no refs.
     :diagnostics {:svo-issues [...]     ;; warn-level, non-blocking (sl-qk8l)
                   :config-lints [...]   ;; sl-lnj1 — unknown/misplaced
                                         ;; top-level config keys; shape is
@@ -25,12 +56,19 @@
                                         ;; here instead, once per run): maps
                                         ;; of :type :capture/unknown-kind |
                                         ;; :capture/invalid-policy-value |
-                                        ;; :capture/no-results-dir, plus
-                                        ;; :message (and :kind where one
-                                        ;; applies). A machine consumer
-                                        ;; reads THIS key to learn promised
-                                        ;; capture evidence is not coming.
-                                        ;; Absent on clean runs.
+                                        ;; :capture/no-results-dir |
+                                        ;; :capture/adapter-unsupported
+                                        ;; (sl-sehc — plan-time, per group:
+                                        ;; the kind exists in the registry
+                                        ;; but no adapter this group uses
+                                        ;; supports it; carries :adapters,
+                                        ;; :group on the setup path, and
+                                        ;; appears in dry-run summaries
+                                        ;; too), plus :message (and :kind
+                                        ;; where one applies). A machine
+                                        ;; consumer reads THIS key to learn
+                                        ;; promised capture evidence is not
+                                        ;; coming. Absent on clean runs.
     :error {...}}       ;; present when exit-code 3
    ```
 
@@ -60,7 +98,8 @@
    (prn-summary {:run/id \"abc\" :run/exit-code 0 :counts {...}})
    ;; Prints EDN map to stdout
    ```"
-  (:require [shiftlefter.runner.reporter :as reporter]))
+  (:require [shiftlefter.runner.reporter :as reporter]
+            [shiftlefter.runner.verdict :as verdict]))
 
 ;; -----------------------------------------------------------------------------
 ;; Error Serialization
@@ -136,7 +175,12 @@
              :scenario/id (:pickle/id pickle)
              :location (:source binding)
              :error (serialize-error (:error step-result))}
-      macro-info (assoc :macro macro-info))))
+      macro-info (assoc :macro macro-info)
+      ;; Attachment refs (sl-oxiz) — evidence rides with the failure it
+      ;; explains, join-free; the same refs also appear in the summary's
+      ;; top-level :attachments index (the complete evidence walk).
+      (seq (:attachments step-result))
+      (assoc :attachments (vec (:attachments step-result))))))
 
 (defn- extract-scenario-error
   "Extract a scenario-level hook failure (sl-esq) — the scenario carries
@@ -144,14 +188,21 @@
    own step-level failures)."
   [scenario]
   (let [pickle (-> scenario :plan :plan/pickle)]
-    {:scenario/name (:pickle/name pickle)
-     :scenario/id (:pickle/id pickle)
-     :error (serialize-error (:error scenario))}))
+    (cond-> {:scenario/name (:pickle/name pickle)
+             :scenario/id (:pickle/id pickle)
+             :error (serialize-error (:error scenario))}
+      ;; Attachment refs (sl-oxiz) — scenario-level claims (After-hook /
+      ;; capture policy) ride the entry; also indexed under the summary's
+      ;; top-level :attachments.
+      (seq (:attachments scenario))
+      (assoc :attachments (vec (:attachments scenario))))))
 
 (defn- extract-failures
   "Extract all failures from scenario results. :failed scenarios contribute
-   their failed steps; :error scenarios (hook threw, sl-esq) contribute a
-   scenario-level entry plus any failed steps (the after-throw case)."
+   their failed steps; :error scenarios (infrastructure-failure family,
+   sl-esq/sl-7c7i) contribute a scenario-level entry plus any failed steps
+   (the after-throw case, and the provisioning flip where the failing step
+   stays :failed)."
   [scenarios]
   (concat
    (for [scenario scenarios
@@ -162,6 +213,45 @@
          step (:steps scenario)
          :when (= :failed (:status step))]
      (extract-step-failure step scenario))))
+
+;; -----------------------------------------------------------------------------
+;; Attachment Index
+;; -----------------------------------------------------------------------------
+
+(defn- extract-step-attachments
+  "Step sub-entries for the attachment index: only steps carrying refs.
+   Envelope steps hold :step (:step/id, :step/text) and seq-guarded
+   :attachments (reporter.clj scenario-envelope)."
+  [scenario]
+  (into []
+        (keep (fn [step-result]
+                (when (seq (:attachments step-result))
+                  {:step/id (-> step-result :step :step/id)
+                   :step/text (-> step-result :step :step/text)
+                   :attachments (vec (:attachments step-result))})))
+        (:steps scenario)))
+
+(defn- extract-attachments
+  "The summary's top-level attachment index (sl-oxiz): one entry per
+   scenario carrying any refs — scenario-level claims and/or per-step
+   captures — REGARDLESS of status. This is the complete evidence walk:
+   green scenarios (:every-step policy, After-hook claims) never reach
+   :failures, so this index is where a machine consumer discovers their
+   evidence. Empty when no scenario carries a ref (the caller seq-guards
+   the key away)."
+  [scenarios]
+  (into []
+        (keep (fn [scenario]
+                (let [step-entries (extract-step-attachments scenario)
+                      pickle (-> scenario :plan :plan/pickle)]
+                  (when (or (seq (:attachments scenario)) (seq step-entries))
+                    (cond-> {:scenario/name (:pickle/name pickle)
+                             :scenario/id (:pickle/id pickle)}
+                      (seq (:attachments scenario))
+                      (assoc :attachments (vec (:attachments scenario)))
+                      (seq step-entries)
+                      (assoc :steps step-entries))))))
+        scenarios))
 
 ;; -----------------------------------------------------------------------------
 ;; Planning Diagnostics
@@ -193,7 +283,12 @@
 
       (= :invalid-arity issue-type)
       (assoc :arity {:expected (:expected (:binding bound-step))
-                     :actual (:actual (:binding bound-step))}))))
+                     :actual (:actual (:binding bound-step))})
+
+      ;; sl-s2oa: unresolved execution instance — full machine-readable map
+      ;; {:type :bind/ambiguous-instance :interface-type T :candidates [...]}
+      (= :ambiguous-instance issue-type)
+      (assoc :instance-resolution (:instance-resolution bound-step)))))
 
 (def ^:private wrapper-error-types
   "Error types under :diagnostics :errors whose payload is already emitted
@@ -207,13 +302,14 @@
    glossary issues, annotation/macro errors, and generic planning errors."
   [diagnostics]
   (when diagnostics
-    (let [{:keys [undefined ambiguous invalid-arity svo-issues
-                  suite-lint-issues stepdef-issues annotation-errors
+    (let [{:keys [undefined ambiguous invalid-arity ambiguous-instance
+                  svo-issues suite-lint-issues stepdef-issues annotation-errors
                   macro-errors errors counts]} diagnostics
           binding-issues (concat
                           (map #(extract-planning-issue % :undefined) undefined)
                           (map #(extract-planning-issue % :ambiguous) ambiguous)
-                          (map #(extract-planning-issue % :invalid-arity) invalid-arity))
+                          (map #(extract-planning-issue % :invalid-arity) invalid-arity)
+                          (map #(extract-planning-issue % :ambiguous-instance) ambiguous-instance))
           other-errors (->> errors
                             (remove #(wrapper-error-types (:type %)))
                             (mapv serialize-error))]
@@ -259,46 +355,74 @@
 ;; Summary Building
 ;; -----------------------------------------------------------------------------
 
+(def ^:private zero-counts
+  "Counts for summaries where nothing executed (exit 2) or no completed
+   verdict exists (exit 3) — counts ride EVERY summary (sl-7c7i AC)."
+  {:passed 0 :failed 0 :pending 0 :skipped 0 :scenarios 0 :steps 0})
+
 (defn build-summary
   "Build a complete EDN summary map from run results.
 
    Parameters:
    - run-id: UUID string for this run
-   - exit-code: 0, 1, 2, or 3
+   - exit-code: 0, 1, 2, 3, or 4 (shiftlefter.runner.verdict, sl-7c7i)
    - result: execution result from execute-suite (or nil for exit 2/3)
-   - opts: {:diagnostics ... :error ...}
+   - opts: {:diagnostics ... :error ... :dropped-events ... :seed ...}
+     :seed (sl-08f7) stamps :run/seed — the runner path always passes it
+     (core-record family); the guard only spares direct callers.
 
    Returns EDN-safe map suitable for prn."
   [run-id exit-code result opts]
-  (let [base {:run/id run-id
-              :run/exit-code exit-code
-              :run/status (case exit-code
-                            0 :passed
-                            1 :failed
-                            2 :planning-failed
-                            3 :crashed)}]
+  (let [base (cond-> {:run/id run-id
+                      :run/exit-code exit-code
+                      :run/status (verdict/exit-code->status exit-code)}
+               (:seed opts) (assoc :run/seed (:seed opts)))]
     (case exit-code
-      ;; Success or failure - include counts, failures, and diagnostics if present
-      (0 1) (let [scenarios (:scenarios result)
-                  step-count (reduce + (map #(count (:steps %)) scenarios))
-                  exec-diagnostics (execution-diagnostics (:diagnostics opts))]
-              (cond-> (assoc base
-                             :counts (assoc (:counts result)
-                                            :scenarios (count scenarios)
-                                            :steps step-count))
-                (= 1 exit-code)
-                (assoc :failures (vec (extract-failures scenarios)))
+      ;; Executed (pass, fail, or degraded) — include counts, failures,
+      ;; and diagnostics if present. Exit 4 (degraded, sl-7c7i) carries
+      ;; :failures like exit 1: the :error scenarios' attributions live
+      ;; there.
+      (0 1 4) (let [scenarios (:scenarios result)
+                    step-count (reduce + (map #(count (:steps %)) scenarios))
+                    exec-diagnostics (execution-diagnostics (:diagnostics opts))
+                    attachment-index (extract-attachments scenarios)]
+                (cond-> (assoc base
+                               :counts (assoc (:counts result)
+                                              :scenarios (count scenarios)
+                                              :steps step-count))
+                  (pos? exit-code)
+                  (assoc :failures (vec (extract-failures scenarios)))
 
-                ;; Include :diagnostics only if non-empty (no noise on clean runs)
-                exec-diagnostics
-                (assoc :diagnostics exec-diagnostics)))
+                  ;; Attachment index (sl-oxiz): absent when no scenario
+                  ;; carries a ref — attachment-less summaries stay
+                  ;; byte-identical (default capture policy is :never).
+                  (seq attachment-index)
+                  (assoc :attachments attachment-index)
 
-      ;; Planning failure - include diagnostics
+                  ;; Include :diagnostics only if non-empty (no noise on clean runs)
+                  exec-diagnostics
+                  (assoc :diagnostics exec-diagnostics)
+
+                  ;; Observe-plane drop count for this run-scope (sl-d7ks):
+                  ;; absent when zero (anomaly-marker convention — golden
+                  ;; safety). Executed summaries only; exits 2/3 publish
+                  ;; nothing / keep bus-close!'s warn.
+                  (:dropped-events opts)
+                  (assoc :dropped-events (:dropped-events opts))))
+
+      ;; Planning failure - include diagnostics. Counts ride EVERY summary
+      ;; (sl-7c7i AC): nothing executed, so all zeros — a consumer can read
+      ;; :counts off any summary without branching on the exit code. The
+      ;; empty-selection record's searched/filter facts ride its planning
+      ;; error's :data.
       2 (assoc base
+               :counts zero-counts
                :planning (extract-planning-diagnostics (:diagnostics opts)))
 
-      ;; Crash - include error
+      ;; Crash - include error. Zero counts (sl-7c7i): no completed verdict
+      ;; exists; per-scenario truth for a mid-run crash is unknowable here.
       3 (assoc base
+               :counts zero-counts
                :error (serialize-error (:error opts))))))
 
 ;; -----------------------------------------------------------------------------
@@ -348,7 +472,13 @@
                     (:exit-code run-summary)
                     {:scenarios (:scenarios @state)
                      :counts (:counts run-summary)}
-                    {:diagnostics (:diagnostics @state)}))
+                    {:diagnostics (:diagnostics @state)
+                     ;; sl-08f7: the invocation seed rides the :run-end
+                     ;; payload — core-record family, always present.
+                     :seed (:seed run-summary)
+                     ;; nil when absent — build-summary's cond-> skips it,
+                     ;; so absent-when-zero survives the threading (sl-d7ks).
+                     :dropped-events (:dropped-events run-summary)}))
     nil))
 
 (defn make-reporter

@@ -45,5 +45,17 @@ on their entry in your subjects glossary:
 {:subjects {:operator {:desc "Ops user" :wears :finance}}}
 ```
 
-See [COSTUMES.md](COSTUMES.md). Working example:
+Costumes bind **per persona** too: give each instance its own jacket and two
+actors of the same role can hold different authenticated sessions in one
+scenario:
+
+```clojure
+{:subjects
+ {:user {:desc "Standard application user"
+         :instances [{:id :alice :desc "Account owner" :wears :alice-chrome}
+                     {:id :bob :desc "Invited collaborator" :wears :bob-chrome}]}}}
+```
+
+A type-level `:wears` acts as a default every instance inherits; an instance's
+own `:wears` wins. See [COSTUMES.md](COSTUMES.md). Working example:
 [`examples/02b-browser-multi-actor`](https://github.com/SHIFT-LEFTER/shiftlefter/tree/main/examples/02b-browser-multi-actor).

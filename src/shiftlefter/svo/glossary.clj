@@ -17,6 +17,24 @@
    Types are top-level keys. Instances are session handles listed under
    `:instances`. Types without `:instances` are singletons (e.g. `:guest`).
 
+   An `:instances` entry may also be a persona map (sl-4e91) — a user with
+   an optional costume and a docstring:
+   ```clojure
+   {:user {:desc \"Standard user\"
+           :wears :default-jacket   ; type-level default, inheritable
+           :instances [{:id :alicia :desc \"Spanish-first admin reviewer\"
+                        :wears :alicia}
+                       {:id :bob :wears :bob-jacket}
+                       :carol]}}    ; bare keyword still fine
+   ```
+   Loaders NORMALIZE this authored shape (`normalize-subjects`): canonical
+   entries keep `:instances` as a bare keyword vector and carry the
+   per-instance keys in `:instance-meta {inst-kw {:desc ... :wears ...}}`.
+   Hand-built glossaries (REPL/tests) should use the canonical shape or
+   call `normalize-subjects` themselves. Costume resolution is
+   instance > type: a persona's own `:wears` wins; `:wears nil` on a
+   persona opts out of an inherited type default.
+
    Legacy flat format (no `:instances`) still works — each entry is a singleton.
 
    Verb glossary (per interface type):
@@ -29,8 +47,15 @@
 
    ## Merging Behavior
 
-   Project glossaries extend framework defaults by default.
-   Use `:override-defaults true` in project glossary to replace entirely.
+   Project glossaries EXTEND framework defaults at the set level: project
+   verbs are added alongside the builtins. On a name collision the project
+   entry replaces the builtin entry WHOLESALE (desc, all frames) — there is
+   no field- or frame-level merge, so restating a builtin verb to add one
+   frame silently drops its other frames. Verified sl-0gfc (2026-08-12).
+   The `:override-defaults` flag was REMOVED (sl-h7c3; it had been
+   parsed-then-dropped by every real path for its whole life, sl-j2aq) —
+   glossaries ALWAYS extend. A glossary file still carrying the key draws
+   a warning naming that truth; the wholesale-override want is sl-t2ht.
 
    ## Usage
 
@@ -47,6 +72,7 @@
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [shiftlefter.gherkin.io :as sio]))
@@ -56,10 +82,38 @@
 ;; -----------------------------------------------------------------------------
 
 ;; Glossary shape: {:subjects {kw -> map} :verbs {kw -> {kw -> map}}}
-;; Subject entries may contain :instances (vector of keywords) for type/instance grouping,
-;; and an optional :wears (costume keyword) so the subject attaches to a persistent
-;; authenticated session instead of fresh-spawning. See sl-rnm.
-(s/def ::instances (s/coll-of keyword? :kind vector?))
+;; Subject entries may contain :instances for type/instance grouping and an
+;; optional :wears (costume keyword) so the subject attaches to a persistent
+;; authenticated session instead of fresh-spawning (sl-rnm). An :instances
+;; entry is a bare keyword or a persona map {:id kw :desc str :wears kw|nil}
+;; (sl-4e91); loaders normalize persona maps into the canonical
+;; :instance-meta map, so ::instances covers both authored and canonical
+;; forms (canonical is the all-bare-keywords subset).
+(s/def ::instance-meta-entry
+  (s/and map?
+         #(if (contains? % :desc) (string? (:desc %)) true)
+         ;; Per-instance :wears is nilable: an explicit nil opts the persona
+         ;; out of an inherited type-level default (sl-4e91).
+         #(if (contains? % :wears) (or (nil? (:wears %)) (keyword? (:wears %))) true)))
+(s/def ::instance-entry
+  (s/or :bare keyword?
+        ;; Custom generator: the bare map? gen can't satisfy the
+        ;; unconditional keyword-:id predicate (spec-health).
+        :persona (s/with-gen
+                   (s/and ::instance-meta-entry #(keyword? (:id %)))
+                   (fn []
+                     (gen/fmap (fn [[id desc wears wears?]]
+                                 (cond-> {:id id}
+                                   desc   (assoc :desc desc)
+                                   wears? (assoc :wears wears)))
+                               (gen/tuple (gen/keyword)
+                                          (gen/one-of [(gen/return nil)
+                                                       (gen/string-alphanumeric)])
+                                          (gen/one-of [(gen/return nil)
+                                                       (gen/keyword)])
+                                          (gen/boolean)))))))
+(s/def ::instances (s/coll-of ::instance-entry :kind vector?))
+(s/def ::instance-meta (s/map-of keyword? ::instance-meta-entry))
 (s/def ::wears keyword?)
 (s/def ::subject-entry (s/and map?
                               #(if (contains? % :instances)
@@ -67,6 +121,9 @@
                                  true)
                               #(if (contains? % :wears)
                                  (s/valid? ::wears (:wears %))
+                                 true)
+                              #(if (contains? % :instance-meta)
+                                 (s/valid? ::instance-meta (:instance-meta %))
                                  true)))
 (s/def ::subjects (s/map-of keyword? ::subject-entry))
 
@@ -333,41 +390,65 @@
 ;; Merging
 ;; -----------------------------------------------------------------------------
 
-(defn- merge-subjects
-  "Merge project subjects into base. Project extends base."
-  [base-subjects project-subjects override?]
-  (if override?
-    project-subjects
-    (merge base-subjects project-subjects)))
-
-(defn- merge-all-verbs
-  "Merge verb glossaries for all types."
-  [base-verbs project-verbs override?]
-  (if override?
-    project-verbs
-    (merge-with (fn [base proj] (merge base proj))
-                base-verbs
-                project-verbs)))
-
 (defn merge-glossaries
-  "Merge project glossaries into default glossaries.
-
-   By default, project extends defaults. If project glossary contains
-   `:override-defaults true`, it replaces defaults entirely.
+  "Merge project glossaries into default glossaries — project ALWAYS
+   extends defaults (sl-h7c3: the `:override-defaults` flag was removed;
+   it had been parsed-then-dropped by both public loaders for its whole
+   life, sl-j2aq — the wholesale-override want is sl-t2ht). On a name
+   collision the project entry replaces the default entry WHOLESALE;
+   restate an entry to replace it.
 
    Parameters:
    - defaults: {:subjects {...} :verbs {:web {...}}}
-   - project: {:subjects {...} :verbs {:web {...}} :override-defaults bool?}
+   - project: {:subjects {...} :verbs {:web {...}}}
 
    Returns merged glossary."
   [defaults project]
-  (let [override? (:override-defaults project)]
-    {:subjects (merge-subjects (:subjects defaults)
-                               (:subjects project)
-                               override?)
-     :verbs (merge-all-verbs (:verbs defaults)
-                             (:verbs project)
-                             override?)}))
+  {:subjects (merge (:subjects defaults) (:subjects project))
+   :verbs (merge-with merge (:verbs defaults) (:verbs project))})
+
+;; -----------------------------------------------------------------------------
+;; Provenance (sl-0gfc)
+;; -----------------------------------------------------------------------------
+
+(defn- section-provenance
+  "Per-key provenance markers for one merged section, computed while the
+   builtin and user maps are both still in hand (the merge itself is lossy —
+   a wholesale-overridden builtin is indistinguishable from a user addition
+   after the fact).
+
+   :builtin          — key only in the framework defaults
+   :user-file        — key only in the project glossary
+   :config-override  — key in both (the project entry replaced the builtin)"
+  [builtin-map user-map]
+  (merge
+   (into {} (map (fn [k] [k :builtin])) (keys builtin-map))
+   (into {} (map (fn [k] [k (if (contains? builtin-map k)
+                              :config-override
+                              :user-file)]))
+         (keys user-map))))
+
+(defn- verbs-provenance
+  "Provenance markers for the verbs section, per interface type."
+  [builtin-verbs user-verbs]
+  (into {}
+        (map (fn [iface]
+               [iface (section-provenance (get builtin-verbs iface)
+                                          (get user-verbs iface))]))
+        (distinct (concat (keys builtin-verbs) (keys user-verbs)))))
+
+(defn- attach-provenance
+  "Attach :provenance (per-entry markers) and :sources (resolved file paths
+   from the config) to a merged glossary. Additive keys — ::glossary is
+   req-un, so consumers that don't know about them conform unchanged."
+  [glossary defaults project config-paths]
+  (assoc glossary
+         :provenance {:subjects (section-provenance (:subjects defaults)
+                                                    (:subjects project))
+                      :verbs (verbs-provenance (:verbs defaults)
+                                               (:verbs project))}
+         :sources {:subjects (:subjects config-paths)
+                   :verbs (or (:verbs config-paths) {})}))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API: Loading All
@@ -381,17 +462,60 @@
        (= "glossary" (namespace (:type result)))))
 
 ;; -----------------------------------------------------------------------------
+;; Persona Normalization (sl-4e91)
+;; -----------------------------------------------------------------------------
+
+(defn- normalize-subject-entry
+  "Normalize one authored subject entry: persona maps in `:instances`
+   ({:id :alicia :desc ... :wears ...}) are split into a bare keyword in
+   `:instances` plus their remaining keys under
+   `:instance-meta {inst-kw {...}}` — the canonical shape every consumer
+   reads. Bare keywords pass through; already-canonical entries are
+   unchanged (normalization is idempotent). An entry that is neither a
+   keyword nor a persona map with a keyword :id is left in place for
+   `validate-instances-entry` to report. Inline persona keys win over a
+   pre-existing `:instance-meta` entry for the same instance."
+  [entry]
+  (if-let [instances (:instances entry)]
+    (let [split (reduce (fn [acc inst]
+                          (if (and (map? inst) (keyword? (:id inst)))
+                            (let [m (dissoc inst :id)]
+                              (cond-> (update acc :ids conj (:id inst))
+                                (seq m) (update :meta assoc (:id inst) m)))
+                            (update acc :ids conj inst)))
+                        {:ids [] :meta {}}
+                        instances)]
+      (cond-> (assoc entry :instances (:ids split))
+        (seq (:meta split))
+        (assoc :instance-meta (merge (:instance-meta entry) (:meta split)))))
+    entry))
+
+(defn normalize-subjects
+  "Normalize every subject entry in a subjects map (see
+   `normalize-subject-entry`). Applied by the glossary loaders; public so
+   hand-built authored-shape glossaries (REPL) can normalize too."
+  [subjects]
+  (reduce-kv (fn [acc type-kw entry]
+               (assoc acc type-kw (normalize-subject-entry entry)))
+             {}
+             subjects))
+
+;; -----------------------------------------------------------------------------
 ;; Instance Index
 ;; -----------------------------------------------------------------------------
 
 (defn- validate-instances-entry
-  "Validate that :instances values are keywords. Returns error or nil."
+  "Validate that :instances values are keywords (post-normalization; a
+   persona map without a keyword :id survives normalization and lands
+   here). Returns error or nil."
   [type-kw instances]
   (let [bad (remove keyword? instances)]
     (when (seq bad)
       {:type :glossary/invalid-instances
        :message (str "Type :" (name type-kw)
-                     " has non-keyword instances: " (pr-str (vec bad)))
+                     " has invalid instances: " (pr-str (vec bad))
+                     " — each entry must be a keyword or a persona map"
+                     " with a keyword :id (sl-4e91)")
        :subject-type type-kw
        :invalid (vec bad)})))
 
@@ -456,6 +580,19 @@
             (assoc glossary :instance-index {})))
       (assoc glossary :instance-index (:ok result)))))
 
+(defn- warn-on-override-flag!
+  "sl-h7c3: `:override-defaults` was removed — a glossary file still
+   carrying the key gets the truth, on the same logging channel every
+   other glossary-load warning uses (both lenient AND strict: the key's
+   presence doesn't make the glossary unusable). Called where the parsed
+   file map is in hand — the exact point the flag historically vanished."
+  [file-map path]
+  (when (contains? file-map :override-defaults)
+    (log/warnf (str "Glossary file %s carries :override-defaults, which is"
+                    " not supported — glossaries always extend the defaults;"
+                    " restate an entry to replace it wholesale")
+               path)))
+
 (defn- load-subject-glossary
   "Load subject glossary from path. Returns {:subjects {...}} or empty on error."
   [path]
@@ -465,7 +602,8 @@
       (if (glossary-error? result)
         (do (log/warnf "Could not load subject glossary: %s" (:message result))
             {:subjects {}})
-        {:subjects (:subjects result)}))))
+        (do (warn-on-override-flag! result path)
+            {:subjects (:subjects result)})))))
 
 (defn- load-subject-glossary-strict
   "Load subject glossary strictly. Returns {:ok {:subjects ...}} or {:error ...}."
@@ -477,7 +615,8 @@
         {:error {:type :svo/glossary-file-not-found
                  :path path
                  :message (:message result)}}
-        {:ok {:subjects (:subjects result)}}))))
+        (do (warn-on-override-flag! result path)
+            {:ok {:subjects (:subjects result)}})))))
 
 (defn- load-verb-glossary
   "Load verb glossary from path for an interface type.
@@ -495,6 +634,7 @@
 
         :else
         (let [errors (validate-verb-entries (:verbs result) interface-type path)]
+          (warn-on-override-flag! result path)
           (doseq [e errors]
             (log/warn (:message e)))
           {:verbs {interface-type (:verbs result)}})))))
@@ -516,6 +656,7 @@
 
         :else
         (let [errors (validate-verb-entries (:verbs result) interface-type path)]
+          (warn-on-override-flag! result path)
           (if (seq errors)
             {:error (assoc (first errors) :all-errors errors)}
             {:ok {:verbs {interface-type (:verbs result)}}}))))))
@@ -550,7 +691,10 @@
         ;; Combine into project glossary
         project {:subjects (:subjects subject-glossary)
                  :verbs (:verbs verb-glossaries)}]
-    (attach-instance-index (merge-glossaries defaults project) false)))
+    (-> (merge-glossaries defaults project)
+        (update :subjects normalize-subjects)
+        (attach-provenance defaults project config-paths)
+        (attach-instance-index false))))
 
 (defn load-all-glossaries-strict
   "Load all glossaries strictly for Shifted mode.
@@ -591,7 +735,9 @@
           ;; All loaded successfully, merge with defaults and build index
           (let [project {:subjects (-> subject-result :ok :subjects)
                          :verbs (-> verb-results :ok :verbs)}
-                merged (merge-glossaries defaults project)
+                merged (-> (merge-glossaries defaults project)
+                           (update :subjects normalize-subjects)
+                           (attach-provenance defaults project config-paths))
                 indexed (attach-instance-index merged true)]
             (if (:error indexed)
               indexed
@@ -714,18 +860,50 @@
   [glossary]
   (vec (keys (:subjects glossary))))
 
+(defn instance-meta
+  "The persona meta map (`{:desc ... :wears ...}`) authored on a subject
+   instance (sl-4e91), or nil when the subject is unknown, a singleton, or
+   a bare-keyword instance with no persona map. Accepts qualified
+   (`:user/alicia`) and bare (`:alicia`) instance forms."
+  [glossary subject]
+  (when-let [resolved (resolve-subject glossary subject)]
+    (when-not (:singleton? resolved)
+      (get-in glossary
+              [:subjects (:type resolved) :instance-meta (:instance resolved)]))))
+
+(defn effective-wears
+  "The costume a subject effectively wears, with its provenance:
+   `{:wears <kw> :source :instance|:type-default}`, or nil when the subject
+   is unknown or wears nothing.
+
+   Resolution order (sl-4e91): the persona instance's own `:wears` (from
+   `:instance-meta`) wins over the type-level `:wears`, which acts as an
+   inheritable default. The override is contains?-based, so a persona
+   carrying an explicit `:wears nil` opts out of an inherited default —
+   that collapses to nil here, indistinguishable from wearing nothing.
+   Singletons read the type entry directly."
+  [glossary subject]
+  (when-let [resolved (resolve-subject glossary subject)]
+    (let [entry (get-in glossary [:subjects (:type resolved)])
+          imeta (when-not (:singleton? resolved)
+                  (get (:instance-meta entry) (:instance resolved)))
+          own?  (and imeta (contains? imeta :wears))
+          worn  (if own? (:wears imeta) (:wears entry))]
+      (when worn
+        {:wears worn :source (if own? :instance :type-default)}))))
+
 (defn costume-for-subject
   "Resolve the costume a subject `:wears`, or nil.
 
-   The `:wears` keyword lives on the subject *type* entry, so an instance
-   (`:user/alice`) inherits its type's costume. Resolves singleton, type,
-   and instance subject forms uniformly via `resolve-subject`. See sl-rnm.
+   Per-instance resolution (sl-4e91): a persona instance's own `:wears`
+   wins over the type-level `:wears` default — see `effective-wears` for
+   the order and the `:wears nil` opt-out. See sl-rnm for what wearing a
+   costume means at provisioning time.
 
    Returns the costume keyword (e.g. `:finance`) or nil if the subject is
    unknown or wears nothing."
   [glossary subject]
-  (when-let [type-kw (:type (resolve-subject glossary subject))]
-    (:wears (get-in glossary [:subjects type-kw]))))
+  (:wears (effective-wears glossary subject)))
 
 (defn singleton?
   "Returns true if the subject type is a singleton (no instances)."

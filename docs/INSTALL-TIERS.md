@@ -22,6 +22,11 @@ Driving a real browser additionally needs Chrome and a matching **ChromeDriver**
 scripts, so Windows is out of scope today (`java -jar` may work, but nothing
 is tested there).
 
+**Git posture:** the installer writes an `sl/.gitignore` (if absent) covering
+only the binaries it lands — the jar, the `.jsa` CDS archive, and `lib/` — so
+commit the rest of `sl/` (your config, features, glossary, steps) as ordinary
+project files.
+
 **What you can do:**
 
 - `sl run features/ --step-paths steps/` — execute Gherkin scenarios against step definitions
@@ -178,7 +183,7 @@ would not provide both. This table is the honest asterisk:
 | Costumes (persistent authenticated sessions) | Yes — attach to a running Chrome profile | Not available: a costume is a WebDriver-owned Chrome profile |
 | Nested-pruning strategy (`:pruning`) | Always fused/fast — WebDriver has no retrying-locator concept, so there is nothing to trade away | `:fast` (default) or `:safe` — see below |
 | Automation-hygiene Chrome prefs | On by default via profile prefs (see below) | Popups can't occur: sessions are off-the-record contexts, so the password machinery has no profile to run against (no prefs channel exists, none needed) |
-| Capture kinds (`:runner {:capture …}`) | Provides `screenshot`, `console` (Chrome/Edge only), `page-source` | Contributes no capture kinds yet (planned for 0.5.5) — a configured kind never fires on Playwright |
+| Capture kinds (`:runner {:capture …}`) | Provides `screenshot`, `console` (Chrome/Edge only), `page-source` | Provides `screenshot`, `page-source`. No `console`: capture is a drain of a browser-side buffer, and Playwright has none — its console messages are listener events, so there is nothing to drain at capture time. The subscription-shape design that would fix this is sl-lam0. A configured kind no adapter in a group supports gets a per-group plan-time warning |
 | Element staleness posture | Point-in-time element references | `:fast` = point-in-time handles; `:safe` = auto-retrying Locators |
 
 #### The `:pruning` knob (Playwright-only meaning)

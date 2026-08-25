@@ -19,7 +19,14 @@
    Binding-name charset [A-Za-z][A-Za-z0-9]* is forced by Java group names
    and adopted for the whole plane. NOTE: 'bindings' elsewhere in this
    codebase also names the intent element locator-bindings map — these are
-   unrelated; this ns is the scenario DATA plane."
+   unrelated; this ns is the scenario DATA plane.
+
+   LAYERING (intentional, module map F2 / sl-52ly): svo/{validate,
+   bindings_lint} require this ns for the token GRAMMAR it defines
+   (name charset, token/literal regex fragments) — the shared-classifier
+   doctrine: plan-time validation and exec-time resolution must read one
+   definition. The law: svo may consume engine-owned vocabulary/grammar
+   definitions, never compile/exec/registry machinery."
   (:require [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
             [clojure.string :as str])

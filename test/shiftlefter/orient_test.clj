@@ -127,6 +127,41 @@
           (is (= (:fingerprint (projection/build-projection (context dir)))
                  (:fingerprint value))))))))
 
+(deftest edn-adapter-metadata-provenance-test
+  ;; sl-hyey (Warden W4): the provenance-honest metadata reaches the --edn
+  ;; surface verbatim — a declared adapter shows the declaration's data
+  ;; half with the runtime fields absent and NAMED unknown, never stamped
+  ;; off the hardcoded default registry.
+  (with-temp-project
+    (fn [dir]
+      (make-project! dir)
+      (write-edn! (fs/path dir "sl" "shiftlefter.edn")
+                  {:runner {:step-paths ["steps/"] :macros {:enabled? false}}
+                   :glossaries {:subjects "glossary/subjects.edn"}
+                   :interfaces {:web {:type :web :adapter :etaoin}
+                                :sms {:type :sms :adapter :sms-mock}}})
+      (write-text! (fs/path dir "sl" "setup.clj")
+                   "(ns setup)
+                    (def setups
+                      [{:adapters [{:name :sms-mock
+                                    :provides [:shiftlefter.sms.protocol/ISMS]}]
+                        :start    (fn [_config] {})
+                        :features [\"features/\"]}])")
+      (let [out (with-out-str
+                  (is (= 0 (orient/orient-cmd ["orient"] {:edn true} (context dir)))))
+            value (edn/read-string out)
+            by-name (into {} (map (juxt :name :adapter-metadata)) (:interfaces value))]
+        (is (= {:known? true
+                :provenance :declared
+                :provides [:shiftlefter.sms.protocol/ISMS]
+                :capture-kinds []
+                :runtime-unknown [:impl-key :has-on-provision?]}
+               (by-name :sms)))
+        (is (= :builtin-default (:provenance (by-name :web))))
+        (is (= [{:name :sms-mock :provides [:shiftlefter.sms.protocol/ISMS]}]
+               (:adapter-declarations value))
+            "the pure-data declarations ride the EDN dump")))))
+
 ;; -----------------------------------------------------------------------------
 ;; CLI dispatch + config-root behavior (AC1)
 ;; -----------------------------------------------------------------------------

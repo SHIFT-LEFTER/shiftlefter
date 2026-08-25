@@ -26,8 +26,11 @@ does not promise any assertion passes — the run supplies the rest.
 The plan phase touches nothing: no `:start`, no `:stop`, no hooks, no
 capture. The one deliberate exception: `setup.clj` is `load-file`'d so the
 plan is knowable, which is why its top level must stay pure — side effects
-belong inside `:start`. That rule, and one registry caveat about preview
-binding, live in [Project layout](project-layout.md#user-code--the-wall).
+belong inside `:start`. Custom adapters stay visible to this phase because
+their data half is *declared* on the group (`:adapters`) rather than locked
+inside `:start` — the preview binds against the declarations, and `:start`'s
+live registry is verified to match them. That rule and the declaration
+contract live in [Project layout](project-layout.md#user-code--the-wall).
 
 If you're coming from Cucumber, calibrate: Cucumber has a `--dry-run` flag
 too, and it answers exactly one question — does every step match some
@@ -53,7 +56,9 @@ the scenario weave is identical.
 ```text
 group (declared order, one at a time)
   :start                      ← the world starts here, not earlier
-  parse + compile             ← against the adapter registry :start returned
+                                (its registry verified against :adapters)
+  parse + compile             ← against the group's adapter registry
+                                (declared data, live factories)
   scenarios (parallel-capable)
     Before hooks              ← no capabilities yet
     capability provisioning   ← browsers launch here
@@ -81,17 +86,21 @@ The weave gives every failure a place, and the place decides the semantics:
 | When it fails | What happens |
 |---|---|
 | A name doesn't resolve, a step matches no frame, a consumed `{binding}` has no producer | Planning error (exit 2). Nothing executes — no browser, no `:start`, no hooks. |
+| The selection is empty — a tag filter matching 0 of N, feature files with no scenarios, CLI paths narrowing every group away | Planning error (exit 2), the vacuity witness: a run that selects nothing cannot claim green. Checked *before* any `:start` runs (a pure selection preflight under `setup.clj`); the record carries counts and what was searched. |
 | `@hook=` names an unknown hook | Planning error, reporting the tag's file and line. |
 | The plan shape is broken — a group matching no features, two groups sharing a label | Planning error. (The same feature in two groups is a warning: a deliberate matrix is legitimate.) |
 | `:start` throws, or returns a malformed shape | That group is reported as a planning failure and skipped — **other groups still run**. Whatever `:start` half-started is yours to clean up; the framework can't know what half-started. |
 | A Before hook throws, or returns a non-map | Scenario `:error` (never `:failed`), steps skipped; only the frames whose Befores succeeded unwind. |
-| Capability provisioning fails | Scenario errors; Afters still unwind — without capabilities, so an After checks for the capability it wants. |
+| Capability provisioning fails | Scenario `:error` — same family as a hook throw (broken harness, never a broken app); Afters still unwind — without capabilities, so an After checks for the capability it wants. |
 | A step fails | Scenario `:failed`; an `:on-failure` capture fires at that instant, before Afters. |
 | An After hook throws, or its attachments claim is malformed | Scenario `:error` even when every step passed — broken cleanup is a lying suite. One failing After doesn't stop the unwind. |
 | Capture infrastructure fails on an otherwise-green scenario | Scenario `:error`, capture-attributed. An already-red scenario keeps its status; the ref records the miss visibly. |
-| `:stop` throws | Reported — console and envelope — but the exit code doesn't change. A dirty-teardown marker is written; the next run announces it, then clears it. |
+| `:stop` throws | Reported — console and envelope — but the exit code doesn't change: the exit code is this run's verdict, already earned by the time teardown runs; environment damage is the *next* run's planning input. That is what the dirty-teardown marker is — written now, announced at the next run's start, then cleared. |
 
-Across groups, exit codes aggregate worst-wins. The full mechanics behind
+Any scenario `:error` makes the run exit **4** (run degraded — the harness
+broke, so the run proves nothing about the app), distinct from exit 1 (a
+scenario failed: valid tests, app wrong). Across groups, exit codes
+aggregate worst-wins: 2 > 4 > 1 > 0. The full mechanics behind
 each row: [hook payloads and failure semantics](AGENT.md#scenario-lifecycle-hooks)
 (`sl agent-doc hooks`), [capture policy](hooks.md#failure-diagnostics--now-a-config-line),
 and [what the framework writes](project-layout.md#what-the-framework-writes).
@@ -142,6 +151,43 @@ which is why today's seeding hooks are written to graduate: the seam where
 the declarative form lands is already cut. Until then, the honest answer is
 that fixtures are lifecycle code, and the evidence records them as exactly
 that.
+
+## The run seed
+
+Every invocation gets exactly ONE seed: a positive 64-bit integer, printed
+in decimal everywhere it appears. You can set it — `--seed N` on the CLI
+wins over `:runner {:seed N}` in config — and when you set neither, the
+framework generates one. Either way it is recorded, always: `:run/seed` in
+every group's `--edn` summary, `:seed` in the run context reporters see,
+the HTML report header, and one console line (`run seed: N`, stderr). A
+record without a seed is an old record, never a seedless run — with one
+deliberate exception: the daemon's busy-reject summary (exit 2, nothing
+ran) carries no `:run/seed`, because nothing was seeded.
+
+The framework itself draws no randomness from it — deliberately. The seed
+is a datum handed to *your* code, provided before the mess exists: when a
+fixture generator, a property library, or any randomized dependency needs
+a seed, draw from this one instead of inventing your own, and a rerun with
+`--seed N` from a report reproduces the run's randomness end to end. It
+arrives everywhere user code runs:
+
+- hook payloads (`:before`/`:after`) carry `:seed`,
+- step `ctx` carries `:seed`,
+- a `setup.clj` group's `:start` receives it as a `:seed` key on its
+  config argument.
+
+**Deriving sub-seeds.** One run seed, many independent consumers: derive,
+don't share. The convention — one concrete formula so every project
+derives identically:
+
+```clojure
+(def sub-seed (bit-xor seed (hash scenario-id)))   ; or any stable label
+```
+
+Parallel scenarios each get an independent-but-reproducible stream
+(`java.util.Random`, `SplittableRandom`, and test.check all take a long
+directly). The framework documents this formula but does not implement
+it — the seed is data; consumers choose.
 
 ## Where this is heading
 

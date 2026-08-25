@@ -110,8 +110,12 @@ capability cleanup.**
   directory (no config file) — check, don't assume.
 - Before writing a screenshot/console/page-source After hook: DON'T — set
   the `[:runner :capture]` policy instead (see the CLI overview's
-  `--capture` entry). Hooks are for evidence the framework doesn't own
-  (DB dumps, API traces). With `:capture` console active, the framework
+  `--capture` entry). Hooks are for one-off evidence the framework
+  doesn't own (DB dumps, API traces); evidence owned by a capability you
+  provision can instead become a custom capture KIND — a `:capture` entry
+  on your setup.clj adapter registry, policy machinery included (worked
+  example: `examples/07-custom-capture-kind/`). With `:capture` console
+  active, the framework
   owns the destructive console drain — a hook reading the browser's log
   API gets leftovers; read the captured artifact, or use `:on-failure`
   (whose single post-steps drain fires before any After).

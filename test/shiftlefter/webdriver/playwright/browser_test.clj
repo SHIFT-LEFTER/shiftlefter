@@ -67,42 +67,23 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest key-translation-test
-  (testing "Single character key"
-    (is (= "a" (pw-keys/webdriver-char->playwright \a)))
-    (is (= "1" (pw-keys/webdriver-char->playwright \1))))
+  ;; Post-split (sl-52ly) the token arriving here is a W3C key name or a
+  ;; single literal character — the etaoin-unicode decode path is gone.
+  ;; Whole-set identity-except-Space is pinned by keys_parity_test.
+  (testing "W3C names pass through as themselves"
+    (is (= "Enter" (pw-keys/translate-key-string "Enter")))
+    (is (= "ArrowUp" (pw-keys/translate-key-string "ArrowUp")))
+    (is (= "Meta" (pw-keys/translate-key-string "Meta"))))
 
-  (testing "WebDriver special keys → Playwright names"
-    (is (= "Enter" (pw-keys/webdriver-char->playwright (char 0xE006))))
-    (is (= "Enter" (pw-keys/webdriver-char->playwright (char 0xE007))))
-    (is (= "Tab" (pw-keys/webdriver-char->playwright (char 0xE004))))
-    (is (= "Backspace" (pw-keys/webdriver-char->playwright (char 0xE003))))
-    (is (= "Escape" (pw-keys/webdriver-char->playwright (char 0xE00C))))
-    (is (= "ArrowUp" (pw-keys/webdriver-char->playwright (char 0xE013))))
-    (is (= "ArrowDown" (pw-keys/webdriver-char->playwright (char 0xE015))))
-    (is (= "ArrowLeft" (pw-keys/webdriver-char->playwright (char 0xE012))))
-    (is (= "ArrowRight" (pw-keys/webdriver-char->playwright (char 0xE014))))
-    (is (= "Delete" (pw-keys/webdriver-char->playwright (char 0xE017))))
-    (is (= "Home" (pw-keys/webdriver-char->playwright (char 0xE011))))
-    (is (= "End" (pw-keys/webdriver-char->playwright (char 0xE010))))
-    (is (= "F1" (pw-keys/webdriver-char->playwright (char 0xE031)))))
+  (testing "the sole exception: Space is the single space character"
+    (is (= " " (pw-keys/translate-key-string "Space"))))
 
-  (testing "Modifier keys"
-    (is (= "Shift" (pw-keys/webdriver-char->playwright (char 0xE008))))
-    (is (= "Control" (pw-keys/webdriver-char->playwright (char 0xE009))))
-    (is (= "Alt" (pw-keys/webdriver-char->playwright (char 0xE00A))))
-    (is (= "Meta" (pw-keys/webdriver-char->playwright (char 0xE03D)))))
+  (testing "single literal characters pass through"
+    (is (= "a" (pw-keys/translate-key-string "a")))
+    (is (= "1" (pw-keys/translate-key-string "1"))))
 
-  (testing "Single key string translation"
-    (is (= "Enter" (pw-keys/translate-key-string (str (char 0xE007)))))
-    (is (= "a" (pw-keys/translate-key-string "a"))))
-
-  (testing "Chord string translation"
-    ;; Etaoin chord format: modifier-down, key, modifier-up
-    ;; e.g., Shift+a = [shift-down, a, shift-up]
-    (let [shift-down (char 0xE008)
-          shift-up (char 0xE008)
-          chord-str (str shift-down "a" shift-up)]
-      (is (= "Shift+a" (pw-keys/translate-key-string chord-str))))))
+  (testing "name-level chords pass through Playwright-native (sl-eecq, parked)"
+    (is (= "Shift+a" (pw-keys/translate-key-string "Shift+a")))))
 
 ;; -----------------------------------------------------------------------------
 ;; Nested-pruning strategies: call-count contracts (sl-tnx)

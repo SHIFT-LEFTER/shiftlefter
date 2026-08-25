@@ -175,6 +175,40 @@
   [ctx interface-name]
   (get-in ctx [run-interfaces-key interface-name :config]))
 
+(def run-timing-key
+  "Ctx key holding the run's global :timing config map (sl-99u2 — the
+   global rung of the deadline substrate). Same species as :run/interfaces:
+   stashed once by execute-scenario, deliberately NOT :cap/*-namespaced so
+   capability enumeration and cleanup never see it."
+  :run/timing)
+
+(defn assoc-run-timing
+  "Stash the run's global :timing config map ({:deadline-ms N :interval-ms N})
+   into ctx. Returns updated ctx."
+  [ctx timing]
+  (assoc ctx run-timing-key timing))
+
+(defn get-run-timing
+  "The run's global :timing config map, or nil when absent (bare REPL
+   invoke-step paths carry no stash; unconfigured runs)."
+  [ctx]
+  (get ctx run-timing-key))
+
+(defn get-run-interface-timing
+  "The :timing map of interface entry `interface-name` from the stashed run
+   interfaces (sl-99u2 — the instance/interface rungs), or nil when absent.
+   Sibling of the entry's :config, not inside it."
+  [ctx interface-name]
+  (get-in ctx [run-interfaces-key interface-name :timing]))
+
+(defn get-run-interface-type
+  "The :type of interface INSTANCE `interface-name` from the stashed run
+   interfaces (sl-s2oa). Falls back to `interface-name` itself when the
+   stash is absent or the name unconfigured — legacy/REPL paths where
+   instance and type coincide."
+  [ctx interface-name]
+  (or (get-in ctx [run-interfaces-key interface-name :type]) interface-name))
+
 ;; -----------------------------------------------------------------------------
 ;; Subject Key Parsing
 ;; -----------------------------------------------------------------------------

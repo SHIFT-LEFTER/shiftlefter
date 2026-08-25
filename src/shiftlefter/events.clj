@@ -1,4 +1,4 @@
-(ns shiftlefter.runner.events
+(ns shiftlefter.events
   "Event bus for ShiftLefter runner — stable event envelope with multi-subscriber support.
 
    ## Event Envelope (BIRDSONG spec)
@@ -24,7 +24,8 @@
    `publish!` is `offer!`-based: a full bus can never throw into or block
    execution. Results are DEFINITELY intact — the report plane never
    touches the bus; observations are possibly gapped, and the dropped-events
-   counter (logged at bus close) says so.
+   counter says so — logged at bus close, and landed in each run-scope's
+   summary as its :dropped-events delta (sl-d7ks, absent when zero).
 
    The gap is at ADMISSION only: once the bus accepts an event, `bus-close!`
    drains it to every subscriber before returning (input-channel-only close;

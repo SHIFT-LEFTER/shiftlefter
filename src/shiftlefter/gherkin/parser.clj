@@ -393,6 +393,18 @@
         (= (:type token) :table-row)
         (let [[table remaining errors] (parse-table ts)]
           [table remaining errors])
+        ;; sl-ur58: comments/blanks between a step and its table's first row
+        ;; are non-structural in upstream Gherkin — attach the table iff one
+        ;; follows. Parsing from the trimmed stream keeps the DataTable's
+        ;; location/span anchored at the first real row; anything other than
+        ;; a table-row past the trim returns the ORIGINAL ts so the
+        ;; between-steps comment path is unchanged.
+        (#{:comment :blank} (:type token))
+        (let [t (drop-while #(#{:comment :blank} (:type %)) ts)]
+          (if (= (:type (first t)) :table-row)
+            (let [[table remaining errors] (parse-table t)]
+              [table remaining errors])
+            [nil ts []]))
         :else
         [nil ts []]))))
 

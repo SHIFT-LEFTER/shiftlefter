@@ -1,0 +1,36 @@
+;; ShiftLefter project config — scaffolded by `sl init`.
+;;
+;; Every relative path here resolves against this file's directory (sl/).
+;; `sl orient` shows the resolved project; `sl agent-doc` is the doctrine.
+{;; Interface instances: name -> {:type ... :adapter ...}. The stepdef
+ ;; vocabulary binds by interface TYPE; add more instances of a type for
+ ;; multi-actor flows (e.g. a second browser).
+ :interfaces {:web {:type :web :adapter :etaoin}}
+
+ ;; Shifted mode: vocabulary enforcement is ON (unknown subjects/verbs warn,
+ ;; unknown interfaces error). DELETE this key for Vanilla mode (no checks).
+ :svo {}
+
+ ;; Glossaries — these are the conventional paths (the same ones discovered
+ ;; when this key is absent), kept explicit so the knobs are visible.
+ ;; The builtins ship the :web verb vocabulary, so no verbs file is needed;
+ ;; :verbs is a map of interface TYPE -> file, e.g.
+ ;;   :verbs {:web "glossary/verbs/web.edn"}
+ :glossaries {:subjects "glossary/subjects.edn"
+              :intents "glossary/intents"}
+
+ ;; Costumes — persistent logged-in browser profiles a persona :wears
+ ;; (see `sl costume init` and :wears in glossary/subjects.edn). Declare
+ ;; each costume's interface INSTANCE so a wrong-interface wear fails at
+ ;; plan time; uncomment to declare:
+ ;; :costumes {:finance {:interface :web}}
+
+ ;; Step timing — framework defaults shown; uncomment to change globally
+ ;; (also settable per interface entry):
+ ;; :timing {:deadline-ms 30000 :interval-ms 500}
+
+ ;; Run artifacts — OFF by default; uncomment to enable:
+ ;; :runner {:capture {:screenshot :on-failure} ; kinds: screenshot/console/page-source
+ ;;                                             ; policies: never/on-failure/every-step
+ ;;          :report {:html "report.html"}}     ; and/or :junit-xml "results.xml"
+ }

@@ -233,12 +233,20 @@ Two behaviors that surprise consumers of stricter test tools:
 
 - **Pending mirrors the exit code (D2).** A pending scenario is `<skipped>`
   when `:allow-pending?` is set (the run exits 0) and `<failure type="pending">`
-  when strict (the run exits 1). The reporter never contradicts the exit code:
-  the XML contains ≥1 `<failure>`/`<error>` iff the run's exit code is nonzero.
-- **No file on planning error (D3).** A planning/config failure exits 2 and
-  writes **no** JUnit file at all — the exit code is the gate. A CI job that
-  keys only on the report's presence must ALSO check the process exit code, or
-  it will read a green (missing) report as success. Prefer gating on exit code.
+  when strict (the run exits 1). In a single-group run the reporter never
+  contradicts the exit code: the XML contains ≥1 `<failure>`/`<error>` iff the
+  run's exit code is nonzero. In a multi-group run (`setup.clj`, N>1) that
+  equivalence holds only for the groups that actually ran — see D3.
+- **Planning error: no file, or an honest partial file (D3).** In a
+  single-group run, a planning/config failure exits 2 and writes **no** JUnit
+  file at all. In a multi-group run (since sl-xjx0's aggregation), a group's
+  planning failure sets exit 2 but the OTHER groups still run, and each group's
+  run-end rewrites the invocation-fixed file with every scenario seen so far —
+  so the file exists, covers only the groups that ran (the failing group is
+  simply absent), and can be entirely green beside a nonzero exit. Either way
+  the exit code is the gate: a CI job that keys on the report's presence — or
+  its greenness — must ALSO check the process exit code, or it will read a
+  missing (or partial, all-green) report as success.
 
 **Impact**:
 Consumers should not assume a formal XSD contract. We validate output against a

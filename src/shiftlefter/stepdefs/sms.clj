@@ -30,10 +30,15 @@
            :sms/scenario-start-ts      ; first receive in scenario
            (now - default-window))     ; fallback (1 hour)
 
-   Default poll timeout 30s, interval 500ms — bind `*receive-timeout-ms*`
-   or `*poll-interval-ms*` to override. Per-interface overrides via the
-   `:config` slot of `:interfaces.<key>` aren't wired in v1; future bead
-   plumbs them through.
+   Polling rides the deadline substrate (sl-99u2,
+   `shiftlefter.step/poll-until`): deadline and interval resolve
+   instance > interface > global from `:timing` config (a `:timing` map
+   on the interface entry or at the top level of shiftlefter.edn),
+   bottoming out at this ns's receive-class defaults — 30s deadline,
+   500ms interval (tight enough for 2FA latency, loose enough to avoid
+   hammering provider APIs). Bind `*receive-timeout-ms*` or
+   `*poll-interval-ms*` to override every rung. No match within the
+   budget throws the kernel's structured `:step/poll-timeout` record.
 
    `:see :count` is single-shot (no polling) and always uses
    `:sms/scenario-start-ts` as the `:since-ts` floor — assertion on a
@@ -67,6 +72,7 @@
    the configured adapter provides ISMS before the scenario runs."
   (:require [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.sms.protocol :as sms-proto]
+            [shiftlefter.step :as step]
             [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.stepengine.registry :refer [defstep]])
   (:import (java.time Duration Instant)
@@ -77,14 +83,22 @@
 ;; -----------------------------------------------------------------------------
 
 (def ^:dynamic *receive-timeout-ms*
-  "Wall-clock budget for `:receive` to find a matching inbound message.
-   Default 30s — comfortable headroom for typical 2FA SMS arrival latency."
-  30000)
+  "Rebinding override for the `:receive` deadline (sl-99u2). Root value
+   nil = defer to the `:timing` resolution ladder (instance > interface >
+   global > receive default 30000ms — comfortable headroom for typical
+   2FA SMS arrival latency). Bind to override every rung."
+  nil)
 
 (def ^:dynamic *poll-interval-ms*
-  "Sleep between adapter polls during `:receive`. Default 500ms — tight
-   enough for 2FA latency, loose enough to avoid hammering provider APIs."
-  500)
+  "Rebinding override for the `:receive` poll interval (sl-99u2). Root
+   value nil = defer to the `:timing` ladder (default 500ms). Bind to
+   override every rung."
+  nil)
+
+(def ^:private receive-timing-defaults
+  "Receive-class bottom rung of the :timing ladder. Any config rung
+   overrides it."
+  {:deadline-ms 30000 :interval-ms 500})
 
 (def ^:private default-window-ms
   "Fallback :since-ts window when no explicit baseline is available."
@@ -118,9 +132,12 @@
    client. Falls back to the bare `:cap/sms` key if the capability
    wasn't subject-keyed."
   [ctx subject-str]
-  (let [subj (subject->keyword subject-str)]
-    (or (cap/get-capability ctx :sms subj)
-        (cap/get-capability ctx :sms))))
+  (let [subj (subject->keyword subject-str)
+        ;; sl-s2oa: the resolved interface INSTANCE (type-literal fallback
+        ;; for REPL/direct paths)
+        instance (step/interface-instance ctx :sms)]
+    (or (cap/get-capability ctx instance subj)
+        (cap/get-capability ctx instance))))
 
 ;; -----------------------------------------------------------------------------
 ;; Time-baseline helpers
@@ -169,19 +186,19 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- with-poll-timeout
-  "Repeatedly call `f` every `*poll-interval-ms*` until it returns a
-   truthy value or `*receive-timeout-ms*` elapses. Returns f's truthy
-   result, or throws `:sms/receive-timeout`."
-  [f context]
-  (let [deadline (+ (System/currentTimeMillis) *receive-timeout-ms*)]
-    (loop []
-      (or (f)
-          (if (< (System/currentTimeMillis) deadline)
-            (do (Thread/sleep *poll-interval-ms*) (recur))
-            (throw (ex-info "Timed out waiting for inbound SMS"
-                            (merge {:type :sms/receive-timeout
-                                    :timeout-ms *receive-timeout-ms*}
-                                   context))))))))
+  "Poll `f` on the deadline substrate (sl-99u2) with this ns's
+   receive-class defaults until it returns a truthy value or the resolved
+   deadline elapses. Returns f's truthy result, or throws the kernel's
+   structured `:step/poll-timeout` with `context` merged in. Adapter
+   errors (`:sms/query-failed`) propagate immediately — a transient
+   provider blip is a real error, not a not-yet."
+  [ctx f context]
+  (step/poll-until ctx f
+                   {:defaults receive-timing-defaults
+                    :deadline-ms *receive-timeout-ms*
+                    :interval-ms *poll-interval-ms*
+                    :context context
+                    :default-type :sms}))
 
 ;; -----------------------------------------------------------------------------
 ;; Receive: shared core
@@ -224,14 +241,14 @@
    embedded {binding} tokens interpolated as regex-quoted literals),
    build filters with the given :since-ts, poll-with-timeout, stash on
    hit. The poll-timeout ladder is SMS's capture-failure semantics: no
-   match within budget throws :sms/receive-timeout."
+   match within budget throws the kernel's :step/poll-timeout (sl-99u2)."
   [ctx subject-str to-phone match-str since-ts]
   (let [sms     (get-sms-impl ctx subject-str)
         pattern (bindings/compile-pattern ctx match-str)
         filters {:since-ts  since-ts
                  :to        to-phone
                  :direction :inbound}
-        hit     (with-poll-timeout
+        hit     (with-poll-timeout ctx
                   #(attempt-receive sms pattern filters)
                   {:to-phone to-phone :match match-str :since-ts since-ts})]
     (update-receive-state ctx hit)))

@@ -138,15 +138,16 @@
       (is (= #{:alice :bob} (set (keys (:subjects merged)))))
       (is (= #{:click :swipe} (set (keys (get-in merged [:verbs :web])))))))
 
-  (testing "project overrides with flag"
+  (testing "the removed :override-defaults flag is ignored even by a
+            direct caller — glossaries ALWAYS extend (sl-h7c3)"
     (let [defaults {:subjects {:alice {:desc "default alice"}}
                     :verbs {:web {:click {:desc "click"}}}}
           project {:subjects {:bob {:desc "only bob"}}
                    :verbs {:web {:swipe {:desc "only swipe"}}}
                    :override-defaults true}
           merged (glossary/merge-glossaries defaults project)]
-      (is (= #{:bob} (set (keys (:subjects merged)))))
-      (is (= #{:swipe} (set (keys (get-in merged [:verbs :web])))))))
+      (is (= #{:alice :bob} (set (keys (:subjects merged)))))
+      (is (= #{:click :swipe} (set (keys (get-in merged [:verbs :web])))))))
 
   (testing "project values override same keys"
     (let [defaults {:subjects {:alice {:desc "old desc"}}
@@ -156,6 +157,51 @@
           merged (glossary/merge-glossaries defaults project)]
       (is (= "new desc" (get-in merged [:subjects :alice :desc])))
       (is (= "new click" (get-in merged [:verbs :web :click :desc]))))))
+
+;; -----------------------------------------------------------------------------
+;; :override-defaults presence diagnostic (sl-h7c3) — the removed flag in a
+;; glossary FILE draws a warning on the loaders' existing logging channel,
+;; in lenient AND strict mode, and the file still loads.
+;; -----------------------------------------------------------------------------
+
+(def ^:private override-warning-text "carries :override-defaults")
+
+(deftest override-flag-presence-warns
+  (testing "lenient loader: subject file with the flag warns and loads"
+    (let [g (atom nil)
+          logs (log-capture/with-captured-logs
+                 #(reset! g (glossary/load-all-glossaries
+                             {:subjects (fixture-path "override-subjects.edn")})))]
+      (is (some (log-capture/level-msg? :warn override-warning-text) logs))
+      (is (some (log-capture/level-msg? :warn "always extend the defaults") logs)
+          "the warning names the truth and the remedy")
+      (is (contains? (:subjects @g) :bob) "the file still loads — extend semantics")))
+  (testing "lenient loader: verb file with the flag warns and loads"
+    (let [g (atom nil)
+          logs (log-capture/with-captured-logs
+                 #(reset! g (glossary/load-all-glossaries
+                             {:verbs {:web (fixture-path "override-verbs.edn")}})))]
+      (is (some (log-capture/level-msg? :warn override-warning-text) logs))
+      (is (contains? (get-in @g [:verbs :web]) :tap))
+      (is (contains? (get-in @g [:verbs :web]) :click)
+          "defaults survive — the flag did not override")))
+  (testing "strict loader: warns (never errors) and returns :ok"
+    (let [result (atom nil)
+          logs (log-capture/with-captured-logs
+                 #(reset! result (glossary/load-all-glossaries-strict
+                                  {:subjects (fixture-path "override-subjects.edn")
+                                   :verbs {:web (fixture-path "override-verbs.edn")}})))]
+      (is (= 2 (count (filter (log-capture/level-msg? :warn override-warning-text)
+                              logs)))
+          "one warning per flag-carrying file")
+      (is (contains? @result :ok)
+          "the flag's presence never fails a strict load")))
+  (testing "flag-free files draw no override warning"
+    (let [logs (log-capture/with-captured-logs
+                 #(glossary/load-all-glossaries
+                   {:subjects (fixture-path "subjects.edn")
+                    :verbs {:web (fixture-path "verbs-web-project.edn")}}))]
+      (is (not-any? (log-capture/level-msg? :warn override-warning-text) logs)))))
 
 ;; -----------------------------------------------------------------------------
 ;; load-all-glossaries Tests
@@ -745,6 +791,45 @@
   (testing "::subject-entry rejects a non-keyword :wears"
     (is (not (s/valid? ::glossary/subject-entry {:wears "finance"})))))
 
+;; -----------------------------------------------------------------------------
+;; Provenance attachment (sl-0gfc)
+;; -----------------------------------------------------------------------------
+
+(deftest strict-loader-attaches-provenance
+  (let [result (glossary/load-all-glossaries-strict
+                {:subjects (fixture-path "subjects.edn")
+                 :verbs {:web (fixture-path "verbs-web-project.edn")}})
+        g (:ok result)]
+    (testing "markers computed at merge time"
+      (is (= :user-file (get-in g [:provenance :verbs :web :swipe]))
+          "verb only in the project file")
+      (is (= :builtin (get-in g [:provenance :verbs :web :click]))
+          "untouched framework verb")
+      (is (= :builtin (get-in g [:provenance :verbs :sms :send]))
+          "framework glossaries for other interface types stay marked")
+      (is (= :user-file (get-in g [:provenance :subjects :user]))
+          "no default subjects ship — project subjects are :user-file"))
+    (testing ":sources carries the resolved config paths"
+      (is (= (fixture-path "subjects.edn") (get-in g [:sources :subjects])))
+      (is (= (fixture-path "verbs-web-project.edn")
+             (get-in g [:sources :verbs :web]))))))
+
+(deftest strict-loader-marks-collisions-config-override
+  (let [result (glossary/load-all-glossaries-strict
+                {:verbs {:web (fixture-path "verbs-web-collide.edn")}})
+        g (:ok result)]
+    (is (= :config-override (get-in g [:provenance :verbs :web :click]))
+        "a project verb colliding with a builtin is marked :config-override")
+    (is (= "Project click override" (get-in g [:verbs :web :click :desc]))
+        "…and the project entry replaced the builtin wholesale (verified sl-0gfc)")))
+
+(deftest lenient-loader-attaches-provenance
+  (let [g (glossary/load-all-glossaries
+           {:subjects (fixture-path "subjects.edn")
+            :verbs {:web (fixture-path "verbs-web-project.edn")}})]
+    (is (= :user-file (get-in g [:provenance :verbs :web :pinch])))
+    (is (= :builtin (get-in g [:provenance :verbs :web :fill])))))
+
 (deftest costume-for-subject-test
   (let [glossary {:subjects {:operator {:instances [:alice] :wears :finance}
                              :admin {:wears :ops}
@@ -759,3 +844,121 @@
       (is (nil? (glossary/costume-for-subject glossary :guest))))
     (testing "nil for an unknown subject"
       (is (nil? (glossary/costume-for-subject glossary :nobody))))))
+
+;; -----------------------------------------------------------------------------
+;; Per-instance costume wear + persona docstrings (sl-4e91)
+;; -----------------------------------------------------------------------------
+
+(def ^:private authored-personas
+  "Authored shape: persona maps mixed with bare keywords."
+  {:user {:desc "Standard user"
+          :wears :default-jacket
+          :instances [{:id :alicia :desc "Spanish-first admin reviewer"
+                       :wears :alicia}
+                      {:id :bob :wears :bob-jacket}
+                      {:id :dana :wears nil}
+                      :carol]}
+   :admin {:wears :ops}})
+
+(defn- indexed
+  "Attach an instance index to a normalized subjects map, as the loaders do."
+  [subjects]
+  {:subjects subjects
+   :instance-index (:ok (glossary/build-instance-index subjects))})
+
+(deftest normalize-subjects-test
+  (let [norm (glossary/normalize-subjects authored-personas)]
+    (testing "persona maps split into canonical :instances + :instance-meta"
+      (is (= [:alicia :bob :dana :carol] (get-in norm [:user :instances])))
+      (is (= {:alicia {:desc "Spanish-first admin reviewer" :wears :alicia}
+              :bob {:wears :bob-jacket}
+              :dana {:wears nil}}
+             (get-in norm [:user :instance-meta]))
+          "bare :carol gets no meta entry; :id is stripped from meta")
+      (is (= :default-jacket (get-in norm [:user :wears]))
+          "type-level default untouched"))
+    (testing "normalization is idempotent"
+      (is (= norm (glossary/normalize-subjects norm))))
+    (testing "entries without :instances pass through unchanged"
+      (is (= {:wears :ops} (:admin norm))))
+    (testing "authored and canonical shapes both satisfy ::subject-entry"
+      (is (s/valid? ::glossary/subject-entry (:user authored-personas)))
+      (is (s/valid? ::glossary/subject-entry (:user norm))))))
+
+(deftest instance-entry-spec-test
+  (testing "persona map requires a keyword :id"
+    (is (s/valid? ::glossary/instance-entry {:id :alicia :desc "d" :wears :j}))
+    (is (s/valid? ::glossary/instance-entry {:id :dana :wears nil})
+        ":wears nil (opt-out) conforms on a persona map")
+    (is (not (s/valid? ::glossary/instance-entry {:desc "no id"})))
+    (is (not (s/valid? ::glossary/instance-entry {:id "alicia"})))
+    (is (not (s/valid? ::glossary/instance-entry {:id :a :wears "jacket"})))
+    (is (not (s/valid? ::glossary/instance-entry {:id :a :desc :not-a-string})))))
+
+(deftest normalize-preserves-invalid-entries-for-validation
+  (let [norm (glossary/normalize-subjects
+              {:user {:instances [{:desc "persona map without :id"} :alice]}})]
+    (testing "an id-less map survives normalization into :instances"
+      (is (= 2 (count (get-in norm [:user :instances])))))
+    (testing "…and build-instance-index reports it via :glossary/invalid-instances"
+      (let [result (glossary/build-instance-index norm)]
+        (is (= :glossary/invalid-instances (get-in result [:error :type])))
+        (is (re-find #"persona map" (get-in result [:error :message])))))))
+
+(deftest duplicate-persona-id-is-caught
+  (let [norm (glossary/normalize-subjects
+              {:user {:instances [{:id :alicia :wears :a}
+                                  {:id :alicia :wears :b}]}})
+        result (glossary/build-instance-index norm)]
+    (is (= :glossary/duplicate-instance (get-in result [:error :type]))
+        "the same :id twice in one vector trips the existing duplicate check")))
+
+(deftest per-instance-costume-resolution-test
+  (let [g (indexed (glossary/normalize-subjects authored-personas))]
+    (testing "instance :wears wins over the type default (instance > type)"
+      (is (= :alicia (glossary/costume-for-subject g :user/alicia)))
+      (is (= {:wears :alicia :source :instance}
+             (glossary/effective-wears g :user/alicia))))
+    (testing "bare instance form resolves via the instance index"
+      (is (= :bob-jacket (glossary/costume-for-subject g :bob))))
+    (testing "an instance without its own :wears inherits the type default"
+      (is (= :default-jacket (glossary/costume-for-subject g :carol)))
+      (is (= {:wears :default-jacket :source :type-default}
+             (glossary/effective-wears g :user/carol))))
+    (testing ":wears nil on a persona opts out of the inherited default"
+      (is (nil? (glossary/costume-for-subject g :user/dana)))
+      (is (nil? (glossary/effective-wears g :user/dana))))
+    (testing "singleton types still resolve their own :wears"
+      (is (= :ops (glossary/costume-for-subject g :admin)))
+      (is (= {:wears :ops :source :type-default}
+             (glossary/effective-wears g :admin))))))
+
+(deftest instance-meta-accessor-test
+  (let [g (indexed (glossary/normalize-subjects authored-personas))]
+    (testing "returns the persona meta map, qualified or bare"
+      (is (= {:desc "Spanish-first admin reviewer" :wears :alicia}
+             (glossary/instance-meta g :user/alicia)))
+      (is (= {:wears :bob-jacket} (glossary/instance-meta g :bob))))
+    (testing "nil for bare-keyword instances, singletons, unknowns"
+      (is (nil? (glossary/instance-meta g :user/carol)))
+      (is (nil? (glossary/instance-meta g :admin)))
+      (is (nil? (glossary/instance-meta g :nobody))))))
+
+(deftest persona-loader-roundtrip-test
+  (let [result (glossary/load-all-glossaries-strict
+                {:subjects (fixture-path "subjects-personas.edn")})
+        g (:ok result)]
+    (testing "strict loader normalizes the authored persona shape"
+      (is (map? g))
+      (is (= [:alicia :bob :dana :carol] (get-in g [:subjects :user :instances])))
+      (is (= :alicia (get-in g [:subjects :user :instance-meta :alicia :wears])))
+      (is (= :user (get-in g [:instance-index :alicia]))
+          "instance index built over the normalized keywords"))
+    (testing "resolution works end-to-end on the loaded glossary"
+      (is (= :alicia (glossary/costume-for-subject g :user/alicia)))
+      (is (= :default-jacket (glossary/costume-for-subject g :user/carol)))
+      (is (nil? (glossary/costume-for-subject g :user/dana))))
+    (testing "lenient loader normalizes identically"
+      (let [gl (glossary/load-all-glossaries
+                {:subjects (fixture-path "subjects-personas.edn")})]
+        (is (= (get-in g [:subjects :user]) (get-in gl [:subjects :user])))))))

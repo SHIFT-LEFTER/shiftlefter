@@ -12,7 +12,7 @@
             [clojure.java.shell :as shell]))
 
 (def lib 'com.shiftlefter/shiftlefter)
-(def version "0.5.4")
+(def version "0.5.5")
 (def class-dir "target/classes")
 (def uber-file "target/shiftlefter.jar")
 (def logback-version "1.5.16")

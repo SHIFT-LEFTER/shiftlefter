@@ -24,6 +24,7 @@
   (:require [clojure.spec.alpha :as s]
             [shiftlefter.attachments :as attachments]
             [shiftlefter.stepengine.exec.cleanup :as cleanup]
+            [shiftlefter.stepengine.exec.provisioning :as provisioning]
             [shiftlefter.stepengine.exec.step-loop :as step-loop]))
 
 ;; -----------------------------------------------------------------------------
@@ -31,8 +32,12 @@
 ;; -----------------------------------------------------------------------------
 
 ;; invoke-step result — keys are :status, :scenario, :error
-;; :error (sl-esq) is scenario-level only: a lifecycle hook threw. Steps
-;; never produce it — a hook failure is infrastructure, not a step outcome.
+;; :error (sl-esq, family widened sl-7c7i) is scenario-level only — the
+;; infrastructure-failure family: a lifecycle hook threw, capability
+;; provisioning failed, capture infrastructure failed, or the harness
+;; crashed. Steps never produce it — infrastructure failure is not a step
+;; outcome (a provisioning-failed step stays :failed; finalize flips the
+;; scenario).
 (s/def ::status #{:passed :pending :failed :skipped :error})
 (s/def ::type keyword?)
 (s/def ::message string?)
@@ -65,8 +70,9 @@
 (s/def ::failed nat-int?)
 (s/def ::pending nat-int?)
 (s/def ::skipped nat-int?)
-;; :error count is ABSENT unless positive (sl-esq) — hook-less runs keep the
-;; historical four-key counts map byte-identical in --edn output.
+;; :error count is ABSENT unless positive (sl-esq) — error-free runs keep the
+;; historical four-key counts map byte-identical in --edn output. Counts the
+;; infrastructure-failure family (hook/provisioning/capture/harness, sl-7c7i).
 (s/def :shiftlefter.counts/error nat-int?)
 
 (s/def ::counts
@@ -85,3 +91,7 @@
 (def invoke-step      step-loop/invoke-step)
 (def execute-scenario step-loop/execute-scenario)
 (def execute-suite    cleanup/execute-suite)
+;; The lazy-provisioning primitive, exposed for bare callers with no plan
+;; to scan — the REPL step path (sl-vmc5). Runner paths keep reaching it
+;; through step_loop/the eager phase, unchanged.
+(def ensure-capability-for-svo provisioning/ensure-capability-for-svo)

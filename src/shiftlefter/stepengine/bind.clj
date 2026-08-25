@@ -49,6 +49,7 @@
             [clojure.string :as str]
             [shiftlefter.intent.state :as intent-state]
             [shiftlefter.stepengine.annotations :as annotations]
+            [shiftlefter.stepengine.costume-lint :as costume-lint]
             [shiftlefter.stepengine.hints :as hints]
             [shiftlefter.svo.extract :as extract]
             [shiftlefter.svo.glossary :as glossary]
@@ -87,7 +88,8 @@
 
 ;; Options threaded from bind-suite down to bind-step (sl-s04n)
 (s/def ::intents (s/nilable map?))
-(s/def ::bind-opts (s/nilable (s/keys :opt-un [::intents])))
+(s/def ::costumes (s/nilable map?))
+(s/def ::bind-opts (s/nilable (s/keys :opt-un [::intents ::costumes])))
 
 ;; Run plan
 (s/def :plan/id uuid?)
@@ -182,9 +184,66 @@
   (select-keys stepdef [:stepdef/id :pattern-src :source]))
 
 (defn- stepdef-interface
-  "Return the declared :interface of a stepdef, or nil if legacy/unspecified."
+  "Return the declared :interface TYPE of a stepdef, or nil if
+   legacy/unspecified. Since sl-s2oa, stepdef :interface metadata always
+   means the interface TYPE (the vocabulary), never a config instance name."
   [stepdef]
   (-> stepdef :metadata :interface))
+
+(defn- declared-instance-type
+  "Resolve an annotation's declared INSTANCE name to its configured TYPE
+   (sl-s2oa). Unconfigured names read as types directly — the type-as-name
+   fallback that keeps vanilla/no-config paths byte-identical."
+  [interfaces declared]
+  (or (get-in interfaces [declared :type]) declared))
+
+(defn- instances-of-type
+  "Sorted names of configured interface instances whose :type is `iface-type`.
+   An entry without :type reads as an instance of the type named by its own
+   key (the run path never normalizes config, so type-less entries exist)."
+  [interfaces iface-type]
+  (->> interfaces
+       (keep (fn [[nm idef]] (when (= iface-type (or (:type idef) nm)) nm)))
+       sort
+       vec))
+
+(defn- resolve-instance
+  "Resolve the execution-target interface INSTANCE for a matched step
+   (sl-s2oa). The instance is what capability keys, provisioning, and
+   cleanup are keyed on; the stepdef's TYPE only selects vocabulary.
+
+   Annotated steps: the annotation names the instance directly (already
+   validated as a config key by the annotation pass).
+   Unannotated steps of stepdef type T:
+   - exactly one configured instance of T -> that instance
+   - 2+ instances -> the type-named entry (name = T) iff it exists with
+     :type T (the zero-config default); otherwise a planning error naming
+     the candidate instances
+   - zero instances -> T itself (type-as-name fallback: vanilla mode and
+     unconfigured types keep today's behavior; suite-lint and provisioning
+     surface the gap downstream).
+
+   Returns {:instance kw} or {:error {...}}."
+  [interfaces declared iface-type]
+  (if declared
+    {:instance declared}
+    (let [instances (instances-of-type interfaces iface-type)]
+      (cond
+        (= 1 (count instances)) {:instance (first instances)}
+        (empty? instances) {:instance iface-type}
+        ;; 2+ instances: the type-named entry is the zero-config default
+        ;; (instances-of-type already applied the name-as-type fallback,
+        ;; so membership is the guard against a shadowing renamed entry)
+        (some #(= iface-type %) instances) {:instance iface-type}
+        :else {:error {:type :bind/ambiguous-instance
+                       :interface-type iface-type
+                       :candidates instances
+                       :message (str "Step of interface type " iface-type
+                                     " could execute on " (count instances)
+                                     " configured instances " (pr-str instances)
+                                     " and none is the type-named default."
+                                     " Annotate the step with an instance,"
+                                     " e.g. [" (first instances) "].")}}))))
 
 (defn bind-step
   "Bind a pickle step to stepdefs.
@@ -195,11 +254,18 @@
    - :binding - for matched: stepdef info + captures + arity validation
    - :alternatives - for ambiguous: all matching stepdefs (summaries)
    - :filter-info - when :step/declared-interface is present, diagnostic info
-     about the annotation filter:
-       {:declared-interface :sms
+     about the annotation filter (sl-s2oa: the annotation names a config
+     INSTANCE; its :type narrows stepdef candidates):
+       {:declared-interface :admin       ;; the annotated instance name
+        :resolved-type :web              ;; that instance's configured :type
         :other-interface-match-count N   ;; only on :undefined
-        :other-interfaces [:web ...]     ;; only on :undefined
+        :other-interfaces [:sms ...]     ;; other TYPES with matches, :undefined only
         :suggestion \"...\"}             ;; only when :other-interfaces present (sl-563)
+   - :instance-resolution - on :matched, present ONLY when the execution
+     instance could not be resolved (unannotated step whose type has 2+
+     configured instances and no type-named default) — a planning error map
+     {:type :bind/ambiguous-instance :interface-type T :candidates [...]
+      :message \"...\"} (sl-s2oa)
    - :hint - on :undefined, at most one grammar hint classifying why the text
      matched nothing (sl-s04n; see shiftlefter.stepengine.hints). Computed on
      the annotation-stripped text against the narrowed candidates, so it
@@ -208,15 +274,23 @@
 
    opts (optional):
    - :intents - loaded intents map for glossary-aware hints (nil degrades)
+   - :interfaces - the :interfaces config map, for annotation name->type
+     resolution and instance stamping (nil degrades to type-as-name)
 
    Synthetic steps (macro wrappers with :step/synthetic? true) are auto-bound
    with :status :synthetic and no binding - they exist for events/reporting only.
 
-   If the step has :step/declared-interface (from the annotation pass), stepdef
-   candidates are narrowed to those whose metadata :interface matches. The
-   annotation prefix is stripped from step text only at the moment of regex
-   matching; the step map itself retains :step/text with annotation intact so
-   reporters and events can surface it."
+   If the step has :step/declared-interface (from the annotation pass), the
+   declared INSTANCE name resolves to its configured :type and stepdef
+   candidates are narrowed to those whose metadata :interface (a TYPE) matches
+   (sl-s2oa). The annotation prefix is stripped from step text only at the
+   moment of regex matching; the step map itself retains :step/text with
+   annotation intact so reporters and events can surface it.
+
+   On :matched, the bound SVO's :interface is stamped with the resolved
+   execution INSTANCE (annotated -> the named instance; unannotated -> see
+   resolve-instance), so downstream capability keys and provisioning stay
+   name-keyed with zero changes."
   ([pickle-step stepdefs]
    (bind-step pickle-step stepdefs nil))
   ([pickle-step stepdefs opts]
@@ -229,41 +303,49 @@
      ;; Regular steps need stepdef matching
      (let [raw-text (:step/text pickle-step)
            declared (:step/declared-interface pickle-step)
+           interfaces (:interfaces opts)
            ;; Strip annotation for regex matching when declared
            match-text (if declared
                         (annotations/strip-annotation raw-text)
                         raw-text)
+           ;; sl-s2oa: the annotation names an INSTANCE; its configured :type
+           ;; is what narrows stepdef candidates (stepdef metadata = TYPE).
+           declared-type (when declared
+                           (declared-instance-type interfaces declared))
            ;; Narrow candidates when an interface is declared.
            ;; Stepdefs without :interface metadata are excluded from annotated
            ;; binding — the annotation is an assertion, and an interface-less
            ;; stepdef has no claim to any particular interface.
            candidates (if declared
-                        (filter #(= declared (stepdef-interface %)) stepdefs)
+                        (filter #(= declared-type (stepdef-interface %)) stepdefs)
                         stepdefs)
            matches (find-all-matches match-text candidates)
            ;; Level-2 diagnostic: when annotated and undefined, surface
-           ;; matches under other interfaces (they were filtered out).
+           ;; matches under other interface TYPES (they were filtered out).
            ;; sl-563: include an explicit human-readable :suggestion when
-           ;; other interfaces had matches.
+           ;; other types had matches. sl-s2oa: the suggestion surfaces the
+           ;; name->type resolution chain.
            filter-info
            (when declared
              (let [others-matching
                    (when (zero? (count matches))
                      (find-all-matches
                       match-text
-                      (remove #(= declared (stepdef-interface %)) stepdefs)))
-                   other-ifaces (vec (distinct
-                                      (keep #(stepdef-interface (:stepdef %))
-                                            others-matching)))]
-               (cond-> {:declared-interface declared}
+                      (remove #(= declared-type (stepdef-interface %)) stepdefs)))
+                   other-types (vec (distinct
+                                     (keep #(stepdef-interface (:stepdef %))
+                                           others-matching)))]
+               (cond-> {:declared-interface declared
+                        :resolved-type declared-type}
                  (seq others-matching)
                  (assoc :other-interface-match-count (count others-matching)
-                        :other-interfaces other-ifaces
+                        :other-interfaces other-types
                         :suggestion
-                        (let [verb (if (= 1 (count other-ifaces)) "does" "do")
+                        (let [verb (if (= 1 (count other-types)) "does" "do")
                               listed (str/join " "
-                                               (map #(str "[" % "]") other-ifaces))]
-                          (str "No [" declared "] stepdef matches, but "
+                                               (map #(str "type " %) other-types))]
+                          (str "No [" declared "] (type " declared-type
+                               ") stepdef matches, but "
                                listed " " verb "."))))))]
        (case (count matches)
          ;; No matches - undefined; classify why with a grammar hint (sl-s04n)
@@ -285,11 +367,19 @@
                filter-info (assoc :filter-info filter-info)
                hint (assoc :hint hint)))
 
-         ;; Single match - check arity and extract SVO
+         ;; Single match - check arity, extract SVO, resolve the execution
+         ;; instance and stamp it on the SVO (sl-s2oa). Stepdefs without
+         ;; :svo metadata never auto-provision, so they skip resolution.
          1 (let [{:keys [stepdef captures]} (first matches)
                  arity-info (validate-arity (count captures) (:arity stepdef))
                  metadata (:metadata stepdef)
-                 svo (extract/extract-svo metadata captures)]
+                 svo (extract/extract-svo metadata captures)
+                 sd-type (stepdef-interface stepdef)
+                 resolution (when (and svo sd-type)
+                              (resolve-instance interfaces declared sd-type))
+                 svo (if-let [inst (:instance resolution)]
+                       (assoc svo :interface inst)
+                       svo)]
              (cond-> {:status :matched
                       :step pickle-step
                       :binding (merge (stepdef-summary stepdef)
@@ -300,7 +390,9 @@
                                        :svo svo}
                                       arity-info)
                       :alternatives []}
-               filter-info (assoc :filter-info filter-info)))
+               filter-info (assoc :filter-info filter-info)
+               (:error resolution) (assoc :instance-resolution
+                                          (:error resolution))))
 
          ;; Multiple matches - ambiguous
          (let [summaries (mapv #(stepdef-summary (:stepdef %)) matches)]
@@ -331,7 +423,10 @@
          runnable? (every? (fn [bs]
                             (or (= :synthetic (:status bs))  ; macro wrappers
                                 (and (= :matched (:status bs))
-                                     (:arity-ok? (:binding bs)))))
+                                     (:arity-ok? (:binding bs))
+                                     ;; sl-s2oa: unresolved execution instance
+                                     ;; blocks the plan like any binding issue
+                                     (not (:instance-resolution bs)))))
                           bound-steps)]
     {:plan/id (java.util.UUID/randomUUID)
      :plan/pickle pickle
@@ -361,10 +456,17 @@
         invalid-arity (->> (filter #(and (= :matched (:status %))
                                          (not (:arity-ok? (:binding %))))
                                    all-steps)
-                           (mapv #(assoc % :severity :error)))]
+                           (mapv #(assoc % :severity :error)))
+        ;; sl-s2oa: matched steps whose execution instance could not be
+        ;; resolved (ambiguous same-type instances, no default)
+        ambiguous-instance (->> (filter #(and (= :matched (:status %))
+                                              (:instance-resolution %))
+                                        all-steps)
+                                (mapv #(assoc % :severity :error)))]
     {:undefined undefined
      :ambiguous ambiguous
-     :invalid-arity invalid-arity}))
+     :invalid-arity invalid-arity
+     :ambiguous-instance ambiguous-instance}))
 
 (defn- issue-counts
   "Count issues by type. :total-issues includes every issue family —
@@ -372,15 +474,17 @@
    on :total-issues must never read 0 when any family is nonzero. Blocking
    is judged separately (see bind-suite): warn-level SVO issues count here
    without blocking."
-  [{:keys [undefined ambiguous invalid-arity svo-issues]}]
-  {:undefined-count     (count undefined)
-   :ambiguous-count     (count ambiguous)
-   :invalid-arity-count (count invalid-arity)
-   :svo-issue-count     (count svo-issues)
-   :total-issues        (+ (count undefined)
-                           (count ambiguous)
-                           (count invalid-arity)
-                           (count svo-issues))})
+  [{:keys [undefined ambiguous invalid-arity ambiguous-instance svo-issues]}]
+  {:undefined-count          (count undefined)
+   :ambiguous-count          (count ambiguous)
+   :invalid-arity-count      (count invalid-arity)
+   :ambiguous-instance-count (count ambiguous-instance)
+   :svo-issue-count          (count svo-issues)
+   :total-issues             (+ (count undefined)
+                                (count ambiguous)
+                                (count invalid-arity)
+                                (count ambiguous-instance)
+                                (count svo-issues))})
 
 ;; -----------------------------------------------------------------------------
 ;; SVO Validation
@@ -405,12 +509,13 @@
    ref may be tomorrow's glossary entry; a typo'd key name has no such
    future, so it doesn't get one.
 
-   For object enforcement, maps :strict to :error."
+   For object enforcement, :strict is the deprecated alias for :error
+   (sl-femd) — normalized here so downstream only ever sees :error."
   [issue svo-config]
   (or (:severity issue)
       (let [config-key (issue-type->config-key (:type issue))
             level (get svo-config config-key :warn)]
-        ;; Map :strict to :error for object enforcement
+        ;; Normalize the deprecated :strict alias to :error (sl-femd)
         (if (= level :strict) :error level))))
 
 (defn- collect-svo-issues
@@ -421,7 +526,9 @@
    :step-text, :step-id, :uri, :line, :column, :severity."
   [plans glossary interfaces svo-config]
   (when (and glossary interfaces)
-    (let [;; Extract object enforcement for validate-svo
+    (let [;; Extract object enforcement for validate-svo. The :off here is
+          ;; the no-config safety net, NOT the default — load-config owns
+          ;; the effective default (:warn when :intents configured, sl-femd).
           validate-opts {:unknown-object (:unknown-object svo-config :off)}]
       (->> plans
            (mapcat (fn [plan]
@@ -483,11 +590,15 @@
    stepdef's :svo metadata (:$N placeholders)
    maps frame args back to capture positions. Returns nil when the frame
    can't be resolved — plain-capture behavior, no token admission."
-  [metadata glossary interfaces capture-count]
+  [metadata glossary _interfaces capture-count]
   (let [{:keys [interface svo]} metadata
         {:keys [verb frame object args]} svo
-        iface-type (or (get-in interfaces [interface :type]) interface)
-        frame-map (get-in glossary [:verbs iface-type verb :frames frame])]
+        ;; sl-s2oa premise-flip: stepdef :interface metadata IS the interface
+        ;; TYPE now, so it indexes the TYPE-keyed glossary directly. This
+        ;; retires sfb1's name->type hop here (and its do-not-simplify
+        ;; guard, whose premise — stepdefs declaring config NAMES — no
+        ;; longer holds). `_interfaces` stays in the signature for callers.
+        frame-map (get-in glossary [:verbs interface verb :frames frame])]
     (when frame-map
       (let [base (vec (repeat capture-count nil))
             in-range? (fn [idx] (and (some? idx) (<= 0 idx) (< idx capture-count)))
@@ -561,12 +672,14 @@
    - :undefined - steps with no matching stepdef
    - :ambiguous - steps matching 2+ stepdefs
    - :invalid-arity - matched steps with arity mismatch
+   - :ambiguous-instance - matched steps whose execution instance could not
+     be resolved (sl-s2oa: 2+ same-type instances, no default, no annotation)
    - :svo-issues - SVO validation issues (when opts provided)
    - :counts - {:undefined-count N :ambiguous-count N :svo-issue-count N ...}"
   ([pickles stepdefs]
    (bind-suite pickles stepdefs nil))
   ([pickles stepdefs opts]
-   (let [{:keys [glossary interfaces svo]} opts
+   (let [{:keys [glossary interfaces svo costumes]} opts
          ;; Intent glossary for grammar hints on undefined steps (sl-s04n).
          ;; Same degradation as svo.validate: not loaded -> nil, hints degrade.
          intents (try (intent-state/get-intents) (catch Exception _ nil))
@@ -574,13 +687,23 @@
          ;; (sl-rnm) — the runtime provisioning path reads (:wears svo) —
          ;; and each binding with its :slot-kinds (sl-yh7) — the exec path
          ;; reads them to normalize value/location captures.
-         plans (-> (mapv #(bind-pickle % stepdefs {:intents intents}) pickles)
+         plans (-> (mapv #(bind-pickle % stepdefs {:intents intents
+                                                   :interfaces interfaces})
+                         pickles)
                    (stamp-costumes glossary)
                    (stamp-slot-kinds glossary interfaces))
          binding-issues (collect-issues plans)
          ;; SVO validation (only if opts provided)
          svo-issues (collect-svo-issues plans glossary interfaces svo)
-         all-issues (assoc binding-issues :svo-issues (or svo-issues []))
+         ;; Costume lints (sl-1206): wrong-interface wear + same-scenario
+         ;; shared wear (errors), undeclared wear (warn). Ride :svo-issues so
+         ;; blocking, counts, and every renderer come from the same channel.
+         ;; Only meaningful when a glossary stamped :wears — no glossary, no
+         ;; wears, no issues.
+         costume-issues (when glossary
+                          (costume-lint/check-plans plans costumes interfaces))
+         svo-issues (vec (concat (or svo-issues []) (or costume-issues [])))
+         all-issues (assoc binding-issues :svo-issues svo-issues)
          counts (issue-counts all-issues)
          ;; Runnable if no binding issues AND no blocking SVO issues.
          ;; sl-unz: stepdef-level capability gating moved to suite-load
@@ -591,7 +714,8 @@
          ;; issues (sl-89ii), and warn-level SVO issues must not block.
          binding-ok? (zero? (+ (:undefined-count counts)
                                (:ambiguous-count counts)
-                               (:invalid-arity-count counts)))
+                               (:invalid-arity-count counts)
+                               (:ambiguous-instance-count counts)))
          svo-ok? (not (svo-issues-blocking? svo-issues))
          runnable? (and binding-ok? svo-ok?)]
      {:plans plans

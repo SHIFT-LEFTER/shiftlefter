@@ -17,7 +17,8 @@ it holds in every slot, and it exists so that nobody ever has to guess:
 - Bare lowercase words — the step language itself (`fills`, `with`,
   `should see`).
 - `:alice` / `:user/alice` — the subject, the actor whose session runs the
-  step. `[:web]` at the head of a step — an interface tag.
+  step. `[:web]` at the head of a step — an interface tag naming the config
+  instance the step executes on (its `:type` picks the vocabulary).
 
 That's the whole grammar. A quoted token never resolves to anything; an
 unquoted capitalized token always must. You can read any step cold and know

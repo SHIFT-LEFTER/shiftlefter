@@ -113,11 +113,15 @@
          (when-let [data (:data error)]
            (str "     " (colorize (str "Data: " (pr-str data)) :gray use-color?) "\n")))))
 
-(defn- format-hook-failure
-  "Format a scenario-level hook failure (sl-esq) with dual attribution:
-   the hook's name + registration home, and the @hook= tag's file:line."
+(defn- format-scenario-error
+  "Format a scenario-level :error (the infrastructure-failure family,
+   sl-esq/sl-7c7i: hook throw, capability provisioning, capture, harness).
+   Hook-attributed errors keep the dual attribution: the hook's name +
+   registration home, and the @hook= tag's file:line."
   [error use-color?]
-  (str "  " (colorize (str "Hook '" (:hook error) "' failed"
+  (str "  " (colorize (str (if (:hook error)
+                             (str "Hook '" (:hook error) "' failed")
+                             "Scenario error")
                            (when-let [t (:type error)] (str " (" t ")"))
                            ": " (:message error))
                       :red use-color?) "\n"
@@ -144,11 +148,16 @@
            kind " -> " (:attachment/path ref) "\n"))))
 
 (defn- format-scenario-failure
-  "Format a scenario with its failed steps. A scenario-level :error (a
-   lifecycle hook threw, sl-esq) renders its own attributed block; any
-   failed steps still follow (the after-throw-plus-step-failure case).
-   Attachment refs (sl-l9nj) close the block — evidence lines under the
-   failure they explain; attachment-less scenarios are byte-identical."
+  "Format a scenario with its failed steps. A scenario-level :error (the
+   infrastructure-failure family, sl-esq/sl-7c7i) renders its own
+   attributed block; any failed steps still follow (the
+   after-throw-plus-step-failure case). When a failed step already bears
+   the identical error map (the provisioning flip: step :failed, scenario
+   :error, one error), the scenario-level block is suppressed — the step
+   block carries the location and the message; printing both would say
+   the same thing twice. Attachment refs (sl-l9nj) close the block —
+   evidence lines under the failure they explain; attachment-less
+   scenarios are byte-identical."
   [scenario-result use-color?]
   (let [pickle (-> scenario-result :plan :plan/pickle)
         source-file (:pickle/source-file pickle)
@@ -157,7 +166,8 @@
                             (:attachments scenario-result))]
     (str (colorize (str "Scenario: " (:pickle/name pickle)) :bold use-color?) "\n"
          (when-let [error (:error scenario-result)]
-           (format-hook-failure error use-color?))
+           (when-not (some #(= error (:error %)) failed-steps)
+             (format-scenario-error error use-color?)))
          (str/join "\n" (map-indexed #(format-step-failure %2 %1 source-file use-color?) failed-steps))
          (when (seq attachments)
            (apply str (map #(format-attachment-line % use-color?) attachments))))))
@@ -309,6 +319,21 @@
          "    Matches:\n"
          (str/join "\n" (map #(str "      • " (:pattern-src %) " at " (format-location (:source %))) alts)))))
 
+(defn- format-ambiguous-instance-step
+  "Format a matched step whose execution instance could not be resolved
+   (sl-s2oa): the stepdef's TYPE has 2+ configured instances, no type-named
+   default, and the step carries no [instance] annotation."
+  [bound-step use-color?]
+  (let [step (:step bound-step)
+        step-loc (:step/location step)
+        loc {:file (:source-file bound-step)
+             :line (:line step-loc)
+             :column (:column step-loc)}
+        {:keys [message]} (:instance-resolution bound-step)]
+    (str "  - " (colorize (:step/text step) :yellow use-color?)
+         " (" (format-location loc) ")"
+         "\n      " (colorize message :cyan use-color?))))
+
 (defn- format-issue-label
   "Severity label for a diagnostic issue: yellow WARNING for :warn,
    red ERROR otherwise (missing :severity defaults to :error — blocking
@@ -353,8 +378,8 @@
    Outputs to stderr."
   [diagnostics opts]
   (let [use-color? (colors-enabled? opts)
-        {:keys [undefined ambiguous invalid-arity svo-issues
-                suite-lint-issues stepdef-issues annotation-errors
+        {:keys [undefined ambiguous invalid-arity ambiguous-instance
+                svo-issues suite-lint-issues stepdef-issues annotation-errors
                 macro-errors errors counts]} diagnostics
         ;; Generic errors not already covered by a dedicated section
         other-errors (remove #(wrapper-error-types (:type %)) errors)]
@@ -375,6 +400,11 @@
           (let [binding (:binding step)]
             (println (str "  - " (:step/text (:step step))
                           " (expected " (:expected binding) ", got " (:actual binding) ")")))))
+
+      (when (seq ambiguous-instance)
+        (println (colorize "\nAmbiguous interface instance:" :yellow use-color?))
+        (doseq [step ambiguous-instance]
+          (println (format-ambiguous-instance-step step use-color?))))
 
       (when (seq svo-issues)
         (println (colorize "\nSVO validation issues:" :yellow use-color?))
@@ -417,7 +447,8 @@
       ;; Cannot execute; fall back to the number of items rendered above
       ;; (warn-level SVO issues included: they were printed too).
       (let [rendered (+ (count undefined) (count ambiguous)
-                        (count invalid-arity) (count suite-lint-issues)
+                        (count invalid-arity) (count ambiguous-instance)
+                        (count suite-lint-issues)
                         (count stepdef-issues) (count annotation-errors)
                         (count macro-errors) (count other-errors)
                         (count svo-issues))
@@ -527,6 +558,13 @@
   (on-run-end [_this run-summary]
     (print-failures! (:scenarios @state) opts)
     (print-summary! run-summary opts)
+    ;; sl-d7ks: drop honesty on the human plane — the bus-close log/warn is
+    ;; logger-config-dependent; this line is not. Absent key = zero = silence.
+    (when-let [dropped (:dropped-events run-summary)]
+      (binding [*out* *err*]
+        (println (colorize (str dropped " observe-plane event(s) dropped (bus full);"
+                                " results unaffected — observations may be gapped")
+                           :yellow (colors-enabled? opts)))))
     (print-warnings! (:diagnostics @state) opts)
     nil))
 

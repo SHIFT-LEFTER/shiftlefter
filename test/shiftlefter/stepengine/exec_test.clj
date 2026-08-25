@@ -4,8 +4,9 @@
             [shiftlefter.browser.protocol :as bp]
             [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.costume :as costume]
-            [shiftlefter.runner.events :as events]
+            [shiftlefter.events :as events]
             [shiftlefter.sms.adapter-hooks :as sms-hooks]
+            [shiftlefter.step :as step]
             [shiftlefter.stepengine.exec.cleanup :as exec-cleanup]
             [shiftlefter.test-helpers.adapter-registry :as mock]))
 
@@ -232,6 +233,41 @@
     (let [plan (make-plan [(make-bound-step (fn [ctx] ctx) 1 [])])
           result (exec/execute-scenario plan {})]
       (is (nil? (:run/interfaces (:scenario-ctx result)))))))
+
+(deftest test-run-timing-stashed-and-resolved
+  (testing "opts :timing is stashed; step/timing resolves the full ladder from
+            inside a step body (sl-99u2: instance > interface > global)"
+    (let [interfaces {:admin-web {:type :web :adapter :etaoin
+                                  :timing {:deadline-ms 1000}}
+                      :web {:type :web :adapter :etaoin
+                            :timing {:interval-ms 250}}}
+          seen (atom nil)
+          plan (make-plan [(make-bound-step
+                            (fn [ctx]
+                              (reset! seen (step/timing ctx {:default-type :admin-web}))
+                              ctx)
+                            1 [])])
+          result (exec/execute-scenario plan {} {:interfaces interfaces
+                                                 :timing {:deadline-ms 9000
+                                                          :interval-ms 90}})]
+      (is (= :passed (:status result)))
+      (is (= {:deadline-ms 1000 :deadline-source :instance
+              :interval-ms 250 :interval-source :interface}
+             @seen)
+          "deadline from the instance entry, interval from its type entry")))
+
+  (testing "global rung answers when no interface entry carries the key"
+    (let [seen (atom nil)
+          plan (make-plan [(make-bound-step
+                            (fn [ctx] (reset! seen (step/timing ctx)) ctx)
+                            1 [])])
+          result (exec/execute-scenario
+                  plan {} {:interfaces {:web {:type :web :adapter :etaoin}}
+                           :timing {:deadline-ms 9000 :interval-ms 90}})]
+      (is (= :passed (:status result)))
+      (is (= {:deadline-ms 9000 :deadline-source :global
+              :interval-ms 90 :interval-source :global}
+             @seen)))))
 
 ;; -----------------------------------------------------------------------------
 ;; execute-suite Tests
@@ -641,7 +677,7 @@
           result (exec/execute-scenario plan {} {:interfaces interfaces
                                                  :adapter-registry registry})]
       (is (not @step-executed) "Step should not execute on provisioning failure")
-      (is (= :failed (:status result)))
+      (is (= :error (:status result)))
       (is (= :svo/provisioning-failed (-> result :steps first :error :type)))
       (is (= :web (-> result :steps first :error :interface))))))
 
@@ -655,7 +691,7 @@
           ;; Config doesn't have :unknown-iface
           interfaces {:web {:type :web :adapter :etaoin :config {}}}
           result (exec/execute-scenario plan {} {:interfaces interfaces})]
-      (is (= :failed (:status result)))
+      (is (= :error (:status result)))
       (is (= :svo/provisioning-failed (-> result :steps first :error :type)))
       (is (= :unknown-iface (-> result :steps first :error :interface)))
       (is (= [:web] (-> result :steps first :error :known))))))
@@ -1465,7 +1501,7 @@
                 :adapter-registry (mock/registry {:test-adapter {:on-provision hook}})}
           result (exec/execute-scenario plan {} opts)
           step-error (:error (first (:steps result)))]
-      (is (= :failed (:status result)))
+      (is (= :error (:status result)))
       (is (= :adapter/on-provision-failed (:type step-error))
           "Error type is the structured hook-failure tag")
       (is (= :test-adapter (:adapter step-error))
@@ -1560,7 +1596,7 @@
                 :provisioning :eager}
           result (exec/execute-scenario plan {} opts)
           [r1 r2] (:steps result)]
-      (is (= :failed (:status result)))
+      (is (= :error (:status result)))
       (is (= :failed (:status r1)) "First step bears the failure")
       (is (= :skipped (:status r2)) "Remaining steps skipped")
       (is (not @step1-ran?) "No step body executed")
@@ -1613,7 +1649,7 @@
                 :provisioning :eager}
           result (exec/execute-scenario plan {} opts)
           err (-> result :steps first :error)]
-      (is (= :failed (:status result)))
+      (is (= :error (:status result)))
       (is (= :scenario/eager-provisioning-failed (:type err))
           "Multi-interface failure wraps under a scenario-level type")
       (is (= 2 (count (:errors err)))
@@ -1759,7 +1795,7 @@
                                              :adapter-registry registry
                                              :provisioning :eager})
           scenario (-> result :scenarios first)]
-      (is (= :failed (:status scenario)))
+      (is (= :error (:status scenario)))
       (is (= :svo/provisioning-failed (-> scenario :steps first :error :type)))
       (is (= [{:action :closed :interface :web.alice :adapter :mock-web}]
              (-> scenario :capability-cleanup :cleaned))
@@ -1785,7 +1821,7 @@
                                              :adapter-registry registry
                                              :provisioning :eager})
           scenario (-> result :scenarios first)]
-      (is (= :failed (:status scenario)))
+      (is (= :error (:status scenario)))
       (is (some #{[:cleanup :mock-web]} @events)
           "The web group provisioned fine and its impl is closed")
       (is (= [:web.alice]
@@ -1807,7 +1843,7 @@
                                              :adapter-registry registry
                                              :provisioning :eager})
           scenario (-> result :scenarios first)]
-      (is (= :failed (:status scenario)))
+      (is (= :error (:status scenario)))
       (is (= :adapter/on-provision-failed (-> scenario :steps first :error :type)))
       (is (some #{[:cleanup :mock-web]} @events)
           "The impl provisioned before the hook threw is closed"))))
@@ -1828,7 +1864,7 @@
           result (exec/execute-suite [plan] {:interfaces interfaces
                                              :adapter-registry registry})
           scenario (-> result :scenarios first)]
-      (is (= :failed (:status scenario)))
+      (is (= :error (:status scenario)))
       (is (some #{[:cleanup :mock-web]} @events)
           "The impl provisioned before the hook threw is closed"))))
 
@@ -1949,10 +1985,12 @@
         (let [result (exec/execute-scenario plan {} {:interfaces interfaces
                                                      :adapter-registry registry})
               err (->> result :steps (keep :error) first)]
-          (is (= :failed (:status result)) "Two wearers of one costume fails the scenario")
+          (is (= :error (:status result)) "Two wearers of one costume errors the scenario")
           (is (= :svo/provisioning-failed (:type err)))
           (is (= :costume/already-worn (:reason err)) "Tagged as the one-wearer violation")
           (is (= :finance (:costume err)))
+          (is (re-find #"per-instance\s+:wears" (:message err))
+              "Error teaches the fix: per-instance :wears (sl-4e91)")
           (is (= 1 @connect-calls)
               "connect-costume! called once (alice) — bob never double-attaches"))))))
 
@@ -1977,7 +2015,7 @@
                                                      :adapter-registry registry
                                                      :provisioning :eager})
               err (->> result :steps (keep :error) first)]
-          (is (= :failed (:status result)))
+          (is (= :error (:status result)))
           (is (= :costume/already-worn (:reason err)))
           (is (= 0 @steps-ran) "Eager fail-fast: no step runs when provisioning is rejected")
           ;; Was 1 (attach-then-reject, an artifact of the per-ctx guard's
@@ -2031,7 +2069,7 @@
                                                      :adapter-registry registry
                                                      :provisioning :eager})
               err (->> result :steps (keep :error) first)]
-          (is (= :failed (:status result)) "Cross-interface duplicate :wears fails the scenario")
+          (is (= :error (:status result)) "Cross-interface duplicate :wears errors the scenario")
           (is (= :svo/provisioning-failed (:type err)))
           (is (= :costume/already-worn (:reason err)))
           (is (= 0 @steps-ran) "Rejected before any step runs")
@@ -2059,7 +2097,7 @@
                                                      :adapter-registry registry
                                                      :provisioning :eager})
               err (->> result :steps (keep :error) first)]
-          (is (= :failed (:status result)))
+          (is (= :error (:status result)))
           (is (= :costume/already-worn (:reason err)))
           (is (= 0 @connect-calls) "Neither interface attaches"))))))
 
@@ -2113,7 +2151,7 @@
           plan       (make-plan [bound-step])
           result     (exec/execute-scenario plan {} {:interfaces       interfaces
                                                      :adapter-registry registry})]
-      (is (= :failed (:status result)))
+      (is (= :error (:status result)))
       (is (false? @step-ran) "step never runs — provisioning fails first")
       (let [err (-> result :steps first :error)]
         (is (= :svo/provisioning-failed (:type err)))

@@ -77,25 +77,30 @@
    - `:subject waits for <N> {<locator>}`               — :wait :for-count
 
    :wait frames are await-style versions of the corresponding :see frames.
-   They retry against the live DOM until the condition is met or
-   `*wait-timeout-ms*` (default 5000ms) elapses, throwing a timeout error.
+   They retry against the live DOM until the condition is met or the await
+   deadline elapses, throwing a structured :step/poll-timeout error.
 
    ## Retry Policy
 
-   Verification steps (`should see`, `should be on`, etc.) retry on
-   transient browser errors for up to `*retry-timeout-ms*` (default 3000ms).
-   Await steps (`:wait` frames) retry against `*wait-timeout-ms*` (default
-   5000ms). Both use 100ms backoff. Retryable errors: stale element
-   references, missing elements, assertion failures
-   (`:browser/assertion-failed`), and capture misses
-   (`:bindings/capture-failure` — the capture step polls like a should-see).
+   All patience rides the deadline substrate (sl-99u2,
+   `shiftlefter.step/poll-until`): deadlines resolve instance > interface >
+   global from `:timing` config, bottoming out in this ns's class defaults —
+   verification steps (`should see`, `should be on`, etc.) at 3000ms,
+   await steps (`:wait` frames) at 5000ms, both polling at 100ms unless
+   config says otherwise. Retryable errors: stale element references,
+   missing elements, assertion failures (`:browser/assertion-failed`), and
+   capture misses (`:bindings/capture-failure` — the capture step polls
+   like a should-see). Deadline exhaustion throws the kernel's legible
+   :step/poll-timeout record (elapsed, deadline, deadline source, last
+   assertion error).
 
    Exceptions:
    - `should not see` does NOT retry (negation is instant — if visible now,
      waiting for disappearance is a different operation)
    - Action steps NEVER retry (mutations are not idempotent)
 
-   Bind `*retry-timeout-ms*` or `*wait-timeout-ms*` to override the defaults.
+   Bind `*retry-timeout-ms*` (verify) or `*wait-timeout-ms*` (await) to
+   override every rung — root value nil defers to the ladder.
 
    ## Locator Syntax
 
@@ -129,6 +134,7 @@
             [shiftlefter.browser.url-match :as url-match]
             [shiftlefter.intent.state :as intent-state]
             [shiftlefter.intent.resolve :as intent-resolve]
+            [shiftlefter.step :as step]
             [clojure.edn :as edn]
             [clojure.string :as str]
             [shiftlefter.svo.keys :as svo-keys]))
@@ -340,39 +346,55 @@
         (contains? err-types :intent/index-out-of-range))))
 
 (def ^:dynamic *retry-timeout-ms*
-  "Default timeout in milliseconds for verification step retries.
-   Bind to override, e.g. `(binding [*retry-timeout-ms* 5000] ...)`."
-  3000)
+  "Rebinding override for the verification-step deadline (sl-99u2). Root
+   value nil = defer to the `:timing` resolution ladder (instance >
+   interface > global > verify default 3000ms). Bind to override every
+   rung, e.g. `(binding [*retry-timeout-ms* 5000] ...)`."
+  nil)
 
 (def ^:dynamic *wait-timeout-ms*
-  "Default timeout in milliseconds for `:wait` await-step polling.
-   Longer than `*retry-timeout-ms*` because await semantics imply
-   the caller is explicitly tolerating a slower path. Bind to override."
-  5000)
+  "Rebinding override for the `:wait` await-step deadline (sl-99u2). Root
+   value nil = defer to the `:timing` resolution ladder (instance >
+   interface > global > await default 5000ms — longer than the verify
+   default because await semantics imply the caller is explicitly
+   tolerating a slower path). Bind to override every rung."
+  nil)
+
+(def ^:private verify-timing-defaults
+  "Verify-class bottom rung of the :timing ladder: this ns's historical
+   retry budget. Any config rung overrides it."
+  {:deadline-ms 3000 :interval-ms 100})
+
+(def ^:private await-timing-defaults
+  "Await-class bottom rung of the :timing ladder (:wait frames)."
+  {:deadline-ms 5000 :interval-ms 100})
+
+(defn- retry-on-substrate
+  "Shared body of `with-retry`/`with-await`: run oracle `f` through the
+   poll-until kernel (sl-99u2). Success = `f` returned without throwing
+   (its return value is passed through, so assertion-style fns returning
+   nil succeed); not-yet = a `retryable-error?` throw. On deadline the
+   kernel throws the structured :step/poll-timeout record with the last
+   assertion error folded in."
+  [ctx f defaults override-ms]
+  (:value (step/poll-until ctx (fn [] {:value (f)})
+                           {:defaults defaults
+                            :deadline-ms override-ms
+                            :retry-error? retryable-error?
+                            :default-type :web})))
 
 (defn- with-retry
-  "Retry a function until it succeeds or timeout.
-   Catches transient browser errors and retries with 100ms backoff.
-   Non-retryable exceptions are rethrown immediately.
-   Default timeout is *retry-timeout-ms* (3000ms)."
-  ([f] (with-retry f *retry-timeout-ms*))
-  ([f timeout-ms]
-   (let [start (System/currentTimeMillis)
-         deadline (+ start timeout-ms)]
-     (loop [last-error nil]
-       (if (> (System/currentTimeMillis) deadline)
-         (throw (or last-error (ex-info "Retry timeout" {:timeout-ms timeout-ms})))
-         (let [result (try
-                        {:success true :value (f)}
-                        (catch Exception e
-                          (if (retryable-error? e)
-                            {:success false :error e}
-                            (throw e))))]
-           (if (:success result)
-             (:value result)
-             (do
-               (Thread/sleep 100)
-               (recur (:error result))))))))))
+  "Verification-step oracle retry on the deadline substrate: verify-class
+   defaults (3000ms/100ms), `*retry-timeout-ms*` as rebinding override."
+  [ctx f]
+  (retry-on-substrate ctx f verify-timing-defaults *retry-timeout-ms*))
+
+(defn- with-await
+  "Await-step (`:wait` frame) oracle retry on the deadline substrate:
+   await-class defaults (5000ms/100ms), `*wait-timeout-ms*` as rebinding
+   override."
+  [ctx f]
+  (retry-on-substrate ctx f await-timing-defaults *wait-timeout-ms*))
 
 ;; -----------------------------------------------------------------------------
 ;; Key Resolution (for press-key step)
@@ -390,8 +412,9 @@
 
 (defn- resolve-key-capture
   "Resolve a :key-slot capture (raw, WITH quotes — :key slots are not
-   engine-normalized) to an etaoin key string. Quoted single char = that
-   character; unquoted = W3C name via svo.keys. Plan validation
+   engine-normalized) to the key token press-key! takes: quoted single
+   char = that character; unquoted = the validated W3C name itself.
+   Vendor translation is the adapter's job (sl-52ly). Plan validation
    (validate-key-object, always-on) catches bad shapes first — the
    throws here are the runtime backstop for direct invocation."
   [capture]
@@ -403,8 +426,8 @@
                              " — to enter text, use fills")
                         {:type :browser/invalid-key-literal
                          :key capture}))))
-    (if-let [key-val (get svo-keys/w3c-key->etaoin capture)]
-      (str key-val)
+    (if (svo-keys/known-key? capture)
+      capture
       (throw (ex-info (str "Unknown key name: '" capture
                            "'. Known keys: " (str/join ", " svo-keys/key-names))
                       {:type :browser/unknown-key
@@ -437,15 +460,19 @@
       kw)))
 
 (defn- web-subjects-in-ctx
-  "Return a vector of subject keywords for every `:cap/web*` entry in ctx,
-   in stable iteration order. Bare `:cap/web` (no subject) shows up as nil
-   and is filtered out — callers want the named subjects for diagnostics."
+  "Return a vector of subject keywords for every web-TYPED capability entry
+   in ctx, in stable iteration order (sl-s2oa: the cap key's interface
+   segment is an INSTANCE name; its :type comes from the run-interfaces
+   stash, unconfigured names reading as their own type). Bare instance keys
+   (no subject) show up as nil and are filtered out — callers want the
+   named subjects for diagnostics."
   [ctx]
   (->> (cap/all-capabilities ctx)
        keys
        (keep (fn [k]
                (let [{:keys [interface subject]} (cap/parse-capability-name k)]
-                 (when (and (= :web interface) subject)
+                 (when (and (= :web (cap/get-run-interface-type ctx interface))
+                            subject)
                    subject))))
        vec))
 
@@ -457,13 +484,22 @@
    capability shape is stateless across step boundaries."
   [ctx subject-str op-fn]
   (let [subject (subject-str->key subject-str)
-        browser (cap/get-capability ctx :web subject)]
+        instance (step/interface-instance ctx :web)
+        browser (cap/get-capability ctx instance subject)]
     (if browser
       (do (op-fn browser) ctx)
-      (throw (ex-info (str "No browser session for subject: " subject-str)
+      (throw (ex-info (str "No browser session for subject: " subject-str
+                           " on interface " instance
+                           " — nothing has provisioned a browser for this"
+                           " subject. In the REPL: (connect-costume! ...)"
+                           " attaches an authenticated costume, or load a"
+                           " config with :interfaces (shifted!) to provision"
+                           " a bare browser on demand. In a runner project:"
+                           " check the :interfaces config.")
                       {:type :browser/no-session
                        :subject subject-str
                        :session-key subject
+                       :interface instance
                        :available-sessions (web-subjects-in-ctx ctx)})))))
 
 (defn- resolve-target*
@@ -526,13 +562,22 @@
    Caller uses the browser for queries; ctx is unchanged."
   [ctx subject-str]
   (let [subject (subject-str->key subject-str)
-        browser (cap/get-capability ctx :web subject)]
+        instance (step/interface-instance ctx :web)
+        browser (cap/get-capability ctx instance subject)]
     (if browser
       [ctx browser]
-      (throw (ex-info (str "No browser session for subject: " subject-str)
+      (throw (ex-info (str "No browser session for subject: " subject-str
+                           " on interface " instance
+                           " — nothing has provisioned a browser for this"
+                           " subject. In the REPL: (connect-costume! ...)"
+                           " attaches an authenticated costume, or load a"
+                           " config with :interfaces (shifted!) to provision"
+                           " a bare browser on demand. In a runner project:"
+                           " check the :interfaces config.")
                       {:type :browser/no-session
                        :subject subject-str
                        :session-key subject
+                       :interface instance
                        :available-sessions (web-subjects-in-ctx ctx)})))))
 
 (defn- unquote-literal
@@ -569,21 +614,26 @@
   ([ctx object-str]
    (resolve-location-object ctx object-str nil))
   ([ctx object-str {:keys [resolve-literals?]}]
-   (if-not (intent-resolve/location-ref? object-str)
-     (let [literal (unquote-literal object-str)]
-       (if-not resolve-literals?
-         literal
-         (let [base-url (:base-url (cap/get-run-interface-config ctx :web))
-               result (url-match/resolve-literal literal base-url)]
-           (if (:error result)
-             (throw (ex-info (get-in result [:error :message]) (:error result)))
-             (:ok result)))))
-     (let [base-url (:base-url (cap/get-run-interface-config ctx :web))
-           result (intent-resolve/resolve-location (intent-state/get-intents)
-                                                   object-str :web base-url)]
-       (if (:error result)
-         (throw (ex-info (get-in result [:error :message]) (:error result)))
-         (:ok result))))))
+   ;; sl-s2oa: base-url comes from the resolved interface INSTANCE (each
+   ;; instance is its own world); the intent :location lookup stays keyed
+   ;; by the instance's TYPE (intent artifacts are vocabulary-scoped).
+   (let [instance (step/interface-instance ctx :web)]
+     (if-not (intent-resolve/location-ref? object-str)
+       (let [literal (unquote-literal object-str)]
+         (if-not resolve-literals?
+           literal
+           (let [base-url (:base-url (cap/get-run-interface-config ctx instance))
+                 result (url-match/resolve-literal literal base-url)]
+             (if (:error result)
+               (throw (ex-info (get-in result [:error :message]) (:error result)))
+               (:ok result)))))
+       (let [base-url (:base-url (cap/get-run-interface-config ctx instance))
+             iface-type (cap/get-run-interface-type ctx instance)
+             result (intent-resolve/resolve-location (intent-state/get-intents)
+                                                     object-str iface-type base-url)]
+         (if (:error result)
+           (throw (ex-info (get-in result [:error :message]) (:error result)))
+           (:ok result)))))))
 
 ;; =============================================================================
 ;; Subject-Extracting Action Steps
@@ -819,7 +869,7 @@
   (let [expected-text (bindings/undouble-quotes expected-text)
         [ctx' browser] (with-subject-query ctx subject-str)
         body-locator (locators/resolve-locator {:tag "body"})]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [actual (bp/get-text browser body-locator)]
           (when-not (.contains (str actual) expected-text)
@@ -839,7 +889,7 @@
   [ctx subject-str count-str locator-str]
   (let [expected (parse-long count-str)
         [ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [resolved (resolve-target* browser locator-str (:interface step-meta))
               actual (if (target/targets? resolved)
@@ -860,7 +910,7 @@
    :doc/example ":alice should see {:id \"banner\"} with text 'Success'"}
   [ctx subject-str locator-str expected-text]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [resolved (target/ensure-single
                         (resolve-target* browser locator-str (:interface step-meta))
@@ -892,7 +942,7 @@
    :doc/example ":alice captures {:id \"total\"} matching /(?<amount>[0-9.]+)/"}
   [ctx subject-str locator-str match-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [resolved (target/ensure-single
                         (resolve-target* browser locator-str (:interface step-meta))
@@ -923,7 +973,7 @@
    :doc/example ":alice should see {:id \"total\"} matching /\\d+ items/"}
   [ctx subject-str locator-str match-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [resolved (target/ensure-single
                         (resolve-target* browser locator-str (:interface step-meta))
@@ -945,7 +995,7 @@
    :doc/example ":alice should see {:id \"qty\"} with value '3'"}
   [ctx subject-str locator-str expected-value]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [resolved (target/ensure-single
                         (resolve-target* browser locator-str (:interface step-meta))
@@ -967,7 +1017,7 @@
    :doc/example ":alice should see {:id \"link\"} with attribute 'href' equal to '/home'"}
   [ctx subject-str locator-str attr-name expected-value]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [resolved (target/ensure-single
                         (resolve-target* browser locator-str (:interface step-meta))
@@ -989,7 +1039,7 @@
    :doc/example ":alice should see {:id \"submit\"} enabled"}
   [ctx subject-str locator-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [resolved (target/ensure-single
                         (resolve-target* browser locator-str (:interface step-meta))
@@ -1006,7 +1056,7 @@
    :doc/example ":alice should see {:id \"submit\"} disabled"}
   [ctx subject-str locator-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [resolved (target/ensure-single
                         (resolve-target* browser locator-str (:interface step-meta))
@@ -1023,7 +1073,7 @@
    :doc/example ":alice should see {:id \"profile\"}"}
   [ctx subject-str locator-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [resolved (target/ensure-single
                         (resolve-target* browser locator-str (:interface step-meta))
@@ -1069,7 +1119,7 @@
   [ctx subject-str expected]
   (let [expected-url (resolve-location-object ctx expected)
         [ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [actual (str (bp/get-url browser))]
           (when-let [mismatch (url-match/region-match expected-url actual)]
@@ -1097,7 +1147,8 @@
   ;; whose :not-a-full-url mismatch teaches the exits; a configured-but-
   ;; unparseable :base-url is a config error and throws.
   (let [literal (unquote-literal expected)
-        base-url (:base-url (cap/get-run-interface-config ctx :web))
+        base-url (:base-url (cap/get-run-interface-config
+                             ctx (step/interface-instance ctx :web)))
         resolved (url-match/resolve-literal literal base-url)
         expected-url (cond
                        (:ok resolved)
@@ -1110,7 +1161,7 @@
 
                        :else literal)
         [ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [actual (str (bp/get-url browser))]
           (when-let [mismatch (url-match/exact-match expected-url actual)]
@@ -1131,7 +1182,7 @@
    :doc/example ":alice should see the title 'Home'"}
   [ctx subject-str expected-title]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [actual (bp/get-title browser)]
           (when-not (= expected-title actual)
@@ -1150,7 +1201,7 @@
    :doc/example ":alice should see an alert with 'Are you sure?'"}
   [ctx subject-str expected-text]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (let [actual (bp/get-alert-text browser)]
           (when-not (.contains (str actual) expected-text)
@@ -1167,7 +1218,7 @@
    :doc/example ":alice should see an alert"}
   [ctx subject-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-retry ctx'
       (fn []
         (try
           (bp/get-alert-text browser)
@@ -1199,7 +1250,7 @@
    :doc/example ":alice waits for {:id \"spinner\"}"}
   [ctx subject-str locator-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-await ctx'
       (fn []
         (let [resolved (target/ensure-single
                         (resolve-target* browser locator-str (:interface step-meta))
@@ -1207,8 +1258,7 @@
           (when-not (bp/visible? browser resolved)
             (throw (ex-info (str "Waited but element never became visible: " locator-str)
                             {:type    :browser/assertion-failed
-                             :locator locator-str})))))
-      *wait-timeout-ms*)
+                             :locator locator-str}))))))
     ctx'))
 
 ;; :wait :for-text — block until element contains the expected text
@@ -1220,7 +1270,7 @@
    :doc/example ":alice waits for {:id \"status\"} to show 'Done'"}
   [ctx subject-str locator-str expected-text]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-await ctx'
       (fn []
         (let [resolved (target/ensure-single
                         (resolve-target* browser locator-str (:interface step-meta))
@@ -1232,8 +1282,7 @@
                             {:type     :browser/assertion-failed
                              :expected expected-text
                              :actual   actual
-                             :locator  locator-str})))))
-      *wait-timeout-ms*)
+                             :locator  locator-str}))))))
     ctx'))
 
 ;; :wait :for-count — block until N matching elements exist (mirror of :see :count).
@@ -1245,7 +1294,7 @@
   [ctx subject-str count-str locator-str]
   (let [expected (parse-long count-str)
         [ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry
+    (with-await ctx'
       (fn []
         (let [resolved (resolve-target* browser locator-str (:interface step-meta))
               actual (if (target/targets? resolved)
@@ -1257,6 +1306,5 @@
                             {:type     :browser/assertion-failed
                              :expected expected
                              :actual   actual
-                             :locator  locator-str})))))
-      *wait-timeout-ms*)
+                             :locator  locator-str}))))))
     ctx'))

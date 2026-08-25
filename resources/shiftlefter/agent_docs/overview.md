@@ -14,6 +14,17 @@ Core commands:
 - `sl agent-doc <topic>` prints one topic.
 - `sl orient` orients you in a project: resolved context, what would fail
   (static validation), validate/run commands, and pointers to these topics.
+- `sl doctor` probes the MACHINE (orient's machine-side counterpart):
+  chromedriver↔Chrome version lockstep, `~/.shiftlefter/config.edn` validity,
+  extra-dependency adapters present when configured, daemon health, orphaned
+  chromedriver processes, `sl/lib` jar sanity. `sl doctor --list` prints
+  exactly what is and isn't checked; `--edn` is machine-readable. Exit 0 =
+  healthy, 1 = issues found. When runs fail for machine-shaped reasons
+  (browser won't start, versions drifted), run doctor before debugging.
+- `sl glossary` lists the RESOLVED vocabulary (subjects, verbs, objects) with
+  per-entry provenance; `sl explain <name>` resolves one name — kind, def
+  site, frames, per-interface bindings including missing ones. See the
+  `resolution` topic.
 - `sl run <path>` executes features.
 - `sl run <path> --dry-run` binds every step without executing — the cheap
   validation pass to run before a real browser run.
@@ -25,9 +36,12 @@ Core commands:
   (console appends `; M filtered out by tags`; EDN gains a `:filtered-out` key).
 - `sl run <path> --junit-xml PATH` also writes a CI-ingestible JUnit XML report
   (config mirror `[:runner :report :junit-xml]`; the flag wins). It rides
-  alongside console/EDN. The XML holds a `<failure>`/`<error>` iff the run's exit
-  code is nonzero; a planning error (exit 2) writes no file, so gate CI on the
-  process exit code, not the report's presence (see ERRATA E009).
+  alongside console/EDN. In a single-group run the XML holds a
+  `<failure>`/`<error>` iff the run's exit code is nonzero, and a planning
+  error (exit 2) writes no file; in a multi-group run (setup.clj, N>1) the
+  file covers only the groups that ran and can be all green beside exit 2 —
+  so gate CI on the process exit code, not the report's presence or
+  greenness (see ERRATA E009).
 - `sl run <path> --html PATH` also writes a self-contained HTML run report
   (config mirror `[:runner :report :html]`; the flag wins). One file, no
   external requests — open it via double-click/`file://`, attach it to CI
@@ -40,8 +54,12 @@ Core commands:
   results directory (config mirror `[:runner :capture]`; the flag wins as a
   whole value). Kinds are adapter-contributed — the WebDriver backend
   (`:etaoin`, the default) provides `screenshot`, `console`, `page-source`;
-  the Playwright backend contributes no capture kinds yet, so a configured
-  kind never fires there; policies are `never` (default),
+  the Playwright backend provides `screenshot` and `page-source` but not
+  `console` (no browser-side buffer to drain there — Playwright console is
+  listener events; the subscription-shape design is sl-lam0). A configured
+  kind supported by none of a group's adapters gets a per-group plan-time
+  warning (`:capture/adapter-unsupported`, visible in dry-run previews);
+  policies are `never` (default),
   `on-failure` (fires at the failing step's instant, capturing ALL live
   browsers), `every-step` (the film strip: one capture per step, following
   the acting subject; no-SVO steps capture all live). Console is a

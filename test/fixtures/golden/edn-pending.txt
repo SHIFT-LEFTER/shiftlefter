@@ -1,4 +1,5 @@
 EXIT 1
 --- STDOUT ---
-{:run/id "UUID", :run/exit-code 1, :run/status :failed, :counts {:passed 0, :failed 0, :pending 1, :skipped 0, :scenarios 1, :steps 3}, :failures []}
+{:run/id "UUID", :run/exit-code 1, :run/status :failed, :run/seed 42, :counts {:passed 0, :failed 0, :pending 1, :skipped 0, :scenarios 1, :steps 3}, :failures []}
 --- STDERR ---
+run seed: 42

@@ -93,6 +93,38 @@
            (capture/unsupported-kinds {:page-src :every-step :message-log :on-failure} reg))
         "sorted")))
 
+(deftest adapter-unsupported-kinds-test
+  ;; sl-sehc: the per-group plan-time gap — a kind SOME registry adapter
+  ;; contributes but none of the group's used adapters do. Disjoint from
+  ;; unsupported-kinds by construction (typo'd kinds stay that class).
+  (let [reg {:browser {:capture {:screenshot {:fn identity}
+                                 :console {:fn identity :scenario-scoped? true}}}
+             :other-browser {:capture {:screenshot {:fn identity}}}
+             :messenger {}}]
+    (is (= [:console]
+           (capture/adapter-unsupported-kinds
+            {:console :on-failure :screenshot :every-step} #{:other-browser} reg))
+        "the used adapter's gap, not the registry union")
+    (is (= [] (capture/adapter-unsupported-kinds
+               {:console :on-failure} #{:browser} reg))
+        "supported by the used adapter — clean")
+    (is (= [] (capture/adapter-unsupported-kinds
+               {:screenshot :on-failure} #{:messenger :browser} reg))
+        "ONE supporting adapter in the group suffices (the sms+web noise guard)")
+    (is (= [:console :screenshot]
+           (capture/adapter-unsupported-kinds
+            {:screenshot :on-failure :console :every-step} #{:messenger} reg))
+        "a capture-less adapter alone: every contributed active kind, sorted")
+    (is (= [] (capture/adapter-unsupported-kinds
+               {:console :never} #{:other-browser} reg))
+        ":never kinds are not checked")
+    (is (= [] (capture/adapter-unsupported-kinds
+               {:screenshoot :on-failure} #{:other-browser} reg))
+        "a kind contributed NOWHERE stays unsupported-kinds' (typo) class")
+    (is (= [] (capture/adapter-unsupported-kinds
+               {:console :on-failure} #{} reg))
+        "no used adapters (fully unbound suite) — no lint")))
+
 (deftest capture-error-shape-test
   (let [err (capture/capture-error [{:kind :screenshot :cap-key :web.alice
                                      :interface :web :subject :alice

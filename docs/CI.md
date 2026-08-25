@@ -9,30 +9,51 @@ The worked examples target GitLab CI and GitHub Actions, but the pieces —
 install, run, collect the report, gate on the exit code — translate to any CI
 system that can run a shell command.
 
-## The one rule: gate on the exit code, not the report file
+## The one rule: gate on the exit code, route on the record
 
 A planning failure — undefined steps, parse errors, config errors, no features
-found — exits **2** and writes **no JUnit file at all**. A job that keys only
-on the report's presence (or swallows the exit code with `|| true`) will read
-that missing report as green. So:
+found, an **empty selection** — exits **2** and, in a single-group run, writes
+**no JUnit file at all**. In a multi-group run (`setup.clj`, N>1) the other
+groups still run and the file IS written, covering only the groups that ran —
+it can be entirely green beside exit 2. A job that keys only on the report's
+presence or greenness (or swallows the exit code with `|| true`) will read
+that missing — or partial, all-green — report as success. So:
 
 - Let `sl run`'s exit code fail the job. Don't append `|| true`, and don't
-  `allow_failure` the test job.
+  `allow_failure` the test job. Any nonzero exit is a failed gate.
 - Treat the JUnit report as *display*, not as the gate.
+- When you need to know *which kind* of red — app failure (1), plan problem
+  (2), harness breakage (4), crash (3) — read the exit code's value or the
+  `--edn` record, and route accordingly: page the app team on 1, fix the
+  test plan on 2, look at your infrastructure on 4. The gate stays binary;
+  the routing is where the distinctions pay.
 
-The report never contradicts the exit code: the XML contains at least one
-`<failure>`/`<error>` exactly when the run exits nonzero. `sl run`'s codes:
+In a single-group run the report never contradicts the exit code: the XML
+contains at least one `<failure>`/`<error>` exactly when the run exits
+nonzero. In a multi-group run that equivalence holds only for the groups that
+ran — a later group's planning failure exits 2 beside a file that may be all
+green (see [ERRATA E009](../ERRATA.md#e009-junit-xml-has-no-official-spec--we-target-the-consumer-subset)
+D3). `sl run`'s codes:
 
 | Code | Meaning |
 |------|---------|
-| 0 | All scenarios passed (or pending allowed via config) |
-| 1 | One or more scenarios failed or errored (a lifecycle hook threw), or pending steps when not allowed |
-| 2 | Planning failure (undefined steps, parse errors, config errors, no features found) — **no JUnit file is written** |
+| 0 | Existential pass: ≥1 scenario selected, all ran to a tolerated outcome, none failed or errored (pending tolerated only under `:allow-pending?`) |
+| 1 | One or more scenarios failed (valid tests, app wrong), or pending steps when not allowed |
+| 2 | Planning failure (undefined steps, parse errors, config errors, no features found, bad flags, empty selection) — **single-group: no JUnit file; multi-group: the file covers only the groups that ran** — gate on the exit code |
 | 3 | Runner crash (unexpected exception) |
+| 4 | Run degraded: an infrastructure failure (hook throw, capability provisioning, capture, harness) — the run proves nothing about the app |
 
 Canonical table for all commands: [README → Return Codes](../README.md#return-codes).
-Background on the no-file decision and the JUnit format itself:
+Background on the no-file/partial-file semantics and the JUnit format itself:
 [ERRATA E009](../ERRATA.md#e009-junit-xml-has-no-official-spec--we-target-the-consumer-subset).
+
+One forward-looking note for gate authors: today an infrastructure failure
+that surfaces inside a step — a connection refused mid-run, say — is
+indistinguishable from the app being wrong and reports as an ordinary
+scenario failure (exit 1); only the harness's own `:error` family reaches 4.
+A future release may classify such step-level infrastructure failures into
+the degraded verdict — one more reason to gate on nonzero, not on a specific
+value.
 
 The HTML report behaves differently on exit 2 (since 0.5.4): late planning
 failures — undefined or ambiguous steps, arity mismatches, a hooks error —
@@ -43,6 +64,38 @@ failing) still write nothing, and a `report.html` from a prior run survives
 them untouched — one more reason the exit code, not any report file, is the
 gate.
 
+## Empty selection is exit 2 — and the dry-run-first pattern
+
+A run that selects **zero** scenarios — a tag filter matching 0 of N, a
+feature path with no scenarios, CLI paths narrowing every `setup.clj` group
+away — exits 2. There is no allow-empty knob, deliberately: a green light
+from a run that ran nothing is the lie this contract exists to prevent, and
+a testless repo wired into a shared pipeline is an upstream problem the
+runner cannot fix by pretending.
+
+What you get instead is **data**. The empty-selection record confesses the
+whole story — `:selected 0`, the pre-narrowing `:total`, what was searched,
+the active tag filter, the CLI paths, the group labels — in the planning
+error's `:data`, and every summary (including exit-2 summaries) carries a
+`:counts` map. If your pipeline legitimately produces empty selections
+(e.g. a tag-sliced matrix where some slices are empty by design), put the
+choice in your wrapper, not in the runner:
+
+```bash
+# Dry-run first: cheap (no browsers, no lifecycle), same planning verdicts.
+if sl run --tags "$SLICE" --dry-run --edn > plan.edn; then
+  sl run --tags "$SLICE" --junit-xml report.xml   # real gate
+else
+  rc=$?
+  # exit 2 with a :selection/empty record = empty slice; YOUR call:
+  grep -q ":selection/empty" plan.edn && [ "$rc" -eq 2 ] && exit 0
+  exit "$rc"                                       # any other planning error
+fi
+```
+
+The dry run's exit 0 is a *plan* verdict — "the selection binds" — which is
+why it too requires a nonempty selection: our data, your choices.
+
 ## Consuming `--edn` output
 
 With `--edn`, stdout carries a **sequence of EDN forms**, not always exactly
@@ -52,7 +105,13 @@ orchestration), plus occasional small supplementary diagnostics forms
 a prior run's dirty-teardown warning at startup). Read **all** forms and
 **skip shapes you don't recognize** — the form vocabulary grows by release,
 and unknown forms are never an error. Summaries are the forms carrying
-`:run/exit-code`.
+`:run/exit-code`. A summary may carry `:dropped-events` — observe-plane
+events the bus refused during that group's run-scope (absent when zero;
+results are unaffected, observations may be gapped).
+
+Building your own rendering from this record? [Build your own report](REPORTS.md)
+documents the machine-record contract — summary shape, attachment refs, and a
+runnable recipe.
 
 ## The run results directory
 
@@ -83,18 +142,23 @@ attachments**, with more run artifacts to come. The report sits beside its attac
 references resolve — the run directory zips and travels as one
 self-contained artifact.
 
-`--html` still writes exactly where you point it: that fixed path now
-receives an end-of-run byte copy of the report (the last group's, under
-`setup.clj`), so CI configs and agents that grab a known path keep
-working unchanged — but images in that copy degrade to labeled text
-(the files live in the run directory, not beside the copy).
-One honesty note for multi-group runs: the fixed path holds whichever
-copy was written last, so a later group's report overwrites an earlier
-group's — including an earlier group's PLANNING FAILED page; the run
-directory keeps every group's truth.
+`--html` still writes exactly where you point it: that fixed path
+receives an end-of-run byte copy, so CI configs and agents that grab a
+known path keep working unchanged — but images in that copy degrade to
+labeled text (the files live in the run directory, not beside the copy).
+Under multi-group `setup.clj` the fixed path holds the **invocation
+report**: a run-root `report.html` listing every group in declaration
+order — invocation verdict up top, per-group status, exit code, counts,
+and a relative link to that group's own `<group-slug>/report.html`.
+Inside the run directory the links navigate; in the fixed-path copy they
+degrade to labeled text, but the verdicts and counts stay visible. A
+group that fails planning mid-run keeps its PLANNING FAILED page durably
+at its own `<group-slug>/report.html` — a later group's report can never
+overwrite it.
 `--junit-xml` is unchanged; its `[[ATTACHMENT|…]]` lines use absolute
-paths into the run directory. Planning failures (exit 2) still write
-only the fixed `--html` path and create no run directory.
+paths into the run directory. Planning failures that stop the whole run
+before execution (exit 2) still write only the fixed `--html` path and
+create no run directory.
 
 In CI, archive the whole `results/<stamp>/` directory when your suite
 captures attachments; the fixed `--junit-xml`/`--html` paths alone are
@@ -104,6 +168,25 @@ default is `:never` everywhere, so capture never surprises a pipeline
 that didn't ask for it. A capture-infrastructure failure on an
 otherwise-green scenario flips it to `:error` (capture-attributed in the
 report) — a green gate whose promised evidence vanished would be lying.
+
+## Warm vs. cold: prefer the cold path in CI
+
+Our data, your choices: **default to the cold path in CI** — set
+`SL_NO_DAEMON=1` in the job environment (or pass `--no-daemon` per call).
+A one-run pipeline gains almost nothing from warmth (the JVM tax is a
+rounding error against one real run), an ephemeral runner is destroyed
+before it could ever reuse a warm daemon, and fan-out containers each pay
+the startup cost once regardless. Cold also leaves **zero background
+residue**: no daemon JVM, no held browser state, nothing for the runner
+teardown to account for. The daemon is a development-loop tool — its
+constituency is the many-small-invocations edit-run cycle (see
+docs/daemon.md).
+
+The exception worth measuring: a **persistent** runner making many small
+sequential `sl` invocations saves a few seconds on each warm call. If
+that's your shape, measure it before switching — and remember a warm
+daemon holds state between invocations (worn costumes included; `sl
+daemon status` shows custody).
 
 ## Picking an image
 
@@ -122,7 +205,7 @@ The installer drops a runnable `sl` + jar into `./sl/`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh \
-  | bash -s -- --version 0.5.4 --no-breadcrumb
+  | bash -s -- --version 0.5.5 --no-breadcrumb
 ```
 
 - **Pin `--version`** to the release your team is on, so CI doesn't silently
@@ -146,12 +229,12 @@ image: eclipse-temurin:21-jre
 stages: [test]
 
 cache:
-  key: "sl-0.5.4"
+  key: "sl-0.5.5"
   paths: [sl/]
 
 .install-sl: &install-sl
   - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl unzip
-  - '[ -x sl/sl ] || curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash -s -- --version 0.5.4 --no-breadcrumb'
+  - '[ -x sl/sl ] || curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash -s -- --version 0.5.5 --no-breadcrumb'
 
 smoke:
   stage: test
@@ -221,7 +304,7 @@ jobs:
       - name: Install sl
         run: |
           curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh \
-            | bash -s -- --version 0.5.4 --no-breadcrumb
+            | bash -s -- --version 0.5.5 --no-breadcrumb
       - name: Run features
         # PRs run the @smoke subset; main runs everything.
         run: |
@@ -325,3 +408,30 @@ CI-level fan-out (GitLab `parallel:`, Actions `matrix:`) is a different axis:
 ShiftLefter has no built-in suite sharding, so N parallel jobs would each run
 the whole suite. If you must split across jobs, partition explicitly with
 `--tags` / `--skip-tags` and give each job its own `--junit-xml` path.
+
+## Concurrent invocations against one project
+
+Two simultaneous `sl` runs against the **same project** are not a supported
+pattern. What actually happens:
+
+- **Warm (the default): the second run is rejected.** The daemon executes one
+  invocation at a time per project; a second call while one is in flight exits
+  2 with the structured error `:daemon/busy` (stderr one-liner; under `--edn`,
+  the standard exit-2 planning summary carries the error type). Retry when the
+  first run completes — nothing queues. See [docs/daemon.md](daemon.md)
+  § One run at a time.
+- **Cold or mixed (`--no-daemon`, `SL_NO_DAEMON`, separate machines sharing a
+  checkout): at your own risk.** Timestamped run directories are
+  collision-safe by design (atomic creation, unique fallback), and fixed-path
+  artifacts (`--html`, `--junit-xml`) are written atomically — a reader never
+  sees a torn file — but two concurrent runs still race last-writer-wins on
+  those fixed paths, and your own subject-under-test (fixture ports, app
+  state) collides in ways ShiftLefter cannot see.
+- **Costume mode is strictly single-occupant.** A costume attaches to one
+  Chrome on a fixed debug port; two runs puppeting the same browser interleave
+  clicks and navigation into nonsense. Never run two costume-wearing
+  invocations at once — the warm reject protects you within one project, but
+  nothing can if two checkouts share a costume.
+
+Distinct projects (including separate git worktrees) are fully isolated — each
+gets its own daemon; see [docs/daemon.md](daemon.md).

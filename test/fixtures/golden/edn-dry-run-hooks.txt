@@ -1,4 +1,5 @@
 EXIT 0
 --- STDOUT ---
-{:run/id "UUID", :run/exit-code 0, :run/status :dry-run, :counts {:scenarios 2, :steps 2}, :hooks [{:scenario/name "Seeded scenario", :hooks ["audit" "reset-db"]} {:scenario/name "Plain scenario", :hooks ["audit"]}]}
+{:run/id "UUID", :run/seed 42, :run/exit-code 0, :run/status :dry-run, :counts {:scenarios 2, :steps 2}, :hooks [{:scenario/name "Seeded scenario", :hooks ["audit" "reset-db"]} {:scenario/name "Plain scenario", :hooks ["audit"]}]}
 --- STDERR ---
+run seed: 42

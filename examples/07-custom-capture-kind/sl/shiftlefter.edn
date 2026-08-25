@@ -1,0 +1,25 @@
+;; ShiftLefter config for the custom-capture-kind example.
+;;
+;; Station 1 of the arc: the config line names the KIND and the POLICY.
+;; :message-log is not a built-in — it exists because setup.clj's adapter
+;; registry contributes it (station 2). :every-step is the film-strip
+;; policy: one capture after every step, following the acting subject, so
+;; a green run still lands evidence. In production suites :on-failure is
+;; the common choice; the CLI mirror is `--capture message-log=on-failure`
+;; (the flag wins over this config line as a whole value).
+;;
+;; One interface, no browser: the mock SMS line ships in the framework,
+;; so this example needs nothing installed. The SMS verb glossary is
+;; auto-loaded from framework defaults; subjects glossary sits at the
+;; conventional path next to this file.
+
+{:interfaces {:sms {:type :sms :adapter :sms-mock}}
+ :svo        {:unknown-subject :error
+              :unknown-verb    :warn
+              :unknown-interface :error}
+ :runner     {:capture {:message-log :every-step}
+              ;; Station 4: the HTML report (off by default). The stamped
+              ;; run dir gets the primary report.html; this path receives
+              ;; an end-of-run copy — pointed inside results/ so the
+              ;; self-ignoring results dir keeps the repo clean.
+              :report  {:html "results/report.html"}}}

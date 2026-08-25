@@ -2,6 +2,7 @@
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
             [clojure.spec.alpha :as s]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [shiftlefter.paths :as paths]
             [shiftlefter.project-context :as project-context]
@@ -110,10 +111,60 @@
                       :junit-xml [:runner :report :junit-xml]
                       :capture [:runner :capture]
                       :verbs [:glossaries :verbs]
-                      :unknown-verb [:svo :unknown-verb]}]
+                      :unknown-verb [:svo :unknown-verb]
+                      :deadline-ms [:timing :deadline-ms]
+                      :interval-ms [:timing :interval-ms]}]
       (let [[w] (config/lint-config {k :whatever})]
         (is (= :config/misplaced-key (:type w)) (str k))
         (is (= path (:suggested-path w)) (str k))))))
+
+(deftest lint-config-flags-runner-nested-top-level-keys
+  ;; sl-xjx0 (Warden W9): the reverse direction — the release's two newest
+  ;; TOP-LEVEL keys nested under :runner used to pass silently dead.
+  (testing ":timing and :costumes under :runner warn with the top-level path"
+    (let [warnings (config/lint-config
+                    (merge config/default-config
+                           {:runner {:timing {:deadline-ms 5000}
+                                     :costumes {:finance {:interface :web}}}}))
+          by-key (into {} (map (juxt :key identity)) warnings)]
+      (is (= 2 (count warnings)))
+      (is (= [:runner :timing] (:found-path (by-key :timing))))
+      (is (= [:timing] (:suggested-path (by-key :timing))))
+      (is (= [:costumes] (:suggested-path (by-key :costumes))))
+      (is (s/valid? ::config/lint-warnings warnings))))
+  (testing "top-level :timing/:costumes stay clean"
+    (is (empty? (config/lint-config
+                 (merge config/default-config
+                        {:timing {:deadline-ms 5000}
+                         :costumes {:finance {:interface :web}}
+                         :interfaces {:web {:type :web :adapter :etaoin}}}))))))
+
+(deftest lint-config-warns-costume-on-non-etaoin-adapter
+  ;; sl-xjx0 (Warden W14, cheap warn; real adapter-awareness = sl-bbqb):
+  ;; costume attach is etaoin-only this release.
+  (testing "declared costume on a playwright-adapter interface warns"
+    (let [warnings (config/lint-config
+                    (merge config/default-config
+                           {:interfaces {:web {:type :web :adapter :playwright}}
+                            :costumes {:finance {:interface :web}}}))
+          [w] warnings]
+      (is (= 1 (count warnings)))
+      (is (= :config/costume-adapter-unsupported (:type w)))
+      (is (= :finance (:key w)))
+      (is (str/includes? (:message w) "etaoin-only"))
+      (is (s/valid? ::config/lint-warnings warnings))))
+  (testing "etaoin-adapter interface: clean"
+    (is (empty? (config/lint-config
+                 (merge config/default-config
+                        {:interfaces {:web {:type :web :adapter :etaoin}}
+                         :costumes {:finance {:interface :web}}})))))
+  (testing "malformed :costumes shapes never throw here (validator's job)"
+    (is (vector? (config/lint-config
+                  (merge config/default-config
+                         {:interfaces {:web {:type :web :adapter :playwright}}
+                          :costumes {:finance :web}}))))
+    (is (vector? (config/lint-config
+                  (merge config/default-config {:costumes [:finance]}))))))
 
 (deftest lint-config-flags-unknown-keys
   (let [[w :as warnings] (config/lint-config
@@ -131,7 +182,9 @@
                 :runner {:step-paths ["steps/"]}
                 :glossaries {:subjects "g/s.edn"}
                 :interfaces {:web {:type :web :adapter :etaoin}}
-                :svo {:unknown-verb :warn}}))))
+                :costumes {:finance {:interface :web}}
+                :svo {:unknown-verb :warn}
+                :timing {:deadline-ms 30000 :interval-ms 500}}))))
   (testing "empty config is clean"
     (is (= [] (config/lint-config {})))))
 
@@ -305,6 +358,61 @@
             :unknown-interface :error
             :unknown-object :off}
            (:svo config/default-config)))))
+
+;; -----------------------------------------------------------------------------
+;; Conditional :unknown-object default (sl-femd)
+;; -----------------------------------------------------------------------------
+
+(deftest test-conditional-unknown-object-default
+  (testing "Intents configured + user silent → :warn"
+    (let [cfg (config/load-config {:config-path "test/fixtures/config/svo-intents.edn"})]
+      (is (= :warn (get-in cfg [:svo :unknown-object])))))
+
+  (testing "Intents configured + user-explicit :off → stays :off"
+    (let [cfg (config/load-config {:config-path "test/fixtures/config/svo-intents-off.edn"})]
+      (is (= :off (get-in cfg [:svo :unknown-object])))))
+
+  (testing "Conventionally probed glossary/intents/ flips the default too"
+    (let [tmp (str (fs/create-temp-dir))]
+      (try
+        (fs/create-dirs (fs/path tmp "sl" "glossary" "intents"))
+        (spit (str (fs/path tmp "sl" "shiftlefter.edn")) "{:svo {}}")
+        (with-redefs [paths/user-cwd (constantly tmp)]
+          (let [cfg (config/load-config {})]
+            (is (= "glossary/intents" (get-in cfg [:glossaries :intents])))
+            (is (= :warn (get-in cfg [:svo :unknown-object])))))
+        (finally
+          (fs/delete-tree tmp)))))
+
+  (testing "No intents anywhere + user silent → :off (static default)"
+    (let [tmp (str (fs/create-temp-dir))]
+      (try
+        (fs/create-dirs (fs/path tmp "sl"))
+        (spit (str (fs/path tmp "sl" "shiftlefter.edn")) "{:svo {}}")
+        (with-redefs [paths/user-cwd (constantly tmp)]
+          (let [cfg (config/load-config {})]
+            (is (= :off (get-in cfg [:svo :unknown-object])))))
+        (finally
+          (fs/delete-tree tmp)))))
+
+  (testing "Vanilla config (no :svo) with intents stays Vanilla — no flip"
+    (let [tmp (str (fs/create-temp-dir))]
+      (try
+        (fs/create-dirs (fs/path tmp "sl" "glossary" "intents"))
+        (spit (str (fs/path tmp "sl" "shiftlefter.edn")) "{:parser {:dialect \"en\"}}")
+        (with-redefs [paths/user-cwd (constantly tmp)]
+          (let [cfg (config/load-config {})]
+            (is (not (contains? cfg :svo)))))
+        (finally
+          (fs/delete-tree tmp))))))
+
+(deftest test-unknown-object-spec-accepts-both-blocking-spellings
+  (testing ":error is canonical, :strict a deprecated alias (sl-femd)"
+    (is (s/valid? ::config/unknown-object :error))
+    (is (s/valid? ::config/unknown-object :strict))
+    (is (s/valid? ::config/unknown-object :warn))
+    (is (s/valid? ::config/unknown-object :off))
+    (is (not (s/valid? ::config/unknown-object :nope)))))
 
 (deftest test-deep-merge-behavior
   (testing "Config merges deeply, not shallowly"
@@ -567,6 +675,59 @@
         (is (= :config/invalid-interface (-> result :errors first :type)))
         (is (re-find #"base-url" (-> result :errors first :message)))))))
 
+(deftest test-timing-config-validation
+  (testing "valid :timing shapes pass at both rungs (sl-99u2)"
+    (doseq [timing [{:deadline-ms 30000 :interval-ms 500}
+                    {:deadline-ms 1000}
+                    {:interval-ms 50}
+                    {}]]
+      (let [cfg {:timing timing
+                 :interfaces {:web {:type :web :adapter :etaoin
+                                    :timing timing}}}
+            result (config/normalize cfg)]
+        (is (nil? (:errors result)) (pr-str timing))
+        (is (s/valid? :shiftlefter.runner.config/config cfg) (pr-str timing)))))
+
+  (testing "malformed top-level :timing is a loud config error"
+    (doseq [bad [{:deadline-ms "5s"} {:deadline-ms 0} {:interval-ms -1} [30000] 30000]]
+      (let [result (config/normalize {:timing bad})]
+        (is (seq (:errors result)) (str ":timing " (pr-str bad) " should error"))
+        (is (= :config/invalid-timing (-> result :errors first :type)))
+        (is (re-find #":timing" (-> result :errors first :message))))))
+
+  (testing "malformed per-interface :timing is a loud config error"
+    (doseq [bad [{:deadline-ms "5s"} {:deadline-ms 0} 30000]]
+      (let [cfg {:interfaces {:web {:type :web :adapter :etaoin :timing bad}}}
+            result (config/normalize cfg)]
+        (is (seq (:errors result)) (str ":timing " (pr-str bad) " should error"))
+        (is (= :config/invalid-interface (-> result :errors first :type)))
+        (is (re-find #":timing" (-> result :errors first :message))))))
+
+  (testing "unknown :timing inner key is a loud error at the GLOBAL rung
+            with a did-you-mean (sl-d3cz — ::timing is open s/keys, so a
+            typo'd key previously passed while the timing config sat
+            silently dead)"
+    (doseq [[bad suggestion] [[{:interval 250} ":interval-ms"]
+                              [{:deadlinems 5000} ":deadline-ms"]]]
+      (let [result (config/normalize {:timing bad})]
+        (is (seq (:errors result)) (str ":timing " (pr-str bad) " should error"))
+        (is (= :config/invalid-timing (-> result :errors first :type)))
+        (is (re-find #"unknown key" (-> result :errors first :message)))
+        (is (re-find (re-pattern (java.util.regex.Pattern/quote suggestion)) (-> result :errors first :message))
+            "the did-you-mean names the intended key")))
+    (let [result (config/normalize {:timing {:deadline-ms 1000 :bogus 1}})]
+      (is (= :config/invalid-timing (-> result :errors first :type))
+          "an unknown key errors even beside a valid one")))
+
+  (testing "unknown :timing inner key is a loud error at the INTERFACE rung"
+    (let [cfg {:interfaces {:web {:type :web :adapter :etaoin
+                                  :timing {:interval 250}}}}
+          result (config/normalize cfg)]
+      (is (seq (:errors result)))
+      (is (= :config/invalid-interface (-> result :errors first :type)))
+      (is (re-find #"unknown key" (-> result :errors first :message)))
+      (is (re-find #":interval-ms" (-> result :errors first :message))))))
+
 ;; -----------------------------------------------------------------------------
 ;; Glossary Config Accessor Tests
 ;; -----------------------------------------------------------------------------
@@ -724,3 +885,44 @@
       (is (= ["steps/" "more-steps/"] (get-in config [:runner :step-paths])))
       ;; Default :runner :macros should still be present (deep merge)
       (is (some? (get-in config [:runner :macros]))))))
+
+;; -----------------------------------------------------------------------------
+;; Costume declarations (sl-1206)
+;; -----------------------------------------------------------------------------
+
+(deftest test-costumes-spec
+  (testing "valid declaration map conforms"
+    (is (s/valid? ::config/costumes {:gmail {:interface :webmail}
+                                     :finance {:interface :web}}))
+    (is (s/valid? ::config/config {:interfaces {:web {:type :web :adapter :etaoin}}
+                                   :costumes {:finance {:interface :web}}})))
+  (testing "malformed entries do not conform"
+    (is (not (s/valid? ::config/costumes {:gmail :webmail})))
+    (is (not (s/valid? ::config/costumes {:gmail {}})))
+    (is (not (s/valid? ::config/costumes {:gmail {:interface "webmail"}})))))
+
+(deftest test-validate-costumes-config
+  (let [interfaces {:web {:type :web :adapter :etaoin}
+                    :webmail {:type :web :adapter :etaoin}}]
+    (testing "declared against a configured instance: clean"
+      (is (nil? (:errors (config/normalize {:interfaces interfaces
+                                            :costumes {:gmail {:interface :webmail}}})))))
+    (testing "malformed entry: :config/invalid-costume"
+      (let [{:keys [errors]} (config/normalize {:interfaces interfaces
+                                                :costumes {:gmail :webmail}})]
+        (is (= [:config/invalid-costume] (mapv :type errors)))))
+    (testing "non-map :costumes: :config/invalid-costume"
+      (let [{:keys [errors]} (config/normalize {:interfaces interfaces
+                                                :costumes [:gmail]})]
+        (is (= [:config/invalid-costume] (mapv :type errors)))))
+    (testing "unknown instance: :config/unknown-costume-interface with did-you-mean"
+      (let [{:keys [errors]} (config/normalize {:interfaces interfaces
+                                                :costumes {:gmail {:interface :webmial}}})]
+        (is (= [:config/unknown-costume-interface] (mapv :type errors)))
+        (is (= :webmail (get-in (first errors) [:data :suggestion])))
+        (is (re-find #"did you mean :webmail" (:message (first errors))))))))
+
+(deftest test-costume-accessors
+  (let [config {:costumes {:finance {:interface :web}}}]
+    (is (= {:finance {:interface :web}} (config/get-costumes config)))
+    (is (= {} (config/get-costumes {})))))

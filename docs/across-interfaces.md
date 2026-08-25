@@ -121,18 +121,22 @@ in your verb glossary and the dry run's producer/consumer check covers
 your interface exactly as it covers the built-ins. The SMS receive step
 and the web capture step are themselves built on this call.
 
-## The `[:interface]` annotation
+## The `[name]` annotation
 
-`[:sms]` in front of a step pins it to the SMS interface. It's both a filter
-(bind only against `:sms` step definitions) and an assertion (if `:sms` isn't
-configured, you get a planning error before the run). Use it when the same step
-vocabulary legitimately spans channels — `receives a message` under `:sms`,
-`:whatsapp`, `:email`. See [SVO.md](SVO.md#step-binding-rules).
+`[:sms]` in front of a step names the interface **instance** the step executes
+on. The instance's declared `:type` narrows binding to step definitions of
+that type, and the annotation is an assertion (if `:sms` isn't configured,
+you get a planning error before the run). It does two jobs: crossing channel
+types (`[:sms]` on the receive step between browser steps), and picking one
+of several same-type instances (`[:admin-console]` vs `[:storefront]`, both
+`:type :web` — every instance of a type speaks its full vocabulary, builtins
+included). See [SVO.md](SVO.md#step-binding-rules).
 
 ## Configuring interfaces
 
-Each interface names a `:type` (verb vocabulary) and an `:adapter` (the backend
-that does the work):
+Each interface entry declares a named **instance**: a `:type` (verb
+vocabulary) and an `:adapter` (the backend that does the work — invisible to
+feature files):
 
 ```clojure
 {:interfaces {:web {:type :web :adapter :etaoin}
@@ -141,5 +145,11 @@ that does the work):
 
 Built-in verb vocabularies for `:web` and `:sms` load automatically. Adapters
 shipped today include `:etaoin` and `:playwright` (browser) and `:sms-twilio` /
-`:sms-mock` (SMS). Full runnable example:
+`:sms-mock` (SMS).
+
+The built-in default `:web` instance deep-merges **under** your `:interfaces`
+map rather than being replaced by it — a project that declares only `:sms`
+still has the default `:web` instance, and `sl orient` shows it. These merge
+semantics are provisional: a future release may make a user `:interfaces` map
+replace the defaults wholesale. Full runnable example:
 [`examples/04-sms-2fa`](https://github.com/SHIFT-LEFTER/shiftlefter/tree/main/examples/04-sms-2fa).

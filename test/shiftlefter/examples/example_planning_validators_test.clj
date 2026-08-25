@@ -47,6 +47,7 @@
 ;; sl/ layout (sl-fcjm): each example's project lives under <example>/sl/.
 (def ^:private ex-02b "examples/02b-browser-multi-actor/sl/")
 (def ^:private ex-03 "examples/03-custom-steps/sl/")
+(def ^:private ex-07 "examples/07-custom-capture-kind/sl/")
 (def ^:private ex-svo "examples/svo-demo/sl/")
 
 (deftest multi-actor-primary-config-plans-clean
@@ -81,5 +82,12 @@
   (let [{:keys [exit plan-count]} (plan-example (str ex-svo "shiftlefter.edn")
                                                 [(str ex-svo "features")])]
     (testing "svo-demo binds and SVO-validates on the canonical glossary layout (sl-q9t)"
+      (is (= 0 exit))
+      (is (pos? plan-count)))))
+
+(deftest custom-capture-kind-plans-clean
+  (let [{:keys [exit plan-count]} (plan-example (str ex-07 "shiftlefter.edn")
+                                                [(str ex-07 "features")])]
+    (testing "07 binds through the :adapters declaration incl. its :capture data half (sl-9od5)"
       (is (= 0 exit))
       (is (pos? plan-count)))))

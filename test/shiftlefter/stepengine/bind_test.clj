@@ -455,6 +455,73 @@
       (is (:runnable? result))
       (is (empty? (-> result :diagnostics :svo-issues))))))
 
+(deftest test-bind-suite-stamps-per-instance-wears
+  (testing "sl-4e91 headline: two instances of ONE type stamp DIFFERENT :wears"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "jackets"
+                              ["user/alicia clicks the button"
+                               "user/bob clicks the button"
+                               "user/carol clicks the button"])
+          ;; Canonical (normalized) glossary shape: per-persona :wears in
+          ;; :instance-meta, type-level :wears as the inheritable default.
+          glossary {:subjects {:user {:desc "Standard user"
+                                      :wears :default-jacket
+                                      :instances [:alicia :bob :carol]
+                                      :instance-meta {:alicia {:wears :alicia}
+                                                      :bob {:wears :bob-jacket}}}}
+                    :verbs {:web {:click {}}}
+                    :instance-index {:alicia :user :bob :user :carol :user}}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs)
+                                  {:glossary glossary
+                                   :interfaces {:web {:type :web :adapter :etaoin}}})]
+      (is (= [{:subject :user/alicia :wears :alicia}
+              {:subject :user/bob :wears :bob-jacket}
+              {:subject :user/carol :wears :default-jacket}]
+             (mapv #(select-keys (-> % :binding :svo) [:subject :wears])
+                   (-> result :plans first :plan/steps)))
+          "each persona wears its own jacket; the bare instance inherits"))))
+
+(deftest test-bind-suite-costume-lints
+  (testing "sl-1206: costume declarations gate at bind time via :svo-issues"
+    (registry/register! #"(.+) clicks (.+)"
+                        (fn [_ctx _s _t] nil)
+                        {:ns 's :file "s.clj" :line 1}
+                        {:interface :web
+                         :svo {:subject :$1 :verb :click :object :$2}})
+    (let [pickle (make-pickle "jackets" ["user/alicia clicks the button"])
+          glossary {:subjects {:user {:desc "Standard user"
+                                      :instances [:alicia]
+                                      :instance-meta {:alicia {:wears :alicia}}}}
+                    :verbs {:web {:click {}}}
+                    :instance-index {:alicia :user}}
+          interfaces {:web {:type :web :adapter :etaoin}
+                      :admin {:type :web :adapter :etaoin}}
+          bind (fn [costumes]
+                 (bind/bind-suite [pickle] (registry/all-stepdefs)
+                                  {:glossary glossary
+                                   :interfaces interfaces
+                                   :costumes costumes}))]
+      (testing "declared for the provisioned instance: runnable, no issues"
+        (let [result (bind {:alicia {:interface :web}})]
+          (is (:runnable? result))
+          (is (empty? (-> result :diagnostics :svo-issues)))))
+      (testing "declared for another instance: wrong-interface ERROR flips runnable?"
+        (let [result (bind {:alicia {:interface :admin}})
+              issues (-> result :diagnostics :svo-issues)]
+          (is (not (:runnable? result)))
+          (is (= [:costume/wrong-interface] (mapv :type issues)))
+          (is (= 1 (-> result :diagnostics :counts :svo-issue-count)))))
+      (testing "undeclared: WARN only, stays runnable"
+        (let [result (bind nil)
+              issues (-> result :diagnostics :svo-issues)]
+          (is (:runnable? result))
+          (is (= [:costume/undeclared] (mapv :type issues)))
+          (is (= [:warn] (mapv :severity issues))))))))
+
 (deftest test-bind-suite-svo-unknown-subject-warn
   (testing "bind-suite with unknown subject (warn) is runnable"
     (registry/register! #"(.+) clicks (.+)"
@@ -684,7 +751,31 @@
           issue (-> result :diagnostics :svo-issues first)]
       (is (= :error (:severity issue)))
       ;; With :error severity, should not be runnable
-      (is (not (:runnable? result))))))
+      (is (not (:runnable? result)))))
+
+  (testing ":unknown-object :error and its deprecated alias :strict both
+            yield :severity :error (sl-femd)"
+    (doseq [level [:error :strict]]
+      (registry/clear-registry!)
+      (registry/register! #"(.+) clicks (.+)"
+                          (fn [_ctx _s _t] nil)
+                          {:ns 's :file "s.clj" :line 1}
+                          {:interface :web
+                           :svo {:subject :$1 :verb :click :object :$2}})
+      (let [pickle (make-pickle "svo" ["Alice clicks {:css \"#submit\"}"])
+            glossary {:subjects {:alice {}}
+                      :verbs {:web {:click {}}}}
+            interfaces {:web {:type :web :adapter :etaoin}}
+            opts {:glossary glossary
+                  :interfaces interfaces
+                  :svo {:unknown-object level}}
+            result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
+            issue (->> result :diagnostics :svo-issues
+                       (filter #(= :svo/raw-locator-disallowed (:type %)))
+                       first)]
+        (is (some? issue) (str "raw locator must be disallowed under " level))
+        (is (= :error (:severity issue)) (str "severity under " level))
+        (is (not (:runnable? result)))))))
 
 (deftest test-bind-suite-multiple-svo-issues
   (testing "bind-suite collects multiple SVO issues"
@@ -843,8 +934,9 @@
         ;; Level-2: surfaces that :web had a candidate that was filtered out
         (is (= 1 (:other-interface-match-count info)))
         (is (= [:web] (:other-interfaces info)))
-        ;; sl-563: explicit suggestion string
-        (is (= "No [:sms] stepdef matches, but [:web] does."
+        ;; sl-563: explicit suggestion string; sl-s2oa: names the
+        ;; annotation's resolved type (type-as-name here — no config)
+        (is (= "No [:sms] (type :sms) stepdef matches, but type :web does."
                (:suggestion info)))))))
 
 (deftest test-declared-interface-suggestion-multiple-other-ifaces
@@ -864,7 +956,7 @@
       (is (= 2 (:other-interface-match-count info)))
       (is (= #{:web :slack} (set (:other-interfaces info))))
       ;; Plural verb when more than one
-      (is (re-find #"^No \[:sms\] stepdef matches, but \[:[\w]+\] \[:[\w]+\] do\.$"
+      (is (re-find #"^No \[:sms\] \(type :sms\) stepdef matches, but type :[\w]+ type :[\w]+ do\.$"
                    (:suggestion info))))))
 
 (deftest test-declared-interface-no-suggestion-when-zero-other-matches
@@ -954,6 +1046,108 @@
         (is (not (contains? info :other-interfaces)))))))
 
 ;; -----------------------------------------------------------------------------
+;; Instance resolution (sl-s2oa): annotation = instance NAME, stepdef
+;; metadata = TYPE; the bound SVO is stamped with the resolved instance
+;; -----------------------------------------------------------------------------
+
+(def ^:private s2oa-web-stepdef-meta
+  {:interface :web
+   :svo {:subject :$1 :verb :navigate :frame :to :object "somewhere"}})
+
+(defn- register-s2oa-web-stepdef! []
+  (registry/register! #"(\S+) opens the thing"
+                      (fn [_s] nil)
+                      {:ns 't :file "t.clj" :line 1}
+                      s2oa-web-stepdef-meta))
+
+(deftest test-s2oa-renamed-instance-binds-type-declared-stepdef
+  (testing "THE s2oa repro: [:admin] over a :web-TYPE stepdef binds when
+            config declares :admin as a :web-typed instance; the SVO is
+            stamped with the INSTANCE"
+    (register-s2oa-web-stepdef!)
+    (let [interfaces {:web {:type :web :adapter :etaoin}
+                      :admin {:type :web :adapter :playwright}}
+          step (make-annotated-step "[:admin] alice opens the thing" :admin)
+          result (bind/bind-step step (registry/all-stepdefs)
+                                 {:interfaces interfaces})]
+      (is (= :matched (:status result)))
+      (is (= :admin (-> result :binding :svo :interface))
+          "capability keys/provisioning follow the instance")
+      (is (= :admin (-> result :filter-info :declared-interface)))
+      (is (= :web (-> result :filter-info :resolved-type))
+          "filter-info surfaces the name->type chain")
+      (is (not (contains? result :instance-resolution))))))
+
+(deftest test-s2oa-unannotated-defaults-to-type-named-instance
+  (testing "Unannotated step, two :web-typed instances, one is the
+            type-named entry -> it is the default"
+    (register-s2oa-web-stepdef!)
+    (let [interfaces {:web {:type :web :adapter :etaoin}
+                      :admin {:type :web :adapter :playwright}}
+          result (bind/bind-step (make-step "alice opens the thing")
+                                 (registry/all-stepdefs)
+                                 {:interfaces interfaces})]
+      (is (= :matched (:status result)))
+      (is (= :web (-> result :binding :svo :interface)))
+      (is (not (contains? result :instance-resolution))))))
+
+(deftest test-s2oa-unannotated-single-renamed-instance-resolves
+  (testing "Unannotated step, exactly one instance of the type (renamed) ->
+            it, no annotation needed"
+    (register-s2oa-web-stepdef!)
+    (let [interfaces {:storefront {:type :web :adapter :etaoin}}
+          result (bind/bind-step (make-step "alice opens the thing")
+                                 (registry/all-stepdefs)
+                                 {:interfaces interfaces})]
+      (is (= :matched (:status result)))
+      (is (= :storefront (-> result :binding :svo :interface))))))
+
+(deftest test-s2oa-unannotated-two-renamed-instances-is-planning-error
+  (testing "Unannotated step, two renamed instances of the type, no
+            type-named default -> :bind/ambiguous-instance naming candidates"
+    (register-s2oa-web-stepdef!)
+    (let [interfaces {:storefront {:type :web :adapter :etaoin}
+                      :backoffice {:type :web :adapter :playwright}}
+          result (bind/bind-step (make-step "alice opens the thing")
+                                 (registry/all-stepdefs)
+                                 {:interfaces interfaces})
+          err (:instance-resolution result)]
+      (is (= :matched (:status result)))
+      (is (= :bind/ambiguous-instance (:type err)))
+      (is (= :web (:interface-type err)))
+      (is (= [:backoffice :storefront] (:candidates err)))
+      (is (re-find #"\[:backoffice :storefront\]" (:message err))
+          "message names the candidate instances"))))
+
+(deftest test-s2oa-no-interfaces-opts-preserves-type-as-name
+  (testing "No :interfaces in opts (vanilla/direct paths) -> the stepdef
+            TYPE reads as its own instance, byte-identical to pre-s2oa"
+    (register-s2oa-web-stepdef!)
+    (let [result (bind/bind-step (make-step "alice opens the thing")
+                                 (registry/all-stepdefs))]
+      (is (= :matched (:status result)))
+      (is (= :web (-> result :binding :svo :interface)))
+      (is (not (contains? result :instance-resolution))))))
+
+(deftest test-s2oa-ambiguous-instance-blocks-suite
+  (testing "bind-suite collects :ambiguous-instance as a blocking family
+            (counted in :total-issues per sl-89ii)"
+    (register-s2oa-web-stepdef!)
+    (let [interfaces {:storefront {:type :web :adapter :etaoin}
+                      :backoffice {:type :web :adapter :playwright}}
+          pickle {:pickle/id (java.util.UUID/randomUUID)
+                  :pickle/name "P"
+                  :pickle/steps [(make-step "alice opens the thing")]}
+          result (bind/bind-suite [pickle] (registry/all-stepdefs)
+                                  {:interfaces interfaces})]
+      (is (false? (:runnable? result)))
+      (is (= 1 (-> result :diagnostics :counts :ambiguous-instance-count)))
+      (is (= 1 (-> result :diagnostics :counts :total-issues)))
+      (is (= :bind/ambiguous-instance
+             (-> result :diagnostics :ambiguous-instance first
+                 :instance-resolution :type))))))
+
+;; -----------------------------------------------------------------------------
 ;; Grammar hints on undefined steps (sl-s04n)
 ;; -----------------------------------------------------------------------------
 
@@ -991,7 +1185,7 @@
     (let [step (make-annotated-step "[:sms] alice pings \"x\"" :sms)
           result (bind/bind-step step (registry/all-stepdefs))]
       (is (= :undefined (:status result)))
-      (is (= "No [:sms] stepdef matches, but [:web] does."
+      (is (= "No [:sms] (type :sms) stepdef matches, but type :web does."
              (-> result :filter-info :suggestion)))
       (is (= :grammar/double-quotes (-> result :hint :type)))
       ;; No :sms candidate admits the repaired text, so no repair is claimed

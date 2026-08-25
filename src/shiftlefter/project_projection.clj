@@ -4,11 +4,14 @@
    The projection is a fresh immutable value built from the current working tree.
    It is not a cache, not a SIEVE session, and not a runtime provisioning path."
   (:require [babashka.fs :as fs]
+            [clojure.java.shell :as shell]
+            [clojure.string :as str]
             [shiftlefter.adapters.registry :as adapters]
             [shiftlefter.intent.loader :as intent-loader]
             [shiftlefter.intent.resolve :as intent-resolve]
             [shiftlefter.project-context :as project-context]
             [shiftlefter.runner.config :as config]
+            [shiftlefter.runner.setup :as setup]
             [shiftlefter.runner.step-loader :as step-loader]
             [shiftlefter.stepengine.macros :as macros]
             [shiftlefter.stepengine.registry :as registry]
@@ -107,21 +110,69 @@
                 ;; print as stderr notices in load-config-stage).
                 :lints (config/lint-config resolved)}})))))
 
-(defn- interface-projection [adapter-registry [interface-name interface-def]]
-  (let [adapter-name (:adapter interface-def)
-        adapter-entry (adapters/get-adapter adapter-name adapter-registry)]
+(defn- adapter-metadata
+  "Provenance-honest plan-time adapter metadata (sl-hyey, Warden W4;
+   declaration upgrade sl-kkoh).
+
+   `adapter-registry` is the EFFECTIVE plan-time registry — the default
+   registry, or the e0ml declared-preview overlay when setup.clj declares
+   adapters (the runner's own dry-run model). `decl-by-name` maps adapter
+   name → its :adapters declaration (last-wins across groups, matching
+   the overlay's flattening).
+
+   - Undeclared builtin entry: full fields, :provenance :builtin-default.
+   - Declared entry (novel name OR builtin-name override): the
+     declaration's data half (:provides, :capture-kinds) plus — since
+     sl-kkoh — the W20 runtime-field declarations where the declaration
+     SPEAKS: `:impl-key` when declared (INCLUDING declared-nil, the
+     deliberate-absence fact) and `:has-on-provision?` from the
+     declaration's `:on-provision?`. Fields the declaration is silent
+     about stay named in :runtime-unknown, never guessed — the key
+     disappears entirely when nothing is unknown. (These are read from
+     the DECLS, not the preview registry, which deliberately carries
+     only the data half — `:impl-key nil` would violate ::adapter-entry.)
+   - Unknown adapter: {:known? false :diagnostic …} unchanged."
+  [adapter-registry decl-by-name adapter-name]
+  (let [adapter-entry (adapters/get-adapter adapter-name adapter-registry)]
+    (cond
+      (:error adapter-entry)
+      {:known? false
+       :diagnostic (:error adapter-entry)}
+
+      (contains? decl-by-name adapter-name)
+      (let [decl (get decl-by-name adapter-name)
+            unknown (cond-> []
+                      (not (contains? decl :impl-key))
+                      (conj :impl-key)
+                      (not (contains? decl :on-provision?))
+                      (conj :has-on-provision?))]
+        (cond-> {:known? true
+                 :provenance :declared
+                 :provides (vec (:provides adapter-entry))
+                 :capture-kinds (vec (sort (keys (:capture adapter-entry))))}
+          (contains? decl :impl-key)
+          (assoc :impl-key (:impl-key decl))
+          (contains? decl :on-provision?)
+          (assoc :has-on-provision? (:on-provision? decl))
+          (seq unknown)
+          (assoc :runtime-unknown unknown)))
+
+      :else
+      {:known? true
+       :provenance :builtin-default
+       :impl-key (:impl-key adapter-entry)
+       :provides (vec (:provides adapter-entry))
+       :capture-kinds (vec (sort (keys (:capture adapter-entry))))
+       :has-on-provision? (boolean (:on-provision adapter-entry))})))
+
+(defn- interface-projection [adapter-registry decl-by-name [interface-name interface-def]]
+  (let [adapter-name (:adapter interface-def)]
     {:name interface-name
      :type (:type interface-def)
      :adapter adapter-name
      :shared-impl? (boolean (:shared-impl? interface-def))
      :config (:config interface-def)
-     :adapter-metadata (if (:error adapter-entry)
-                         {:known? false
-                          :diagnostic (:error adapter-entry)}
-                         {:known? true
-                          :impl-key (:impl-key adapter-entry)
-                          :provides (vec (:provides adapter-entry))
-                          :has-on-provision? (boolean (:on-provision adapter-entry))})}))
+     :adapter-metadata (adapter-metadata adapter-registry decl-by-name adapter-name)}))
 
 (defn- subjects-projection [g]
   (->> (:subjects g)
@@ -130,23 +181,42 @@
                 :description (:desc entry)
                 :instances (vec (:instances entry))
                 :singleton? (nil? (:instances entry))
-                :wears (:wears entry)}))))
+                :wears (:wears entry)
+                ;; Per-persona meta (sl-4e91): {inst-kw {:desc ... :wears ...}}
+                :instance-meta (:instance-meta entry)
+                ;; Merge-time provenance (sl-0gfc); no default subjects ship,
+                ;; so absent marker data can only mean :user-file.
+                :provenance (get-in g [:provenance :subjects subject-type]
+                                    :user-file)}))))
 
 (defn- instances-projection [g]
   (->> (:instance-index g)
        (mapv (fn [[instance subject-type]]
-               {:instance instance
-                :type subject-type
-                :qualified (keyword (name subject-type) (name instance))}))))
+               (let [qualified (keyword (name subject-type) (name instance))
+                     imeta (glossary/instance-meta g qualified)
+                     worn (glossary/effective-wears g qualified)]
+                 (cond-> {:instance instance
+                          :type subject-type
+                          :qualified qualified
+                          :provenance (get-in g [:provenance :subjects subject-type]
+                                              :user-file)}
+                   ;; Persona docstring + effective costume (sl-4e91)
+                   (:desc imeta) (assoc :description (:desc imeta))
+                   worn (assoc :wears (:wears worn)
+                               :wears-source (:source worn))))))))
 
 (defn- verbs-projection [g]
   (->> (:verbs g)
        (mapv (fn [[interface-type verbs]]
                {:interface-type interface-type
+                :source (get-in g [:sources :verbs interface-type])
                 :verbs (->> verbs
                             (mapv (fn [[verb entry]]
                                     {:verb verb
                                      :description (:desc entry)
+                                     :provenance (get-in g [:provenance :verbs
+                                                            interface-type verb]
+                                                         :builtin)
                                      :frames (->> (:frames entry)
                                                   (mapv (fn [[frame frame-def]]
                                                           {:frame frame
@@ -191,6 +261,7 @@
          (mapv (fn [[intent-name region]]
                  (let [addresses (representative-addresses intents intent-name region)]
                    {:intent intent-name
+                    :provenance :user-file
                     :root (:root region)
                     :reusable? (boolean (:reusable region))
                     :elements (vec (sort (:elements region)))
@@ -313,7 +384,7 @@
       [(str "sl run" cfg-flag)
        (str "sl run --dry-run" cfg-flag)])))
 
-(defn- projection-inputs [project-context cfg step-load]
+(defn- projection-inputs [project-context cfg step-load setup-path]
   (let [glossaries (:glossaries cfg)
         subject-paths (keep identity [(:subjects glossaries)])
         verb-paths (vals (:verbs glossaries))
@@ -322,12 +393,56 @@
         step-files (mapcat step-files-under (config/get-step-paths cfg))]
     (vec (concat
           (keep identity [(when-let [p (:config-path project-context)]
-                            (input-entry :config p))])
+                            (input-entry :config p))
+                          ;; sl-hyey: setup.clj's declarations shape
+                          ;; :adapter-metadata, so the fingerprint sees it.
+                          (when setup-path
+                            (input-entry :setup setup-path))])
           (map #(input-entry :glossary/subjects %) subject-paths)
           (map #(input-entry :glossary/verbs %) verb-paths)
           (map #(input-entry :glossary/intents %) intent-files)
           (map #(input-entry :stepdef %) (or (:loaded step-load) step-files))
           (map #(input-entry :macro %) macro-paths)))))
+
+(defn- git-state
+  "Substrate git state for a directory: {:git-sha \"abc1234\" :git-dirty? bool},
+   or {:git-sha nil} when the directory is not a git repository (or git is
+   unavailable). Always passes :dir — a projection can be built from any cwd
+   (the fuzz.clj sha helper's missing-:dir is the mistake this avoids)."
+  [dir]
+  (if-not dir
+    {:git-sha nil}
+    (try
+      (let [sha (shell/sh "git" "rev-parse" "--short" "HEAD" :dir (str dir))]
+        (if (zero? (:exit sha))
+          {:git-sha (str/trim (:out sha))
+           :git-dirty? (let [st (shell/sh "git" "status" "--porcelain"
+                                          :dir (str dir))]
+                         (boolean (and (zero? (:exit st))
+                                       (seq (str/trim (:out st))))))}
+          {:git-sha nil}))
+      (catch Exception _
+        {:git-sha nil}))))
+
+(defn- substrate
+  "Substrate provenance (sl-0gfc AC addendum 3 + 08-09 ruling 3): the config
+   and tree a resolved-state output was computed against. Deliberately OUTSIDE
+   the fingerprint key-set — the fingerprint is content identity; substrate is
+   the citation."
+  [project-context]
+  (merge {:config-path (:config-path project-context)
+          :config-source (:config-source project-context)}
+         (git-state (:project-root project-context))))
+
+(defn- svo-effective
+  "The EFFECTIVE :svo strictness levels from a LOADED config (post
+   `runner.config/apply-conditional-object-default`, so the conditional
+   :unknown-object flip is already applied), display-normalized the way the
+   binder reads them (:strict -> :error, stepengine/bind.clj). Nil in
+   Vanilla mode (no :svo key)."
+  [cfg]
+  (when (contains? cfg :svo)
+    (update-vals (:svo cfg) #(if (= :strict %) :error %))))
 
 (defn- fingerprint [projection-without-fingerprint]
   (digest-string (pr-str (select-keys projection-without-fingerprint
@@ -355,15 +470,54 @@
   [cfg]
   (if (contains? cfg :svo) :shifted :vanilla))
 
-(defn- complete-projection [project-context source cfg glossary-map intents step-load macro-load diagnostics]
-  (let [adapter-registry adapters/default-registry
+(defn- load-setup-declarations
+  "Load setup.clj's e0ml :adapters declarations for plan-time adapter
+   metadata (sl-hyey, Warden W4). Pure data by construction — declarations
+   carry no functions. Loading setup.clj here is not a new execution class:
+   the projection already load-files stepdef user code, and the runner
+   load-files setup.clj on every --dry-run (layout doctrine: keep its top
+   level pure).
+
+   Returns {:setup-path p-or-nil :declarations [decl …] :error e-or-nil}:
+   - no setup.clj → {:setup-path nil :declarations []}
+   - loaded       → decls from ALL groups, declaration order (a name
+                    declared twice resolves last-wins in the preview
+                    overlay — whole-project projection; per-group
+                    refinement is future work)
+   - load/shape failure → :error (runner parity: that project's run dies
+     at planning, so the projection reports :error and adapter metadata
+     falls back to the default registry — what is still known)."
+  [project-context cfg]
+  (if-let [setup-path (setup/find-setup-file (:config-path project-context))]
+    (let [result (setup/load-setup setup-path cfg)]
+      (if (:error result)
+        {:setup-path setup-path :declarations [] :error (:error result)}
+        {:setup-path setup-path
+         :declarations (vec (mapcat :adapters (:ok result)))
+         :error nil}))
+    {:setup-path nil :declarations []}))
+
+(defn- complete-projection [project-context source cfg glossary-map intents step-load macro-load setup-decls diagnostics]
+  (let [decls (:declarations setup-decls)
+        ;; sl-hyey (Warden W4): the plan-time registry is the runner's own
+        ;; dry-run model — the default registry overlaid with the e0ml
+        ;; declarations when setup.clj carries any. Never a parallel path.
+        adapter-registry (if (seq decls)
+                           (setup/declared-preview-registry decls)
+                           adapters/default-registry)
+        ;; sl-kkoh: name → declaration (not just the name set) so
+        ;; adapter-metadata can read the W20 runtime-field declarations.
+        ;; Last-wins across groups, matching the overlay's flattening.
+        decl-by-name (into {} (map (juxt :name identity)) decls)
         mode (config-mode cfg)
         stepdefs (:stepdefs step-load)
         interfaces (:interfaces cfg)
-        configured-interface-names (set (keys interfaces))
+        ;; sl-s2oa: stepdef :interface metadata is a TYPE — lint only
+        ;; stepdefs whose type some configured instance provides
+        configured-iface-types (suite-lint/configured-types interfaces)
         lintable-stepdefs (filter #(let [iface (get-in % [:metadata :interface])]
                                      (or (nil? iface)
-                                         (contains? configured-interface-names iface)))
+                                         (contains? configured-iface-types iface)))
                                   stepdefs)
         ;; Suite-lint is runner-real in BOTH modes (compile-suite gates it
         ;; only on :interfaces), so it stays unconditional here.
@@ -376,8 +530,10 @@
         ;; projection must not surface diagnostics the runner won't (sl-hjnp).
         stepdef-issues (when (= :shifted mode)
                          (svo-validate/validate-stepdefs-against-glossary
-                          stepdefs glossary-map))
+                          stepdefs glossary-map interfaces))
         all-diagnostics (vec (concat diagnostics
+                                     (when-let [e (:error setup-decls)]
+                                       [(diagnostic :setup :error e)])
                                      (map #(diagnostic :suite-lint :error %) suite-lint)
                                      (map #(diagnostic :stepdefs :error %) stepdef-issues)
                                      (map #(diagnostic :steps :error %) (:diagnostics step-load))
@@ -392,16 +548,24 @@
                         :ok)
               :mode mode
               :config cfg
+              :substrate (substrate project-context)
+              :svo-effective (svo-effective cfg)
               :subjects (subjects-projection glossary-map)
               :instances (instances-projection glossary-map)
-              :interfaces (mapv #(interface-projection adapter-registry %) interfaces)
+              :interfaces (mapv #(interface-projection adapter-registry decl-by-name %) interfaces)
+              ;; Pure DATA only — the preview registry itself holds factory
+              ;; fns (default-registry overlay) and must never enter the
+              ;; EDN-dumped projection value. Consumers (usage-index corpus
+              ;; bind) recompute the preview registry from these.
+              :adapter-declarations (vec decls)
               :verbs (verbs-projection glossary-map)
               :intents (intents-projection intents interfaces)
               :stepdefs stepdefs
               :macros (:macros macro-load)
               :diagnostics all-diagnostics
               :validation-commands (validation-commands project-context)}
-        with-inputs (assoc base :inputs (projection-inputs project-context cfg step-load))]
+        with-inputs (assoc base :inputs (projection-inputs project-context cfg step-load
+                                                           (:setup-path setup-decls)))]
     (assoc with-inputs :fingerprint (fingerprint with-inputs))))
 
 (defn build-projection
@@ -458,6 +622,7 @@
                  intents-result (load-intents-projection cfg)
                  step-load (load-stepdefs-projection! (config/get-step-paths cfg))
                  macro-load (load-macros-projection cfg)
+                 setup-decls (load-setup-declarations project-context cfg)
                  blocking (vec (concat config-diagnostics
                                        glossary-warnings
                                        (when (:error glossary-result)
@@ -485,6 +650,7 @@
                                     (:ok intents-result)
                                     step-load
                                     macro-load
+                                    setup-decls
                                     blocking)))))))))
 
 (defn- include-section? [include section]

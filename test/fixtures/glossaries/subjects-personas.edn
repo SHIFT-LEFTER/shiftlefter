@@ -1,0 +1,12 @@
+;; Persona-map authored shape (sl-4e91): instances mix bare keywords and
+;; {:id ... :desc ... :wears ...} maps; type-level :wears is an inheritable
+;; default; {:wears nil} on a persona opts out of it.
+{:subjects
+ {:user {:desc "Standard user"
+         :wears :default-jacket
+         :instances [{:id :alicia :desc "Spanish-first admin reviewer"
+                      :wears :alicia}
+                     {:id :bob :wears :bob-jacket}
+                     {:id :dana :wears nil}
+                     :carol]}
+  :guest {:desc "Unauthenticated visitor"}}}

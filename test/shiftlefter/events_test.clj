@@ -1,9 +1,9 @@
-(ns shiftlefter.runner.events-test
+(ns shiftlefter.events-test
   (:require [clojure.spec.alpha :as s]
             [clojure.test :refer [deftest is testing]]
             [clojure.tools.logging :as log]
             [clojure.tools.logging.impl :as log-impl]
-            [shiftlefter.runner.events :as events]))
+            [shiftlefter.events :as events]))
 
 ;; -----------------------------------------------------------------------------
 ;; Timestamp Helper Tests

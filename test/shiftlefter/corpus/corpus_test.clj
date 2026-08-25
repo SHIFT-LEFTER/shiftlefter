@@ -11,7 +11,7 @@
             [shiftlefter.corpus.generator :as gen]
             [shiftlefter.corpus.harness :as harness]
             [shiftlefter.corpus.verifier :as verifier]
-            [shiftlefter.runner.events :as events]
+            [shiftlefter.events :as events]
             [shiftlefter.stepengine.registry :as registry]))
 
 (defn- clean-registry-fixture [f]
@@ -80,8 +80,10 @@
                       (nil? (:expected-fail-step %)))
                 entries)
           "a two-hook scenario whose After throws — scenario-level :error"))
-    (testing "run executed and failed as designed (fail/error scenarios exist)"
-      (is (= 1 (:exit-code result)))
+    (testing "run executed and failed as designed (fail/error scenarios
+              exist; the hook-error scenario degrades the run — worst-wins
+              4 over 1, sl-7c7i)"
+      (is (= 4 (:exit-code result)))
       (is (fs/exists? junit-file)))
     (testing "JUnit XML vs manifest (AC3)"
       (ok? (verifier/verify-run manifest (verifier/parse-junit junit-file))))
@@ -160,10 +162,15 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- expected-filtered-exit
-  "1 if the filtered subset contains designed failures, else 0 (corpus runs
-   with allow-pending? true, so pending never fails)."
+  "4 if the filtered subset contains a hook-error scenario (scenario
+   :error => run degraded, worst-wins over 1 — sl-7c7i), else 1 if it
+   contains designed failures, else 0 (corpus runs with allow-pending?
+   true, so pending never fails)."
   [manifest]
-  (if (some #(#{:failed :error} (:expected-status %)) (:scenarios manifest)) 1 0))
+  (cond
+    (some #(= :hook-error (:expected-status %)) (:scenarios manifest)) 4
+    (some #(#{:failed :error} (:expected-status %)) (:scenarios manifest)) 1
+    :else 0))
 
 (defn- run-filtered
   "Run the corpus with a tag filter and verify JUnit + EDN against the
@@ -219,7 +226,7 @@
     (let [{:keys [manifest junit-file edn-summary result]}
           (harness/run-corpus! {:seed seed :include-broken? true
                                 :tag-filter {:exclude #{"@broken"}}})]
-      (is (= 1 (:exit-code result)) "designed failures, NOT exit 2")
+      (is (= 4 (:exit-code result)) "degraded by the hook-error scenario, NOT exit 2")
       (is (not= :planning-failed (:status result)))
       (is (fs/exists? junit-file))
       (is (not-any? #(= "Corpus broken quarantine" (:classname %))
@@ -235,7 +242,7 @@
   (let [{:keys [manifest junit-file edn-summary result]}
         (harness/run-corpus! {:seed seed :profile :parallel-stress})]
     (is (< 80 (count (:scenarios manifest))) "bigger N than :default")
-    (is (= 1 (:exit-code result)))
+    (is (= 4 (:exit-code result)))
     (ok? (verifier/verify-run manifest (verifier/parse-junit junit-file)))
     (ok? (verifier/verify-edn manifest edn-summary))
     (ok? (verifier/verify-serial-hazard manifest))))
@@ -252,7 +259,7 @@
       (let [{:keys [manifest junit-file edn-summary result]}
             (harness/run-corpus! {:seed seed :profile :parallel-stress
                                   :max-parallel n})]
-        (is (= 1 (:exit-code result)))
+        (is (= 4 (:exit-code result)))
         (ok? (verifier/verify-run manifest (verifier/parse-junit junit-file)))
         (ok? (verifier/verify-edn manifest edn-summary))
         (ok? (verifier/verify-serial-hazard manifest))))))
@@ -264,7 +271,7 @@
   (let [{:keys [manifest result]}
         (harness/run-corpus! {:seed seed :profile :parallel-stress
                               :max-parallel 5})]
-    (is (= 1 (:exit-code result)))
+    (is (= 4 (:exit-code result)))
     (ok? (verifier/verify-control-interleaved manifest))))
 
 (deftest parallel-slow-consumer-never-blocks
@@ -286,7 +293,7 @@
         (let [{:keys [manifest junit-file edn-summary result]}
               (harness/run-corpus! {:seed seed :profile :parallel-stress
                                     :max-parallel 5})]
-          (is (= 1 (:exit-code result)) "run completed with its normal exit code")
+          (is (= 4 (:exit-code result)) "run completed with its normal exit code")
           (ok? (verifier/verify-run manifest (verifier/parse-junit junit-file)))
           (ok? (verifier/verify-edn manifest edn-summary))))
       (finally

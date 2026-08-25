@@ -30,9 +30,41 @@
 
    Each entry:
    - `:label`    — human-readable name (optional, used in reporters)
+   - `:adapters` — OPTIONAL vector of pure-data adapter declarations
+                   (sl-e0ml): the plan-time face of the custom registry
+                   `:start` will return. Each declaration is
+                   `{:name :kw, :type :kw?, :provides [qualified-kw ...]?,
+                   :capture {kind data-map}?, :impl-key kw-or-nil?,
+                   :on-provision? bool?}` — data only, no functions
+                   (`:impl-key nil` declares deliberate absence;
+                   `:on-provision?` is the boolean face of the hook).
+                   Declarations cover the DELTA vs the default registry;
+                   bundled adapters used unmodified need no declaration.
+                   Dry-run binds against the declarations (preview-honest);
+                   at `:start` the live registry is VERIFIED to match them
+                   (mismatch = planning error, `:setup/registry-mismatch`).
+                   A novel adapter name (absent from the default registry)
+                   MUST declare `:provides` — an empty-provides novel
+                   adapter would re-create the preview blindness this key
+                   exists to kill (static lint error). `:type` names the
+                   verb-vocabulary family for novel-typed adapters —
+                   informational; the `:interfaces` config already carries
+                   the plan-time `:type` data.
    - `:start`    — `(fn [config])` → `{:adapter-registry ..., :stop ...}`,
                    both keys optional. Called once per group, before that
-                   group's scenarios run.
+                   group's scenarios run. Factories in the returned registry
+                   may close over runtime state (the 04-sms-2fa shared-mock
+                   pattern) — binding stays runtime; only the data half is
+                   declared. A returned registry is EXTERNAL INPUT: its
+                   entries are validated against the registry's own spec at
+                   install (sl-wntk; `adapters.registry/registry-problems`)
+                   — a malformed entry is a planning error
+                   `:setup/invalid-adapter-registry` with the s/explain
+                   output, before any factory runs. DEPRECATED SHAPE: returning `:adapter-registry`
+                   from a group with no `:adapters` declaration still works
+                   this release with a preview-blind warning
+                   (`:setup/undeclared-adapter-registry`); it becomes an
+                   error in a future release.
    - `:features` — vector of feature paths/globs (anything `discover` accepts).
                    Vector position drives intra-group order; group position
                    in the outer vector drives between-group order.
@@ -68,6 +100,7 @@
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
             [clojure.string :as str]
+            [shiftlefter.adapters.registry :as adapters]
             [shiftlefter.runner.discover :as discover]))
 
 ;; -----------------------------------------------------------------------------
@@ -82,9 +115,42 @@
 (s/def ::features (s/coll-of string? :min-count 1))
 (s/def ::adapter-registry (s/nilable map?))
 
+;; Adapter declarations (sl-e0ml): the pure-data plan-time face of a custom
+;; registry. :name is the registry key; :provides is the protocol list the
+;; adapter's impl satisfies (qualified keywords — already data in registry
+;; entries); :capture maps capture kinds to their data half
+;; ({:scenario-scoped? bool} — never :fn); :type names the verb-vocabulary
+;; family for novel-typed adapters (informational). NO FUNCTIONS anywhere in
+;; a declaration — that is the point.
+(s/def :shiftlefter.runner.setup.decl/name keyword?)
+(s/def :shiftlefter.runner.setup.decl/type keyword?)
+;; sl-xjx0 (Warden W20): the runtime-only entry facts get pure-data
+;; declaration faces. :impl-key is nilable ON PURPOSE — `:impl-key nil`
+;; DECLARES deliberate absence (a factory returning the impl directly),
+;; which is how a builtin-name override records dropping the default's
+;; key as intended (see lossy-override-warnings). :on-provision? is the
+;; boolean face of "the live entry carries a provision hook" — never the
+;; fn itself.
+(s/def :shiftlefter.runner.setup.decl/impl-key (s/nilable keyword?))
+(s/def :shiftlefter.runner.setup.decl/on-provision? boolean?)
+;; Explicitly-empty :provides is legal and meaningful — "this adapter
+;; provides no protocols" is a truthful declaration (steps may consume its
+;; impl without :requires-protocols). What the novel-adapter lint requires
+;; is the KEY's presence, never a minimum count.
+(s/def ::provides (s/coll-of qualified-keyword?))
+(s/def ::capture (s/map-of keyword? map?))
+
+(s/def ::adapter-decl
+  (s/keys :req-un [:shiftlefter.runner.setup.decl/name]
+          :opt-un [:shiftlefter.runner.setup.decl/type ::provides ::capture
+                   :shiftlefter.runner.setup.decl/impl-key
+                   :shiftlefter.runner.setup.decl/on-provision?]))
+
+(s/def ::adapters (s/coll-of ::adapter-decl :min-count 1))
+
 (s/def ::setup-entry
   (s/keys :req-un [::start ::features]
-          :opt-un [::label]))
+          :opt-un [::label ::adapters]))
 
 (s/def ::setup-list
   (s/coll-of ::setup-entry :min-count 1))
@@ -191,6 +257,256 @@
                :message (str "Failed to load setup.clj: " (ex-message t))
                :path    setup-path
                :cause   (.getName (class t))}})))
+
+;; -----------------------------------------------------------------------------
+;; Adapter Declarations (sl-e0ml) — declare / verify
+;; -----------------------------------------------------------------------------
+
+(defn- entry-data-half
+  "The comparable pure-data projection of one registry entry (or one
+   declaration — both carry :provides and a :capture map keyed by kind):
+   {:provides #{...} :capture-kinds {kind scenario-scoped?}}. Factories,
+   cleanup fns, and every other runtime key are out of frame by design —
+   the declared contract covers exactly what plan time consumes."
+  [entry]
+  {:provides (set (:provides entry))
+   :capture-kinds (into {}
+                        (map (fn [[kind v]] [kind (boolean (:scenario-scoped? v))]))
+                        (:capture entry))})
+
+(defn registry-data-half
+  "Project a whole adapter registry to its comparable data half:
+   {adapter-name (entry-data-half entry)}."
+  [registry]
+  (into {} (map (fn [[k e]] [k (entry-data-half e)])) registry))
+
+(defn declared-preview-registry
+  "The registry preview binds against (sl-e0ml part a): the default registry
+   overlaid with each declaration's data. An existing name keeps its default
+   entry with the declared keys overriding; a novel name becomes a data-only
+   entry. Sufficient for every plan-time consumer (suite-lint capability
+   gating reads :provides; nothing at plan time calls :factory)."
+  [decls]
+  (reduce (fn [reg decl]
+            (update reg (:name decl)
+                    (fn [entry]
+                      (cond-> (or entry {})
+                        (contains? decl :provides) (assoc :provides (vec (:provides decl)))
+                        (contains? decl :capture)  (assoc :capture (:capture decl))))))
+          adapters/default-registry
+          decls))
+
+(defn verify-declared-registry
+  "Verify the LIVE registry (:start's return, or the default registry when it
+   returned none) against the group's :adapters declarations (sl-e0ml part c:
+   declared contract, runtime-checked). Returns nil on match, else a
+   planning-class error map {:type :setup/registry-mismatch :message ...
+   :mismatches [...]}.
+
+   Match = data-half equality against the declared preview registry:
+   - every declared name must exist in the live registry with the same
+     :provides set and capture kinds/flags as the preview entry (a
+     declaration that omits :provides/:capture therefore pins the default
+     entry's data — silence is not a wildcard);
+   - every live entry whose data half differs from the default registry's
+     must be declared (an undeclared delta is exactly the preview blindness
+     this contract kills)."
+  [decls live-registry]
+  (let [live          (or live-registry adapters/default-registry)
+        live-half     (registry-data-half live)
+        default-half  (registry-data-half adapters/default-registry)
+        expected-half (registry-data-half (declared-preview-registry decls))
+        declared?     (set (map :name decls))
+        mismatches
+        (vec
+         (concat
+          (mapcat (fn [decl]
+                    (let [nm (:name decl)
+                          lh (get live-half nm)
+                          eh (get expected-half nm)]
+                      (cond
+                        (nil? lh)
+                        [{:mismatch :declared-adapter-missing
+                          :adapter nm
+                          :message (str "declared adapter " nm
+                                        " is absent from the live registry")}]
+
+                        :else
+                        (concat
+                         (when (not= lh eh)
+                           [(cond-> {:mismatch :declared-data-differs
+                                     :adapter nm
+                                     :message (str "adapter " nm
+                                                   " differs from its declaration")}
+                              (not= (:provides lh) (:provides eh))
+                              (assoc :declared-provides (vec (sort (:provides eh)))
+                                     :live-provides (vec (sort (:provides lh))))
+                              (not= (:capture-kinds lh) (:capture-kinds eh))
+                              (assoc :declared-capture-kinds (:capture-kinds eh)
+                                     :live-capture-kinds (:capture-kinds lh)))])
+                         ;; sl-xjx0 (Warden W20): the OPTIONAL runtime-field
+                         ;; declarations, compared only when present.
+                         ;; :impl-key nil declares deliberate absence.
+                         (let [live-entry (get live nm)]
+                           (concat
+                            (when (and (contains? decl :impl-key)
+                                       (not= (:impl-key decl)
+                                             (:impl-key live-entry)))
+                              [{:mismatch :declared-impl-key-differs
+                                :adapter nm
+                                :declared-impl-key (:impl-key decl)
+                                :live-impl-key (:impl-key live-entry)
+                                :message (str "adapter " nm " declares :impl-key "
+                                              (pr-str (:impl-key decl))
+                                              " but the live entry has "
+                                              (pr-str (:impl-key live-entry)))}])
+                            (when (and (contains? decl :on-provision?)
+                                       (not= (:on-provision? decl)
+                                             (boolean (:on-provision live-entry))))
+                              [{:mismatch :declared-on-provision-differs
+                                :adapter nm
+                                :declared-on-provision? (:on-provision? decl)
+                                :live-on-provision? (boolean (:on-provision live-entry))
+                                :message (str "adapter " nm " declares :on-provision? "
+                                              (:on-provision? decl)
+                                              " but the live entry "
+                                              (if (:on-provision live-entry)
+                                                "carries a hook"
+                                                "has none"))}])))))))
+                  decls)
+          (keep (fn [[nm lh]]
+                  (when (and (not (declared? nm))
+                             (not= lh (get default-half nm)))
+                    {:mismatch :undeclared-adapter
+                     :adapter nm
+                     :message (str "adapter " nm " differs from the default"
+                                   " registry but is not declared in :adapters")}))
+                (sort-by key live-half))))]
+    (when (seq mismatches)
+      {:type :setup/registry-mismatch
+       :mismatches mismatches
+       :message (str "live adapter registry does not match the :adapters"
+                     " declaration: "
+                     (str/join "; " (map :message mismatches)))})))
+
+(defn lossy-override-warnings
+  "Warn-class check beside `verify-declared-registry` (sl-xjx0, Warden
+   W20 — the uv3r/W22 accident class): a live entry that OVERRIDES a
+   builtin name and silently drops runtime keys the default entry carries
+   (:impl-key, :on-provision). Those keys are outside the data-half
+   contract, so verify cannot error on them — but dropping them is almost
+   always an accident (rebuilding the entry instead of updating it), and
+   the loss is invisible until provisioning misbehaves (a hook that never
+   fires, an impl extracted from the wrong shape).
+
+   A drop the declaration ADDRESSES is silent: `:impl-key nil` or
+   `:on-provision? false` on the adapter's declaration records the drop
+   as deliberate (and `verify-declared-registry` then enforces it).
+
+   Returns a vector of warning maps (empty when clean) — the caller
+   surfaces them on the non-exit-flipping setup-lints channel."
+  [decls live-registry referenced-adapters]
+  (let [live (or live-registry adapters/default-registry)
+        decl-by-name (into {} (map (juxt :name identity)) decls)
+        ;; sl-xjx0 (Warden W21): the extreme lossy case — a default adapter
+        ;; ABSENT from the live registry entirely. Removal is a delta the
+        ;; declaration grammar cannot express this release and verify's
+        ;; live-half iteration cannot see, so an empty registry used to
+        ;; pass every check while first provisioning failed live with
+        ;; :adapter/unknown. Scoped to `referenced-adapters` (the config's
+        ;; :interfaces adapter set): a minimal registry that covers
+        ;; everything the config uses is an established, harmless shape —
+        ;; the warn fires exactly when the :adapter/unknown failure is
+        ;; reachable. Since sl-kkoh this arm is the PLANS-NOT-IN-HAND
+        ;; fallback only: the run seam passes no referenced adapters and
+        ;; uses the exact plan-aware `bound-adapter-errors` instead
+        ;; (config-referenced-but-unbound removed defaults are certainly
+        ;; safe for that invocation, so the run stays silent about them).
+        removed (vec
+                 (for [nm (sort (keys adapters/default-registry))
+                       :when (and (contains? (set referenced-adapters) nm)
+                                  (not (contains? live nm)))]
+                   {:type :setup/default-adapter-removed
+                    :adapter nm
+                    :message (str "default adapter " nm " is absent from the"
+                                  " returned registry but a configured"
+                                  " interface uses it — dry-run still binds"
+                                  " against it and its first provisioning"
+                                  " will fail live with :adapter/unknown;"
+                                  " build on the defaults ((assoc"
+                                  " reg/default-registry ...)) unless the"
+                                  " removal is deliberate")}))]
+    (into
+     removed
+     (for [[nm entry] (sort-by key live)
+           :let [default-entry (get adapters/default-registry nm)
+                 decl (get decl-by-name nm)
+                 dropped (vec
+                          (for [[k decl-k] [[:impl-key :impl-key]
+                                            [:on-provision :on-provision?]]
+                                :when (and default-entry
+                                           (not (identical? entry default-entry))
+                                           (contains? default-entry k)
+                                           (not (contains? entry k))
+                                           (not (contains? decl decl-k)))]
+                            k))]
+           :when (seq dropped)]
+       {:type :setup/lossy-adapter-override
+        :adapter nm
+        :dropped dropped
+        :message (str "adapter " nm " overrides a builtin entry but drops "
+                      (str/join " and " (map pr-str dropped))
+                      " that the default entry carries — deliberate? If so,"
+                      " record it on the declaration ("
+                      (str/join ", " (keep {:impl-key ":impl-key nil"
+                                            :on-provision ":on-provision? false"}
+                                           dropped))
+                      "); if not, build the entry with update-dont-rebuild"
+                      " ((update reg/default-registry " nm " merge ...)) so"
+                      " the default keys survive")}))))
+
+(defn bound-adapter-errors
+  "The plan-aware EXACT registry check (sl-kkoh, the W21 precision
+   refinement): every adapter a BOUND, SELECTED scenario references must
+   exist in the live registry, or its first provisioning certainly dies
+   with :adapter/unknown. Exactness cuts both ways: an adapter the plans
+   never touch is certainly safe for this invocation and stays silent
+   (the config-referenced approximation lives on only in
+   `lossy-override-warnings`' removal arm, for callers without plans).
+
+   `touched-by-adapter` is {adapter-name #{interface-instances}} — built
+   by the caller from the compiled plans (collect-provisioning-targets +
+   the config's interface→:adapter lookup), so this fn stays plans-free.
+   Selection-sensitive BY DESIGN: tag filtering precedes compile, so a
+   filtered-out scenario cannot make this error.
+
+   Returns a vector of planning-class error maps (empty when clean):
+   {:type :setup/bound-adapter-missing :adapter nm :interfaces [...]}.
+   Not scoped to default-registry names — a bound novel adapter missing
+   from the live registry dies identically; default names additionally
+   get the build-on-defaults teaching tail."
+  [touched-by-adapter live-registry]
+  (let [live (or live-registry adapters/default-registry)]
+    (vec
+     (for [[nm instances] (sort-by key touched-by-adapter)
+           :when (not (contains? live nm))]
+       {:type :setup/bound-adapter-missing
+        :adapter nm
+        :interfaces (vec (sort instances))
+        ;; :data mirrors the identifying keys: --edn's serialize-error is
+        ;; a key projection that passes :data through but drops novel
+        ;; top-level keys, and the machine consumer needs the adapter.
+        :data {:adapter nm :interfaces (vec (sort instances))}
+        :message (str "bound scenarios on interface"
+                      (when (next instances) "s") " "
+                      (str/join ", " (map str (sort instances)))
+                      " reference adapter " nm ", which is absent from the"
+                      " live registry — first provisioning would fail with"
+                      " :adapter/unknown"
+                      (when (contains? adapters/default-registry nm)
+                        (str "; build on the defaults ((assoc"
+                             " reg/default-registry ...)) unless the"
+                             " removal is deliberate")))}))))
 
 ;; -----------------------------------------------------------------------------
 ;; Feature Resolution
@@ -361,6 +677,51 @@
                  " — it will run once per group; if this is a deliberate"
                  " matrix, this warning is expected")})
 
+(defn- adapter-decl-issues
+  "Static lint over one group's :adapters declarations (sl-e0ml). Errors:
+   - :setup/adapter-decl-missing-provides — a NOVEL adapter name (absent
+     from the default registry) declared without :provides; preview would
+     bind it blind, re-creating the disease the declaration exists to kill.
+   - :setup/duplicate-adapter-decl — the same :name declared twice in one
+     group; the declaration is a map-shaped contract, duplicates are a lie."
+  [entry group-name]
+  (let [decls (:adapters entry)
+        dupes (->> (map :name decls)
+                   frequencies
+                   (filter (fn [[_ n]] (> n 1)))
+                   (map key)
+                   sort)
+        novel-blind (->> decls
+                         (filter #(and (not (contains? adapters/default-registry (:name %)))
+                                       (not (contains? % :provides))))
+                         (map :name))]
+    (vec
+     (concat
+      (map (fn [nm]
+             {:type :setup/duplicate-adapter-decl
+              :group group-name
+              :adapter nm
+              :message (str "Setup group " (pr-str group-name)
+                            " declares adapter " nm " more than once in"
+                            " :adapters — declarations must be unique per name")})
+           dupes)
+      (map (fn [nm]
+             {:type :setup/adapter-decl-missing-provides
+              :group group-name
+              :adapter nm
+              :message (str "Setup group " (pr-str group-name)
+                            " declares novel adapter " nm " without :provides —"
+                            " preview would bind it blind; declare the protocol"
+                            " list its impl satisfies (an explicit [] is legal:"
+                            " it truthfully declares no protocols)")})
+           novel-blind)))))
+
+(defn- lint-adapter-decls
+  [setups names]
+  (vec (mapcat (fn [idx]
+                 (adapter-decl-issues (nth setups idx) (nth names idx)))
+               (range (count setups)))))
+
 (defn- lint-shared-features
   [names expansions]
   (->> (range (count expansions))
@@ -385,6 +746,8 @@
      empty :features vector is already rejected at load by ::features.)
    - :setup/duplicate-label — two groups share a :label; labels are
      reporting-load-bearing (group = run-scope) and must be unique.
+   - :setup/adapter-decl-missing-provides / :setup/duplicate-adapter-decl —
+     malformed :adapters declarations (sl-e0ml; see adapter-decl-issues).
 
    Warnings (surfaced, never exit-flipping):
    - :setup/feature-in-multiple-groups — the same feature file is declared
@@ -398,6 +761,7 @@
   ([setups base-dir]
    (let [names      (vec (map-indexed (fn [idx entry] (group-name entry idx)) setups))
          expansions (mapv #(expand-group-features % base-dir) setups)]
-     {:errors (into (lint-empty-features setups names expansions)
-                    (lint-duplicate-labels setups))
+     {:errors (-> (lint-empty-features setups names expansions)
+                  (into (lint-duplicate-labels setups))
+                  (into (lint-adapter-decls setups names)))
       :warnings (lint-shared-features names expansions)})))

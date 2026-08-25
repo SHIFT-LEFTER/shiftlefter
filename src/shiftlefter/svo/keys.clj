@@ -16,57 +16,25 @@
    (Numpad0…) are deliberately absent: they live in the `code` namespace,
    the same deviation class, and would be exception #2.
 
-   Values are etaoin key constants (W3C WebDriver code points) consumed by
-   the browser-protocol press path; the Playwright backend translates them
-   back to W3C names via shiftlefter.webdriver.playwright.keys."
-  (:require [etaoin.keys :as k]))
-
-(def w3c-key->etaoin
-  "W3C KeyboardEvent.key name → etaoin key constant. The single source of
-   truth for the closed set: plan-time validation uses its keys, exec
-   resolution uses its values."
-  {"Enter"      k/enter
-   "Tab"        k/tab
-   "Escape"     k/escape
-   "Backspace"  k/backspace
-   "Delete"     k/delete
-   "Insert"     k/insert
-   "Home"       k/home
-   "End"        k/end
-   "PageUp"     k/pageup
-   "PageDown"   k/pagedown
-   "ArrowUp"    k/arrow-up
-   "ArrowDown"  k/arrow-down
-   "ArrowLeft"  k/arrow-left
-   "ArrowRight" k/arrow-right
-   "F1"         k/f1
-   "F2"         k/f2
-   "F3"         k/f3
-   "F4"         k/f4
-   "F5"         k/f5
-   "F6"         k/f6
-   "F7"         k/f7
-   "F8"         k/f8
-   "F9"         k/f9
-   "F10"        k/f10
-   "F11"        k/f11
-   "F12"        k/f12
-   "Shift"      k/shift-left
-   "Control"    k/control-left
-   "Alt"        k/alt-left
-   "Meta"       k/meta-left
-   "Pause"      k/pause
-   "Clear"      k/clear
-   "Help"       k/help
-   "Cancel"     k/cancel
-   ;; The documented deviation — see ns docstring.
-   "Space"      k/space})
+   This ns owns ONLY the name set — plan-time vocabulary. Vendor
+   translation lives with each adapter (name → code, sl-52ly):
+   shiftlefter.webdriver.etaoin.keys and
+   shiftlefter.webdriver.playwright.keys. The parity test
+   (webdriver/keys_parity_test.clj) pins the vendor tables to this set,
+   so extending the set without extending an adapter fails the build.")
 
 (def key-names
-  "Sorted vector of every admissible unquoted key name."
-  (vec (sort (keys w3c-key->etaoin))))
+  "Sorted vector of every admissible unquoted key name — the single
+   source of truth for the closed set."
+  ["Alt" "ArrowDown" "ArrowLeft" "ArrowRight" "ArrowUp" "Backspace"
+   "Cancel" "Clear" "Control" "Delete" "End" "Enter" "Escape"
+   "F1" "F10" "F11" "F12" "F2" "F3" "F4" "F5" "F6" "F7" "F8" "F9"
+   "Help" "Home" "Insert" "Meta" "PageDown" "PageUp" "Pause" "Shift"
+   "Space" "Tab"])
+
+(def ^:private key-name-set (set key-names))
 
 (defn known-key?
   "True when s is a member of the closed key-name set."
   [s]
-  (contains? w3c-key->etaoin s))
+  (contains? key-name-set s))

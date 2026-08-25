@@ -341,8 +341,11 @@
             (is (some? our-costume))
             (is (= :alive (:status our-costume)))))
 
-        (testing "destroy-costume! kills Chrome and cleans up"
-          (let [result ((resolve 'shiftlefter.costume/destroy-costume!) costume-name)]
+        (testing "destroy-costume! refuses while Chrome is live, then force-kills (sl-7q7w)"
+          (let [refused ((resolve 'shiftlefter.costume/destroy-costume!) costume-name)]
+            (is (= :costume/browser-live (get-in refused [:error :type]))))
+          (let [result ((resolve 'shiftlefter.costume/destroy-costume!)
+                        costume-name {:force true})]
             (is (= :destroyed (:status result)))))
 
         (testing "costume no longer listed after destroy"
@@ -353,7 +356,7 @@
         (finally
           ;; Cleanup in case test failed mid-way
           (try
-            ((resolve 'shiftlefter.costume/destroy-costume!) costume-name)
+            ((resolve 'shiftlefter.costume/destroy-costume!) costume-name {:force true})
             (catch Exception _)))))
     (testing "skipped - SHIFTLEFTER_LIVE_CHROME not set"
       (is true "Integration test skipped"))))

@@ -80,14 +80,26 @@ Validation strictness is **fine-grained**, not a global switch: each check in th
 
 The runtime model behind a step actually doing something:
 
-- **Interface** — a named slot in `shiftlefter.edn` (`:web`, `:sms`) that a step
-  targets. Its `:type` selects the verb vocabulary; its `:adapter` selects the
-  backend. See [SVO.md](SVO.md#interface-name-vs-type).
-- **Adapter** — the backend that does an interface's work: `:etaoin` / `:playwright`
-  for browsers, `:sms-twilio` / `:sms-mock` for SMS.
-- **Capability** — the live, materialized implementation of an interface inside a
-  running scenario (stored as `:cap/<interface>`), **auto-provisioned** the first
-  time a subject acts over that interface.
+- **Interface type** — a verb vocabulary and protocol contract (`:web`,
+  `:sms`). Step definitions, glossaries, and intent bindings are all keyed by
+  type. See [SVO.md](SVO.md#interface-name-vs-type).
+- **Interface (instance)** — a named entry in `shiftlefter.edn`
+  (`:web`, `:admin-console`): one configured instantiation of a type, with
+  its own `:adapter` and world config. A step targets an instance with the
+  `[name]` annotation; unannotated steps default to the type-named entry.
+  Every instance of a type speaks that type's full vocabulary.
+- **Adapter** — the backend that does an instance's work: `:etaoin` /
+  `:playwright` for browsers, `:sms-twilio` / `:sms-mock` for SMS. Invisible
+  behind the instance name — feature files never mention it.
+- **Capability** — the live, materialized implementation of an interface
+  instance inside a running scenario (stored as `:cap/<instance>` or
+  `:cap/<instance>.<subject>` — one per instance × subject),
+  **auto-provisioned** the first time a subject acts over that instance.
+- **Persona** — a subject instance authored as a map in the subjects
+  glossary: a user with an optional costume (`:wears`, resolved
+  instance > type) and a docstring (`:desc`, surfaced by `sl explain` and
+  `sl glossary subjects`). See [SVO.md](SVO.md) and
+  [COSTUMES.md](COSTUMES.md).
 - **Intent reference** — a semantic element name like `Login.submit` (defined in
   `glossary/intents/`) used in place of a brittle selector; validated as the
   **Object** of a step. See [SVO.md](SVO.md#object-validation-against-intent-regions).

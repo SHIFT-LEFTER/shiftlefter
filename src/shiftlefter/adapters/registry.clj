@@ -8,6 +8,11 @@
 
    ## Registry Structure
 
+   The entry shape is spec'd — `::adapter-entry` below is the single source
+   of truth (sl-wntk), and custom registries installed via setup.clj are
+   validated against it at the install boundary (`registry-problems`;
+   runner-side error `:setup/invalid-adapter-registry`).
+
    An adapter entry has:
    - `:factory`      — function that takes config, returns capability
    - `:cleanup`      — function that takes capability, cleans up resources
@@ -73,12 +78,69 @@
    (cleanup-capability :etaoin capability)
    ;; => {:ok :closed}
    ```"
-  (:require [clojure.string :as str]
+  (:require [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as sgen]
+            [clojure.string :as str]
             [shiftlefter.adapters.etaoin :as etaoin]
             [shiftlefter.adapters.playwright :as playwright]
             [shiftlefter.adapters.sms-mock :as sms-mock]
             [shiftlefter.adapters.twilio :as twilio]
             [shiftlefter.sms.adapter-hooks :as sms-hooks]))
+
+;; -----------------------------------------------------------------------------
+;; Specs — the registry-entry contract (sl-wntk)
+;;
+;; A custom registry arriving through setup.clj is EXTERNAL INPUT (house
+;; boundary-validation rule); these specs are the entry contract's single
+;; source of truth. The runner validates live custom registries against
+;; ::registry at the setup install boundary (runner/core `run-group!`,
+;; :setup/invalid-adapter-registry) — dry-run PREVIEW registries
+;; (setup/declared-preview-registry) are data-only by design and are never
+;; checked against ::adapter-entry.
+;;
+;; Fn-valued specs are `ifn?` + s/with-gen (the setup ::start idiom): bare
+;; ifn? is ungeneratable (spec_health_test generates every :shiftlefter*
+;; spec), and s/fspec is banned here — instrumenting an fspec would
+;; generatively INVOKE user lifecycle fns at check time (sl-yvaz).
+;; -----------------------------------------------------------------------------
+
+(s/def ::factory (s/with-gen ifn? #(sgen/return (fn [_config] {:ok {}}))))
+(s/def ::cleanup (s/with-gen ifn? #(sgen/return (fn [_capability] {:ok :closed}))))
+(s/def ::impl-key keyword?)
+;; Explicitly-empty :provides is legal at THIS layer — "produces an impl
+;; satisfying no protocols" is a truthful entry. The setup DECLARATION
+;; layer separately requires novel adapters to declare the :provides KEY
+;; (:setup/adapter-decl-missing-provides, sl-e0ml) — that lint is about a
+;; declaration omitting the key (preview blindness), not about [] as a
+;; value; the two layers complement, they don't contradict.
+(s/def ::provides (s/coll-of qualified-keyword?))
+(s/def ::on-provision (s/with-gen ifn? #(sgen/return (fn [ctx _impl] ctx))))
+(s/def :shiftlefter.adapters.registry.capture/fn
+  (s/with-gen ifn? #(sgen/return (constantly nil))))
+(s/def :shiftlefter.adapters.registry.capture/scenario-scoped? boolean?)
+(s/def ::capture-kind-spec
+  (s/keys :req-un [:shiftlefter.adapters.registry.capture/fn]
+          :opt-un [:shiftlefter.adapters.registry.capture/scenario-scoped?]))
+(s/def ::capture (s/map-of keyword? ::capture-kind-spec))
+(s/def ::requires-class string?)
+(s/def ::requires-dep string?)
+(s/def ::not-bundled-note string?)
+
+(s/def ::adapter-entry
+  (s/keys :req-un [::factory ::cleanup ::provides]
+          :opt-un [::impl-key ::on-provision ::capture
+                   ::requires-class ::requires-dep ::not-bundled-note]))
+
+(s/def ::registry (s/map-of keyword? ::adapter-entry))
+
+;; The factory contract (AC4): every factory returns the envelope
+;; {:ok <impl-or-bundle>} | {:error {...}} — provisioning branches on
+;; :error and unwraps :ok (stepengine/exec/provisioning.clj).
+(s/def ::ok any?)
+(s/def ::error map?)
+(s/def ::factory-result
+  (s/or :ok (s/keys :req-un [::ok])
+        :error (s/keys :req-un [::error])))
 
 ;; -----------------------------------------------------------------------------
 ;; Default Registry
@@ -120,16 +182,104 @@
                 ;; three pin sites, one version.
                 :requires-class "com.microsoft.playwright.Playwright"
                 :requires-dep "com.microsoft.playwright/playwright {:mvn/version \"1.50.0\"}"
-                :not-bundled-note "the driver bundle alone is ~200MB"}
+                :not-bundled-note "the driver bundle alone is ~200MB"
+                ;; sl-sehc: the pull-at-capture kinds. No :console — impossible
+                ;; in the drain shape (no browser-side buffer; Playwright
+                ;; console messages are listener events); the subscription-
+                ;; shape design is sl-lam0.
+                :capture  {:screenshot  {:fn playwright/capture-screenshot}
+                           :page-source {:fn playwright/capture-page-source}}}
+   ;; sl-uv3r: both SMS factories return the bundle {:sms impl
+   ;; :from-number ...}; :impl-key extracts the protocol object for steps
+   ;; (the bundle rides :cleanup-handle). Without it, steps received the
+   ;; wrapper map and the first send! threw on PersistentArrayMap.
    :sms-mock   {:factory      sms-mock/create-sms
                 :cleanup      sms-mock/close-sms
+                :impl-key     :sms
                 :provides     [:shiftlefter.sms.protocol/ISMS
                                :shiftlefter.sms.protocol/ISMSInbound]
                 :on-provision sms-hooks/set-scenario-start-ts}
    :sms-twilio {:factory      twilio/create-sms
                 :cleanup      twilio/close-sms
+                :impl-key     :sms
                 :provides     [:shiftlefter.sms.protocol/ISMS]
                 :on-provision sms-hooks/set-scenario-start-ts}})
+
+;; -----------------------------------------------------------------------------
+;; Registry Validation (sl-wntk) — legible boundary errors for custom registries
+;; -----------------------------------------------------------------------------
+
+(def known-entry-keys
+  "Every key the framework reads off a registry entry. `s/keys` maps are
+   open, so a typo'd OPTIONAL key (:implkey, :captur) would pass the spec
+   silently and the entry would misbehave at use-time — exactly the failure
+   the boundary check exists to kill. Unknown-key detection pairs with the
+   spec (config-lint / doctor precedent)."
+  #{:factory :cleanup :impl-key :provides :on-provision :capture
+    :requires-class :requires-dep :not-bundled-note})
+
+(defn- entry-problems
+  "Problems with one registry entry: spec violations (legible s/explain-str)
+   and unknown keys. Empty seq = conforming entry."
+  [entry]
+  (let [spec-problem (when-not (s/valid? ::adapter-entry entry)
+                       [{:problem :spec-violation
+                         :explain-str (s/explain-str ::adapter-entry entry)
+                         :explain-data (s/explain-data ::adapter-entry entry)}])
+        unknown (when (map? entry)
+                  (for [k (keys entry)
+                        :when (not (contains? known-entry-keys k))]
+                    {:problem :unknown-key
+                     :key k
+                     :known (vec (sort known-entry-keys))}))]
+    (concat spec-problem unknown)))
+
+(defn- describe-entry-problem [{:keys [problem explain-str key known]}]
+  (case problem
+    :spec-violation (str/trim-newline explain-str)
+    :unknown-key (str "unknown entry key " key
+                      " (known: " (str/join " " known) ")")))
+
+(defn registry-problems
+  "Validate a LIVE adapter registry against the entry contract
+   (::adapter-entry + unknown-key detection). This is the setup install
+   boundary's validator (runner/core `run-group!`): a malformed custom
+   entry fails at installation with a legible message instead of an
+   incidental error at first use.
+
+   Returns nil when the registry conforms, else a vector of problem maps:
+   - {:problem :not-a-map :message <legible line>}    — registry itself;
+     DIRECT-invocation guard only: at the run-group! boundary a non-map
+     registry never reaches this fn — the ::start-result spec gate
+     (::adapter-registry is (s/nilable map?)) rejects it first as
+     :setup/invalid-start-result (sl-t86d, ruled honest-shape: the arm
+     stays as this fn's own boundary check for public callers)
+   - {:problem :non-keyword-adapter-name :name <...>} — bad key
+   - {:adapter <kw> :problems [{:problem :spec-violation :explain-str ...
+      :explain-data ...} | {:problem :unknown-key :key ... :known [...]}]
+      :message <one legible line per problem>}        — per entry
+
+   Never applied to dry-run PREVIEW registries (data-only by design)."
+  [registry]
+  (if-not (map? registry)
+    [{:problem :not-a-map
+      :message (str "adapter registry is not a map: " (pr-str registry))}]
+    (let [bad-names (for [k (keys registry)
+                          :when (not (keyword? k))]
+                      {:problem :non-keyword-adapter-name
+                       :name (pr-str k)
+                       :message (str "adapter registry key " (pr-str k)
+                                     " is not a keyword")})
+          bad-entries (for [[adapter-name entry] (sort-by (comp str key) registry)
+                            :let [problems (vec (entry-problems entry))]
+                            :when (seq problems)]
+                        {:adapter adapter-name
+                         :problems problems
+                         :message (str "adapter " adapter-name ": "
+                                       (str/join "; " (map describe-entry-problem
+                                                           problems)))})
+          all (vec (concat bad-names bad-entries))]
+      (when (seq all) all))))
 
 ;; -----------------------------------------------------------------------------
 ;; Registry Operations
@@ -364,6 +514,17 @@
        adapter
        ((:factory adapter) config)))))
 
+;; The instrumentable face of the factory contract (sl-wntk): under test
+;; instrumentation the :args spec shape-checks every custom registry that
+;; flows through these fns (stest/instrument checks :args only); the :ret
+;; envelope is the registered contract — runtime envelope handling stays in
+;; provisioning's :error branch, unchanged.
+(s/fdef create-capability
+  :args (s/cat :adapter-name keyword?
+               :config (s/nilable map?)
+               :registry (s/? ::registry))
+  :ret ::factory-result)
+
 (defn cleanup-capability
   "Clean up a capability using the named adapter.
 
@@ -389,3 +550,9 @@
      (if (:error adapter)
        adapter
        ((:cleanup adapter) capability)))))
+
+(s/fdef cleanup-capability
+  :args (s/cat :adapter-name keyword?
+               :capability any?
+               :registry (s/? ::registry))
+  :ret ::factory-result)

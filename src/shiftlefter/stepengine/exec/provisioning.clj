@@ -194,14 +194,18 @@
            :message (str "subject " (pr-str subject) " wears costume "
                          (pr-str costume-name) ", already worn by "
                          (pr-str existing-wearer)
-                         " this scenario; one wearer per costume")}})
+                         " this scenario; one wearer per costume — give"
+                         " each persona its own jacket with a per-instance"
+                         " :wears in the subjects glossary (sl-4e91)")}})
 
-(defn- ensure-capability-for-svo
+(defn ensure-capability-for-svo
   "Provision (interface, subject) into ctx if not already present.
 
-   Pure function over an SVO map — used by both the per-step lazy path
-   (`ensure-capability`) and the scenario-start scoped-eager phase
-   (`eager-provision-scenario`). One mechanism, two strategies.
+   Pure function over an SVO map — used by the per-step lazy path
+   (`ensure-capability`), the scenario-start scoped-eager phase
+   (`eager-provision-scenario`), and — via the `stepengine.exec` facade —
+   the REPL's bare-step provisioning (sl-vmc5: the bare-caller path the
+   :lazy mode was built for). One mechanism, three strategies.
 
    Honors `:shared-impl?` via `find-existing-shared-impl` and runs the
    adapter's `:on-provision` hook (sl-yzu) on the freshly provisioned impl.
@@ -479,10 +483,24 @@
                                     (mapv #(or (:ok %) (:ctx %)) results))}
           {:ok (merge-group-deltas initial-ctx (mapv :ok results))})))))
 
+(def provisioning-error-types
+  "Error :type values produced by capability provisioning (this ns).
+   The scenario-level :error family test (sl-7c7i, §937 row 3): a step
+   bearing one of these is a broken harness, never a broken app."
+  #{:svo/provisioning-failed :adapter/on-provision-failed})
+
+(defn provisioning-error?
+  "True when `error` (a step/scenario error map, or nil) is a capability
+   provisioning failure — the :error-family flip in finalize keys on this."
+  [error]
+  (contains? provisioning-error-types (:type error)))
+
 (defn eager-failure-result
   "Build a scenario result for an eager-provisioning failure: scenario
-   :failed, first step bears the error (matches today's lazy first-step
-   semantics), remaining steps :skipped.
+   :error (infrastructure failure family, sl-7c7i — broken harness is
+   never a broken app), first step bears the error detail (matching
+   today's lazy first-step semantics; steps keep the :failed/:skipped
+   vocabulary — steps never carry :error), remaining steps :skipped.
 
    `initial-ctx` (3-arity, sl-esq) preserves Before-hook contributions in
    :scenario-ctx: when provisioning fails, ALL Afters still unwind
@@ -494,7 +512,8 @@
          [first-step & rest-steps] steps
          step-results (cons (make-step-result first-step :failed nil error)
                             (mapv #(make-step-result % :skipped nil nil) rest-steps))]
-     {:status :failed
+     {:status :error
       :plan plan
       :steps (vec step-results)
-      :scenario-ctx initial-ctx})))
+      :scenario-ctx initial-ctx
+      :error error})))

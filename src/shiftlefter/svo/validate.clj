@@ -54,7 +54,12 @@
                 :bindings/consumed-without-producer :bindings/invalid-pattern
                 :bindings/unnamed-only-groups :bindings/produced-never-consumed
                 ;; sl-gwru: producer marker in the assert-only matcher frame
-                :bindings/named-groups-in-assert-only})
+                :bindings/named-groups-in-assert-only
+                ;; Costume lints (sl-1206) — plan-time front door of the
+                ;; costume doctrine (stepengine.costume-lint); xbm runtime
+                ;; guard stays as the belt
+                :costume/wrong-interface :costume/shared-wears
+                :costume/undeclared})
 (s/def ::subject keyword?)
 (s/def ::verb keyword?)
 (s/def ::interface keyword?)
@@ -182,13 +187,13 @@
          :known known
          :suggestion suggestion}))))
 
-(defn- raw-locator?
+(defn raw-locator?
   "Check if the object string is a raw EDN locator (starts with {)."
   [object-str]
   (and (string? object-str)
        (str/starts-with? object-str "{")))
 
-(defn- object-kind
+(defn object-kind
   "Look up the accepted value kind of the O slot for the SVO's verb frame.
 
    Frames may declare :object-kind in the verb glossary (sl-rlxa);
@@ -199,7 +204,7 @@
         (get-in glossary [:verbs interface-type verb :frames frame :object-kind]))
       :intent))
 
-(defn- location-refs-frame?
+(defn location-refs-frame?
   "True when the SVO's verb frame declares :location-refs? — a :location slot
    that additionally accepts bare PascalCase named-location refs (sl-3jr4)."
   [glossary interface-type {:keys [verb frame]}]
@@ -207,7 +212,7 @@
    (when (and interface-type verb frame)
      (get-in glossary [:verbs interface-type verb :frames frame :location-refs?]))))
 
-(defn- quoted-capture?
+(defn quoted-capture?
   "True when the capture is a quoted literal ('…') — captured WITH its
    quotes (sl-yh7 capture-with-quotes; the exec seam strips them)."
   [s]
@@ -293,7 +298,8 @@
   "Validate object (locator) against intent glossary.
 
    Enforcement modes:
-   - :strict — raw locators disallowed, unknown intents disallowed
+   - :error — raw locators disallowed, unknown intents disallowed
+     (:strict is a deprecated alias, sl-femd)
    - :warn — unknown intents warn (raw locators allowed)
    - :off — no validation
 
@@ -364,11 +370,12 @@
           (quoted-capture? object-str)
           (ref-shaped-location-literal object-str interface)))
 
-      ;; Raw locator check (strict mode only)
-      (and (= enforcement :strict) (raw-locator? object-str))
+      ;; Raw locator check (blocking level only — :error, or its deprecated
+      ;; alias :strict)
+      (and (#{:error :strict} enforcement) (raw-locator? object-str))
       {:type :svo/raw-locator-disallowed
        :object object-str
-       :message "Raw locators are not allowed in strict mode. Use intent references instead."}
+       :message "Raw locators are not allowed when :unknown-object is :error. Use intent references instead."}
 
       ;; Intent reference check — supports flat AND nested (multi-segment) refs.
       (not (raw-locator? object-str))
@@ -408,7 +415,10 @@
    - interfaces: Interface config map from `config/get-interfaces`
    - svo: Extracted SVO map {:subject :verb :object :interface}
    - opts: Optional enforcement options:
-     - :unknown-object — :strict, :warn, or :off (default :off)
+     - :unknown-object — :error, :warn, or :off (:strict = deprecated alias
+       for :error). The :off here is only the no-opts fallback — the
+       effective default is computed by runner.config/load-config (:warn
+       when an :intents glossary is configured, sl-femd).
 
    Returns:
    - {:valid? true :issues []} if all checks pass
@@ -430,10 +440,15 @@
    (validate-svo glossary interfaces svo nil))
   ([glossary interfaces svo opts]
    (let [{:keys [subject verb object interface]} svo
-         ;; Look up interface type from config
+         ;; The SVO's :interface is the resolved execution INSTANCE
+         ;; (sl-s2oa); its configured :type selects vocabulary and intent
+         ;; artifacts. Unconfigured values read as types directly (the
+         ;; type-as-name fallback — vanilla/unconfigured paths unchanged).
          interface-def (get interfaces interface)
          interface-type (:type interface-def)
-         ;; Object enforcement (default :off)
+         effective-type (or interface-type interface)
+         ;; Object enforcement — :off is the no-opts safety net, NOT the
+         ;; default: load-config owns the effective default (sl-femd).
          object-enforcement (get opts :unknown-object :off)
          ;; Collect issues
          issues (keep identity
@@ -444,10 +459,16 @@
                         (validate-interface interfaces interface)
                         ;; Validate object/locator (when enforcement is not :off
                         ;; and the frame's O slot expects an intent reference —
-                        ;; or a named-location ref on a :location-refs? frame)
-                        (validate-object object interface object-enforcement
-                                         (object-kind glossary interface-type svo)
-                                         (location-refs-frame? glossary interface-type svo))])]
+                        ;; or a named-location ref on a :location-refs? frame).
+                        ;; Intent bindings/locations AND the frame lookups are
+                        ;; TYPE-keyed (sl-s2oa), so every lookup crosses
+                        ;; instance -> effective type — the frame helpers
+                        ;; nil-guard, so passing the raw configured type would
+                        ;; silently default unconfigured type-as-name values
+                        ;; to :intent (fit-pass condition, 2026-08-13).
+                        (validate-object object effective-type object-enforcement
+                                         (object-kind glossary effective-type svo)
+                                         (location-refs-frame? glossary effective-type svo))])]
      {:valid? (empty? issues)
       :issues (vec issues)})))
 
@@ -479,10 +500,28 @@
   [{:keys [file line]}]
   (str (or file "?") ":" (or line "?")))
 
+(defn- interface-label
+  "Render an interface for an issue message: ':name' when the name IS the
+   type, ':name (type :t)' when they differ."
+  [interface interface-type]
+  (str ":" (name interface)
+       (when (not= interface interface-type)
+         (str " (type :" (name interface-type) ")"))))
+
 (defn- check-one-stepdef
   "Validate a single stepdef against the glossary. Returns nil if valid
-   or no :svo metadata; otherwise a stepdef-issue map."
-  [stepdef glossary]
+   or no :svo metadata; otherwise a stepdef-issue map.
+
+   The glossary's :verbs map is keyed by interface TYPE, and since
+   sl-s2oa the stepdef's :interface metadata IS the TYPE — the lookup is
+   direct. This retires sl-sfb1's name→type resolution here, and its
+   'do not simplify' guard with it: that guard's premise (stepdefs
+   declaring config instance NAMES, so a renamed project silently
+   skipped the check) no longer holds — instance names live in the
+   [name] step annotation now, never in stepdef metadata. Issue maps
+   keep both :interface and :interface-type keys for shape stability;
+   they are equal under the s2oa model."
+  [stepdef glossary _interfaces]
   (let [{:keys [metadata source]} stepdef
         {:keys [interface svo]} metadata
         {:keys [verb frame args]} svo]
@@ -492,7 +531,8 @@
       nil
 
       :else
-      (let [interface-verbs (get-in glossary [:verbs interface])
+      (let [interface-type  interface
+            interface-verbs (get-in glossary [:verbs interface-type])
             verb-entry      (get interface-verbs verb)]
         (cond
           ;; Interface not loaded in glossary — skip (e.g., :sms stepdef
@@ -502,43 +542,47 @@
 
           ;; Unknown verb under this interface
           (nil? verb-entry)
-          {:type        :stepdef/unknown-verb
-           :stepdef-id  (:stepdef/id stepdef)
-           :source      source
-           :interface   interface
-           :verb        verb
-           :known-verbs (sort (keys interface-verbs))
-           :message     (str "Step at " (source-loc source)
-                             " declares unknown verb :" (name interface) "/" (name verb)
-                             "; known :" (name interface) " verbs: "
-                             (format-keyword-list (keys interface-verbs)))}
+          {:type           :stepdef/unknown-verb
+           :stepdef-id     (:stepdef/id stepdef)
+           :source         source
+           :interface      interface
+           :interface-type interface-type
+           :verb           verb
+           :known-verbs    (sort (keys interface-verbs))
+           :message        (str "Step at " (source-loc source)
+                                " declares unknown verb :" (name verb)
+                                " on interface " (interface-label interface interface-type)
+                                "; known :" (name interface-type) " verbs: "
+                                (format-keyword-list (keys interface-verbs)))}
 
           ;; Step :svo missing :frame (Tier 1 will catch eventually, but
           ;; defensive — bail out cleanly so we don't NPE downstream).
           (nil? frame)
-          {:type       :stepdef/missing-frame
-           :stepdef-id (:stepdef/id stepdef)
-           :source     source
-           :interface  interface
-           :verb       verb
-           :message    (str "Step at " (source-loc source)
-                            " declares :verb :" (name interface) "/" (name verb)
-                            " but no :frame; required since sl-hse")}
+          {:type           :stepdef/missing-frame
+           :stepdef-id     (:stepdef/id stepdef)
+           :source         source
+           :interface      interface
+           :interface-type interface-type
+           :verb           verb
+           :message        (str "Step at " (source-loc source)
+                                " declares :verb :" (name interface-type) "/" (name verb)
+                                " but no :frame; required since sl-hse")}
 
           ;; Frame not declared on this verb
           (not (contains? (:frames verb-entry) frame))
-          {:type         :stepdef/unknown-frame
-           :stepdef-id   (:stepdef/id stepdef)
-           :source       source
-           :interface    interface
-           :verb         verb
-           :frame        frame
-           :known-frames (sort (keys (:frames verb-entry)))
-           :message      (str "Step at " (source-loc source)
-                              " uses unknown frame :" (name frame)
-                              " on verb :" (name interface) "/" (name verb)
-                              "; known frames: "
-                              (format-keyword-list (keys (:frames verb-entry))))}
+          {:type           :stepdef/unknown-frame
+           :stepdef-id     (:stepdef/id stepdef)
+           :source         source
+           :interface      interface
+           :interface-type interface-type
+           :verb           verb
+           :frame          frame
+           :known-frames   (sort (keys (:frames verb-entry)))
+           :message        (str "Step at " (source-loc source)
+                                " uses unknown frame :" (name frame)
+                                " on verb :" (name interface-type) "/" (name verb)
+                                "; known frames: "
+                                (format-keyword-list (keys (:frames verb-entry))))}
 
           ;; Args keyset mismatch
           :else
@@ -551,6 +595,7 @@
                :stepdef-id     (:stepdef/id stepdef)
                :source         source
                :interface      interface
+               :interface-type interface-type
                :verb           verb
                :frame          frame
                :expected-args  (vec (sort frame-args))
@@ -559,7 +604,7 @@
                :extra-args     unexpected
                :message
                (str "Step at " (source-loc source)
-                    " — frame :" (name interface) "/" (name verb) "/" (name frame)
+                    " — frame :" (name interface-type) "/" (name verb) "/" (name frame)
                     " expects args ["
                     (format-keyword-list frame-args)
                     "]; got ["
@@ -573,11 +618,16 @@
 (defn validate-stepdefs-against-glossary
   "Walk all stepdefs; verify each :svo's verb/frame/args are declared
    in the loaded glossary. Returns a vector of issues; empty when valid.
-   Stepdefs whose interface is absent from the glossary are skipped
-   (interface-less stepdefs and cross-interface tooling are unaffected)."
-  [stepdefs glossary]
+
+   Since sl-s2oa each stepdef's :interface metadata IS the interface
+   TYPE, indexing the type-keyed glossary directly (`interfaces` stays
+   in the signature for callers; see check-one-stepdef for why sfb1's
+   name→type hop is retired). Stepdefs whose type has no loaded
+   glossary are skipped (interface-less stepdefs and cross-interface
+   tooling are unaffected)."
+  [stepdefs glossary interfaces]
   (->> stepdefs
-       (keep #(check-one-stepdef % glossary))
+       (keep #(check-one-stepdef % glossary interfaces))
        vec))
 
 ;; -----------------------------------------------------------------------------
@@ -825,5 +875,8 @@
     :bindings/invalid-pattern (format-bindings-invalid-pattern issue)
     :bindings/unnamed-only-groups (format-unnamed-only-groups issue)
     :bindings/produced-never-consumed (format-produced-never-consumed issue)
+    :costume/wrong-interface (format-message-only issue)
+    :costume/shared-wears (format-message-only issue)
+    :costume/undeclared (format-message-only issue)
     ;; Fallback for unknown types
     (str "SVO issue: " (pr-str issue))))

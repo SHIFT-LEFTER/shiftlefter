@@ -93,6 +93,13 @@ body {
   background: var(--failed);
 }
 
+/* PLANNING FAILED / DEGRADED / CRASHED — the harness-truth family. This
+   rule was missing (sl-t86d): without it those badges rendered with no
+   background at all. */
+.run-status.st-error {
+  background: var(--error);
+}
+
 .run-meta,
 .run-selection {
   margin: 0.15rem 0;
@@ -518,4 +525,36 @@ body.failures-only .scenario:not(.red) {
 
 body.failures-only .feature:not(.has-red) {
   display: none;
+}
+
+/* ---- invocation TOC (sl-n9c6) --------------------------------------- */
+
+.toc-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+}
+
+.toc-table th,
+.toc-table td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border, #ddd);
+}
+
+.toc-table th {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.toc-exit {
+  font-size: 0.8rem;
+  opacity: 0.7;
+  margin-left: 0.35rem;
+}
+
+.toc-no-page {
+  font-size: 0.85rem;
+  opacity: 0.6;
 }

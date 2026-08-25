@@ -65,8 +65,10 @@ work (canvas, custom JS), or contributing a new interface. See
 | I want to… | Go to |
 |---|---|
 | decide whether it fits my project | [Would ShiftLefter work for my project?](FIT.md) |
+| understand why it's built this way | [Why ShiftLefter is built this way](PHILOSOPHY.md) |
 | get a browser test running | [Add your first browser behavior](browser-getting-started.md) |
 | run my suite in CI (GitLab, GitHub Actions) | [Running ShiftLefter in CI](CI.md) |
+| build a custom report from the run record | [Build your own report](REPORTS.md) |
 | choose a locator that survives refactors | [Choosing web locators](LOCATORS.md) |
 | understand the validation model | [SVO](SVO.md) |
 | model multiple users & sessions | [Multiple actors](multiple-actors.md) |
@@ -75,6 +77,8 @@ work (canvas, custom JS), or contributing a new interface. See
 | drive authenticated / real-account sessions | [Costumes](COSTUMES.md) |
 | seed data or run code around scenarios | [Hooks — and when not to use them](hooks.md) |
 | understand what runs when — and what a failure does | [The execution lifecycle](lifecycle.md) |
+| know what that background `java` process is | [The ShiftLefter daemon](daemon.md) |
+| stress-test Gherkin handling (fuzz + minimize) | [Fuzz testing](FUZZ.md) |
 | know what I can run (Java vs Clojure) | [What can I do?](INSTALL-TIERS.md) |
 | know where everything lives & what gets written into my repo | [Project layout](project-layout.md) |
 | look up a term | [Glossary](GLOSSARY.md) |
@@ -83,4 +87,5 @@ work (canvas, custom JS), or contributing a new interface. See
 Runnable projects live in [`examples/`](https://github.com/SHIFT-LEFTER/shiftlefter/tree/main/examples)
 — [`examples/README.md`](https://github.com/SHIFT-LEFTER/shiftlefter/tree/main/examples/README.md)
 is the ordered learning path. For agents and contributors: [AGENT.md](AGENT.md)
-(or `sl agent-doc --list`).
+(or `sl agent-doc --list`); internals are mapped in [`architecture/`](architecture/)
+(the commit-stamped architecture series).

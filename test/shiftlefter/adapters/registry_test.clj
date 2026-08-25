@@ -1,10 +1,13 @@
 (ns shiftlefter.adapters.registry-test
-  (:require [clojure.string :as str]
+  (:require [clojure.spec.alpha :as s]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [shiftlefter.adapters.registry :as registry]
             [shiftlefter.adapters.etaoin :as etaoin]
             [shiftlefter.adapters.playwright :as playwright]
-            [shiftlefter.browser.protocol :as bp]))
+            [shiftlefter.adapters.sms-mock :as sms-mock-adapter]
+            [shiftlefter.browser.protocol :as bp]
+            [shiftlefter.test-helpers.adapter-registry :as mock]))
 
 ;; -----------------------------------------------------------------------------
 ;; get-adapter Tests
@@ -95,7 +98,7 @@
           mock-factory (fn [config]
                          (reset! captured-config config)
                          {:ok {:mock true}})
-          mock-registry {:mock {:factory mock-factory :cleanup identity}}
+          mock-registry {:mock {:factory mock-factory :cleanup identity :provides []}}
           result (registry/create-capability :mock {:headless true} mock-registry)]
       (is (= {:ok {:mock true}} result))
       (is (= {:headless true} @captured-config)))))
@@ -104,7 +107,7 @@
   (testing "create-capability returns factory's error on failure"
     (let [mock-factory (fn [_config]
                          {:error {:type :adapter/create-failed :message "boom"}})
-          mock-registry {:mock {:factory mock-factory :cleanup identity}}
+          mock-registry {:mock {:factory mock-factory :cleanup identity :provides []}}
           result (registry/create-capability :mock {} mock-registry)]
       (is (:error result))
       (is (= :adapter/create-failed (-> result :error :type))))))
@@ -125,7 +128,7 @@
           mock-cleanup (fn [capability]
                          (reset! captured-capability capability)
                          {:ok :closed})
-          mock-registry {:mock {:factory identity :cleanup mock-cleanup}}
+          mock-registry {:mock {:factory identity :cleanup mock-cleanup :provides []}}
           result (registry/cleanup-capability :mock {:browser :fake} mock-registry)]
       (is (= {:ok :closed} result))
       (is (= {:browser :fake} @captured-capability)))))
@@ -195,9 +198,11 @@
   (testing "browser adapters declare :impl-key :browser"
     (is (= :browser (registry/impl-key :etaoin)))
     (is (= :browser (registry/impl-key :playwright))))
-  (testing "SMS adapters declare no :impl-key"
-    (is (nil? (registry/impl-key :sms-mock)))
-    (is (nil? (registry/impl-key :sms-twilio))))
+  (testing "SMS adapters declare :impl-key :sms (sl-uv3r — the bundle
+            {:sms impl :from-number ...} rides :cleanup-handle; steps get
+            the protocol object)"
+    (is (= :sms (registry/impl-key :sms-mock)))
+    (is (= :sms (registry/impl-key :sms-twilio))))
   (testing "custom registry is honored"
     (is (= :foo (registry/impl-key :a {:a {:impl-key :foo}})))
     (is (nil? (registry/impl-key :a {:a {}})))))
@@ -218,11 +223,22 @@
       (is (= [ibrowser-kw] result)))))
 
 (deftest test-check-extracted-impl-exempts-no-impl-key
-  (testing "adapters without :impl-key are exempt (SMS bundle path)"
+  (testing "adapters without :impl-key are exempt (bare-impl factory path,
+            e.g. example 04's :sms-mock override)"
     ;; The bundle does not satisfy ISMS — only the nested :sms does — but
     ;; without :impl-key the check must not run.
     (let [reg {:sms {:provides [:shiftlefter.sms.protocol/ISMS]}}]
       (is (nil? (registry/check-extracted-impl :sms {:sms :nested :from-number "x"} reg))))))
+
+(deftest test-default-sms-mock-extraction-satisfies-provides
+  (testing "sl-uv3r: the DEFAULT :sms-mock entry's :impl-key extracts an
+            impl that satisfies the entry's declared :provides — the exact
+            promise that went unverified while the entry omitted :impl-key"
+    (let [{:keys [ok]} (sms-mock-adapter/create-sms {})
+          impl (get ok (registry/impl-key :sms-mock))]
+      (is (some? impl))
+      (is (nil? (registry/check-extracted-impl :sms-mock impl
+                                               registry/default-registry))))))
 
 (deftest test-check-extracted-impl-unresolvable-protocol
   (testing "an unresolvable :provides keyword is reported as unsatisfied"
@@ -258,6 +274,17 @@
   (testing "every kind's :fn is callable"
     (is (every? #(fn? (:fn %)) (vals (registry/capture-kinds :etaoin))))))
 
+(deftest test-playwright-capture-contract
+  (testing "playwright contributes exactly the two pull-at-capture kinds (sl-sehc)
+            — no :console: impossible in the drain shape (no browser-side
+            buffer; Playwright console is listener events; design is sl-lam0)"
+    (is (= #{:screenshot :page-source}
+           (set (keys (registry/capture-kinds :playwright))))))
+  (testing "neither kind is a drain — no scenario-scoped flags"
+    (is (not-any? :scenario-scoped? (vals (registry/capture-kinds :playwright)))))
+  (testing "every kind's :fn is callable"
+    (is (every? #(fn? (:fn %)) (vals (registry/capture-kinds :playwright))))))
+
 (deftest test-console-line-formatting
   (testing "one plain line per entry: LEVEL source message"
     (is (= "SEVERE console-api boom at line 3\nINFO network fetch failed"
@@ -280,3 +307,80 @@
       (is (= :adapter/unknown (-> result :error :type)))
       (is (= :unknown (-> result :error :adapter)))
       (is (seq (-> result :error :known))))))
+
+;; -----------------------------------------------------------------------------
+;; Registry-entry contract (sl-wntk) — the spec's first consumer is our own
+;; registry; then the legible-problems validator, one negative per failure
+;; class.
+;; -----------------------------------------------------------------------------
+
+(deftest default-registry-conforms-to-entry-spec
+  (testing "AC2: default-registry is the spec's first conformance test"
+    (is (s/valid? ::registry/registry registry/default-registry)
+        (s/explain-str ::registry/registry registry/default-registry))
+    (is (nil? (registry/registry-problems registry/default-registry))))
+  (testing "a mock-helper-built registry conforms too (helper stays in step)"
+    (let [built (mock/registry {:web {:impl {:browser :fake} :impl-key :browser}
+                                :sms {:provides [:shiftlefter.sms.protocol/ISMS]
+                                      :capture {:screenshot {:fn (constantly nil)}}}})]
+      (is (s/valid? ::registry/registry built)
+          (s/explain-str ::registry/registry built))
+      (is (nil? (registry/registry-problems built))))))
+
+(defn- problem-messages [registry]
+  (mapv :message (registry/registry-problems registry)))
+
+(def ^:private valid-entry
+  {:factory (fn [_config] {:ok {}})
+   :cleanup (fn [_cap] {:ok :closed})
+   :provides []})
+
+(deftest registry-problems-negatives
+  (testing "registry itself not a map"
+    (let [[problem] (registry/registry-problems 42)]
+      (is (= :not-a-map (:problem problem)))
+      (is (str/includes? (:message problem) "not a map"))))
+
+  (testing "non-keyword adapter name"
+    (let [[problem] (registry/registry-problems {"web" valid-entry})]
+      (is (= :non-keyword-adapter-name (:problem problem)))
+      (is (str/includes? (:message problem) "\"web\""))))
+
+  (testing "missing :factory — spec violation with s/explain output"
+    (let [[msg] (problem-messages {:bad (dissoc valid-entry :factory)})]
+      (is (str/includes? msg "adapter :bad"))
+      (is (str/includes? msg ":factory"))))
+
+  (testing ":factory not invokable"
+    (let [[msg] (problem-messages {:bad (assoc valid-entry :factory "not-a-fn")})]
+      (is (str/includes? msg "ifn?"))))
+
+  (testing ":provides with unqualified keywords"
+    (let [[msg] (problem-messages {:bad (assoc valid-entry :provides [:unqualified])})]
+      (is (str/includes? msg "qualified-keyword?"))))
+
+  (testing ":provides not a collection"
+    (let [[msg] (problem-messages {:bad (assoc valid-entry :provides :oops)})]
+      (is (str/includes? msg "adapter :bad"))))
+
+  (testing "typo'd key names the known vocabulary"
+    (let [[problem] (registry/registry-problems {:bad (assoc valid-entry :implkey :browser)})]
+      (is (= [{:problem :unknown-key
+               :key :implkey
+               :known (vec (sort registry/known-entry-keys))}]
+             (:problems problem)))
+      (is (str/includes? (:message problem) "unknown entry key :implkey"))
+      (is (str/includes? (:message problem) ":impl-key"))))
+
+  (testing "capture kind missing :fn"
+    (let [[msg] (problem-messages {:bad (assoc valid-entry
+                                               :capture {:screenshot {:scenario-scoped? true}})})]
+      (is (str/includes? msg "adapter :bad"))
+      (is (str/includes? msg ":fn"))))
+
+  (testing "one problem report per broken adapter, sorted, valid entries silent"
+    (let [problems (registry/registry-problems
+                    {:zeta (dissoc valid-entry :cleanup)
+                     :alpha (assoc valid-entry :captur {})
+                     :fine valid-entry})]
+      (is (= [:alpha :zeta] (mapv :adapter problems))))))

@@ -167,6 +167,32 @@
                :message (str "Failed to connect to Chrome on port " port ": " (ex-message e))
                :data {:port port}}})))
 
+(defn quit-driver!
+  "Quit a RAW etaoin driver: delete its WebDriver session and kill the
+   chromedriver process etaoin spawned for it (sl-34fu).
+
+   Takes the `:etaoin-driver` value `create-session!`/`connect-to-existing!`
+   return — the map holding the spawned `:process` — NOT this ns's own
+   driver maps (those go through `close-session!`). etaoin's `quit` stops
+   the process in a `finally`, so the process dies even when the session
+   delete throws; quitting an already-dead driver is therefore a safe
+   no-op. For a session attached to an existing Chrome via
+   debuggerAddress, chromedriver does not close the browser on session
+   delete — the attached Chrome survives (the costume-reap requirement).
+
+   Never throws. Returns {:ok :quit} | {:error {:type
+   :webdriver/quit-failed ...}} (the error is diagnostic only: by the
+   time `eta/quit` throws, the process kill has already run)."
+  [eta-driver]
+  (if-not eta-driver
+    {:ok :quit}
+    (try
+      (eta/quit eta-driver)
+      {:ok :quit}
+      (catch Throwable t
+        {:error {:type :webdriver/quit-failed
+                 :message (ex-message t)}}))))
+
 (defn close-session!
   "Close/delete the remote WebDriver session.
 

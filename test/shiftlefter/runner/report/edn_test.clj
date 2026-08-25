@@ -1,8 +1,10 @@
 (ns shiftlefter.runner.report.edn-test
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.edn :as edn]
+            [clojure.spec.alpha :as s]
             [clojure.string :as str]
-            [shiftlefter.runner.report.edn :as report-edn]))
+            [shiftlefter.runner.report.edn :as report-edn]
+            [shiftlefter.runner.reporter :as reporter]))
 
 ;; -----------------------------------------------------------------------------
 ;; build-summary Tests
@@ -60,6 +62,34 @@
       (is (some? (:planning summary)))
       (is (= 1 (count (-> summary :planning :issues))))
       (is (= :undefined (-> summary :planning :issues first :type))))))
+
+(deftest test-build-summary-exit-4
+  (testing "Exit 4 (run degraded, sl-7c7i) carries counts AND failures —
+            the :error scenarios' attributions ride :failures like exit 1"
+    (let [result {:scenarios [{:status :passed
+                               :plan {:plan/pickle {:pickle/id #uuid "00000000-0000-0000-0000-000000000001"
+                                                    :pickle/name "Passing"}}
+                               :steps [{:status :passed}]}
+                              {:status :error
+                               :plan {:plan/pickle {:pickle/id #uuid "00000000-0000-0000-0000-000000000002"
+                                                    :pickle/name "Degraded"}}
+                               :error {:type :svo/provisioning-failed
+                                       :message "Browser provisioning failed"}
+                               :steps [{:status :failed
+                                        :step {:step/id #uuid "00000000-0000-0000-0000-000000000003"
+                                               :step/text "I click button"}
+                                        :binding {:source {:file "s.clj" :line 10}}
+                                        :error {:type :svo/provisioning-failed
+                                                :message "Browser provisioning failed"}}]}]
+                  :counts {:passed 1 :failed 0 :pending 0 :skipped 0 :error 1}}
+          summary (report-edn/build-summary "run-deg" 4 result {})]
+      (is (= 4 (:run/exit-code summary)))
+      (is (= :degraded (:run/status summary)))
+      (is (= 1 (-> summary :counts :error)))
+      (is (= 2 (-> summary :counts :scenarios)))
+      (is (pos? (count (:failures summary)))
+          "scenario-level :error contributes a failure entry")
+      (is (some #(= "Degraded" (:scenario/name %)) (:failures summary))))))
 
 (deftest test-build-summary-exit-3
   (testing "Exit 3 (crash) includes error"
@@ -596,3 +626,179 @@
       (is (= 2 (count (:failures summary))))
       (is (= "screenshot" (-> summary :failures first :error :hook)))
       (is (= "I click" (-> summary :failures second :step/text))))))
+
+;; -----------------------------------------------------------------------------
+;; Attachment Refs (sl-oxiz)
+;; -----------------------------------------------------------------------------
+
+(def ^:private screenshot-ref
+  #:attachment{:kind :screenshot
+               :path "attachments/failing/shot.png"
+               :media-type "image/png"
+               :bytes 1024
+               :source :capture-policy})
+
+(def ^:private console-ref
+  #:attachment{:kind :console
+               :path "attachments/failing/console.log"
+               :source [:hook "drain-console"]})
+
+(deftest test-attachments-exit-1-inline-and-indexed
+  (testing "failed step's refs ride its :failures entry AND the top-level index"
+    (let [sid #uuid "00000000-0000-0000-0000-00000000000a"
+          stid #uuid "00000000-0000-0000-0000-00000000000b"
+          result {:scenarios [{:status :failed
+                               :plan {:plan/pickle {:pickle/id sid
+                                                    :pickle/name "Failing"}}
+                               :steps [{:status :failed
+                                        :step {:step/id stid
+                                               :step/text "I click button"}
+                                        :binding {:source {:file "s.clj" :line 10}}
+                                        :error {:type :step/exception
+                                                :message "Not found"}
+                                        :attachments [screenshot-ref]}]}]
+                  :counts {:passed 0 :failed 1 :pending 0 :skipped 0}}
+          summary (report-edn/build-summary "run-att-1" 1 result {})]
+      (is (= [screenshot-ref] (-> summary :failures first :attachments))
+          "refs inline on the failure entry, verbatim")
+      (let [entry (first (:attachments summary))]
+        (is (= "Failing" (:scenario/name entry)))
+        (is (= sid (:scenario/id entry)))
+        (is (nil? (:attachments entry))
+            "no scenario-level claims -> no scenario-level :attachments")
+        (is (= [{:step/id stid
+                 :step/text "I click button"
+                 :attachments [screenshot-ref]}]
+               (:steps entry))
+            "the index carries the same refs verbatim")))))
+
+(deftest test-attachments-exit-4-scenario-level
+  (testing "scenario-level claims ride the scenario :error entry AND the index"
+    (let [sid #uuid "00000000-0000-0000-0000-00000000000c"
+          result {:scenarios [{:status :error
+                               :error {:type :hook/after-failed :message "boom"}
+                               :attachments [console-ref]
+                               :plan {:plan/pickle {:pickle/id sid
+                                                    :pickle/name "Degraded"}}
+                               :steps [{:status :skipped
+                                        :step {:step/text "I log in"}}]}]
+                  :counts {:passed 0 :failed 0 :pending 0 :skipped 0 :error 1}}
+          summary (report-edn/build-summary "run-att-4" 4 result {})]
+      (is (= [console-ref] (-> summary :failures first :attachments))
+          "scenario-level refs inline on the scenario failure entry")
+      (let [entry (first (:attachments summary))]
+        (is (= [console-ref] (:attachments entry)))
+        (is (nil? (:steps entry))
+            "no step carries refs -> no :steps in the index entry")))))
+
+(deftest test-attachments-exit-0-index-only
+  (testing "green-run evidence (:every-step / After-hook claims) appears in
+            the index — the only surface, since :failures is absent"
+    (let [sid #uuid "00000000-0000-0000-0000-00000000000d"
+          stid #uuid "00000000-0000-0000-0000-00000000000e"
+          result {:scenarios [{:status :passed
+                               :attachments [console-ref]
+                               :plan {:plan/pickle {:pickle/id sid
+                                                    :pickle/name "Green"}}
+                               :steps [{:status :passed
+                                        :step {:step/id stid
+                                               :step/text "I click button"}
+                                        :attachments [screenshot-ref]}]}
+                              {:status :passed
+                               :plan {:plan/pickle {:pickle/id #uuid "00000000-0000-0000-0000-00000000000f"
+                                                    :pickle/name "Bare"}}
+                               :steps [{:status :passed
+                                        :step {:step/text "I wait"}}]}]
+                  :counts {:passed 2 :failed 0 :pending 0 :skipped 0}}
+          summary (report-edn/build-summary "run-att-0" 0 result {})]
+      (is (nil? (:failures summary)))
+      (is (= 1 (count (:attachments summary)))
+          "only the evidence-carrying scenario is indexed")
+      (let [entry (first (:attachments summary))]
+        (is (= "Green" (:scenario/name entry)))
+        (is (= sid (:scenario/id entry)))
+        (is (= [console-ref] (:attachments entry)))
+        (is (= [{:step/id stid
+                 :step/text "I click button"
+                 :attachments [screenshot-ref]}]
+               (:steps entry)))))))
+
+(deftest test-attachments-absent-when-none
+  (testing "attachment-less runs are byte-identical: no top-level key, no
+            :attachments on failure entries (golden-safety, policy :never)"
+    (let [result {:scenarios [{:status :failed
+                               :plan {:plan/pickle {:pickle/id #uuid "00000000-0000-0000-0000-000000000010"
+                                                    :pickle/name "Plain"}}
+                               :steps [{:status :failed
+                                        :step {:step/text "I click"}
+                                        :binding {:source {:file "s.clj" :line 1}}
+                                        :error {:type :step/exception
+                                                :message "nope"}}]}]
+                  :counts {:passed 0 :failed 1 :pending 0 :skipped 0}}
+          summary (report-edn/build-summary "run-none" 1 result {})]
+      (is (not (contains? summary :attachments)))
+      (is (not (contains? (first (:failures summary)) :attachments))))))
+
+(deftest test-attachments-round-trip-valid-edn
+  (testing "a summary carrying refs survives prn-summary -> edn/read-string"
+    (let [sid #uuid "00000000-0000-0000-0000-000000000011"
+          result {:scenarios [{:status :passed
+                               :attachments [console-ref]
+                               :plan {:plan/pickle {:pickle/id sid
+                                                    :pickle/name "Round trip"}}
+                               :steps [{:status :passed
+                                        :step {:step/id #uuid "00000000-0000-0000-0000-000000000012"
+                                               :step/text "I click"}
+                                        :attachments [screenshot-ref]}]}]
+                  :counts {:passed 1 :failed 0 :pending 0 :skipped 0}}
+          summary (report-edn/build-summary "run-rt" 0 result {})
+          parsed (edn/read-string (with-out-str (report-edn/prn-summary summary)))]
+      (is (= (:attachments summary) (:attachments parsed))
+          "refs (namespaced keys, uuids, hook-tuple source) are EDN-native"))))
+
+;; -----------------------------------------------------------------------------
+;; Dropped-events Tests (sl-d7ks)
+;; -----------------------------------------------------------------------------
+
+(deftest test-build-summary-dropped-events
+  (testing "Executed summaries carry :dropped-events when opts pass one"
+    (let [result {:scenarios [{:status :passed :steps [{:status :passed}]}]
+                  :counts {:passed 1 :failed 0 :pending 0 :skipped 0}}
+          summary (report-edn/build-summary "run-drop" 0 result {:dropped-events 3})]
+      (is (= 3 (:dropped-events summary)))))
+  (testing "Absent-when-zero: no key in opts -> no key in the summary (golden safety)"
+    (let [result {:scenarios [{:status :passed :steps [{:status :passed}]}]
+                  :counts {:passed 1 :failed 0 :pending 0 :skipped 0}}
+          summary (report-edn/build-summary "run-clean" 0 result {})]
+      (is (not (contains? summary :dropped-events)))))
+  (testing "nil threads through as absent (the reporter passes nil when its
+            run-summary lacks the key)"
+    (let [result {:scenarios [] :counts {:passed 0 :failed 0 :pending 0 :skipped 0}}
+          summary (report-edn/build-summary "run-nil" 0 result {:dropped-events nil})]
+      (is (not (contains? summary :dropped-events))))))
+
+(deftest test-edn-reporter-threads-dropped-events
+  (testing "EdnReporter's printed form carries :dropped-events off the run-summary"
+    (let [r (report-edn/make-reporter)
+          out (with-out-str
+                (reporter/on-run-end r {:run-id "run-x" :exit-code 0
+                                        :counts {:passed 1 :failed 0 :pending 0 :skipped 0}
+                                        :status :passed
+                                        :dropped-events 2}))
+          form (edn/read-string out)]
+      (is (= 2 (:dropped-events form)))))
+  (testing "No :dropped-events on the run-summary -> none in the printed form"
+    (let [r (report-edn/make-reporter)
+          out (with-out-str
+                (reporter/on-run-end r {:run-id "run-y" :exit-code 0
+                                        :counts {:passed 1 :failed 0 :pending 0 :skipped 0}
+                                        :status :passed}))
+          form (edn/read-string out)]
+      (is (not (contains? form :dropped-events))))))
+
+(deftest test-run-summary-spec-dropped-events
+  (let [base {:run-id "r" :exit-code 0 :status :passed :counts {:passed 1}}]
+    (is (s/valid? ::reporter/run-summary base))
+    (is (s/valid? ::reporter/run-summary (assoc base :dropped-events 5)))
+    (testing "zero is a spec violation — absent-when-zero IS the contract"
+      (is (not (s/valid? ::reporter/run-summary (assoc base :dropped-events 0)))))))

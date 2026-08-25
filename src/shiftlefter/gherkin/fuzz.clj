@@ -28,7 +28,7 @@
 (def generator-version
   "Bump this when generator logic changes to preserve reproducibility.
    Format: [major minor] where major = breaking change, minor = additions."
-  [2 2])  ; sl-lg8v: comment sprinkling (steps, table/example rows, feature top/mid/trailing)
+  [2 3])  ; sl-ur58: comment sprinkle position before a table's first row
 
 ;; -----------------------------------------------------------------------------
 ;; Presets
@@ -148,9 +148,7 @@
 (defn gen-comment-line
   "Generator for an optional whole-line comment at the given indent
    (sl-lg8v): nil ~3/4 of the time so comment-free features stay the
-   common case. NOTE: a comment between a step and its table's FIRST row
-   is a parse error (the parser ends the step at the comment), so callers
-   only splice these where comments are grammar-legal."
+   common case."
   [indent]
   (gen/frequency [[3 (gen/return nil)]
                   [1 (gen/fmap #(str indent "# " %) gen-text)]]))
@@ -184,17 +182,23 @@
 
 (def gen-data-table
   "Generator for a data table (1-3 rows, or nil for no table).
-   All rows have consistent cell count. May carry a comment BETWEEN rows
-   (sl-lg8v) — never before the first row, which is a parse error."
+   All rows have consistent cell count. May carry a comment before the
+   first row (legal since sl-ur58) or BETWEEN rows (sl-lg8v)."
   (gen/one-of
    [(gen/return nil)
     (gen/return nil)  ; 2/3 chance of no table
     (gen/let [num-cols (gen/choose 2 4)
               rows (gen/vector (gen-table-row-with-count num-cols) 1 3)
-              cmt (gen-comment-line "      ")]
-      (str/join "\n" (if (and cmt (seq (rest rows)))
+              cmt (gen-comment-line "      ")
+              before-first? gen/boolean]
+      (str/join "\n" (cond
+                       (and cmt before-first?)
+                       (cons cmt rows)
+
+                       (and cmt (seq (rest rows)))
                        (concat [(first rows) cmt] (rest rows))
-                       rows)))]))
+
+                       :else rows)))]))
 
 (def gen-docstring
   "Generator for a docstring (or nil for no docstring)."

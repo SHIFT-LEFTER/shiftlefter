@@ -1,6 +1,7 @@
 EXIT 2
 --- STDOUT ---
 --- STDERR ---
+run seed: 42
 
 Undefined steps:
   - I do something undefined (ROOT/test/fixtures/features/undefined.feature:5:5)

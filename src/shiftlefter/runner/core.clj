@@ -13,12 +13,17 @@
    9. Report results
    10. Return exit code
 
-   ## Exit Codes
+   ## Exit Codes (the verdict contract, sl-7c7i)
 
-   - 0: All scenarios passed
-   - 1: Executed, some not passed (failed/pending when not allowed)
-   - 2: Planning/setup failure (parse/config/load/bind errors)
-   - 3: Harness crash (uncaught exception)"
+   - 0: Existential pass — >=1 scenario selected, all ran to a tolerated
+        outcome (pending only under :allow-pending?), none failed/errored
+   - 1: Executed, >=1 scenario failed (or pending under strict mode)
+   - 2: Planning/setup failure (parse/config/load/bind errors, empty
+        selection) — pre-execution exclusive
+   - 3: Harness crash (uncaught exception)
+   - 4: Run degraded — >=1 scenario :error (infrastructure-failure family)
+
+   Canonical table + precedence: shiftlefter.runner.verdict."
   (:require [babashka.fs :as fs]
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
@@ -29,7 +34,7 @@
             [shiftlefter.project-context :as project-context]
             [shiftlefter.runner.config :as config]
             [shiftlefter.runner.discover :as discover]
-            [shiftlefter.runner.events :as events]
+            [shiftlefter.events :as events]
             [shiftlefter.runner.hooks :as hooks]
             [shiftlefter.intent.state :as intent-state]
             [shiftlefter.runner.report.console :as console]
@@ -43,9 +48,11 @@
             [shiftlefter.runner.step-loader :as step-loader]
             [shiftlefter.runner.tag-disposition :as tagd]
             [shiftlefter.runner.teardown-marker :as marker]
+            [shiftlefter.runner.verdict :as verdict]
             [shiftlefter.stepengine.compile :as compile]
             [shiftlefter.stepengine.exec :as exec]
             [shiftlefter.stepengine.exec.capture :as capture]
+            [shiftlefter.stepengine.exec.provisioning :as prov]
             [shiftlefter.stepengine.registry :as registry]
             [shiftlefter.svo.bindings-lint :as bindings-lint]
             [shiftlefter.version :as version]
@@ -149,13 +156,18 @@
        :errors []})))
 
 (defn- compute-exit-code
-  "Compute exit code from execution result. Scenario :error (a lifecycle
-   hook threw, sl-esq) is a red run like :failed — never exit 2, which is
-   reserved for planning failures."
+  "Compute exit code from execution result (invariant 4: a pure function
+   of the execution result). Execution worst-wins 4 > 1 > 0 (sl-7c7i):
+   scenario :error (the infrastructure-failure family — hook throw,
+   capability provisioning, capture, harness) is exit 4, RUN DEGRADED —
+   the harness broke, so the run proves nothing about the app. Exit 1 is
+   reserved for scenario :failed (valid tests, app wrong) and for pending
+   under strict mode. Never exit 2 from here — that code is pre-execution
+   exclusive. See shiftlefter.runner.verdict for the canonical table."
   [exec-result allow-pending?]
   (let [{:keys [failed pending error]} (:counts exec-result)]
     (cond
-      (pos? (or error 0)) 1
+      (pos? (or error 0)) 4
       (pos? (or failed 0)) 1
       (and (pos? (or pending 0)) (not allow-pending?)) 1
       :else 0)))
@@ -321,6 +333,59 @@
                                       " provided by no registered adapter")}))
               (capture/unsupported-kinds policy registry)))))))
 
+(defn- capture-plan-lint-pass!
+  "The plan-time per-group capture capability warn (sl-sehc): a configured
+   ACTIVE kind that at least one registry adapter contributes but NONE of
+   the adapters this group's plans actually use — the registry-level
+   unknown-kind check cannot see per-adapter gaps (etaoin's kinds mask a
+   pure-Playwright group's silence, including the mixed etaoin+playwright
+   multi-group composition, where the silence is per-group). Runs right
+   after compile in BOTH pipelines and BOTH branches — dry-run included:
+   preview-honesty is the point (agents live on dry-run), so the gate is
+   the policy alone, never group-root. Under dry-run the threaded registry
+   is e0ml's declared-preview-registry when the group declares :adapters,
+   so declared custom adapters count.
+
+   Same channel discipline as capture-warn-pass!: one stderr line per key
+   (suppressed under --edn), lints ride :diagnostics :capture-lints; the
+   dedup key includes the group index so precision stays per-group. Never
+   an error, never exit-code.
+
+   Returns the NEWLY-warned lint maps for this group's diagnostics."
+  [opts {:keys [policy]} plans config]
+  (let [state (or (:capture-warn-state opts) (atom #{}))
+        edn? (:edn opts)
+        registry (or (:adapter-registry opts) adapters/default-registry)
+        used (into #{}
+                   (keep #(get-in (:interfaces config) [(:interface %) :adapter]))
+                   (mapcat prov/collect-provisioning-targets plans))
+        label (:group-label opts)
+        adapters-str (str/join ", " (map str (sort used)))
+        warn! (fn [key msg lint]
+                (when-not (contains? @state key)
+                  (swap! state conj key)
+                  (when-not edn?
+                    (binding [*out* *err*] (println msg)))
+                  lint))]
+    (vec
+     (keep (fn [kind]
+             (warn! [:adapter-unsupported (:group-index opts) kind]
+                    (str "Capture warning: "
+                         (when label (str "group " (pr-str label) ": "))
+                         "kind " kind " is supported by none of the adapters "
+                         (if label "this group" "this run") " uses ("
+                         adapters-str ") — it will never capture anything"
+                         (when label " in this group"))
+                    (cond-> {:type :capture/adapter-unsupported
+                             :kind kind
+                             :adapters (vec (sort used))
+                             :message (str "capture kind " kind
+                                           " supported by none of the"
+                                           " adapters in use ("
+                                           adapters-str ")")}
+                      label (assoc :group label))))
+           (capture/adapter-unsupported-kinds policy used registry)))))
+
 (defn- max-parallel-error
   "nil when the :max-parallel execute! opt is valid (absent or a positive
    integer), else a structured error map (the tag-filter rules-error
@@ -348,6 +413,31 @@
        :message (str "Invalid :capture " (pr-str c) " — "
                      (s/explain-str :shiftlefter.runner.config/capture c))})))
 
+(defn- seed-opt-error
+  "nil when the :seed execute! opt is valid (absent or a positive long,
+   sl-08f7), else a structured error map (the max-parallel-error pattern)."
+  [opts]
+  (let [sd (:seed opts)]
+    (when (and (some? sd)
+               (not (and (int? sd) (pos? sd))))
+      {:type :seed/invalid
+       :message (str "Invalid :seed " (pr-str sd)
+                     " — must be a positive integer")})))
+
+(defn- generate-run-seed
+  "A fresh run seed: positive 64-bit long, decimal-printed everywhere
+   (sl-08f7 — composes with java.util.Random/SplittableRandom/test.check)."
+  []
+  (.nextLong (java.util.concurrent.ThreadLocalRandom/current) 1 Long/MAX_VALUE))
+
+(defn- print-run-seed-line!
+  "The ONE console line recording the run seed (sl-08f7, Chair-ratified):
+   stderr, once per invocation, after final resolution — stderr keeps
+   --edn stdout pure data."
+  [seed]
+  (binding [*out* *err*]
+    (println (str "run seed: " seed))))
+
 (defn- make-reporters
   "Build the reporter list for this run. Console (stderr) and EDN (stdout) are
    mutually exclusive; the JUnit (sl-40to) and HTML (sl-muq9) reporters are
@@ -367,11 +457,27 @@
         junit-path (resolve-junit-path opts config)
         html-path (resolve-html-path opts config)]
     (cond-> base
-      junit-path (conj (report-junit/make-reporter {:path junit-path}))
+      junit-path (conj (report-junit/make-reporter
+                        ;; sl-xjx0 (Warden W7): multi-group runs share one
+                        ;; invocation-scoped state so the invocation-fixed
+                        ;; XML aggregates across groups instead of
+                        ;; last-writer-wins.
+                        (cond-> {:path junit-path}
+                          (:junit-shared-state opts)
+                          (assoc :shared-state (:junit-shared-state opts)))))
       html-path (conj (report-html/make-reporter
-                       {:path html-path
-                        :primary (when group-root
-                                   (str (fs/path group-root "report.html")))})))))
+                       (let [primary (when group-root
+                                       (str (fs/path group-root "report.html")))]
+                         ;; sl-n9c6: in a multi-group run the stable path
+                         ;; belongs to the invocation TOC — the per-group
+                         ;; byte copy is suppressed (path = primary makes
+                         ;; the copy a same-file no-op). Without a primary
+                         ;; the group write still lands at the stable path;
+                         ;; the TOC epilogue overwrites it last.
+                         {:path (if (and (:suppress-stable-html-copy opts) primary)
+                                  primary
+                                  html-path)
+                          :primary primary}))))))
 
 (defn- run-start-timestamp
   "ISO-8601 UTC timestamp with NO offset (e.g. 2026-07-09T03:00:00), truncated
@@ -396,6 +502,10 @@
   [run-id opts config selected-count filtered-count started-at]
   (let [project-root (get-in opts [:project-context :project-root])]
     (cond-> {:run-id run-id
+             ;; sl-08f7: the run seed — always present on the runner path
+             ;; (core-record family beside :run-id); spec keeps it opt-un so
+             ;; bare/defaults contexts keep their historical shape.
+             :seed (:run-seed opts)
              :version (version/version)
              ;; Presence of :svo in loaded config == Shifted mode (sl-ieie).
              :mode (if (:svo config) :shifted :vanilla)
@@ -421,15 +531,25 @@
    earlier planning exits (parse/config/adapter) stay console/EDN-only."
   [run-id opts config all-pickles diagnostics]
   (when-let [html-path (resolve-html-path opts config)]
-    (report-html/write-planning-failure!
-     html-path
-     (run-start-ctx run-id opts config (count all-pickles) nil
-                    (run-start-timestamp))
-     diagnostics
-     {:run-id run-id
-      :exit-code 2
-      :status :planning-failed
-      :counts (:counts diagnostics)})))
+    (let [run-ctx (run-start-ctx run-id opts config (count all-pickles) nil
+                                 (run-start-timestamp))
+          summary {:run-id run-id
+                   :exit-code 2
+                   :status :planning-failed
+                   :counts (:counts diagnostics)}]
+      (if-let [stash (:html-failure-stash opts)]
+        ;; sl-n9c6 half A: in a multi-group run the page is DEFERRED — the
+        ;; invocation epilogue writes it durably at <group-slug>/report.html
+        ;; (the run dir may not exist yet when this group fails), and the
+        ;; stable path belongs to the TOC. Writing here would recreate the
+        ;; F3 transient (a later green group's copy destroying the only
+        ;; copy of this failure page).
+        (swap! stash conj {:group-label (:group-label opts)
+                           :group-index (:group-index opts 0)
+                           :run-ctx run-ctx
+                           :diagnostics diagnostics
+                           :summary summary})
+        (report-html/write-planning-failure! html-path run-ctx diagnostics summary)))))
 
 (defn- emit-lifecycle!
   "Fan one lifecycle `moment` out to both planes.
@@ -453,12 +573,15 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- report-planning-error!
-  "Report a planning error (exit 2) to the appropriate output."
+  "Report a planning error (exit 2) to the appropriate output.
+   Stamps the run seed into the record (sl-08f7 core-record family):
+   pre-config failures carry the candidate seed already riding opts."
   [run-id opts error-info]
   (let [exit-code 2]
     (when (:edn opts)
       (report-edn/prn-summary
-       (report-edn/build-summary run-id exit-code nil error-info)))
+       (report-edn/build-summary run-id exit-code nil
+                                 (assoc error-info :seed (:run-seed opts)))))
     (when (and (not (:edn opts)) (:stderr-msg error-info))
       (binding [*out* *err*]
         ((:stderr-msg error-info))))
@@ -470,9 +593,11 @@
   "Config-lint warnings (sl-hlkz) — the i608 notice pattern: one stderr line
    per warning, suppressed in EDN mode (the machine contract stays
    byte-stable; `orient --edn` carries the same lints as :warn diagnostics,
-   and sl-lnj1 will add them to the runner's EDN envelope). NOT suppressed
-   in dry-run: unlike the tag-filter notice, nothing else carries this
-   signal. Warnings only — never affects the exit code."
+   and the runner's EDN envelope carries them as :config-lints on every
+   exit path — sl-lnj1 for the compile-stage and run exits, sl-8cvd P2-5
+   for the config-stage exit-2). NOT suppressed in dry-run: unlike the
+   tag-filter notice, nothing else carries this signal. Warnings only —
+   never affects the exit code."
   [opts config-path lints]
   (when (and (seq lints) (not (:edn opts)))
     (binding [*out* *err*]
@@ -510,16 +635,32 @@
                   :diagnostics {:errors [err]}
                   :stderr-msg #(println "Config error:" (:message config-result))})])
       (let [config (resolve-config-declared-paths project-context (:config config-result))
-            adapter-errs (adapter-availability-errors config)]
-        (print-config-lint-notices! opts (:config-path project-context)
-                                    (config/lint-config config))
-        (if (seq adapter-errs)
+            ;; Config-stage errors, all exit 2 through the same envelope:
+            ;; adapter-not-bundled (sl-gcdu) plus EVERY normalize validator
+            ;; (sl-74w8 — macro/timing/interfaces/costumes). sl-st01 (Warden
+            ;; W2) first wired validate-costumes-config here directly; that
+            ;; call is SUBSUMED by normalize now — do not re-add it. normalize
+            ;; is identity-on-success (sl-w9wp), so only its :errors are
+            ;; consumed and `config` flows on unchanged; any validator added
+            ;; to normalize is run-path-reachable by construction.
+            config-errs (into (adapter-availability-errors config)
+                              (:errors (config/normalize config)))
+            lints (config/lint-config config)]
+        (print-config-lint-notices! opts (:config-path project-context) lints)
+        (if (seq config-errs)
           ;; :diagnostics {:errors ...} is what makes the EDN summary carry
           ;; the error on exit 2 — build-summary ignores :error there.
+          ;; :config-lints rides the same map (sl-8cvd, Warden P2-5): the
+          ;; stderr notice is suppressed under :edn, so without this the
+          ;; machine surface lost the lint signal exactly when a config
+          ;; error co-occurred. Scrubbed at attach, like the compile-stage
+          ;; twin in compile-suite-stage.
           [:exit (report-planning-error! run-id opts
-                   {:error (first adapter-errs)
-                    :diagnostics {:errors adapter-errs}
-                    :stderr-msg #(doseq [{:keys [message]} adapter-errs]
+                   {:error (first config-errs)
+                    :diagnostics (cond-> {:errors config-errs}
+                                   (seq lints)
+                                   (assoc :config-lints (reporter/scrub lints)))
+                    :stderr-msg #(doseq [{:keys [message]} config-errs]
                                    (println (str "Config error: " message)))})]
           [:continue {:config config
                       :step-paths (or (some->> (:step-paths opts)
@@ -672,6 +813,46 @@
         (print-tag-filter-notice! opts (count selected) (count filtered-out))
         [:continue {:all-pickles selected :filtered-count (count filtered-out)}]))))
 
+(defn- empty-selection-error
+  "The vacuity witness (sl-7c7i): a selection of zero scenarios is a
+   planning error — a run that selects nothing cannot claim green, and
+   exit 0 is existential (>=1 scenario selected). No escape knob (Chair
+   ruling 08-07): the escape is DATA — the :data block carries what a CI
+   wrapper needs to make its own choice upstream (sl-78md item 12,
+   our-data-your-choices): what was searched, the active filter, the CLI
+   narrowing, and how many scenarios existed before narrowing."
+  [{:keys [total searched tag-filter groups cli-paths]}]
+  (let [total (or total 0)]
+    {:type :selection/empty
+     :message (str "Empty selection: 0 of " total " scenario(s) selected"
+                   (when (seq searched)
+                     (str " (searched: " (str/join ", " searched) ")"))
+                   (when tag-filter
+                     (str " (tag filter: " (pr-str tag-filter) ")"))
+                   (when (seq cli-paths)
+                     (str " (CLI paths: " (str/join ", " cli-paths) ")"))
+                   (when (seq groups)
+                     (str " (groups: " (str/join ", " (map pr-str groups)) ")"))
+                   " — nothing would run, so nothing can pass")
+     :data (cond-> {:selected 0 :total total}
+             (seq searched) (assoc :searched (vec searched))
+             tag-filter     (assoc :tag-filter tag-filter)
+             (seq cli-paths) (assoc :cli-paths (vec cli-paths))
+             (seq groups)   (assoc :groups (vec groups)))}))
+
+(defn- report-empty-selection!
+  "Ride the standard planning-error path with an empty-selection error.
+   The error also rides the returned result map (the run-group! pattern)
+   so programmatic callers can read the selection story without parsing
+   output."
+  [run-id opts data]
+  (let [err (empty-selection-error data)]
+    (-> (report-planning-error! run-id opts
+                                {:error err
+                                 :diagnostics {:errors [err]}
+                                 :stderr-msg #(println (:message err))})
+        (assoc :error err))))
+
 (defn- load-steps-stage
   "Stage 5: Load step definitions + built-ins.
    Returns [:continue nil] or [:exit error-result]."
@@ -737,7 +918,9 @@
           (console/print-diagnostics! diagnostics report-opts))
         (when (:edn opts)
           (report-edn/prn-summary
-           (report-edn/build-summary run-id exit-code nil {:diagnostics diagnostics})))
+           (report-edn/build-summary run-id exit-code nil
+                                     {:diagnostics diagnostics
+                                      :seed (:run-seed opts)})))
         [:exit {:exit-code exit-code
                 :run-id run-id
                 :status :planning-failed
@@ -787,7 +970,8 @@
                 (when (:edn opts)
                   (report-edn/prn-summary
                    (report-edn/build-summary run-id exit-code nil
-                                             {:diagnostics diagnostics})))
+                                             {:diagnostics diagnostics
+                                              :seed (:run-seed opts)})))
                 [:exit {:exit-code exit-code
                         :run-id run-id
                         :status :planning-failed
@@ -806,9 +990,11 @@
    is non-nil on the setup-group path only. `filtered-count` is non-nil only
    when a tag filter is active (sl-i608): the additive :filtered-out key makes
    the dry-run preview distinguish 'filter selected N' from 'project has N';
-   without a filter the summary is byte-identical to before."
-  [run-id plans diagnostics group-label filtered-count]
+   without a filter the summary is byte-identical to before.
+   `seed` (sl-08f7): the run seed — core-record family, always stamped."
+  [run-id seed plans diagnostics group-label filtered-count]
   (cond-> {:run/id run-id
+           :run/seed seed
            :run/exit-code 0
            :run/status :dry-run
            :counts {:scenarios (count plans)
@@ -953,6 +1139,11 @@
    Closing here would kill groups 2..N's events on the shared bus."
   [run-id opts bus config features all-pickles filtered-count plans diagnostics allow-pending? report-opts]
   (let [started-at (run-start-timestamp)
+        ;; sl-d7ks: this run-scope's drop baseline. The bus (and its drop
+        ;; counter) is invocation-scoped but summaries are per-group, so each
+        ;; group reports the DELTA — a consumer summing group summaries never
+        ;; double-counts. The invocation total stays bus-close!'s warn line.
+        dropped-at-start (events/dropped-events bus)
         ;; sl-y3wd: the run-results dir, stamped from this run-scope's
         ;; started-at (first executing group creates; later groups share the
         ;; invocation's cached dir). nil in a no-config (:defaults) context.
@@ -1030,7 +1221,21 @@
                      {:bus-event :test-run/started
                       :bus-payload {:feature-count (count features)
                                     :scenario-count (count all-pickles)}})
-    (let [exec-opts (cond-> {:bus bus :run-id run-id :interfaces (:interfaces config)
+    (let [;; MIRROR NOTE (sl-xjx0, W8): the ENGINE consumes five of these
+          ;; opts — :interfaces :timing :run-seed (mirrored by repl.clj's
+          ;; `run`) plus :provisioning (step_loop's :eager gate) and
+          ;; :max-parallel (exec's parallel dispatch), which repl omits ON
+          ;; PURPOSE: repl/run is always lazy + sequential (sl-vmc5). A
+          ;; new engine-consumed exec-opt added here must be hand-mirrored
+          ;; there — or its omission recorded there — and vice versa.
+          exec-opts (cond-> {:bus bus :run-id run-id :interfaces (:interfaces config)
+                             ;; sl-99u2: global :timing rung, stashed into
+                             ;; scenario ctx for step/timing resolution.
+                             :timing (:timing config)
+                             ;; sl-08f7: the run seed, handed down to user
+                             ;; code (hook payloads + step ctx) by the
+                             ;; scenario wrapper.
+                             :run-seed (:run-seed opts)
                              ;; sl-aa5: scoped-eager provisioning is the default;
                              ;; opt-out via {:runner {:provisioning :lazy}}.
                              :provisioning (config/provisioning-mode config)
@@ -1059,31 +1264,52 @@
                         (assoc :cleanup-failures cleanup-failures)
                         ;; sl-3q9r: capture warns ride the diagnostics
                         ;; lifecycle under --edn (stderr suppressed there),
-                        ;; the i608 config-lint pattern.
+                        ;; the i608 config-lint pattern. Append, not assoc —
+                        ;; the sl-sehc plan-time lints may already be here.
                         (seq capture-lints)
-                        (assoc :capture-lints capture-lints))]
+                        (update :capture-lints (fnil into []) capture-lints))]
       ;; Warn-level SVO issues didn't block execution but must still reach a
       ;; human (sl-qk8l/sl-6h4r) — EDN output already carries them.
       (emit-lifecycle! ctx :diagnostics (reporter/diagnostics-envelope diagnostics) nil)
-      (emit-lifecycle! ctx :run-end
-                       {:run-id run-id
-                        :exit-code exit-code
-                        :counts (:counts exec-result)
-                        :status (if (zero? exit-code) :passed :failed)}
-                       {:bus-event :test-run/finished
-                        :bus-payload {:exit-code exit-code :counts (:counts exec-result)}})
-      (cond-> {:exit-code exit-code
-               :run-id run-id
-               :status (if (zero? exit-code) :passed :failed)
-               :counts (:counts exec-result)
-               ;; The RAW exec-result, deliberately: envelopes are a projection
-               ;; for the report/observe planes only; programmatic callers keep
-               ;; full fidelity.
-               :result exec-result}
-        ;; sl-y3wd: where this run's outputs live (also in run-ctx since
-        ;; sl-l9nj — reporters see it; goldens stay byte-identical because
-        ;; console/EDN ignore run-start and the key is absent without a dir).
-        results-dir (assoc :results-dir results-dir)))))
+      ;; sl-d7ks: :test-run/finished is published BEFORE the reporter
+      ;; fan-out (emit-lifecycle! is reporters-first) so the drop counter is
+      ;; read AFTER the run-scope's final publish — otherwise a drop of the
+      ;; finished event itself would postdate the read and the summary would
+      ;; falsely report zero. Cross-plane ordering is explicitly unspecified
+      ;; (events.clj delivery contract), so only the counter read moves.
+      (events/publish! bus (events/make-event :test-run/finished run-id
+                                              {:exit-code exit-code
+                                               :counts (:counts exec-result)}))
+      (let [dropped (- (events/dropped-events bus) dropped-at-start)
+            run-summary (cond-> {:run-id run-id
+                                 ;; sl-08f7: core-record family — every
+                                 ;; run-scope's summary carries the one
+                                 ;; invocation seed.
+                                 :seed (:run-seed opts)
+                                 :exit-code exit-code
+                                 :counts (:counts exec-result)
+                                 :status (verdict/exit-code->status exit-code)}
+                          ;; Absent-when-zero (anomaly-marker convention,
+                          ;; Chair re-ratified 08-10): presence IS the signal.
+                          (pos? dropped) (assoc :dropped-events dropped))]
+        (emit-lifecycle! ctx :run-end run-summary nil)
+        (cond-> {:exit-code exit-code
+                 :run-id run-id
+                 :status (verdict/exit-code->status exit-code)
+                 :counts (:counts exec-result)
+                 ;; The RAW exec-result, deliberately: envelopes are a projection
+                 ;; for the report/observe planes only; programmatic callers keep
+                 ;; full fidelity.
+                 :result exec-result}
+          (pos? dropped) (assoc :dropped-events dropped)
+          ;; sl-y3wd: where this run's outputs live (also in run-ctx since
+          ;; sl-l9nj — reporters see it; goldens stay byte-identical because
+          ;; console/EDN ignore run-start and the key is absent without a dir).
+          results-dir (assoc :results-dir results-dir)
+          ;; sl-n9c6: this run-scope's actual output root. The invocation TOC
+          ;; links rows by it — re-deriving via ensure-group-dir! would hit
+          ;; the duplicate-label fallback and misroute.
+          group-root (assoc :group-root group-root))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Setup-Aware Execution (sl-dbu)
@@ -1130,10 +1356,13 @@
 
 (defn- compute-suite-exit-code
   "Aggregate per-group exit codes into a suite exit code.
-   Worst code wins: planning-error (2) > failed (1) > passed (0)."
+   Worst code wins: planning-error (2) > degraded (4) > failed (1) >
+   passed (0) — sl-7c7i; a crash (3) never appears here, it throws past
+   aggregation to execute!'s handler."
   [exit-codes]
   (cond
     (some #(= 2 %) exit-codes) 2
+    (some #(= 4 %) exit-codes) 4
     (some #(not (zero? %)) exit-codes) 1
     :else 0))
 
@@ -1194,14 +1423,72 @@
       (when-not (:dry-run opts)
         (marker/clear! (:project-context opts))))))
 
+(defn- report-undeclared-registry!
+  "Migration warning (sl-e0ml part d): a group with no :adapters declaration
+   whose :start returned an :adapter-registry still works this release, but
+   the preview is blind to that registry — say so, once per group, at the
+   moment it becomes knowable (post-:start; plan time cannot know, that IS
+   the blindness). Channel mirrors the lkla setup-lints lane: one stderr
+   line in console mode; under --edn a supplementary :setup-lints
+   diagnostics form (the teardown-failures precedent — supplementary forms
+   may precede the group's summary). Never exit-flipping. Returns the entry."
+  [run-id opts label]
+  (let [entry {:type :setup/undeclared-adapter-registry
+               :group label
+               :message (str "group " (pr-str label) " returned an adapter"
+                             " registry it never declared — dry-run binds"
+                             " blind to it; declare :adapters on the group"
+                             " (deprecated; becomes an error in a future"
+                             " release)")}]
+    (if (:edn opts)
+      (report-edn/prn-summary {:run/id run-id
+                               :group label
+                               :diagnostics {:setup-lints [entry]}})
+      (binding [*out* *err*]
+        (println (str "Setup plan warning: " (:message entry)))))
+    entry))
+
+(defn- report-lossy-overrides!
+  "sl-xjx0 (Warden W20): surface lossy builtin-override warnings from
+   `setup/lossy-override-warnings` on the same non-exit-flipping
+   setup-lints channel as the undeclared-registry warning above. Returns
+   the entries."
+  [run-id opts label entries]
+  (when (seq entries)
+    (let [stamped (mapv #(assoc % :group label) entries)]
+      (if (:edn opts)
+        (report-edn/prn-summary {:run/id run-id
+                                 :group label
+                                 :diagnostics {:setup-lints stamped}})
+        (binding [*out* *err*]
+          (doseq [e stamped]
+            (println (str "Setup plan warning: " (:message e))))))
+      stamped)))
+
+(defn- plans-touched-adapters
+  "{adapter-name #{interface-instances}} for every adapter the compiled
+   plans' bound steps reference (sl-kkoh — the exact-check input; the
+   capture-plan-lint pass walks the same targets). Unconfigured/bare-type
+   interfaces carry no :adapter and provision nothing, so they drop out."
+  [plans interfaces]
+  (reduce (fn [acc {:keys [interface]}]
+            (if-let [adapter (get-in interfaces [interface :adapter])]
+              (update acc adapter (fnil conj #{}) interface)
+              acc))
+          {}
+          (mapcat prov/collect-provisioning-targets plans)))
+
 (defn- run-group!
   "Run one orchestrated group end-to-end.
 
-   Lifecycle: call (:start config) → parse this group's features →
-   compile-suite (with the group's adapter-registry) → execute → :stop
-   (runs even when the body fails or throws). Under :dry-run, :start and
-   :stop are skipped ENTIRELY (sl-ev0b) — the preview binds against the
-   default adapter registry and no user lifecycle code runs.
+   Lifecycle: call (:start config) → verify the returned registry against
+   the group's :adapters declarations (sl-e0ml) → parse this group's
+   features → compile-suite (with the group's adapter-registry) → execute
+   → :stop (runs even when the body fails or throws). Under :dry-run,
+   :start and :stop are skipped ENTIRELY (sl-ev0b) — no user lifecycle code
+   runs; the preview binds against the group's DECLARED adapter shapes
+   (setup/declared-preview-registry) when :adapters is present, else the
+   default registry.
 
    Returns a per-group result map shaped like execute-and-report-stage's,
    plus :group-label and :status; a :stop throw adds :teardown-failure
@@ -1209,6 +1496,7 @@
   [run-id opts config group group-index bus report-opts allow-pending?]
   (let [label    (or (:label group) "<unlabeled>")
         features (setup/resolve-group-features group)
+        decls    (:adapters group)
         ;; :start may throw or return malformed shape — both treated as
         ;; planning errors local to this group; other groups still run.
         ;; sl-ev0b: dry-run is a pure plan preview — no user lifecycle code
@@ -1216,9 +1504,39 @@
         ;; :stop in the finally (there is nothing to stop).
         start-result (when-not (:dry-run opts)
                        (try
-                         ((:start group) config)
+                         ;; sl-08f7: the run seed rides the config argument
+                         ;; as an additive :seed key — :start is run-level
+                         ;; lifecycle, so it gets the datum too.
+                         ((:start group) (assoc config :seed (:run-seed opts)))
                          (catch Throwable t
-                           {::start-throw t})))]
+                           {::start-throw t})))
+        ;; sl-wntk: the returned registry is EXTERNAL INPUT (house boundary-
+        ;; validation rule) — entry-shape check via the registry's own spec,
+        ;; with legible s/explain + unknown-key output. Fires on ANY live
+        ;; returned registry (declared or the deprecated undeclared path),
+        ;; and deliberately BEFORE verify-declared-registry: entry-data-half
+        ;; would throw incidentally on e.g. a non-coll :provides, and the
+        ;; legible error must win that race. Never fires on the dry-run
+        ;; preview registry (data-only by design).
+        registry-shape-problems
+        (when (and (not (:dry-run opts))
+                   (not (::start-throw start-result))
+                   (s/valid? :shiftlefter.runner.setup/start-result start-result))
+          (some-> (:adapter-registry start-result)
+                  adapters/registry-problems))
+        ;; sl-e0ml part c: declared contract, runtime-checked. Only when the
+        ;; group declares :adapters and :start produced a spec-valid shape —
+        ;; the earlier cond branches own the throw/invalid cases.
+        registry-mismatch
+        (when (and (seq decls)
+                   (not (:dry-run opts))
+                   (not (::start-throw start-result))
+                   (nil? registry-shape-problems)
+                   ;; a nil start-result (:start returned nil — tolerated
+                   ;; today) verifies against the default registry
+                   (or (nil? start-result)
+                       (s/valid? :shiftlefter.runner.setup/start-result start-result)))
+          (setup/verify-declared-registry decls (:adapter-registry start-result)))]
     (cond
       ;; Both :start failure branches ride report-planning-error! like every
       ;; sibling failure path in this fn (parse/filter/compile) — before
@@ -1254,11 +1572,68 @@
                :stderr-msg #(println (:message err))})
             (assoc :group-label label :error err)))
 
+      ;; sl-wntk: the returned registry has malformed entries — a loud
+      ;; planning-class error with the spec's own explain output, per
+      ;; group, like its siblings. :stop does not run on this branch
+      ;; (invalid-start-result precedent — the group's contract is broken
+      ;; before its body ever starts).
+      (seq registry-shape-problems)
+      (let [err {:type :setup/invalid-adapter-registry
+                 :group label
+                 :problems (vec registry-shape-problems)
+                 :message (str "Setup group " (pr-str label) " returned an"
+                               " adapter registry with invalid entries: "
+                               (str/join "; " (map :message registry-shape-problems)))}]
+        (-> (report-planning-error! run-id opts
+              {:error err
+               :diagnostics {:errors [err]}
+               :stderr-msg #(println (:message err))})
+            (assoc :group-label label :error err)))
+
+      ;; sl-e0ml part c: the live registry does not match the group's
+      ;; :adapters declarations — a loud planning-class error, per group,
+      ;; like every sibling failure path above. NOTE: :stop does not run on
+      ;; this branch (matching the invalid-start-result precedent — the
+      ;; group's contract is broken before its body ever starts).
+      registry-mismatch
+      (let [err (assoc registry-mismatch
+                       :group label
+                       :message (str "Setup group " (pr-str label) ": "
+                                     (:message registry-mismatch)))]
+        (-> (report-planning-error! run-id opts
+              {:error err
+               :diagnostics {:errors [err]}
+               :stderr-msg #(println (:message err))})
+            (assoc :group-label label :error err)))
+
       :else
       (let [{:keys [adapter-registry stop]} start-result
+            ;; sl-e0ml part a: dry-run binds against the DECLARED shapes —
+            ;; the preview registry is the default overlaid with the group's
+            ;; declarations. Live runs keep threading the live registry
+            ;; (factories are needed at provisioning); verify above already
+            ;; proved its data half matches the declaration.
+            preview-registry (when (and (:dry-run opts) (seq decls))
+                               (setup/declared-preview-registry decls))
+            effective-registry (or adapter-registry preview-registry)
+            ;; sl-e0ml part d: undeclared returned registry = deprecated
+            ;; shape; works this release with a preview-blind warning.
+            _ (when (and adapter-registry (empty? decls))
+                (report-undeclared-registry! run-id opts label))
+            ;; sl-xjx0 (Warden W20): builtin-name overrides that silently
+            ;; drop the default entry's runtime keys — warn unless the
+            ;; declaration records the drop as deliberate. The removal arm
+            ;; gets NO referenced adapters here (sl-kkoh): this seam has
+            ;; plans by compile time, so the exact bound-adapter check
+            ;; below owns removal — config-referenced-but-unbound removed
+            ;; defaults are certainly safe for this invocation and silent.
+            _ (when adapter-registry
+                (report-lossy-overrides!
+                 run-id opts label
+                 (setup/lossy-override-warnings decls adapter-registry [])))
             inner-opts (cond-> (assoc opts :group-label label
                                       :group-index group-index)
-                         adapter-registry (assoc :adapter-registry adapter-registry))
+                         effective-registry (assoc :adapter-registry effective-registry))
             ;; Body result is CAPTURED (not try/finally): a :stop throw must
             ;; enrich the returned group result, which a finally cannot do.
             ;; ::crashed preserves crash semantics — :stop still runs, then
@@ -1277,8 +1652,50 @@
                             (compile-suite-stage run-id inner-opts config all-pickles report-opts)]
                         (if (= :exit s-compile)
                           (assoc d-compile :group-label label)
-                          (let [{:keys [plans diagnostics]} d-compile]
-                            (if (:dry-run opts)
+                          (let [{:keys [plans diagnostics]} d-compile
+                                ;; sl-sehc: the plan-time per-group capture
+                                ;; capability warn — computed here so BOTH
+                                ;; branches see it (dry-run included; under
+                                ;; dry-run inner-opts carries e0ml's declared
+                                ;; preview registry, so it's preview-honest).
+                                plan-lints (capture-plan-lint-pass!
+                                            inner-opts
+                                            (resolve-capture inner-opts config)
+                                            plans config)
+                                diagnostics (cond-> diagnostics
+                                              (seq plan-lints)
+                                              (update :capture-lints
+                                                      (fnil into []) plan-lints))
+                                ;; sl-kkoh: the plan-aware EXACT registry
+                                ;; check — a bound, selected scenario whose
+                                ;; adapter is missing from the live registry
+                                ;; certainly dies at first provisioning.
+                                ;; Live runs only (dry-run has no :start and
+                                ;; binds the declared preview). NOTE: an
+                                ;; error here still runs :stop below —
+                                ;; :start ran, the world exists (unlike the
+                                ;; pre-compile branches, ruled deliberate).
+                                bound-errors
+                                (when-not (:dry-run opts)
+                                  (setup/bound-adapter-errors
+                                   (plans-touched-adapters
+                                    plans (:interfaces config))
+                                   adapter-registry))]
+                            (cond
+                              (seq bound-errors)
+                              (let [errs (mapv #(assoc % :group label)
+                                               bound-errors)
+                                    msg (str "Setup group " (pr-str label)
+                                             ": "
+                                             (str/join "; " (map :message errs)))]
+                                (-> (report-planning-error! run-id opts
+                                      {:error (first errs)
+                                       :diagnostics {:errors errs}
+                                       :stderr-msg #(println msg)})
+                                    (assoc :group-label label
+                                           :error (first errs))))
+
+                              (:dry-run opts)
                               (let [exit-code 0]
                                 (when-not (:edn opts)
                                   (console/print-warnings! diagnostics report-opts)
@@ -1288,9 +1705,12 @@
                                   (print-dry-run-hooks! (dry-run-hooks-entries plans)))
                                 (when (:edn opts)
                                   (report-edn/prn-summary
-                                   (dry-run-edn-summary run-id plans diagnostics label filtered-count)))
+                                   (dry-run-edn-summary run-id (:run-seed opts)
+                                                        plans diagnostics label filtered-count)))
                                 {:exit-code exit-code :run-id run-id :status :dry-run
                                  :group-label label :plans plans})
+
+                              :else
                               (-> (execute-and-report-stage
                                    run-id inner-opts bus config features
                                    all-pickles filtered-count plans diagnostics
@@ -1309,6 +1729,83 @@
           (throw t)
           (cond-> body-result
             stop-entry (assoc :teardown-failure stop-entry)))))))
+
+(defn- preflight-group-selection
+  "Count the scenarios one narrowed group would select — PURE planning
+   work (feature resolution + parse + tag disposition; no :start runs).
+   Returns {:selected n :total m :paths [...]}, or nil when the answer is
+   unknowable here (parse error, malformed filter): those surface with
+   full reporting inside the group pipeline; the preflight only answers
+   'would the whole run select zero?' (sl-7c7i — exit 2 is pre-execution
+   exclusive, so the vacuity check must precede every :start)."
+  [opts group]
+  (let [paths (setup/resolve-group-features group)
+        parsed (parse-all-features paths)]
+    (when (= :ok (:status parsed))
+      (let [pickles (:all-pickles parsed)
+            rules (:tag-filter opts)]
+        (cond
+          (nil? rules)
+          {:selected (count pickles) :total (count pickles) :paths paths}
+
+          (tagd/rules-error rules)
+          nil
+
+          :else
+          {:selected (count (:selected (tagd/apply-dispositions rules pickles)))
+           :total (count pickles)
+           :paths paths})))))
+
+(defn- write-invocation-report!
+  "sl-n9c6: in a multi-group run the stable --html path represents the
+   INVOCATION, not whichever group wrote last. Two writes, both here so
+   ordering can't race the group loop:
+
+   1. Half A (Chair-ratified 08-05): each stashed planning-failed group's
+      page lands durably at its own <group-slug>/report.html beside its
+      siblings — the F3 destruction scenario (a later green group's copy
+      destroying the only copy) dies. Deferred to this epilogue because
+      the run dir may not exist at failure time (failed group ran first).
+   2. The invocation TOC at <run-dir>/report.html, byte-copied to the
+      stable path. Rows ride in declaration order; the invocation verdict
+      is the 7c7i suite aggregate. Links are relative and resolve inside
+      the run dir; at the stable copy they degrade to labeled text (the
+      renderAttachment pattern — the anchor text IS the path).
+
+   No run dir at all (every group planning-failed — sl-y3wd creates none):
+   stable TOC only, group pages skipped; verdicts stay visible, which is
+   the honesty that matters."
+  [run-id opts config results exit-code]
+  (when-let [html-path (resolve-html-path opts config)]
+    (let [run-dir (some :results-dir results)
+          failures (some-> (:html-failure-stash opts) deref)
+          failure-pages
+          (when run-dir
+            (into {}
+                  (for [{:keys [group-label group-index run-ctx diagnostics summary]} failures]
+                    (let [group-root (results/ensure-group-dir! run-dir group-label group-index)]
+                      (report-html/write-planning-failure!
+                       (str (fs/path group-root "report.html")) run-ctx diagnostics summary)
+                      [group-index (str (fs/file-name group-root) "/report.html")]))))
+          rows (vec (map-indexed
+                     (fn [idx {:keys [group-label status counts group-root] :as result}]
+                       (cond-> {:label group-label
+                                :exit-code (:exit-code result)
+                                :status status}
+                         counts (assoc :counts counts)
+                         group-root
+                         (assoc :path (str (fs/file-name group-root) "/report.html"))
+                         (and (nil? group-root) (get failure-pages idx))
+                         (assoc :path (get failure-pages idx))))
+                     results))
+          island {:run-ctx (run-start-ctx run-id opts config 0 nil (run-start-timestamp))
+                  :toc {:groups rows}
+                  :summary {:run-id run-id
+                            :exit-code exit-code
+                            :status (verdict/exit-code->status exit-code)}}]
+      (report-html/write-invocation-toc!
+       (when run-dir (str (fs/path run-dir "report.html")))
+       html-path island))))
 
 (defn- run-with-setups!
   "Drive the suite through all setup groups in declared order.
@@ -1352,23 +1849,52 @@
 
       :else
       (let [filtered (setup/filter-setups-by-cli-paths setups (:ok cli-result) setup-base-dir)
-            results  (vec (map-indexed
-                           (fn [idx group]
-                             (run-group! run-id opts config group idx
-                                         bus report-opts allow-pending?))
-                           filtered))
-            exit-code (compute-suite-exit-code (map :exit-code results))]
-        (cond-> {:exit-code exit-code
-                 :run-id    run-id
-                 :status    (case exit-code
-                              0 :passed
-                              2 :planning-failed
-                              :failed)
-                 :groups    results}
-          ;; sl-l9nj: the invocation's run dir at the top level too — all
-          ;; groups share it (per-group results keep their own copy).
-          (some :results-dir results)
-          (assoc :results-dir (some :results-dir results)))))))
+            ;; Selection preflight (sl-7c7i): parse + tag-filter every
+            ;; narrowed group WITHOUT running any :start. Empty selection
+            ;; must be a pre-execution planning error (2 is pre-execution
+            ;; exclusive), and the all-groups-narrowed-away case must not
+            ;; aggregate [] into a silent green. A nil preflight (parse
+            ;; error, malformed filter) means 'unknowable here' — proceed;
+            ;; the group pipeline reports it properly. The re-parse inside
+            ;; run-group! is deterministic, so preflight and run agree.
+            preflights (mapv #(preflight-group-selection opts %) filtered)
+            empty-selection? (and (every? some? preflights)
+                                  (zero? (reduce + 0 (map :selected preflights))))]
+        (if empty-selection?
+          (report-empty-selection! run-id opts
+                                   {:total (reduce + 0 (map :total preflights))
+                                    :searched (vec (mapcat :paths preflights))
+                                    :tag-filter (:tag-filter opts)
+                                    :cli-paths (:paths opts)
+                                    :groups (mapv :label filtered)})
+          (let [multi? (> (count filtered) 1)
+                ;; sl-n9c6: in a multi-group run the stable --html path is
+                ;; the invocation TOC's — per-group stable copies are
+                ;; suppressed and planning-failure pages are stashed for the
+                ;; epilogue. Single remaining group: byte-identical to today.
+                opts (cond-> opts
+                       multi? (assoc :suppress-stable-html-copy true
+                                     :html-failure-stash (atom [])
+                                     ;; sl-xjx0 (Warden W7): one JUnit state
+                                     ;; for the whole invocation.
+                                     :junit-shared-state
+                                     (atom {:scenarios [] :run-ctx nil})))
+                results  (vec (map-indexed
+                               (fn [idx group]
+                                 (run-group! run-id opts config group idx
+                                             bus report-opts allow-pending?))
+                               filtered))
+                exit-code (compute-suite-exit-code (map :exit-code results))]
+            (when (and multi? (not (:dry-run opts)))
+              (write-invocation-report! run-id opts config results exit-code))
+            (cond-> {:exit-code exit-code
+                     :run-id    run-id
+                     :status    (verdict/exit-code->status exit-code)
+                     :groups    results}
+              ;; sl-l9nj: the invocation's run dir at the top level too —
+              ;; all groups share it (per-group results keep their own copy).
+              (some :results-dir results)
+              (assoc :results-dir (some :results-dir results)))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Main Pipeline
@@ -1385,6 +1911,10 @@
      filter (sl-i608); tags are normalized \"@name\" strings
    - :max-parallel - pos-int scenario parallelism bound (sl-q9wp); wins over
      the config mirror [:runner :max-parallel]; absent/1 = sequential
+   - :seed - positive long run seed (sl-08f7); wins over the config mirror
+     [:runner :seed]; absent = generated. Recorded (:run/seed, run-ctx
+     :seed, HTML header, one stderr line) and handed down (hook payloads,
+     step ctx, :start's config arg)
    - :capture - capture policy map {kind #{:never :on-failure :every-step}}
      (sl-3q9r); wins AS A WHOLE VALUE over the config mirror
      [:runner :capture]; absent/{} = no capture
@@ -1418,6 +1948,17 @@
                (nil? (:capture-warn-state opts))
                (assoc :capture-warn-state (atom #{})))
         run-id (str (java.util.UUID/randomUUID))
+        ;; sl-08f7: candidate seed = CLI or generated, resolved BESIDE run-id
+        ;; so even pre-config planning failures record one (core-record
+        ;; family, always present). An INVALID :seed opt never becomes the
+        ;; candidate — its exit-2 record carries a generated one. Config's
+        ;; [:runner :seed] folds in after load-config-stage — before
+        ;; anything consumes the seed. The atom exists so the crash path
+        ;; (outer catch, which only sees THIS let) records the
+        ;; post-resolution value, never a stale candidate.
+        run-seed-state (atom (or (when-not (seed-opt-error opts) (:seed opts))
+                                 (generate-run-seed)))
+        opts (assoc opts :run-seed @run-seed-state)
         bus (events/make-memory-bus)
         report-opts (select-keys opts [:verbose :no-color])]
     (binding [wardrobe/*project-context* project-context]
@@ -1426,10 +1967,11 @@
         ;; teardown marker before anything else happens.
         (announce-prior-teardown! run-id opts)
         (let [[s1 d1] (if-let [opt-err (or (max-parallel-error opts)
-                                           (capture-opt-error opts))]
+                                           (capture-opt-error opts)
+                                           (seed-opt-error opts))]
                         ;; Strict execute!-boundary validation (sl-q9wp,
-                        ;; sl-3q9r): malformed opts ride the planning-error
-                        ;; path, like :tag-filter.
+                        ;; sl-3q9r, sl-08f7): malformed opts ride the
+                        ;; planning-error path, like :tag-filter.
                         [:exit (report-planning-error! run-id opts
                                  {:error opt-err
                                   :diagnostics {:errors [opt-err]}
@@ -1438,6 +1980,26 @@
                         (load-config-stage run-id opts))]
           (if (= :exit s1) d1
             (let [{:keys [config step-paths allow-pending?]} d1
+                  ;; sl-08f7 final seed resolution: CLI > config > candidate.
+                  ;; One seed per invocation — threaded via opts to both
+                  ;; pipelines, so every group summary records the same one.
+                  ;; A malformed config seed inerts with a warning (the
+                  ;; bad-config-value posture from resolve-capture), never
+                  ;; silently becomes the run's seed.
+                  cfg-seed (get-in config [:runner :seed])
+                  cfg-seed (if (and (some? cfg-seed)
+                                    (not (and (int? cfg-seed) (pos? cfg-seed))))
+                             (do (when-not (:edn opts)
+                                   (binding [*out* *err*]
+                                     (println (str "Config warning: ignoring invalid"
+                                                   " [:runner :seed] " (pr-str cfg-seed)
+                                                   " — must be a positive integer"))))
+                                 nil)
+                             cfg-seed)
+                  opts (assoc opts :run-seed
+                              (or (:seed opts) cfg-seed (:run-seed opts)))
+                  _ (reset! run-seed-state (:run-seed opts))
+                  _ (print-run-seed-line! (:run-seed opts))
                   ;; Stage 1b: load this project's intents glossary into
                   ;; intent-state before any features run, so the browser step
                   ;; path resolves nested addresses against the right glossary.
@@ -1473,34 +2035,61 @@
                           (if (= :exit s3)
                             d3
                             (let [{:keys [all-pickles features]} d3
+                                  pre-filter-total (count all-pickles)
                                   [sf df] (tag-filter-stage run-id opts all-pickles)]
                               (if (= :exit sf)
                                 df
-                                (let [{:keys [all-pickles filtered-count]} df
-                                      [s4 d4] (load-steps-stage run-id opts step-paths)]
-                                  (if (= :exit s4)
-                                    d4
-                                    (let [[s5 d5] (compile-suite-stage run-id opts config all-pickles report-opts)]
-                                      (if (= :exit s5)
-                                        d5
-                                        (let [{:keys [plans diagnostics]} d5]
-                                          (if (:dry-run opts)
-                                            (let [exit-code 0]
-                                              (when-not (:edn opts)
-                                                (console/print-warnings! diagnostics report-opts)
-                                                (binding [*out* *err*]
-                                                  (println (dry-run-console-line (count plans) filtered-count)))
-                                                (print-dry-run-hooks! (dry-run-hooks-entries plans)))
-                                              (when (:edn opts)
-                                                (report-edn/prn-summary
-                                                 (dry-run-edn-summary run-id plans diagnostics nil filtered-count)))
-                                              {:exit-code exit-code
-                                               :run-id run-id
-                                               :status :dry-run
-                                               :plans plans})
-                                            (execute-and-report-stage run-id opts bus config features
-                                                                      all-pickles filtered-count plans diagnostics
-                                                                      allow-pending? report-opts)))))))))))))))))))
+                                ;; Empty selection is a planning error
+                                ;; (sl-7c7i, vacuity witness): 0-of-N tag
+                                ;; narrowing and no-scenario feature files
+                                ;; land here; an empty features dir already
+                                ;; exits 2 in discovery. Fires in dry-run
+                                ;; too (Chair-ratified 08-09): the
+                                ;; PLAN-verdict exit 0 requires a nonempty
+                                ;; selection.
+                                (if (empty? (:all-pickles df))
+                                  (report-empty-selection! run-id opts
+                                                           {:total pre-filter-total
+                                                            :searched feature-paths
+                                                            :tag-filter (:tag-filter opts)})
+                                  (let [{:keys [all-pickles filtered-count]} df
+                                        [s4 d4] (load-steps-stage run-id opts step-paths)]
+                                    (if (= :exit s4)
+                                      d4
+                                      (let [[s5 d5] (compile-suite-stage run-id opts config all-pickles report-opts)]
+                                        (if (= :exit s5)
+                                          d5
+                                          (let [{:keys [plans diagnostics]} d5
+                                                ;; sl-sehc: plan-time capture
+                                                ;; capability warn, implicit
+                                                ;; single group (see
+                                                ;; capture-plan-lint-pass!).
+                                                plan-lints (capture-plan-lint-pass!
+                                                            opts
+                                                            (resolve-capture opts config)
+                                                            plans config)
+                                                diagnostics (cond-> diagnostics
+                                                              (seq plan-lints)
+                                                              (update :capture-lints
+                                                                      (fnil into []) plan-lints))]
+                                            (if (:dry-run opts)
+                                              (let [exit-code 0]
+                                                (when-not (:edn opts)
+                                                  (console/print-warnings! diagnostics report-opts)
+                                                  (binding [*out* *err*]
+                                                    (println (dry-run-console-line (count plans) filtered-count)))
+                                                  (print-dry-run-hooks! (dry-run-hooks-entries plans)))
+                                                (when (:edn opts)
+                                                  (report-edn/prn-summary
+                                                   (dry-run-edn-summary run-id (:run-seed opts)
+                                                                        plans diagnostics nil filtered-count)))
+                                                {:exit-code exit-code
+                                                 :run-id run-id
+                                                 :status :dry-run
+                                                 :plans plans})
+                                              (execute-and-report-stage run-id opts bus config features
+                                                                        all-pickles filtered-count plans diagnostics
+                                                                        allow-pending? report-opts))))))))))))))))))))
         ;; Catch any uncaught exceptions → exit 3
         (catch Throwable t
           (let [exit-code 3
@@ -1509,7 +2098,9 @@
                        :exception-class (.getName (class t))}]
             (when (:edn opts)
               (report-edn/prn-summary
-               (report-edn/build-summary run-id exit-code nil {:error error})))
+               (report-edn/build-summary run-id exit-code nil
+                                         {:error error
+                                          :seed @run-seed-state})))
             (when-not (:edn opts)
               (binding [*out* *err*]
                 (println "Runner crash:" (ex-message t))

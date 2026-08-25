@@ -250,7 +250,8 @@
              last-receive-ts, and rebinding {code} is last-write-wins")))))
 
 (deftest test-receive-times-out-when-no-match
-  (testing ":receive throws :sms/receive-timeout when no matching message arrives"
+  (testing ":receive throws the kernel's :step/poll-timeout when no matching
+            message arrives (sl-99u2), with the receive context aboard"
     (let [m   (mock/make-mock-sms)
           ctx (ctx-with-sms m :alice)
           step (find-sms-stepdef :receive :default)]
@@ -259,8 +260,13 @@
         (let [thrown (try (invoke step ctx "alice" "+15558888888" "anything")
                           nil
                           (catch Exception e (ex-data e)))]
-          (is (= :sms/receive-timeout (:type thrown)))
-          (is (= 200 (:timeout-ms thrown))))))))
+          (is (= :step/poll-timeout (:type thrown)))
+          (is (= 200 (:deadline-ms thrown)))
+          (is (= :override (:deadline-source thrown)) "a bound var reads as override")
+          (is (= 50 (:interval-ms thrown)))
+          (is (>= (:elapsed-ms thrown) 200))
+          (is (= "+15558888888" (:to-phone thrown))
+              "the receive inputs still ride the record"))))))
 
 ;; -----------------------------------------------------------------------------
 ;; :receive — explicit-baseline frames

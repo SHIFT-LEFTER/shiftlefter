@@ -118,7 +118,11 @@ One forward note for custom steps you do write: a step definition may read
 and write ctx freely today (that's what makes the fixture escape-hatch
 work), but direct ctx writes are slated to be fenced behind a declared
 calling convention in the 0.6 contracts arc — prefer the documented
-surfaces (capabilities, `bindings/capture!`) where one exists.
+surfaces (capabilities, `bindings/capture!`) where one exists. Ctx
+*metadata* is not yours at all: the framework restamps `(meta ctx)` with
+the `:step/*` keys before every step, so metadata you attach to a
+returned ctx does not survive to the next one (see the
+[control loop](architecture/control-loop.md) § ctx contract).
 
 If you're reaching for `defstep` to do an ordinary browser or SMS action, step back —
 there's almost certainly a built-in step or a macro that fits. When you do need it,
@@ -137,3 +141,68 @@ no Clojure toolchain is required (the jar loads `.clj` files directly):
 
 The bundled libraries available to step definitions (JSON, HTTP, filesystem, …) are
 listed in [INSTALL-TIERS.md](INSTALL-TIERS.md#tier-b-write-custom-steps-java-only).
+
+## Timing in a custom step: call the kernel, don't reimplement the doctrine
+
+Built-in steps follow one timing doctrine, and it has three clauses:
+
+- **Oracles retry patiently.** A step that *observes* (`should see`, `waits for`,
+  `receive`) polls until the condition holds or a deadline elapses.
+- **Mutations never retry.** A step that *acts* (click, type, send) runs exactly
+  once — mutations are not idempotent, and a retried click is a second click.
+- **Negation never waits.** `should not see` checks once, now. Waiting for
+  something to *disappear* is a different operation: an oracle over a negated
+  predicate (`waits until gone` = poll until "not visible" is true) — ask for
+  that explicitly.
+
+A custom step that hand-rolls a `Thread/sleep` loop silently diverges from all
+three. Instead, call the doctrine — `poll-until` in `shiftlefter.step` (the
+namespace your steps already require for ctx accessors) is the oracle kernel:
+
+```clojure
+(ns my.steps
+  (:require [shiftlefter.stepengine.registry :refer [defstep]]
+            [shiftlefter.step :as step]))
+
+;; an oracle: poll until the exported report file appears
+(defstep #"^the nightly report has landed$"
+  [ctx]
+  (step/poll-until ctx #(.exists (java.io.File. "out/report.csv")))
+  ctx)
+```
+
+`poll-until` polls the predicate until it returns truthy, at the framework's
+resolved interval and deadline. On timeout it throws a structured, legible
+failure through normal step reporting: elapsed time, the deadline, **where the
+deadline came from**, and the last observed value. When your predicate observes
+a value (a count, a payload), pass `:until` so the timeout record can carry the
+observation:
+
+```clojure
+(step/poll-until ctx #(count (fetch-rows)) {:until #(<= 5 %)})
+```
+
+Never wrap a mutation in `poll-until`, and never poll a bare negation — those
+clauses are prohibitions, not missing helpers.
+
+### Where the deadline comes from
+
+Deadlines and intervals resolve down a ladder — first rung that answers, wins:
+
+1. explicit opts to `poll-until` (or a rebound builtin dynamic var)
+2. `:timing` on the interface **instance** entry in `shiftlefter.edn`
+3. `:timing` on the entry named by the instance's **type**
+4. the top-level `:timing` map — `{:timing {:deadline-ms 30000 :interval-ms 500}}`
+5. defaults (bare `poll-until`: 30s / 500ms; built-in browser verification:
+   3s / 100ms; `:wait` frames: 5s / 100ms; SMS receive: 30s / 500ms)
+
+Built-in steps ride the same ladder, so one `:timing` entry in config slows or
+tightens the whole suite coherently — and every timeout report names the rung
+that decided it. `(step/timing ctx)` returns the resolved budget if a step needs
+to read it without polling.
+
+One forward note, same shape as the ctx-writes note above: declared operation
+classes (a `defstep` stating "I am an oracle / a mutation / a negation" and the
+framework wrapping it accordingly) are slated for the 0.6 contracts arc. Until
+then the doctrine is yours to follow — `poll-until` makes following it the
+shortest path.

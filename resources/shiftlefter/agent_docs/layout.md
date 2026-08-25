@@ -6,8 +6,8 @@ door:
 
 ```text
 <project>/
-  AGENTS.md              breadcrumb (yours, optional)
-  .shiftlefter/          framework operational state — gitignore it
+  AGENTS.md              agent on-ramp stanza (written by sl init, marker-guarded)
+  .shiftlefter/          framework operational state — self-ignoring under sl init
   sl/                    the ShiftLefter project (yours, committed)
     sl, shiftlefter-*.jar  launcher + jar (installer convention)
     shiftlefter.edn      the ONLY discovered config location
@@ -55,19 +55,34 @@ DSL and never will be: `:start` is arbitrary user Clojure, a throw means the
 group is skipped honestly and other groups run, and cleanup of half-started
 state is yours. Keep `setup.clj`'s top level pure (it is load-file'd even on
 `--dry-run`; side effects belong inside `:start`). Dry-run starts nothing —
-but binds against the default adapter registry, so custom-registry projects
-can bind differently in preview. The warm daemon re-load-files `setup.clj`
+and binds honestly: a group declares its custom adapters as pure data
+(`:adapters [{:name .. :provides [..]}]`, the delta vs the default registry);
+the preview binds against the declarations and the registry `:start` returns
+is verified to match them (mismatch = planning error
+`:setup/registry-mismatch`). An undeclared `:start`-returned registry still
+works this release with a preview-blind warning (deprecated shape). The warm
+daemon re-load-files `setup.clj`
 per dispatch — the framework re-derives everything and sees your file fresh;
 state your code establishes outside the file (spawned threads, system
 properties, open connections) is yours to manage.
 
 Custom reporting today = consume the machine record (`--edn` stdout stream,
-or the full record in `report.html`); live in-run reaction = hooks; bus
-observers have no user path. The data contracts (EDN summary shape, bus
+or the full record in `report.html`) — contract and runnable recipe in
+`docs/REPORTS.md`; live in-run reaction = hooks; bus observers have no user
+path. The data contracts (EDN summary shape, bus
 event envelope) are locked — code written against the data survives any
 future attachment mechanism.
 
 ## What the framework writes
+
+The framework writes only into places it owns (below); files the user owns
+are never written unprompted — changes arrive as proposals (SIEVE proposes,
+never applies): proposed, never written without an explicit yes. Two
+named, marker-guarded exceptions, both on explicit commands: `sl init`
+writes the agent on-ramp stanza into `AGENTS.md` (create-or-append between
+markers; an existing stanza is never edited — on a preexisting project the
+installer only prints it for you to paste), and `sl costume init` appends
+the protective wardrobe line to `.gitignore`.
 
 - `sl/results/<STAMP>/` per invocation: `report.html`, per-scenario
   `attachments/<slug>/`, per-group subdirs under `setup.clj`. Self-ignoring
@@ -77,9 +92,14 @@ future attachment mechanism.
 - `.shiftlefter/` at the project root: `wardrobe/<name>/` (costumes — fixed
   location, no config key), `daemon.edn`, `daemon.log`, `lib-sig`,
   `spawn.lock`, `dirty-teardown.edn` (failed `:stop` marker, announced next
-  run), `sieve/`. **Add `.shiftlefter/` to your `.gitignore`** — the
-  framework only self-ignores `results/` and (on `sl costume init`)
-  `wardrobe/`.
+  run), `sieve/`. Self-ignoring: `sl init` writes `.shiftlefter/.gitignore`
+  (`*`) at scaffold time, so a scaffolded project never commits it. A
+  project that never ran `sl init` adds `.shiftlefter/` to its own
+  `.gitignore` — the framework otherwise self-ignores only `results/`,
+  (on `sl costume init`) `wardrobe/`, and the installed binaries: the
+  installer writes an `sl/.gitignore` (if absent) covering the jar, the
+  `.jsa` CDS archive, and `lib/`, so authored files in `sl/` stay
+  committable.
 
 ## Environment variables
 

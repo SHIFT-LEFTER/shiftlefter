@@ -8,7 +8,7 @@
    `shiftlefter.stepengine.exec` (the facade) which re-exports
    `invoke-step` and `execute-scenario` from this ns."
   (:require [shiftlefter.capabilities.ctx :as cap]
-            [shiftlefter.runner.events :as events]
+            [shiftlefter.events :as events]
             [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.stepengine.exec.capture :as capture]
             [shiftlefter.stepengine.exec.provisioning :as prov]))
@@ -60,16 +60,23 @@
       {:status :failed
        :scenario scenario-ctx
        :error err}
-      (invoke-step* step-fn ctx-aware? (:ok normalized) scenario-ctx step))))
+      (invoke-step* step-fn ctx-aware? (:ok normalized) scenario-ctx step
+                    (get-in binding [:svo :interface])))))
 
 (defn- invoke-step*
-  "The dispatch/apply half of invoke-step, after capture normalization."
-  [step-fn ctx-aware? captures scenario-ctx step]
+  "The dispatch/apply half of invoke-step, after capture normalization.
+   `svo-interface` is the bound SVO's resolved interface INSTANCE (sl-s2oa),
+   stamped into ctx metadata as :step/interface so stepdef bodies can target
+   the instance's capability; nil (no svo — REPL free mode, legacy stepdefs)
+   leaves the key absent and accessors fall back to the type literal."
+  [step-fn ctx-aware? captures scenario-ctx step svo-interface]
   (let [;; Attach step metadata to ctx (not in ctx map, in metadata)
         ctx-with-meta (with-meta (or scenario-ctx {})
-                        {:step/arguments (:step/arguments step)
-                         :step/text (:step/text step)
-                         :step/keyword (:step/keyword step)})
+                        (cond-> {:step/arguments (:step/arguments step)
+                                 :step/text (:step/text step)
+                                 :step/keyword (:step/keyword step)}
+                          svo-interface
+                          (assoc :step/interface svo-interface)))
         ;; ctx-first: [ctx-with-meta & captures]
         args (if ctx-aware?
                (into [ctx-with-meta] captures)
@@ -235,7 +242,9 @@
         ;; with the already-live capability — thread it so cleanup can
         ;; close the impl (sl-uu7x). Capture does NOT fire on this path
         ;; (sl-3q9r): the failure is provisioning infrastructure, not a
-        ;; step outcome — there is no settled instant to witness.
+        ;; step outcome — there is no settled instant to witness. The step
+        ;; stays :failed here; finalize-scenario-results flips the SCENARIO
+        ;; to :error off the provisioning-family error type (sl-7c7i).
         {:step-result (prov/make-step-result bound-step :failed scenario-ctx
                                              (:error provision-result))
          :scenario-ctx (or (:ctx provision-result) scenario-ctx)
@@ -286,6 +295,13 @@
 (defn- finalize-scenario-results
   "Roll up wrapper statuses and compute final scenario status.
 
+   Provisioning flip (sl-7c7i, §937 row 3): a step bearing a
+   capability-provisioning error makes the scenario :error, not :failed —
+   broken harness is never a broken app. The step keeps :failed (steps
+   never carry :error; rollup-status deliberately has no :error arm) and
+   the scenario-level :error map carries the attribution, like the hook
+   and capture paths.
+
    D4 (sl-3q9r): capture-infrastructure failures flip an otherwise-GREEN
    scenario to :error, capture-attributed — a green scenario whose
    promised evidence silently failed is green with missing evidence.
@@ -295,11 +311,17 @@
   (let [rolled-steps (rollup-wrapper-statuses (:steps raw-results))
         non-wrapper-statuses (map :status (remove #(wrapper-step? %) rolled-steps))
         final-status (rollup-status non-wrapper-statuses)
-        capture-failures (:capture-failures raw-results)]
+        capture-failures (:capture-failures raw-results)
+        prov-error (some #(let [e (:error %)]
+                            (when (prov/provisioning-error? e) e))
+                         (remove wrapper-step? rolled-steps))]
     (cond-> {:status final-status
              :plan plan
              :steps rolled-steps
              :scenario-ctx (:scenario-ctx raw-results)}
+      prov-error
+      (-> (assoc :status :error)
+          (assoc :error prov-error))
       (and (seq capture-failures) (= :passed final-status))
       (-> (assoc :status :error)
           (assoc :error (capture/capture-error capture-failures))))))
@@ -319,10 +341,12 @@
        runner threads `:eager` from `[:runner :provisioning]` config.
 
    Returns:
-   - {:status :passed|:failed|:pending|:skipped
+   - {:status :passed|:failed|:pending|:skipped|:error
       :plan plan
       :steps [{:step ... :status ... :error ...} ...]
       :scenario-ctx <final-ctx>}
+   (:error — infrastructure failure family: capability provisioning
+   failed, eager or lazy; carries a scenario-level :error map.)
 
    Semantics:
    - Steps execute in order, threading scenario-ctx
@@ -353,6 +377,9 @@
            ;; survives parallel-group delta merges.
            initial-ctx (cond-> initial-ctx
                          (seq interfaces) (cap/assoc-run-interfaces interfaces)
+                         ;; Global :timing rung (sl-99u2) — same stash
+                         ;; pattern; step/timing resolves against it.
+                         (seq (:timing opts)) (cap/assoc-run-timing (:timing opts))
                          ;; Reserve the data plane (sl-yh7). `or` — Before
                          ;; hooks may already have mirrored contributions in.
                          :always (update bindings/bindings-key #(or % {})))

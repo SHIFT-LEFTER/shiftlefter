@@ -4,7 +4,7 @@
 
 An agent can write you a passing browser test in one shot today. That's not the hard part anymore. The hard part is the **second** shot, and the tenth: each regeneration re-derives your app from scratch — its own selectors, its own names, its own idea of who "the user" is — and the suite drifts faster the more agents (and models) touch it. ShiftLefter gives that loop something stable to stand on: a typed vocabulary you define once, shared by every agent and every human on the team, and validated before anything runs. ([The full problem statement and fit check →](docs/FIT.md))
 
-## Status: v0.5.4
+## Status: v0.5.5
 
 ShiftLefter is an early, openly-scoped foundation for driving real software behavior from Gherkin — multiple users, multiple interfaces, all checked before anything runs. The core — driving a browser with multiple independent actors over a typed glossary you control — is solid and meant to be built on. The surrounding test-suite machinery and the traceability graph are on the way.
 
@@ -16,7 +16,7 @@ ShiftLefter runs in two modes. **Vanilla** is a plain Gherkin runner — parse, 
 
 - **Typed behavioral vocabulary** — steps resolve to a Subject–Verb–Object triple and validate at bind time, before any expensive E2E run starts.
 - **User-controlled project vocabulary** — your glossary defines which subjects, verbs, and intents are valid; unknown ones are caught with Levenshtein "did you mean?" suggestions.
-- **Interface-level steps, not page scripts** — built-in browser steps drive real per-subject sessions; intent references (`Login.submit`) replace brittle selectors.
+- **Interface-level steps, not page scripts** — built-in browser steps drive real per-subject sessions; intent references (`Login.submit`) replace brittle selectors. (Raw EDN locators stay available as a deliberate fallback — a discipline, not an enforced ban.)
 - **Plan and diagnose before executing** — dry-run binding, suite-load lint, and structured diagnostics surface problems without launching a browser.
 - **Many personas, many interfaces** — multiple instances of a subject type run in separate sessions; web and SMS interfaces co-exist in one feature.
 - **Agent-first authoring** — durable project artifacts (glossary, costumes, config) instead of one-shot generated scripts; a coding agent orients via `sl orient` and `sl agent-doc`.
@@ -95,11 +95,12 @@ This is all you need to run features, format files, start the REPL (`sl repl`), 
 ShiftLefter ships an agent surface a coding agent can't discover by grepping —
 built-in vocabulary (`sl agent-doc builtins`) and project validation (`sl orient`).
 You can't run a command to discover the command exists (the bootstrap paradox), so
-the entry point has to be advertised *outside* the tool. The installer prints a
-short breadcrumb stanza at the end of install; **paste it into your agent file**
+the entry point has to be advertised *outside* the tool. On a fresh install the
+installer runs `sl init`, which writes the breadcrumb stanza into `AGENTS.md`
+for you (marker-guarded create-or-append). On a project that already has `sl/`,
+the installer prints the stanza instead — **paste it into your agent file**
 (`AGENTS.md` / `CLAUDE.md` / `.cursor/rules`) or startup prompt. The same stanza
-ships as a flat `agents-breadcrumb.md` in the release artifact. (Once `sl init`
-exists it will place the breadcrumb for you.)
+ships as a flat `agents-breadcrumb.md` in the release artifact.
 
 ### Writing Custom Step Definitions
 
@@ -180,7 +181,7 @@ sl run -v
 | `--skip-tags TAGS` | — | Skip scenarios carrying any of these tags (same syntax; exclude wins over `--tags`) |
 | `--max-parallel N` | `:runner {:max-parallel N}` | Run up to N scenarios concurrently (default 1 = sequential). Results and console output are identical to a sequential run. `@serial`, costume-wearing, and shared-interface scenarios run alone. |
 | `--edn` | — | Output results as EDN to stdout |
-| `--junit-xml PATH` | `:runner {:report {:junit-xml "..."}}` | Write a CI-ingestible JUnit XML report (alongside console/EDN; flag wins over config). A planning error (exit 2) writes **no** file — gate CI on the exit code. See [docs/CI.md](docs/CI.md) for worked pipelines and [ERRATA E009](ERRATA.md) for format details. |
+| `--junit-xml PATH` | `:runner {:report {:junit-xml "..."}}` | Write a CI-ingestible JUnit XML report (alongside console/EDN; flag wins over config). A planning error (exit 2) writes **no** file in a single-group run; in a multi-group run the file covers only the groups that ran — gate CI on the exit code, not the report. See [docs/CI.md](docs/CI.md) for worked pipelines and [ERRATA E009](ERRATA.md) for format details. |
 | `--html PATH` | `:runner {:report {:html "..."}}` | Write a self-contained HTML run report (one file, works offline via double-click; flag wins over config). Embeds the full run data as a readable EDN island alongside the rendered view. |
 | `--capture k=v,…` | `:runner {:capture {...}}` | Capture artifacts into the run's results directory (e.g. `screenshot=on-failure,console=every-step`). Kinds: `screenshot`, `console`, `page-source` (browser). Policies: `never` (default), `on-failure` (the failing step's instant, all live browsers), `every-step` (film strip following the acting subject). Flag wins over config as a whole value. Capture failures on a green scenario flip it to `:error`, capture-attributed — evidence loss is never silent. |
 | `-v, --verbose` | — | Show each step as it executes |
@@ -231,6 +232,27 @@ sl costume destroy finance
 
 A costume is a named, reusable bundle of authenticated state (a Chrome profile)
 that an actor *wears*. See [docs/COSTUMES.md](docs/COSTUMES.md).
+
+### Machine pre-flight (`sl doctor`)
+
+```bash
+# Probe the machine: binaries, version lockstep, machine config, daemon, strays
+sl doctor
+
+# What doctor does and does not check (the probe registry is the whole list)
+sl doctor --list
+
+# Machine-readable report
+sl doctor --edn
+```
+
+`sl doctor` validates the *machine*: chromedriver↔Chrome version lockstep,
+`~/.shiftlefter/config.edn` validity, extra-dependency adapters present when
+configured, daemon health, orphaned chromedriver processes, `sl/lib` jar
+sanity. Project truth is `sl orient`'s lane — the two don't overlap. Every
+probe exists because its failure mode has actually bitten, and `--list`
+prints exactly what is and isn't checked. When ShiftLefter misbehaves on a
+machine, `sl doctor` and paste the output is the first move.
 
 ### Agent on-ramp commands
 
@@ -418,7 +440,7 @@ mkdir -p sl && cp shiftlefter.edn.example sl/shiftlefter.edn
  :runner {:step-paths ["steps/"]      ;; Where to find step definitions (sl/steps/)
           :features ["features/"]     ;; Feature corpus for bare `sl run` (sl/features/)
           :allow-pending? false       ;; true = pending steps don't fail the run
-          ;; :capture {:screenshot :on-failure   ;; artifacts into sl/results/<run>/
+          ;; :capture {:screenshot :on-failure   ;; artifacts into sl/results/<stamp>/
           ;;           :console :on-failure}     ;; policies: never|on-failure|every-step
           }}
 ```
@@ -680,10 +702,12 @@ isn't), plus a task-based index of every guide. Highlights:
 
 ```
 src/                           # Framework source code
-resources/shiftlefter/         # Runtime data and templates
+resources/shiftlefter/         # Runtime data
 ├── gherkin/i18n.json         # Dialect definitions (70+ languages)
 ├── glossaries/               # Default glossary files
-└── templates/shiftlefter.edn # Config template for `sl init` (future)
+├── agent_docs/               # `sl agent-doc` topic sources
+├── init/                     # `sl init` scaffold bodies
+└── onramp/                   # Agent on-ramp breadcrumb stanza
 resources/logback.xml          # Default logging config for release jars
 ```
 
@@ -728,10 +752,25 @@ CLI commands return consistent exit codes for scripting and CI integration.
 ### `sl run`
 | Code | Meaning |
 |------|---------|
-| 0 | All scenarios passed (or pending allowed via config) |
-| 1 | One or more scenarios failed or errored (a lifecycle hook threw), or pending steps when not allowed |
-| 2 | Planning failure (undefined steps, parse errors, config errors, no features found) |
+| 0 | Existential pass: at least one scenario was selected, every selected scenario ran to a tolerated outcome, and none failed or errored. "Tolerated" covers exactly one documented exception — pending steps under `:allow-pending?` (the counts still confess `0 passed / N pending`). |
+| 1 | One or more scenarios failed (a step assertion or step exception — valid tests, app wrong), or pending steps when not allowed |
+| 2 | Planning failure — invalid before execution: undefined steps, parse errors, config errors, no features found, bad flags/arguments, and **empty selection** (a tag filter matching 0 of N, feature files with no scenarios, CLI paths narrowing every group away). Nothing executed. |
 | 3 | Runner crash (unexpected exception) |
+| 4 | Run degraded: one or more scenarios hit an infrastructure failure (`:error` — a lifecycle hook threw, capability provisioning failed, capture infrastructure failed, or the harness crashed mid-scenario). The harness broke, so the run proves nothing about the app — distinct from 1 by design. |
+
+Precedence: 3 anywhere; 2 is pre-execution exclusive; during execution worst
+wins, 4 over 1 over 0. Across `setup.clj` groups the suite aggregates
+worst-wins: 2 > 4 > 1 > 0. A dry run's exit 0 is a *plan* verdict (the
+selection binds) and requires a nonempty selection — an empty selection
+exits 2 in dry runs too, and its record carries the counts and what was
+searched so a CI wrapper can make its own call upstream.
+
+Today an infrastructure failure that surfaces inside a step — a connection
+refused mid-run, say — is indistinguishable from the app being wrong and
+reports as an ordinary scenario failure (exit 1); only the harness's own
+`:error` family reaches 4. A future release may classify such step-level
+infrastructure failures into the degraded verdict — one more reason to gate
+on nonzero, not on a specific value.
 
 ### `sl fmt --check`
 | Code | Meaning |
@@ -765,6 +804,7 @@ CLI commands return consistent exit codes for scripting and CI integration.
 |------|---------|
 | 0 | Minimization succeeded (signatures match) |
 | 1 | Minimization failed or input doesn't produce a failure |
+| 2 | Usage error (no path given) |
 
 ### `sl verify`
 | Code | Meaning |
@@ -778,6 +818,17 @@ CLI commands return consistent exit codes for scripting and CI integration.
 **With `--ci`:** Adds kaocha tests, compliance suite, fuzz smoke
 
 **With `--fuzzed`:** Checks fuzz artifact integrity (opt-in, can be slow with large artifact sets)
+
+### `sl doctor`
+
+| Code | Meaning |
+|------|---------|
+| 0 | Healthy — no probe failed (skipped probes don't fail) |
+| 1 | Issues found — at least one probe failed |
+| 2 | Un-runnable invocation (bad flags) |
+
+Doctor's codes are a *machine* verdict, deliberately outside `sl run`'s
+verdict table — doctor never executes scenarios. `--list` always exits 0.
 
 ---
 

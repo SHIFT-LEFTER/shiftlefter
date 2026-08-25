@@ -1,6 +1,7 @@
 ;; ShiftLefter default verb glossary for :sms interface type.
-;; Projects can extend or override via :glossaries config — same merge
-;; semantics as verbs-web.edn (see svo/glossary.clj).
+;; Project verb glossaries EXTEND this set; a same-named project verb
+;; replaces the builtin entry wholesale — same merge semantics as
+;; verbs-web.edn (see svo/glossary.clj; verified sl-0gfc).
 ;;
 ;; Each verb declares its valence as a closed set of frames. A frame is
 ;; one valid argument shape, with :args (slot names beyond S-V-O), a

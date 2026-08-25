@@ -8,13 +8,16 @@
    [shiftlefter.agent-doc :as agent-doc]
    [shiftlefter.costume :as costume]
    [shiftlefter.costume.wardrobe :as wardrobe]
+   [shiftlefter.doctor :as doctor]
    [shiftlefter.gherkin.api :as api]
    [shiftlefter.gherkin.ddmin :as ddmin]
    [shiftlefter.gherkin.diagnostics :as diag]
    [shiftlefter.gherkin.fuzz :as fuzz]
    [shiftlefter.gherkin.io :as io]
    [shiftlefter.gherkin.verify :as verify]
+   [shiftlefter.init :as init]
    [shiftlefter.orient :as orient]
+   [shiftlefter.resolution :as resolution]
    [shiftlefter.project-context :as project-context]
    [shiftlefter.runner.config :as runner-config]
    [shiftlefter.runner.core :as runner]
@@ -68,7 +71,7 @@
     :parse-fn runner-config/parse-capture-spec
     :validate [runner-config/valid-capture-spec?
                "must be kind=policy pairs with policy one of never|on-failure|every-step"]]
-   ["-s" "--seed SEED" "Random seed for fuzz"
+   ["-s" "--seed SEED" "Random seed (run: the run seed — recorded and handed down, must be positive; fuzz: trial seed)"
     :parse-fn #(Long/parseLong %)]
    ["-t" "--trials N" "Number of fuzz trials"
     :parse-fn #(Integer/parseInt %)]
@@ -103,7 +106,8 @@
    [nil "--nrepl" "Start nREPL server (for IDE integration)"]
    [nil "--port PORT" "nREPL port (default: auto-select)"
     :parse-fn #(Integer/parseInt %)]
-   [nil "--chrome-path PATH" "Explicit Chrome binary path (sl costume init)"]
+   [nil "--chrome-path PATH" "Explicit Chrome binary path (sl costume init/relaunch)"]
+   [nil "--force" "Destroy a costume even if its browser is live (sl costume destroy)"]
    ;; sl-rju: low-profile, deliberately absent from --help. SL_NO_DAEMON is the
    ;; "don't daemon at all" escape, so this never needs a disable sentinel.
    [nil "--idle-timeout-min N" "Daemon idle timeout in minutes (default: 60)"
@@ -150,6 +154,7 @@
                                    (:junit-xml opts) (assoc :junit-xml (:junit-xml opts))
                                    (:html opts) (assoc :html (:html opts))
                                    (:max-parallel opts) (assoc :max-parallel (:max-parallel opts))
+                                   (:seed opts) (assoc :seed (:seed opts))
                                    (:capture opts) (assoc :capture (:capture opts))
                                    (tag-filter-opt opts) (assoc :tag-filter (tag-filter-opt opts))
                                    (:config-path opts) (assoc :config-path (:config-path opts))))]
@@ -707,8 +712,9 @@
 
 (def ^:private costume-usage
   (str "Usage: sl costume init <name> [--chrome-path PATH]\n"
+       "       sl costume relaunch <name> [--chrome-path PATH]\n"
        "       sl costume list\n"
-       "       sl costume destroy <name>"))
+       "       sl costume destroy <name> [--force]"))
 
 (defn- costume-init-cmd
   [name-str {:keys [chrome-path]}]
@@ -722,7 +728,25 @@
                            (name costume) (:port result) (:pid result)))
           (println (format "  wardrobe: %s" (str (fs/absolutize (wardrobe/costume-dir costume)))))
           0)))
-    (do (println "Usage: sl costume init <name> [--chrome-path PATH]") 1)))
+    (do (println "Usage: sl costume init <name> [--chrome-path PATH]") 2)))
+
+(defn- costume-relaunch-cmd
+  "Launch-only reopen of an existing costume for a human re-login
+   (sl-2de7): browser opens with no WebDriver session attached; a later
+   connect (or `sl run` via :wears) attaches."
+  [name-str {:keys [chrome-path]}]
+  (if name-str
+    (let [opts   (cond-> {} chrome-path (assoc :chrome-path chrome-path))
+          result (costume/relaunch-costume! (keyword name-str) opts)]
+      (if (:error result)
+        (do (print-costume-error! result) 1)
+        (do (println (if (= :already-running (:status result))
+                       (format "Costume :%s already running on port %d (pid %d) -- log in in that window."
+                               name-str (:port result) (:pid result))
+                       (format "Costume :%s relaunched on port %d (pid %d) -- log in, then connect/run attaches."
+                               name-str (:port result) (:pid result))))
+            0)))
+    (do (println "Usage: sl costume relaunch <name> [--chrome-path PATH]") 2)))
 
 (defn- costume-list-cmd
   []
@@ -746,17 +770,25 @@
     0))
 
 (defn- costume-destroy-cmd
-  [name-str]
+  [name-str {:keys [force]}]
   (if name-str
-    (let [result (costume/destroy-costume! (keyword name-str))]
+    (let [result (costume/destroy-costume! (keyword name-str)
+                                           {:force (boolean force)})]
       (if (:error result)
-        (do (print-costume-error! result) 1)
+        (do (print-costume-error! result)
+            ;; Refusals are overridable — surface the exact rerun (sl-7q7w).
+            (when (#{:costume/browser-live :costume/meta-unreadable}
+                   (get-in result [:error :type]))
+              (binding [*out* *err*]
+                (println (format "  rerun with: sl costume destroy %s --force" name-str))))
+            1)
         (do (println (format "Costume :%s destroyed." name-str)) 0)))
-    (do (println "Usage: sl costume destroy <name>") 1)))
+    (do (println "Usage: sl costume destroy <name> [--force]") 2)))
 
 (defn costume-cmd
   "Manage costumes (sl-rnm). Dispatches on the subcommand (second arguments).
-   Returns exit code 0 on success, 1 on error or usage."
+   Returns exit code 0 on success, 1 on error, 2 on usage (un-runnable
+   invocation, sl-7c7i)."
   ([arguments options]
    (costume-cmd arguments options (project-context/resolve
                                    (cond-> {}
@@ -765,10 +797,11 @@
    (binding [wardrobe/*project-context* project-context]
      (let [name-str (nth arguments 2 nil)]
        (case (second arguments)
-         "init"    (costume-init-cmd name-str options)
-         "list"    (costume-list-cmd)
-         "destroy" (costume-destroy-cmd name-str)
-         (do (println costume-usage) 1))))))
+         "init"     (costume-init-cmd name-str options)
+         "relaunch" (costume-relaunch-cmd name-str options)
+         "list"     (costume-list-cmd)
+         "destroy"  (costume-destroy-cmd name-str options)
+         (do (println costume-usage) 2))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Daemon Command (sl-rju)
@@ -800,7 +833,7 @@
                    (:idle-timeout-min options) (assoc :idle-timeout-min (:idle-timeout-min options))))))
     (do (binding [*out* *err*]
           (println "Usage: sl daemon serve [--idle-timeout-min N]"))
-        1))))
+        2))))
 
 ;; -----------------------------------------------------------------------------
 ;; REPL Command (WI-033.017)
@@ -852,9 +885,10 @@
                (refer-clojure))))))
 
 (defn dispatch
-  "Run one CLI command and RETURN its exit code (0/1/2/3) without touching the
-   JVM. Returns the sentinel `:repl` for the repl branch, which blocks and has
-   no exit code — `-main` handles that.
+  "Run one CLI command and RETURN its exit code (0/1/2/3/4 — the verdict
+   contract, shiftlefter.runner.verdict) without touching the JVM. Returns
+   the sentinel `:repl` for the repl branch, which blocks and has no exit
+   code — `-main` handles that.
 
    This is the single command-dispatch entry point shared by the cold CLI
    (`-main`) and the warm daemon (sl-rju). No branch here calls `System/exit`;
@@ -881,17 +915,21 @@
                            (cond-> {}
                              (:config-path options) (assoc :config-path (:config-path options)))))]
     (cond
+      ;; Arg-parse errors are un-runnable invocations → exit 2, like the
+      ;; unknown-command branch (sl-7c7i, Chair-ratified 08-09: exit 1 is
+      ;; reserved for 'a scenario failed'; a typo'd flag never executed
+      ;; anything).
       (seq errors)
       (do
         (binding [*out* *err*]
           (doseq [e errors] (println e))
           (println "\nUse --help for usage."))
-        1)
+        2)
 
       (:help options)
       (do
         (println "Usage:
-  sl run <path> [<path2> ...] [--step-paths p1,p2] [-c FILE|--config FILE] [--tags t1,t2] [--skip-tags t1,t2] [--max-parallel N] [--capture k=v,...] [--dry-run] [--edn] [--junit-xml PATH] [--html PATH] [-v]
+  sl run <path> [<path2> ...] [--step-paths p1,p2] [-c FILE|--config FILE] [--tags t1,t2] [--skip-tags t1,t2] [--max-parallel N] [--seed N] [--capture k=v,...] [--dry-run] [--edn] [--junit-xml PATH] [--html PATH] [-v]
         (--junit-xml writes a CI-ingestible report; no file on planning error — see ERRATA E009)
         (--html writes a self-contained HTML run report; open it in any browser, no server needed)
         (--max-parallel N runs up to N scenarios concurrently; @serial-tagged and auto-serialized scenarios run alone)
@@ -903,13 +941,18 @@
   sl agent-doc [topic]                  (print packaged agent doctrine)
   sl agent-doc --list                   (list packaged agent doctrine topics)
   sl orient [--edn] [-c FILE]           (project orientation; --edn dumps the full projection)
+  sl glossary [subjects|verbs|objects|duplicates] [path ...] [--tags T] [--skip-tags T] [--edn] [-c FILE]
+                                        (resolved vocabulary: provenance + corpus usage markers; duplicates = locator collisions)
+  sl explain <name|'{locator}'> [path ...] [--tags T] [--edn] [-c FILE]
+                                        (resolve one name: kind, def site, frames, bindings incl. missing, corpus usage; a {..} arg reverse-looks-up its owning intents)
   sl gherkin fuzz [--preset smoke|quick|nightly] [--seed N] [--trials N] [-v]
   sl gherkin fuzz --mutation [--sources generated|corpus|both] [--timeout-ms N]
   sl gherkin ddmin <path> [--mode parse|pickles|lex|auto] [--strategy structured|raw-lines]
   sl verify [--ci] [--fuzzed] [--edn]   (validator checks, optionally full CI; framework-dev tool — exits 2 outside the framework repo)
   sl costume init <name> [--chrome-path PATH]   (launch a costume for one-time login)
   sl costume list                               (list costumes + status)
-  sl costume destroy <name>                     (remove a costume)
+  sl costume destroy <name> [--force]           (remove a costume; refuses while its browser is live)
+  sl doctor [--list] [--edn]            (machine pre-flight probes; --list shows exactly what is and isn't checked)
   sl daemon serve [--idle-timeout-min N]        (start the warm-path daemon; normally auto-spawned)
   sl daemon status                              (show this project's daemon)
   sl daemon stop                                (stop this project's daemon)
@@ -938,7 +981,7 @@
           (ddmin-cmd path options project-context)
           (do
             (println "Usage: sl gherkin ddmin <path>")
-            1)))
+            2)))
 
       (= (first arguments) "verify")
       (verify-cmd options)
@@ -949,8 +992,23 @@
       (= (first arguments) "orient")
       (orient/orient-cmd arguments options project-context)
 
+      (= (first arguments) "glossary")
+      (resolution/glossary-cmd arguments options project-context)
+
+      (= (first arguments) "explain")
+      (resolution/explain-cmd arguments options project-context)
+
       (= (first arguments) "costume")
       (costume-cmd arguments options project-context)
+
+      (= (first arguments) "doctor")
+      (doctor/doctor-cmd (rest arguments) options project-context)
+
+      ;; Low-profile scaffold entrypoint (sl-sl-init-scaffold-cn7): invoked by
+      ;; release/install.sh in the breath that creates sl/; deliberately
+      ;; absent from --help until system-wide distribution (sl-f1ir).
+      (= (first arguments) "init")
+      (init/init-cmd)
 
       (= (first arguments) "daemon")
       (daemon-cmd arguments options project-context)
@@ -961,19 +1019,20 @@
       :else
       ;; Unknown command: usage/CLI error (sl-von). Hint → stderr (stdout stays
       ;; clean for machine consumers, matching orient/agent-doc discipline);
-      ;; exit 2 per the locked contract (daemon.clj: 0=pass 1=fail 2=planning
-      ;; 3=crash — the un-runnable-invocation code, as used for repl-rejection
-      ;; and ambiguous config). Was exit 0 + stdout (pre-de-exit parity). Warm
-      ;; parity is automatic: daemon/dispatch! delegates unknown commands here.
+      ;; exit 2 per the verdict contract (shiftlefter.runner.verdict: 0=pass
+      ;; 1=fail 2=planning 3=crash 4=degraded — the un-runnable-invocation
+      ;; code, as used for repl-rejection and ambiguous config). Was exit 0 +
+      ;; stdout (pre-de-exit parity). Warm parity is automatic:
+      ;; daemon/dispatch! delegates unknown commands here.
       (do
         (binding [*out* *err*]
           (println "Unknown command. Use --help"))
         2))))
 
 (defn -main [& args]
-  ;; Crash parity (sl-rju): an uncaught Throwable becomes exit 3, the locked
-  ;; "crash" code — matching shiftlefter.daemon/dispatch!'s contract so cold and
-  ;; warm agree on all four exit codes (0/1/2/3). The catch wraps only `dispatch`;
+  ;; Crash parity (sl-rju): an uncaught Throwable becomes exit 3, the
+  ;; "crash" code — matching shiftlefter.daemon/dispatch!'s contract so cold
+  ;; and warm agree on every exit code (0/1/2/3/4). The catch wraps only `dispatch`;
   ;; the :repl branch must stay outside it (repl-cmd blocks and owns the process).
   (let [result (try
                  (dispatch args)

@@ -418,6 +418,35 @@
         (is (= :svo/unknown-object (:type issue)))
         (is (= "login.submit" (:object issue)))))))
 
+;; sl-femd: :error is the canonical blocking level; :strict is a deprecated
+;; alias with identical behavior. Both halves pinned pairwise.
+
+(deftest object-enforcement-error-equals-strict-test
+  (testing ":error rejects raw locators exactly like :strict"
+    (let [run #(validate/validate-svo
+                test-glossary
+                test-interfaces
+                {:subject :alice :verb :click :object "{:css \"#submit\"}" :interface :web}
+                {:unknown-object %})
+          error-result (run :error)
+          strict-result (run :strict)]
+      (is (false? (:valid? error-result)))
+      (is (= :svo/raw-locator-disallowed (:type (first (:issues error-result)))))
+      (is (= (mapv :type (:issues strict-result))
+             (mapv :type (:issues error-result))))))
+  (testing ":error rejects invalid intent syntax exactly like :strict"
+    (let [run #(validate/validate-svo
+                test-glossary
+                test-interfaces
+                {:subject :alice :verb :click :object "login.submit" :interface :web}
+                {:unknown-object %})
+          error-result (run :error)
+          strict-result (run :strict)]
+      (is (false? (:valid? error-result)))
+      (is (= :svo/unknown-object (:type (first (:issues error-result)))))
+      (is (= (mapv :type (:issues strict-result))
+             (mapv :type (:issues error-result)))))))
+
 ;; -----------------------------------------------------------------------------
 ;; Object Kind: :location slots accept literal URLs — sl-rlxa
 ;; -----------------------------------------------------------------------------
@@ -527,6 +556,11 @@
                                   :attribute {:args [:attribute :value]
                                               :pattern "S sees O with ATTRIBUTE = VALUE"}}}}}})
 
+(def ^:private tier2-interfaces
+  "name==type interfaces map — the regression pin that the sl-sfb1
+   name→type resolution leaves the common case unchanged."
+  {:web {:type :web :adapter :etaoin}})
+
 (defn- mk-stepdef
   "Build a fake stepdef map with the given metadata."
   ([metadata]
@@ -549,7 +583,7 @@
                                  :svo {:subject :$1 :verb :fill
                                        :frame :with :object :$2
                                        :args {:value :$3}}})]
-          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary tier2-interfaces)]
       (is (empty? issues)))))
 
 (deftest validate-stepdefs-skips-non-svo
@@ -557,7 +591,7 @@
     (let [stepdefs [(mk-stepdef nil)
                     (mk-stepdef {:interface :web})  ; no :svo
                     (mk-stepdef {:svo {:subject :$1 :verb :foo :frame :bar}})]
-          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary tier2-interfaces)]
       (is (empty? issues)))))
 
 (deftest validate-stepdefs-skips-interface-not-in-glossary
@@ -566,7 +600,7 @@
     (let [stepdefs [(mk-stepdef {:interface :sms
                                  :svo {:subject :$1 :verb :anything
                                        :frame :anyframe}})]
-          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary tier2-interfaces)]
       (is (empty? issues)))))
 
 (deftest validate-stepdefs-detects-unknown-verb
@@ -575,13 +609,13 @@
                                  :svo {:subject :$1 :verb :swipe-left
                                        :frame :default :object :$2}}
                                 "myproject.clj" 17)]
-          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary tier2-interfaces)]
       (is (= 1 (count issues)))
       (let [issue (first issues)]
         (is (= :stepdef/unknown-verb (:type issue)))
         (is (= :swipe-left (:verb issue)))
         (is (= :web (:interface issue)))
-        (is (re-find #":web/swipe-left" (:message issue)))
+        (is (re-find #"unknown verb :swipe-left on interface :web" (:message issue)))
         (is (re-find #"myproject\.clj:17" (:message issue))
             "source location is in the message")
         (is (some #{:click :fill :see} (:known-verbs issue))
@@ -592,7 +626,7 @@
     (let [stepdefs [(mk-stepdef {:interface :web
                                  :svo {:subject :$1 :verb :see
                                        :frame :bonkers :object :$2}})]
-          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary tier2-interfaces)]
       (is (= 1 (count issues)))
       (let [issue (first issues)]
         (is (= :stepdef/unknown-frame (:type issue)))
@@ -607,7 +641,7 @@
           stepdefs [(mk-stepdef {:interface :web
                                  :svo {:subject :$1 :verb :fill :frame :with
                                        :object :$2 :args {:val :$3}}})]
-          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary tier2-interfaces)]
       (is (= 1 (count issues)))
       (let [issue (first issues)]
         (is (= :stepdef/args-mismatch (:type issue)))
@@ -622,7 +656,7 @@
   (testing "stepdef :svo without :frame is flagged (defensive — Tier 1 catches first)"
     (let [stepdefs [(mk-stepdef {:interface :web
                                  :svo {:subject :$1 :verb :click :object :$2}})]
-          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary tier2-interfaces)]
       (is (= 1 (count issues)))
       (is (= :stepdef/missing-frame (-> issues first :type))))))
 
@@ -632,7 +666,62 @@
                                  :svo {:subject :$1 :verb :see :frame :attribute
                                        :object :$2
                                        :args {:attribute :$3 :value :$4}}})]
-          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary)]
+          issues (validate/validate-stepdefs-against-glossary stepdefs tier2-glossary tier2-interfaces)]
+      (is (empty? issues)))))
+
+;; --- sl-s2oa: stepdef :interface metadata IS the interface TYPE -------------
+;; (supersedes sl-sfb1's name→type resolution here: instance names now live
+;; in the [name] step annotation, never in stepdef metadata)
+
+(deftest validate-stepdefs-type-metadata-checked-in-renamed-config
+  (testing "REPRO (s2oa shape): shipped-style :interface :web metadata is
+            checked directly against the TYPE-keyed glossary, regardless of
+            what the config names its instances"
+    (let [interfaces {:storefront {:type :web :adapter :etaoin}}
+          stepdefs [(mk-stepdef {:interface :web
+                                 :svo {:subject :$1 :verb :swipe-left
+                                       :frame :default :object :$2}})]
+          issues (validate/validate-stepdefs-against-glossary
+                  stepdefs tier2-glossary interfaces)]
+      (is (= 1 (count issues)))
+      (let [issue (first issues)]
+        (is (= :stepdef/unknown-verb (:type issue)))
+        (is (= :web (:interface issue)))
+        (is (= :web (:interface-type issue))
+            ":interface and :interface-type coincide under s2oa")))))
+
+(deftest validate-stepdefs-clean-type-stepdef-passes-renamed-config
+  (testing "a VALID type-declaring stepdef passes in a renamed-instance config"
+    (let [interfaces {:storefront {:type :web :adapter :etaoin}}
+          stepdefs [(mk-stepdef {:interface :web
+                                 :svo {:subject :$1 :verb :click
+                                       :frame :default :object :$2}})]
+          issues (validate/validate-stepdefs-against-glossary
+                  stepdefs tier2-glossary interfaces)]
+      (is (empty? issues)))))
+
+(deftest validate-stepdefs-instance-name-metadata-skips-tier2
+  (testing "MIGRATION PIN: a pre-s2oa stepdef still pinning a config instance
+            NAME (:storefront) has no glossary of that TYPE — tier-2 skips it
+            (nothing to check against); suite-lint's
+            :stepdef/undefined-interface is the migration signal"
+    (let [interfaces {:storefront {:type :web :adapter :etaoin}}
+          stepdefs [(mk-stepdef {:interface :storefront
+                                 :svo {:subject :$1 :verb :swipe-left
+                                       :frame :default :object :$2}})]
+          issues (validate/validate-stepdefs-against-glossary
+                  stepdefs tier2-glossary interfaces)]
+      (is (empty? issues)))))
+
+(deftest validate-stepdefs-unloaded-type-still-skipped
+  (testing "SKIP PIN: a configured custom type with no loaded glossary is
+            still skipped — nothing to check against"
+    (let [interfaces {:api-main {:type :api :adapter :http}}
+          stepdefs [(mk-stepdef {:interface :api-main
+                                 :svo {:subject :$1 :verb :get
+                                       :frame :default :object :$2}})]
+          issues (validate/validate-stepdefs-against-glossary
+                  stepdefs tier2-glossary interfaces)]
       (is (empty? issues)))))
 
 (deftest validate-stepdefs-real-browser-stepdefs-pass-real-default-glossary
@@ -644,7 +733,8 @@
     (let [defaults  (glossary/load-default-glossaries)
           stepdefs  (filter #(= :web (-> % :metadata :interface))
                             (registry/all-stepdefs))
-          issues    (validate/validate-stepdefs-against-glossary stepdefs defaults)]
+          issues    (validate/validate-stepdefs-against-glossary
+                     stepdefs defaults tier2-interfaces)]
       (is (pos? (count stepdefs))
           "browser.clj should have registered :web stepdefs")
       (is (empty? issues)
@@ -779,14 +869,40 @@
           (is (= :svo/unknown-object (:type issue)))
           (is (str/includes? (:message issue) ":location"))))
 
-      (testing "Ref whose :location lacks this interface's :path errors"
+      (testing "sl-s2oa: a renamed same-type instance CROSSES to its type for
+                the location lookup — Feed has a :web path, so the :web-typed
+                :mobile instance validates clean (pre-s2oa this errored: the
+                instance NAME was used against the TYPE-keyed location map)"
         (let [result (validate/validate-svo
                       location-glossary
                       (assoc test-interfaces :mobile {:type :web :adapter :etaoin})
                       {:subject :alice :verb :navigate :frame :to
                        :object "Feed" :interface :mobile}
                       {:unknown-object :strict})]
-          (is (seq (filter #(= :svo/unknown-object (:type %)) (:issues result)))))))))
+          (is (empty? (filter #(= :svo/unknown-object (:type %)) (:issues result))))))
+
+      (testing "Ref whose :location lacks the effective type's :path still
+                errors (unconfigured instance reads as its own type)"
+        (let [result (validate/validate-svo
+                      location-glossary test-interfaces
+                      {:subject :alice :verb :navigate :frame :to
+                       :object "Feed" :interface :kiosk}
+                      {:unknown-object :strict})]
+          (is (seq (filter #(= :svo/unknown-object (:type %)) (:issues result))))))
+
+      (testing "sl-s2oa fit-pass condition: an UNCONFIGURED type-as-name value
+                (svo :interface :web, no :web entry in config) reaches the
+                frame lookups too — object-kind/location-refs-frame? resolve
+                via the effective type instead of nil-defaulting to :intent,
+                so the named-location ref validates clean"
+        (let [result (validate/validate-svo
+                      location-glossary
+                      {:api {:type :api :adapter :http-kit}}
+                      {:subject :alice :verb :navigate :frame :to
+                       :object "Feed" :interface :web}
+                      {:unknown-object :strict})]
+          (is (empty? (filter #(= :svo/unknown-object (:type %))
+                              (:issues result)))))))))
 
 (deftest location-literals-still-pass-in-navigate-slot
   (with-location-intents

@@ -256,12 +256,16 @@
          (when msg (str " -- " (clean msg)))
          (clean (macro-attribution failing-step counts)))))
 
-(defn- hook-error-message
-  "Message for a scenario-level hook failure (sl-esq): hook name, error
-   message, and dual attribution (registration home + @hook= tag file:line)."
+(defn- scenario-error-message
+  "Message for a scenario-level :error (the infrastructure-failure family,
+   sl-esq/sl-7c7i: hook throw, capability provisioning, capture, harness).
+   Hook-attributed errors keep the dual attribution (hook name +
+   registration home + @hook= tag file:line); other family members render
+   their own message verbatim."
   [err]
   (let [ts (:tag-source err)]
-    (str "hook '" (:hook err) "' -- " (clean (:message err))
+    (str (when (:hook err) (str "hook '" (:hook err) "' -- "))
+         (clean (:message err))
          (when-let [reg (:path (:registration err))]
            (str " [registered at " reg "]"))
          (when (and ts (:file ts))
@@ -272,9 +276,10 @@
    :error when the failing step carried an :exception-class, else :failure;
    pending mirrors the exit code via allow-pending? (D2). `counts` is the
    macro N/M lookup (may be {} when only the outcome tag is needed).
-   Scenario :error (a lifecycle hook threw, sl-esq) renders <error> with a
-   hook-typed type attribute, reading the SCENARIO-level :error — no step
-   carries a hook failure."
+   Scenario :error (the infrastructure-failure family, sl-esq/sl-7c7i:
+   hook throw, capability provisioning, capture, harness) renders <error>
+   with the error's type as the type attribute, reading the
+   SCENARIO-level :error map."
   [scenario allow-pending? counts]
   (case (:status scenario)
     :passed nil
@@ -289,7 +294,7 @@
                          (nil? t) "hook"
                          (namespace t) (str (namespace t) "/" (name t)) ; "hook/before-failed"
                          :else (name t))]
-             (el "error" {:type etype :message (hook-error-message err)} nil))
+             (el "error" {:type etype :message (scenario-error-message err)} nil))
     :pending (let [ps (first-step-of-status scenario :pending)
                    text (clean (get-in ps [:step :step/text]))
                    msg (str "pending: " text)]
@@ -423,7 +428,13 @@
   (on-run-start [_this run-ctx]
     ;; Stash the enriched run-ctx (version/mode/timestamp/project) and stamp a
     ;; hostname for XSD validity. Console/EDN ignore run-start.
-    (swap! state assoc :run-ctx (assoc run-ctx :hostname (hostname)))
+    ;; In a multi-group run `state` is the invocation-shared atom (sl-xjx0,
+    ;; Warden W7) — the FIRST group's ctx wins so timestamp/name don't churn
+    ;; across groups.
+    (swap! state (fn [s]
+                   (cond-> s
+                     (nil? (:run-ctx s))
+                     (assoc :run-ctx (assoc run-ctx :hostname (hostname))))))
     nil)
 
   (on-scenario-complete [_this scenario-result]
@@ -436,16 +447,28 @@
 
   (on-run-end [_this _run-summary]
     ;; Materialize the artifact. A write failure THROWS (invariant 4): a CI
-    ;; gate reading this file must never get a silent partial.
+    ;; gate reading this file must never get a silent partial. Atomic
+    ;; temp-sibling + rename (sl-luhn): a concurrent reader/writer on the
+    ;; fixed path sees last-writer-wins, never a torn file.
     (let [{:keys [scenarios run-ctx]} @state
-          xml (build-document scenarios run-ctx)
-          file (java.io.File. ^String path)]
-      (when-let [parent (.getParentFile file)]
-        (.mkdirs parent))
-      (spit file xml)
+          xml (build-document scenarios run-ctx)]
+      (reporter/write-atomically! path xml)
       nil)))
 
 (defn make-reporter
-  "Construct a JUnitReporter. `opts` is {:path <output-path>}."
+  "Construct a JUnitReporter. `opts` is {:path <output-path>, :shared-state?}.
+
+   `:shared-state` (sl-xjx0, Warden W7): in a multi-group run every group
+   builds its own reporter but the output path is invocation-fixed, so
+   per-group private state made each group's :run-end write REPLACE the
+   whole document — a red early group vanished behind a green last group
+   (breaking the ERRATA invariant: ≥1 failure/error iff exit nonzero).
+   The runner passes one invocation-scoped atom for all groups; each
+   :run-end write then aggregates every scenario seen so far — the last
+   write carries the full invocation, and a mid-run crash still leaves the
+   honest partial file. Absent (single group / direct construction) the
+   reporter keeps its own atom, byte-identical to before."
   [opts]
-  (->JUnitReporter (:path opts) (atom {:scenarios [] :run-ctx nil})))
+  (->JUnitReporter (:path opts)
+                   (or (:shared-state opts)
+                       (atom {:scenarios [] :run-ctx nil}))))
