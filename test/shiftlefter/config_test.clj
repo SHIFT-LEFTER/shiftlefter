@@ -1,4 +1,4 @@
-(ns shiftlefter.runner.config-test
+(ns shiftlefter.config-test
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
             [clojure.spec.alpha :as s]
@@ -6,7 +6,7 @@
             [clojure.test :refer [deftest is testing]]
             [shiftlefter.paths :as paths]
             [shiftlefter.project-context :as project-context]
-            [shiftlefter.runner.config :as config]
+            [shiftlefter.config :as config]
             [shiftlefter.runner.reporter :as reporter]))
 
 ;; -----------------------------------------------------------------------------
@@ -54,7 +54,7 @@
      "glossary/intents/Login.edn" "{:intent \"Login\" :elements {}}"}
     (fn [ctx]
       (is (= {:subjects "glossary/subjects.edn"
-              :verbs {:web "glossary/verbs/web.edn"}
+              :verbs ["glossary/verbs/web.edn"]
               :intents "glossary/intents"}
              (:glossaries (config/load-config {:project-context ctx})))))))
 
@@ -457,11 +457,11 @@
     (is (= :eager (config/provisioning-mode {:runner {:provisioning :eager}})))
     (is (= :lazy  (config/provisioning-mode {:runner {:provisioning :lazy}}))))
   (testing ":runner spec accepts :eager and :lazy, rejects others"
-    (is (s/valid? :shiftlefter.runner.config/runner
+    (is (s/valid? :shiftlefter.config/runner
                                    {:step-paths ["s/"] :allow-pending? false :provisioning :eager}))
-    (is (s/valid? :shiftlefter.runner.config/runner
+    (is (s/valid? :shiftlefter.config/runner
                                    {:step-paths ["s/"] :allow-pending? false :provisioning :lazy}))
-    (is (not (s/valid? :shiftlefter.runner.config/runner
+    (is (not (s/valid? :shiftlefter.config/runner
                                         {:step-paths ["s/"] :allow-pending? false :provisioning :nope})))))
 
 (deftest test-capture-policy
@@ -473,17 +473,17 @@
   (testing ":runner spec accepts policy values, rejects garbage"
     (let [base {:step-paths ["s/"] :allow-pending? false}]
       (doseq [policy [:never :on-failure :every-step]]
-        (is (s/valid? :shiftlefter.runner.config/runner
+        (is (s/valid? :shiftlefter.config/runner
                       (assoc base :capture {:screenshot policy}))
             (str policy)))
-      (is (s/valid? :shiftlefter.runner.config/runner
+      (is (s/valid? :shiftlefter.config/runner
                     (assoc base :capture {:message-log :on-failure}))
           "kinds are OPEN — adapter-contributed keywords all pass")
-      (is (not (s/valid? :shiftlefter.runner.config/runner
+      (is (not (s/valid? :shiftlefter.config/runner
                          (assoc base :capture {:screenshot :sometimes}))))
-      (is (not (s/valid? :shiftlefter.runner.config/runner
+      (is (not (s/valid? :shiftlefter.config/runner
                          (assoc base :capture {"screenshot" :never}))))
-      (is (not (s/valid? :shiftlefter.runner.config/runner
+      (is (not (s/valid? :shiftlefter.config/runner
                          (assoc base :capture [:screenshot :never])))))))
 
 (deftest test-parse-capture-spec
@@ -647,10 +647,227 @@
       (is (= :config/invalid-interface (-> result :errors first :type))))))
 
 (deftest test-normalize-empty-interfaces
-  (testing "Empty interfaces map is valid (uses defaults)"
+  (testing "Empty interfaces map is valid (zero interfaces, sl-g2lj)"
     (let [cfg {:interfaces {}}
           result (config/normalize cfg)]
       (is (nil? (:errors result))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-g2lj — user :interfaces replaces the defaults wholesale (Design A)
+;; -----------------------------------------------------------------------------
+
+(deftest test-interfaces-wholesale-replace
+  (testing "user :interfaces is the COMPLETE set — no phantom builtin :web"
+    (let [cfg (config/load-config
+               {:config-path "test/fixtures/config/interfaces_sms_only.edn"})]
+      (is (= [:sms] (keys (:interfaces cfg))))
+      (is (nil? (config/get-interface cfg :web)))
+      (is (nil? (:errors (config/normalize cfg))))))
+  (testing "no :interfaces key -> builtin defaults mounted, unchanged"
+    (let [cfg (config/load-config
+               {:config-path "test/fixtures/config/minimal.edn"})]
+      (is (= (:interfaces config/default-config) (:interfaces cfg)))))
+  (testing "explicit :interfaces nil = zero interfaces, normalized to {} at
+            load (sl-a7sx, Warden W-B1) — nil and {} are ONE shape downstream"
+    (let [cfg (config/load-config
+               {:config-path "test/fixtures/config/interfaces_nil.edn"})]
+      (is (contains? cfg :interfaces))
+      (is (= {} (:interfaces cfg)))
+      (is (nil? (:errors (config/normalize cfg))))))
+  (testing "W34 falls out: a costume naming an interface under :interfaces nil
+            now errors like it does under {} (one shape, one verdict)"
+    (let [tmp (str (fs/create-temp-dir))
+          path (str (fs/path tmp "shiftlefter.edn"))]
+      (try
+        (spit path (pr-str {:interfaces nil
+                            :costumes {:finance {:interface :web}}}))
+        (let [cfg (config/load-config {:config-path path})
+              [err] (:errors (config/normalize cfg))]
+          (is (= :config/unknown-costume-interface (:type err))))
+        (finally (fs/delete-tree tmp))))))
+
+(deftest test-interfaces-default-sentinel
+  (testing ":default re-includes the shipped builtin def VERBATIM"
+    (let [cfg (config/load-config
+               {:config-path
+                "test/fixtures/config/interfaces_default_sentinel.edn"})]
+      (is (= (get-in config/default-config [:interfaces :web])
+             (get-in cfg [:interfaces :web])))
+      (is (= #{:web :api :admin-web} (set (keys (:interfaces cfg)))))
+      ;; NAME vs TYPE: :admin-web is a second :web-TYPE instance under a
+      ;; non-builtin name — the user's def as-is, never the builtin's.
+      (is (= :web (config/get-interface-type cfg :admin-web)))
+      (is (= "http://localhost:9092/admin"
+             (config/get-base-url cfg :admin-web)))
+      (is (nil? (:errors (config/normalize cfg))))))
+  (testing "a full map under the builtin NAME fully shadows — never merged"
+    ;; The builtin :web def carries :config {}; a user :web without :config
+    ;; must come through with the key ABSENT, proving no merge happened.
+    (let [ifaces (config/expand-interface-defaults
+                  {:web {:type :web :adapter :playwright}})]
+      (is (= {:type :web :adapter :playwright} (:web ifaces)))
+      (is (not (contains? (:web ifaces) :config)))))
+  (testing "an unmatched sentinel is left in place for normalize"
+    (is (= {:foo :default} (config/expand-interface-defaults {:foo :default}))))
+  (testing "non-map input (incl. nil = zero interfaces) returned as written"
+    (is (nil? (config/expand-interface-defaults nil)))
+    (is (= [:web] (config/expand-interface-defaults [:web])))))
+
+(deftest test-normalize-unknown-default-interface
+  (testing ":foo :default with no builtin :foo is a planning error, never
+            silent-empty"
+    (let [[err] (:errors (config/normalize {:interfaces {:foo :default}}))]
+      (is (= :config/unknown-default-interface (:type err)))
+      (is (str/includes? (:message err) ":foo"))
+      (is (= [:web] (get-in err [:data :builtins]))))))
+
+(deftest test-normalize-reserved-sl-namespace
+  (testing "sl/-namespaced interface NAME is rejected (builtin reservation)"
+    (let [[err] (:errors (config/normalize
+                          {:interfaces {:sl/web {:type :web
+                                                 :adapter :etaoin}}}))]
+      (is (= :config/reserved-interface-name (:type err)))))
+  (testing "the name reservation fires for sentinel entries too"
+    (let [[err] (:errors (config/normalize {:interfaces {:sl/api :default}}))]
+      (is (= :config/reserved-interface-name (:type err)))))
+  (testing "sl/-namespaced :type gets its own error, not unknown-type"
+    (let [[err] (:errors (config/normalize
+                          {:interfaces {:x {:type :sl/web :adapter :a}}}))]
+      (is (= :config/reserved-interface-type (:type err)))
+      (is (= :sl/web (get-in err [:data :type]))))))
+
+(deftest test-string-keyed-timing-is-a-planning-error
+  ;; sl-q4cb (Warden W35): {:timing {"deadline-ms" 5}} crashed normalize
+  ;; inside the did-you-mean suggester (String cannot be cast to Named).
+  (doseq [cfg [{:timing {"deadline-ms" 5}}
+               {:interfaces {:web {:type :web :adapter :etaoin
+                                   :timing {"deadline-ms" 5}}}}]]
+    (let [errs (:errors (config/normalize cfg))]
+      (is (seq errs) (pr-str cfg))
+      (is (str/includes? (:message (first errs)) "\"deadline-ms\"")
+          "the error names the string key the user typed"))))
+
+(deftest test-stray-default-inside-a-full-interface-map-is-linted
+  ;; sl-q4cb (Warden W36): the :default sentinel is an entry VALUE; as a key
+  ;; inside a full map it was silently ignored.
+  (let [lints (config/lint-config
+               {:interfaces {:web {:default true :type :web :adapter :etaoin}
+                             :api {:type :api :adapter :http}}})
+        lint (first (filter #(= [:interfaces :web :default] (:found-path %)) lints))]
+    (is (some? lint))
+    (is (= :config/misplaced-key (:type lint)))
+    (is (= :default (:key lint)))
+    (is (str/includes? (:message lint) "never merged with the builtin"))
+    (is (empty? (filter #(= [:interfaces :api :default] (:found-path %)) lints))
+        "only the entry carrying the stray key is named"))
+  (testing "a sentinel VALUE and a clean full map lint nothing"
+    (is (empty? (filter #(= :default (:key %))
+                        (config/lint-config {:interfaces {:web :default
+                                                          :api {:type :api :adapter :http}}}))))))
+
+(deftest test-svo-levels-are-a-closed-set
+  ;; sl-3bqv: a typo'd level (:warm) used to flow through compute-severity
+  ;; as non-blocking — the strict setting silently became a warning.
+  (testing "an unknown level is a hard error with did-you-mean over the enum"
+    (let [[err :as errs] (:errors (config/normalize {:svo {:unknown-subject :warm}}))]
+      (is (= 1 (count errs)))
+      (is (= :config/invalid-svo-level (:type err)))
+      (is (str/includes? (:message err) "[:svo :unknown-subject]"))
+      (is (str/includes? (:message err) "did you mean :warn?"))
+      (is (= :warn (get-in err [:data :suggestion])))))
+  (testing "every key is checked; :strict is accepted for :unknown-object only"
+    (is (nil? (:errors (config/normalize {:svo {:unknown-subject :error
+                                                :unknown-verb :warn
+                                                :unknown-interface :off
+                                                :unknown-object :strict}}))))
+    (is (= [:config/invalid-svo-level]
+           (mapv :type (:errors (config/normalize {:svo {:unknown-verb :strict}})))))
+    (is (= [:unknown-interface :unknown-object]
+           (mapv #(get-in % [:data :key])
+                 (:errors (config/normalize {:svo {:unknown-interface "error"
+                                                   :unknown-object :nope}}))))))
+  (testing "no :svo, an empty :svo, and a non-map :svo"
+    (is (nil? (:errors (config/normalize {}))))
+    (is (nil? (:errors (config/normalize {:svo {}}))))
+    (is (= [:config/invalid-svo-level]
+           (mapv :type (:errors (config/normalize {:svo [:warn]})))))))
+
+(deftest test-halt-policy-tri-state
+  ;; sl-78u4 (Warden W3): false | :group | :run, true reads as :run.
+  (testing "the accessor's tri-state"
+    (is (false? (config/halt-policy {})))
+    (is (false? (config/halt-policy {:runner {:halt-on-observation-failure false}})))
+    (is (= :group (config/halt-policy {:runner {:halt-on-observation-failure :group}})))
+    (is (= :run (config/halt-policy {:runner {:halt-on-observation-failure :run}})))
+    (is (= :run (config/halt-policy {:runner {:halt-on-observation-failure true}}))
+        "true = :run, so every pre-tri-state doc sentence stays true"))
+  (testing "the engine's boolean is on for ANY scope"
+    (is (config/halt-on-observation-failure? {:runner {:halt-on-observation-failure :group}}))
+    (is (config/halt-on-observation-failure? {:runner {:halt-on-observation-failure true}}))
+    (is (not (config/halt-on-observation-failure? {}))))
+  (testing "the spec accepts the three states and rejects the rest"
+    (doseq [ok [false true :group :run]]
+      (is (s/valid? :shiftlefter.config/halt-on-observation-failure ok) (pr-str ok)))
+    (doseq [bad ["true" :everything 1 nil]]
+      (is (not (s/valid? :shiftlefter.config/halt-on-observation-failure bad)) (pr-str bad)))))
+
+(deftest test-normalize-glossaries-shape
+  ;; sl-a7sx (Warden W33): the ::config spec was documentation-only — the
+  ;; retired type-keyed :verbs map crashed the path resolver instead of
+  ;; reaching a planning error.
+  (testing "the retired type-keyed :verbs map → :config/invalid-glossaries,
+            quoting the found value and naming the path-list form"
+    (let [[err :as errs] (:errors (config/normalize
+                                   {:glossaries {:verbs {:web "a.edn"}}}))]
+      (is (= 1 (count errs)))
+      (is (= :config/invalid-glossaries (:type err)))
+      (is (str/includes? (:message err) "{:web \"a.edn\"}"))
+      (is (str/includes? (:message err) "LIST"))
+      (is (= {:web "a.edn"} (get-in err [:data :definition])))))
+  (testing "a string :verbs, a non-string element, a non-map :glossaries,
+            and non-string :subjects/:intents are the same error class"
+    (doseq [bad [{:glossaries {:verbs "a.edn"}}
+                 {:glossaries {:verbs ["a.edn" :b]}}
+                 {:glossaries ["a.edn"]}
+                 {:glossaries {:subjects :x}}
+                 {:glossaries {:intents 42}}]]
+      (is (= [:config/invalid-glossaries]
+             (mapv :type (:errors (config/normalize bad))))
+          (pr-str bad))))
+  (testing "a LIST literal is as valid as a vector (spec :kind sequential? —
+            aligned to the shipped loader), and nil/absent stay clean"
+    (doseq [ok [{:glossaries {:verbs '("a.edn" "b.edn")}}
+                {:glossaries {:verbs ["a.edn"]}}
+                {:glossaries {:verbs nil}}
+                {:glossaries nil}
+                {}]]
+      (is (nil? (:errors (config/normalize ok))) (pr-str ok)))))
+
+(deftest test-resolve-glossary-config-paths-is-shape-safe
+  ;; sl-a7sx (Warden W33): the resolver runs BEFORE normalize on both
+  ;; channels, so it must never throw — only strings are paths; anything
+  ;; else passes through untouched for normalize to name.
+  (let [ctx {:config-root "/tmp/sl-shape-safe"}
+        resolve #(config/resolve-glossary-config-paths ctx %)]
+    (testing "a list resolves like a vector"
+      (is (= [(str (fs/path "/tmp/sl-shape-safe" "a.edn"))]
+             (:verbs (resolve {:verbs '("a.edn")})))))
+    (testing "the retired map, a string, and non-string elements pass through"
+      (is (= {:verbs {:web "a.edn"}} (resolve {:verbs {:web "a.edn"}})))
+      (is (= {:verbs "a.edn"} (resolve {:verbs "a.edn"})))
+      (is (= :b (second (:verbs (resolve {:verbs ["a.edn" :b]})))))
+      (is (= {:subjects :x} (resolve {:subjects :x}))))
+    (testing "nil config stays nil"
+      (is (nil? (resolve nil))))))
+
+(deftest test-normalize-interfaces-shape
+  (testing "present-but-non-map :interfaces errors — presence is meaningful"
+    (let [[err] (:errors (config/normalize {:interfaces [:web]}))]
+      (is (= :config/invalid-interfaces (:type err)))))
+  (testing "a non-map, non-:default entry value errors"
+    (let [[err] (:errors (config/normalize {:interfaces {:web "etaoin"}}))]
+      (is (= :config/invalid-interface (:type err)))
+      (is (str/includes? (:message err) ":default")))))
 
 (deftest test-interface-base-url
   (testing "A string :base-url in interface :config is valid and spec-conformant"
@@ -659,7 +876,7 @@
           cfg {:interfaces {:web iface}}
           result (config/normalize cfg)]
       (is (nil? (:errors result)))
-      (is (s/valid? :shiftlefter.runner.config/interface-def iface))
+      (is (s/valid? :shiftlefter.config/interface-def iface))
       (is (= "http://localhost:9092" (config/get-base-url result :web)))))
 
   (testing "get-base-url is nil when unset"
@@ -686,7 +903,7 @@
                                     :timing timing}}}
             result (config/normalize cfg)]
         (is (nil? (:errors result)) (pr-str timing))
-        (is (s/valid? :shiftlefter.runner.config/config cfg) (pr-str timing)))))
+        (is (s/valid? :shiftlefter.config/config cfg) (pr-str timing)))))
 
   (testing "malformed top-level :timing is a loud config error"
     (doseq [bad [{:deadline-ms "5s"} {:deadline-ms 0} {:interval-ms -1} [30000] 30000]]
@@ -735,9 +952,9 @@
 (deftest test-get-glossary-config
   (testing "get-glossary-config extracts glossary paths"
     (let [cfg {:glossaries {:subjects "config/subjects.edn"
-                            :verbs {:web "config/verbs-web.edn"}}}]
+                            :verbs ["config/verbs-web.edn"]}}]
       (is (= {:subjects "config/subjects.edn"
-              :verbs {:web "config/verbs-web.edn"}}
+              :verbs ["config/verbs-web.edn"]}
              (config/get-glossary-config cfg)))))
 
   (testing "get-glossary-config returns nil for missing"
@@ -829,7 +1046,7 @@
 (deftest test-acceptance-criteria-valid-config
   (testing "Task 3.0.3 AC: valid config passes"
     (let [cfg {:glossaries {:subjects "glossary/subjects.edn"
-                            :verbs {:web "glossary/verbs/web.edn"}}
+                            :verbs ["glossary/verbs/web.edn"]}
                :interfaces {:web {:type :web
                                   :adapter :etaoin
                                   :config {:headless true}}}

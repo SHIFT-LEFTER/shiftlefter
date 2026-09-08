@@ -375,13 +375,21 @@
    (its return value is passed through, so assertion-style fns returning
    nil succeed); not-yet = a `retryable-error?` throw. On deadline the
    kernel throws the structured :step/poll-timeout record with the last
-   assertion error folded in."
+   assertion error folded in.
+
+   Error class (sl-kowi): the poll is wrapped in
+   `browser-errors/classify-observation` — OUTSIDE the kernel, so a
+   transport throw (`:etaoin/http-ex`, which `retryable-error?` never
+   matches) propagates immediately with `:error/class :observation`.
+   Poll timeouts themselves inherit no class (kernel untouched)."
   [ctx f defaults override-ms]
-  (:value (step/poll-until ctx (fn [] {:value (f)})
-                           {:defaults defaults
-                            :deadline-ms override-ms
-                            :retry-error? retryable-error?
-                            :default-type :web})))
+  (browser-errors/classify-observation
+   (fn []
+     (:value (step/poll-until ctx (fn [] {:value (f)})
+                              {:defaults defaults
+                               :deadline-ms override-ms
+                               :retry-error? retryable-error?
+                               :default-type :web})))))
 
 (defn- with-retry
   "Verification-step oracle retry on the deadline substrate: verify-class
@@ -481,13 +489,20 @@
 
    Subject string from step text (e.g., \"alice\" or \"user/alice\") is
    normalized via `subject-str->key`. Returns ctx unchanged — the unified
-   capability shape is stateless across step boundaries."
+   capability shape is stateless across step boundaries.
+
+   Error class (sl-kowi): the op runs under
+   `browser-errors/classify-observation`, so a driver transport throw
+   (`:etaoin/http-ex` — no response existed) reaches the runner with
+   `:error/class :observation`. Together with `retry-on-substrate` this is
+   the whole browser boundary: every built-in browser step routes through
+   one of the two."
   [ctx subject-str op-fn]
   (let [subject (subject-str->key subject-str)
         instance (step/interface-instance ctx :web)
         browser (cap/get-capability ctx instance subject)]
     (if browser
-      (do (op-fn browser) ctx)
+      (do (browser-errors/classify-observation #(op-fn browser)) ctx)
       (throw (ex-info (str "No browser session for subject: " subject-str
                            " on interface " instance
                            " — nothing has provisioned a browser for this"
@@ -648,9 +663,14 @@
   [ctx subject-str url]
   ;; Navigation needs a full URL: schemeless literals resolve against
   ;; :base-url (sl-34ec); refs and absolute literals as before.
+  ;; sl-kowi rider: THE ONE site where a driver ANSWER is classified — a
+  ;; navigation refused by the network (net::ERR_CONNECTION_REFUSED & co.,
+  ;; the closed set in browser.errors) means no page existed to observe:
+  ;; :observation. Never applied to element lookups.
   (let [url' (resolve-location-object ctx url {:resolve-literals? true})]
     (with-subject-browser ctx subject-str
-      (fn [browser] (bp/open-to! browser url')))))
+      (fn [browser]
+        (browser-errors/classify-navigation #(bp/open-to! browser url') url')))))
 
 (defstep click-pattern
   {:interface :web

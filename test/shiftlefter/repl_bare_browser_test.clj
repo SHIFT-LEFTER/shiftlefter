@@ -1,7 +1,7 @@
 (ns shiftlefter.repl-bare-browser-test
   "sl-vmc5: the REPL can provision a BARE (non-costume) capability when a
    loaded config declares the step's interface — the bare-caller path the
-   :lazy provisioning mode was built for (runner/config.clj's own
+   :lazy provisioning mode was built for (config.clj's own
    comment). The provisioned capability is :ephemeral in the named ctx,
    which is exactly what makes the sl-tss7 :closed cleanup branch
    reachable from public REPL calls — the coverage half of the bead.

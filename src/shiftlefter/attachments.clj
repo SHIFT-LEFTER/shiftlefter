@@ -131,9 +131,11 @@
 (defn- absolute-path? [s]
   (.isAbsolute (as-path s)))
 
-(defn- relativize-under
+(defn relativize-under
   "Relative path string (forward slashes) of `p` under `root`, or nil when
-   `p` is not under `root`. Both absolute path strings."
+   `p` is not under `root`. Both absolute path strings. (Public since
+   sl-7dq5: the runner relativizes the run's results path against the
+   config root for the envelope's :run/results-path.)"
   [root p]
   (let [rootp (as-path root)
         pp (as-path p)]

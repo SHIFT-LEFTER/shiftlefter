@@ -10,8 +10,9 @@
 
 ShiftLefter is a Gherkin/BDD test framework in Clojure: a Gherkin parser,
 formatter, and runner (Gherkin-compliant — 46/46 official Cucumber test files), plus a
-typed Subject–Verb–Object vocabulary — "Shifted" mode, the normal way to use
-ShiftLefter — that validates steps before any browser or SMS run. It
+typed Subject–Verb–Object vocabulary — "Shifted" mode, the recommended way to
+use ShiftLefter, opted into with an `:svo` block in `shiftlefter.edn` (absent
+= Vanilla) — that validates steps before any browser or SMS run. It
 drives real browser sessions (one per actor) and other interfaces from plain
 feature files, and it is built for agents to author and repair behavior against
 durable project vocabulary rather than one-shot generated scripts.
@@ -95,8 +96,9 @@ Core commands:
   destructive drain: per-step under `every-step` (each file holds exactly
   that step's entries, plus a final tail sweep), once post-steps when red
   under `on-failure`; Chrome/Edge only, other drivers no-op. Refs render as
-  attachments in the human report surfaces (HTML, JUnit, console); the
-  `--edn` summary carries no refs yet. A capture-infrastructure failure on an
+  attachments in the human report surfaces (HTML, JUnit, console) and the
+  `--edn` summary carries them all in its top-level `:attachments` index
+  (docs/REPORTS.md § The machine-record contract). A capture-infrastructure failure on an
   otherwise-green scenario flips it to `:error`, capture-attributed —
   check `:data {:kind … :capability …}` to triage "all N errors are
   capture-attributed; ship, fix harness". Capture time never pollutes step
@@ -136,7 +138,7 @@ door:
 
 ```text
 <project>/
-  AGENTS.md              agent on-ramp stanza (written by sl init, marker-guarded)
+  AGENTS.md              agent on-ramp stanza (only via `sl init --write-agents`, marker-guarded)
   .shiftlefter/          framework operational state — self-ignoring under sl init
   sl/                    the ShiftLefter project (yours, committed)
     sl, shiftlefter-*.jar  launcher + jar (installer convention)
@@ -160,7 +162,7 @@ Defaults are relative to the config root (`sl/`). Explicit config always wins.
 | feature files | yes | no `setup.clj`: `[:runner :features]` default `["features/"]`; with `setup.clj`: the declared plan IS the corpus | config key / CLI paths (subset of the plan under setup) |
 | `glossary/subjects.edn` | in Shifted mode | probed at `glossary/subjects.edn` | `:glossaries` — explicit value, *including nil*, used as written |
 | intents | in practice, Shifted web | probed at `glossary/intents/` | `:glossaries {:intents …}` |
-| verb glossaries | no (built-ins cover) | probed at `glossary/verbs/<iface>.edn` | `:glossaries {:verbs …}` |
+| verb glossaries | no (built-ins cover) | probed at `glossary/verbs/*.edn`; each file's `:type` is its mount key | `:glossaries {:verbs [paths]}` |
 | dev steps | no | `[:runner :step-paths]` default `["steps/"]` | config / `--step-paths` |
 | `setup.clj`, `hooks.clj` | no | sibling of the active config, fixed names | none — fixed by design |
 | macro registries | with `:macros {:enabled? true}` | `:registry-paths` required; INI files or directories (dir loads every `.ini`, recursive, sorted) | configured paths (0.6 moves INI → typed EDN, hard cut) |
@@ -208,11 +210,12 @@ future attachment mechanism.
 The framework writes only into places it owns (below); files the user owns
 are never written unprompted — changes arrive as proposals (SIEVE proposes,
 never applies): proposed, never written without an explicit yes. Two
-named, marker-guarded exceptions, both on explicit commands: `sl init`
+named, marker-guarded exceptions, both the direct object of an explicit
+user command (the sl-7dq5 ownership boundary): `sl init --write-agents`
 writes the agent on-ramp stanza into `AGENTS.md` (create-or-append between
-markers; an existing stanza is never edited — on a preexisting project the
-installer only prints it for you to paste), and `sl costume init` appends
-the protective wardrobe line to `.gitignore`.
+markers; an existing stanza is never edited; plain `sl init` never touches
+it — it prints the offer instead), and `sl costume init` appends the
+protective wardrobe line to `.gitignore`.
 
 - `sl/results/<STAMP>/` per invocation: `report.html`, per-scenario
   `attachments/<slug>/`, per-group subdirs under `setup.clj`. Self-ignoring
@@ -316,19 +319,70 @@ it calls the kernel in `shiftlefter.step`:
 ```clojure
 (require '[shiftlefter.step :as step])
 
-(defstep #"the nightly report has landed"
-  [ctx]
-  (step/poll-until ctx #(.exists (java.io.File. "out/report.csv")))
+;; observe-and-judge: the predicate RETURNS the observation, :until judges it
+(defstep #"the export job (\S+) has finished"
+  [ctx job-id]
+  (step/poll-until ctx #(fetch-job job-id)            ; => {:state "running" :pct 85}
+                   {:until #(= "done" (:state %))})
   ctx)
 ```
 
-`poll-until` polls until truthy at the resolved interval/deadline (`:timing`
-config, instance > interface > global > default — 30s/500ms bare). On timeout
-it throws a structured `:step/poll-timeout` through normal step reporting:
-elapsed, deadline, deadline SOURCE, last observed value (pass `:until` when
-the predicate observes a value, e.g. `{:until #(<= 5 %)}`). Never wrap a
-mutation in it; never poll a bare negation (waiting-for-gone = poll a negated
-predicate, explicitly). `(step/timing ctx)` reads the budget without polling.
+`poll-until` polls at the resolved interval/deadline (`:timing` config,
+instance > interface > global > default — 30s/500ms bare) until `:until`
+accepts the predicate's return. **Return the observation; let `:until`
+judge it.** On timeout it throws a structured `:step/poll-timeout` through
+normal step reporting — elapsed, deadline, deadline SOURCE, and the last
+attempt through exactly one of two channels: `:last-value`, the last thing
+the predicate returned (here `{:state "running" :pct 85}` — the diagnosis,
+not just "timed out"), or `:last-error`, the last exception a
+`:retry-error?` predicate accepted as a not-yet (the built-in browser
+oracles ride this channel; your own steps rarely need it). `poll-until`
+returns the observation that satisfied `:until`, so the step can use it.
+Never wrap a mutation in it; never poll a bare negation (waiting-for-gone =
+poll a negated predicate, explicitly). `(step/timing ctx)` reads the budget
+without polling.
+
+Footnote — the nil-to-continue form (`(step/poll-until ctx #(when done? …))`,
+no `:until`) still works, since the default test is truthiness, but it
+**leaves `:last-value` empty on timeout**: a predicate that returns nil to
+keep polling has thrown away what it saw. The timeout record says so
+(`:hint "pred returned nil to continue; return the observation and pass
+:until to populate :last-value"`). Prefer the form above.
+
+#### Evidence in a custom adapter: log the attempt, then the outcome
+
+If your adapter feeds an evidence log — a transcript a capture kind dumps
+when a scenario fails — record the attempted operation **before** executing
+it, then record the outcome. A helper that logs only after a response
+arrives has a structural blind spot: the fatal request (connection refused,
+timeout, DNS failure) is exactly the one that never gets a response, so the
+trail ends one line before the moment of death. The first real `:api`
+adapter we built hit this: the service was killed mid-run, the capture fired
+faithfully, and the transcript's last entry was the final *healthy* request.
+
+```clojure
+;; BLIND: the fatal request never reaches the log
+(defn request! [impl req]
+  (let [resp (http/request req)]
+    (log-entry! impl req resp)          ; never runs when http/request throws
+    resp))
+
+;; HONEST: attempt first, outcome second — a refused request appears
+;; in the capture with its failure noted
+(defn request! [impl req]
+  (let [entry (log-attempt! impl req)]
+    (try
+      (let [resp (http/request req)]
+        (log-outcome! impl entry resp)
+        resp)
+      (catch java.io.IOException e
+        (log-outcome! impl entry {:failed (ex-message e)})
+        (throw e)))))
+```
+
+The capture fn stays dumb — it dumps whatever the log holds; whether the
+moment of death is *in* that log is decided at the helper, by ordering
+alone.
 
 ### Minimal config
 
@@ -356,11 +410,23 @@ older versions ignore silently.)
  :svo {:unknown-subject :warn}}
 ```
 
-The built-in default `:web` instance deep-merges **under** your
-`:interfaces` map rather than being replaced by it — a project that
-declares only `:sms` still has the default `:web` instance, and
-`sl orient` shows it. These merge semantics are provisional: a future
-release may make a user `:interfaces` map replace the defaults wholesale.
+A user `:interfaces` map is the **complete** set — it replaces the builtin
+defaults wholesale (no `:interfaces` key = builtin defaults, today the
+`:web`/`:etaoin` instance; `:interfaces nil` = explicitly zero). Per entry:
+`:default` includes the shipped builtin def of that name verbatim (no
+overrides through the sentinel), and a full map is used as-is under any
+name — including `:web`, which then fully shadows the builtin. A user map
+and a builtin def are **never merged**, and a full map must declare its
+`:type` (never inferred from the name — `:admin-web {:type :web …}` is a
+second browser instance). `:default` under a name with no builtin is a
+planning-time config error, and the `sl/` namespace is reserved for
+builtin interface names and types. So a project that declares only `:sms`
+has exactly one interface, and `sl orient` says so:
+
+```clojure
+:interfaces {:web :default                      ; keep the builtin browser
+             :sms {:type :sms :adapter :sms-mock}} ; bring your own
+```
 
 ### Common mistakes
 
@@ -371,7 +437,8 @@ release may make a user `:interfaces` map replace the defaults wholesale.
 | `:step-paths` at config top level (warned since 0.5.2, ignored either way) | Nest it under `:runner` |
 | `When :login-form submits` | Subjects are actors: `When :user/alice clicks Login.submit` |
 | Compare a capture as a number | `(parse-long n)` first — captures are strings |
-| Hand-roll `Thread/sleep` or a polling loop in a step | `(step/poll-until ctx pred)` — rides the `:timing` ladder, fails legibly |
+| Hand-roll `Thread/sleep` or a polling loop in a step | `(step/poll-until ctx observe {:until done?})` — rides the `:timing` ladder, fails legibly with the last observation aboard |
+| Poll with a predicate that returns nil to keep going | Return what you observed and pass `:until` — a nil-idiom timeout carries no `:last-value` (the record's `:hint` says so) |
 | Retry a click/type/send that "flakes" | Mutations never retry — fix the oracle before it, or the app |
 
 ### URL assertions beyond the built-in frames
@@ -721,9 +788,10 @@ it is declared for is an error (with a did-you-mean), two targets sharing a
 `:wears` in one scenario is an error, and a worn-but-undeclared costume is
 a warning that teaches the declaration to add.
 
-Project verbs extend the built-in set per interface type in
-`glossary/verbs/<type>.edn` (a same-named project verb replaces the builtin
-entry wholesale, frames and all — `sl glossary` marks such entries
+Project verbs extend the built-in set in `glossary/verbs/*.edn` files; each
+file declares its own `:type` — the required, authoritative mount key, any
+keyword including namespaced ones (a same-named project verb replaces the
+builtin entry wholesale, frames and all — `sl glossary` marks such entries
 `config-override`); intents live under `glossary/intents/` (all under
 `sl/`, next to the config — these conventional paths are discovered
 automatically when `:glossaries` is unset). Once an intents glossary is
@@ -1090,9 +1158,10 @@ capability cleanup.**
   `(:status result)` — there is no separate on-failure hook kind. The
   return is the ATTACHMENTS CLAIM: nil (no claim) or
   `{:attachments [{:attachment/kind :screenshot :attachment/path "..."} ..]}`
-  — refs to files the hook wrote, which then ride the scenario envelope and
-  render in the human report surfaces (HTML, JUnit, console; the `--edn`
-  summary carries no refs yet). The contract is full-strict: any other return
+  — refs to files the hook wrote, which then ride the scenario envelope,
+  render in the human report surfaces (HTML, JUnit, console) and appear in
+  the `--edn` summary's top-level `:attachments` index. The contract is
+  full-strict: any other return
   (a map with extra or misspelled keys, a malformed ref, a non-map value)
   is `:hook/invalid-return` → scenario `:error`. A claimed file that does
   not exist keeps the scenario outcome but the ref is marked
@@ -1209,6 +1278,27 @@ envelope.
   capabilities.
 - Step fails → scenario `:failed`; `:on-failure` capture fires at that
   instant, before Afters.
+- Step throws with `:error/class :observation` (the witness went dark — no
+  answer existed: refused, transport timeout, DNS) → scenario `:error`,
+  counted `unobserved` (disjoint from the harness's `error` bucket), exit
+  4; the step stays `:failed` with the class on its error. The other two
+  classes (`:sut` = the app answered WITH an error, `:assertion` = the app
+  answered and missed) are recorded and rendered only — scenario `:failed`,
+  exit 1. Absent key = unchanged behavior. Builtin SMS/browser adapters
+  ship classified; tag your own adapter's throw at its catch site — the
+  class is read when that throw reaches the STEP; hook, provisioning and
+  capture throws are the harness bucket (`error`), never `unobserved`.
+- `{:runner {:halt-on-observation-failure true}}` (default off) → after an
+  observation-class scenario, no further scenario STARTS; in-flight ones
+  (`--max-parallel`) finish and keep their verdicts, everything unstarted
+  (incl. the `@serial` tail) is `skipped`; the summary says `halted after
+  scenario N (<name>): observation failure` and the EDN summary carries
+  `:halted {:after-scenario N :scenario "<name>"}`. Exit 4 either way.
+  The key is `false` | `:group` | `:run` (`true` = `:run`): with `setup.clj`
+  groups, `:run` skips every group not yet started (its `:start` never
+  runs; the invocation aggregate carries the `:halted` record and the
+  skipped groups' rows say `:run/status :skipped`), `:group` halts only the
+  group that went dark.
 - After hook throws or its attachments claim is malformed → scenario
   `:error` even when every step passed. One failing After doesn't stop the
   unwind.
@@ -1220,9 +1310,13 @@ envelope.
   environment damage is the NEXT run's planning input — which is what the
   dirty-teardown marker is (written now, announced at the next run's start,
   then cleared).
-- Any scenario `:error` → exit 4 (run degraded: the harness broke, the run
-  proves nothing about the app), distinct from exit 1 (a scenario failed).
-- Exit codes aggregate worst-wins across groups: 2 > 4 > 1 > 0.
+- Any scenario `:error` → exit 4 (run degraded: the harness broke or the
+  observation channel went dark — the run proves nothing about the app for
+  that scenario), distinct from exit 1 (a scenario failed). Exit 4 is not
+  an acquittal: red, blocking; only the indictment of the app is withheld.
+- Exit codes aggregate worst-wins across groups: 2 > 4 > 1 > 0. 0/1 are
+  verdicts about the app; 2/3/4 are three ways the run failed to be a
+  measurement (your request / SL's code / the observation channel).
 
 ### Parallelism
 
@@ -1267,11 +1361,99 @@ file is written) plus the run-directory bytes. The summary's top-level
 appears only there); `:failures` entries carry their own refs inline for
 join-free triage — same refs, deliberate duplication. `:run/seed` on every
 summary is the run's seed — rerun with `--seed <that value>` to reproduce
-user-code randomness. Building a custom rendering from the record:
-`docs/REPORTS.md` (contract + runnable recipe).
+user-code randomness. In a multi-group run each group's summary carries
+`:group/label` + `:group/index` (join by index, not stream order — the
+index is the group's DECLARED position, so under CLI narrowing the numbers
+keep their declared values and may have gaps), and one
+final `:invocation/exit-code` form carries the suite verdict — read it if
+present, else the lone summary's `:run/exit-code`. Building a custom
+rendering from the record: `docs/REPORTS.md` (contract + runnable recipe).
 
 Related topics: `hooks` (registration, payloads, attachments claim),
 `layout` (which files attach user code, what the framework writes).
+
+---
+
+## Exit Codes
+
+The `sl run` exit code is a claim about what the run proved. This is the
+decision procedure; the reasoning lives in `docs/architecture/exit-codes.md`.
+
+### The table
+
+| Code | Status | Meaning |
+|---|---|---|
+| 0 | `:passed` | Existential pass: ≥1 scenario selected, every selected scenario ran to a tolerated outcome, none failed or errored (pending tolerated only under `:allow-pending?` — the counts still confess). |
+| 1 | `:failed` | ≥1 scenario `:failed` — the app answered and the answer missed the expectation (including `:sut`-classed errors: the app answered *with* an error). Or pending under strict mode. |
+| 2 | `:planning-failed` | Invalid before execution: config/parse/discovery/binding errors, an un-runnable invocation, an empty selection. Pre-execution exclusive — nothing ran. |
+| 3 | `:crashed` | Runner crash — an uncaught throwable in ShiftLefter's own code. Anywhere; wins over everything. |
+| 4 | `:degraded` | ≥1 scenario `:error` — either the harness's own machinery broke (hook throw, capability provisioning, capture, harness; counted `error`) or a step's adapter classified its failure `:observation` — no answer existed (counted `unobserved`). The verdict about the app is unavailable for those scenarios. |
+
+Precedence: 3 anywhere; 2 pre-execution exclusive per `setup.clj` group;
+during execution worst wins, 4 > 1 > 0; across groups the suite
+aggregates worst-wins: 2 > 4 > 1 > 0. A suite-level 2 means at least one
+group's request was never runnable — earlier groups' evidence is real and
+in the report; gate on the exit code, not the report. Under `--edn` a
+multi-group run also says this in the stream: each group's summary carries
+`:group/label` + `:group/index`, and one final aggregate form carries
+`:invocation/exit-code` — the suite verdict, readable without the process
+exit (absent in single-group streams, where the lone summary's
+`:run/exit-code` is the verdict; absent on a crash).
+
+### What to do on each exit
+
+- **0** — the app met every expectation checked. Done.
+- **1** — the app answered and at least one answer was wrong. Debug from
+  the report's failure evidence.
+- **2** — nothing ran for that group. Fix the invocation, the config, or
+  the spec's symbols. Absence of exit 2 is not evidence the spec is
+  valid — a fresh element-not-found at runtime (exit 1) may be glossary
+  rot or app regression; triage, don't assume.
+- **3** — ShiftLefter itself crashed. Trust nothing in the run; file a
+  framework bug.
+- **4** — ≥1 scenario got no answer. Do not touch product code; check the
+  environment, then rerun. Exit 4 withholds the indictment of the product
+  because the evidence never reached it.
+
+### Classifying a failure (the razor)
+
+Did the witness channel — the channel the SUT is observed through —
+answer?
+
+- Answered, wrong → `:error/class :assertion` → scenario `:failed`, exit 1.
+- Answered *with* an error (500, stack-trace page, job state `failed`) →
+  `:sut` → `:failed`, exit 1.
+- Never answered (refused, transport timeout, DNS) → `:observation` →
+  `:error`, counted `unobserved`, exit 4. Classifying silence as
+  `:observation` is a refusal to convert silence into evidence.
+
+Give-backs: a late answer that arrives is `:assertion`; a poll that timed
+out after successful answers is `:assertion` — `:last-value` present
+means the witness was answering, `:last-error` only means it never
+answered. An expected event that never occurs through a healthy witness
+is `:assertion`; an expected response that never comes is `:observation`.
+The one misclassification that lies: marking a delivered answer
+`:observation`. Unclassified errors keep default behavior; declining to
+classify is always safe.
+
+### Exit-4 triage
+
+The build is red, nonzero, blocking either way. The report names which
+scenarios went unobserved — read it before rerunning. The same scenario
+unobserved run after run while its siblings pass: suspect the SUT's
+responsiveness, not the network.
+
+`{:runner {:halt-on-observation-failure true}}` (run-level config,
+default off): after a scenario finalizes observation-class, no further
+scenario starts; in-flight scenarios finish and keep their verdicts, the
+rest are `skipped`; the exit code is 4 either way. The key is a tri-state
+`false` | `:group` | `:run` (`true` reads as `:run`): with `setup.clj`
+groups, `:run` skips every group not yet started — its `:start` never
+runs, its aggregate row says `:run/status :skipped` — while `:group`
+halts only the group that went dark and lets the siblings run.
+
+Related topics: `lifecycle` (failure semantics by stage, the execution
+weave), `builtins` (the pre-classified built-in step families).
 
 ---
 

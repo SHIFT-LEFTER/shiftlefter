@@ -73,19 +73,70 @@ it calls the kernel in `shiftlefter.step`:
 ```clojure
 (require '[shiftlefter.step :as step])
 
-(defstep #"the nightly report has landed"
-  [ctx]
-  (step/poll-until ctx #(.exists (java.io.File. "out/report.csv")))
+;; observe-and-judge: the predicate RETURNS the observation, :until judges it
+(defstep #"the export job (\S+) has finished"
+  [ctx job-id]
+  (step/poll-until ctx #(fetch-job job-id)            ; => {:state "running" :pct 85}
+                   {:until #(= "done" (:state %))})
   ctx)
 ```
 
-`poll-until` polls until truthy at the resolved interval/deadline (`:timing`
-config, instance > interface > global > default — 30s/500ms bare). On timeout
-it throws a structured `:step/poll-timeout` through normal step reporting:
-elapsed, deadline, deadline SOURCE, last observed value (pass `:until` when
-the predicate observes a value, e.g. `{:until #(<= 5 %)}`). Never wrap a
-mutation in it; never poll a bare negation (waiting-for-gone = poll a negated
-predicate, explicitly). `(step/timing ctx)` reads the budget without polling.
+`poll-until` polls at the resolved interval/deadline (`:timing` config,
+instance > interface > global > default — 30s/500ms bare) until `:until`
+accepts the predicate's return. **Return the observation; let `:until`
+judge it.** On timeout it throws a structured `:step/poll-timeout` through
+normal step reporting — elapsed, deadline, deadline SOURCE, and the last
+attempt through exactly one of two channels: `:last-value`, the last thing
+the predicate returned (here `{:state "running" :pct 85}` — the diagnosis,
+not just "timed out"), or `:last-error`, the last exception a
+`:retry-error?` predicate accepted as a not-yet (the built-in browser
+oracles ride this channel; your own steps rarely need it). `poll-until`
+returns the observation that satisfied `:until`, so the step can use it.
+Never wrap a mutation in it; never poll a bare negation (waiting-for-gone =
+poll a negated predicate, explicitly). `(step/timing ctx)` reads the budget
+without polling.
+
+Footnote — the nil-to-continue form (`(step/poll-until ctx #(when done? …))`,
+no `:until`) still works, since the default test is truthiness, but it
+**leaves `:last-value` empty on timeout**: a predicate that returns nil to
+keep polling has thrown away what it saw. The timeout record says so
+(`:hint "pred returned nil to continue; return the observation and pass
+:until to populate :last-value"`). Prefer the form above.
+
+### Evidence in a custom adapter: log the attempt, then the outcome
+
+If your adapter feeds an evidence log — a transcript a capture kind dumps
+when a scenario fails — record the attempted operation **before** executing
+it, then record the outcome. A helper that logs only after a response
+arrives has a structural blind spot: the fatal request (connection refused,
+timeout, DNS failure) is exactly the one that never gets a response, so the
+trail ends one line before the moment of death. The first real `:api`
+adapter we built hit this: the service was killed mid-run, the capture fired
+faithfully, and the transcript's last entry was the final *healthy* request.
+
+```clojure
+;; BLIND: the fatal request never reaches the log
+(defn request! [impl req]
+  (let [resp (http/request req)]
+    (log-entry! impl req resp)          ; never runs when http/request throws
+    resp))
+
+;; HONEST: attempt first, outcome second — a refused request appears
+;; in the capture with its failure noted
+(defn request! [impl req]
+  (let [entry (log-attempt! impl req)]
+    (try
+      (let [resp (http/request req)]
+        (log-outcome! impl entry resp)
+        resp)
+      (catch java.io.IOException e
+        (log-outcome! impl entry {:failed (ex-message e)})
+        (throw e)))))
+```
+
+The capture fn stays dumb — it dumps whatever the log holds; whether the
+moment of death is *in* that log is decided at the helper, by ordering
+alone.
 
 ## Minimal config
 
@@ -113,11 +164,23 @@ older versions ignore silently.)
  :svo {:unknown-subject :warn}}
 ```
 
-The built-in default `:web` instance deep-merges **under** your
-`:interfaces` map rather than being replaced by it — a project that
-declares only `:sms` still has the default `:web` instance, and
-`sl orient` shows it. These merge semantics are provisional: a future
-release may make a user `:interfaces` map replace the defaults wholesale.
+A user `:interfaces` map is the **complete** set — it replaces the builtin
+defaults wholesale (no `:interfaces` key = builtin defaults, today the
+`:web`/`:etaoin` instance; `:interfaces nil` = explicitly zero). Per entry:
+`:default` includes the shipped builtin def of that name verbatim (no
+overrides through the sentinel), and a full map is used as-is under any
+name — including `:web`, which then fully shadows the builtin. A user map
+and a builtin def are **never merged**, and a full map must declare its
+`:type` (never inferred from the name — `:admin-web {:type :web …}` is a
+second browser instance). `:default` under a name with no builtin is a
+planning-time config error, and the `sl/` namespace is reserved for
+builtin interface names and types. So a project that declares only `:sms`
+has exactly one interface, and `sl orient` says so:
+
+```clojure
+:interfaces {:web :default                      ; keep the builtin browser
+             :sms {:type :sms :adapter :sms-mock}} ; bring your own
+```
 
 ## Common mistakes
 
@@ -128,7 +191,8 @@ release may make a user `:interfaces` map replace the defaults wholesale.
 | `:step-paths` at config top level (warned since 0.5.2, ignored either way) | Nest it under `:runner` |
 | `When :login-form submits` | Subjects are actors: `When :user/alice clicks Login.submit` |
 | Compare a capture as a number | `(parse-long n)` first — captures are strings |
-| Hand-roll `Thread/sleep` or a polling loop in a step | `(step/poll-until ctx pred)` — rides the `:timing` ladder, fails legibly |
+| Hand-roll `Thread/sleep` or a polling loop in a step | `(step/poll-until ctx observe {:until done?})` — rides the `:timing` ladder, fails legibly with the last observation aboard |
+| Poll with a predicate that returns nil to keep going | Return what you observed and pass `:until` — a nil-idiom timeout carries no `:last-value` (the record's `:hint` says so) |
 | Retry a click/type/send that "flakes" | Mutations never retry — fix the oracle before it, or the app |
 
 ## URL assertions beyond the built-in frames

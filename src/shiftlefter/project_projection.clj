@@ -10,7 +10,7 @@
             [shiftlefter.intent.loader :as intent-loader]
             [shiftlefter.intent.resolve :as intent-resolve]
             [shiftlefter.project-context :as project-context]
-            [shiftlefter.runner.config :as config]
+            [shiftlefter.config :as config]
             [shiftlefter.runner.setup :as setup]
             [shiftlefter.runner.step-loader :as step-loader]
             [shiftlefter.stepengine.macros :as macros]
@@ -62,23 +62,6 @@
       (fs/exists? p) [p]
       :else [])))
 
-(defn- resolve-glossary-config [project-context glossary-config]
-  (when glossary-config
-    (cond-> glossary-config
-      (:subjects glossary-config)
-      (update :subjects #(project-context/resolve-config-path project-context %))
-
-      (:intents glossary-config)
-      (update :intents #(project-context/resolve-config-path project-context %))
-
-      (:verbs glossary-config)
-      (update :verbs (fn [verbs]
-                       (into {}
-                             (map (fn [[interface-type path]]
-                                    [interface-type
-                                     (project-context/resolve-config-path project-context path)]))
-                             verbs))))))
-
 (defn- resolve-config-declared-paths [project-context cfg]
   (cond-> cfg
     (seq (get-in cfg [:runner :step-paths]))
@@ -90,7 +73,7 @@
                #(project-context/resolve-config-paths project-context %))
 
     (:glossaries cfg)
-    (update :glossaries #(resolve-glossary-config project-context %))))
+    (update :glossaries #(config/resolve-glossary-config-paths project-context %))))
 
 (defn- load-config-projection [project-context opts]
   (if-let [required (and (not (:allow-defaults? opts))
@@ -331,11 +314,16 @@
          :loaded (:loaded load-result)
          :diagnostics []}))))
 
-(defn- load-glossary-projection [cfg]
+(defn- load-glossary-projection
+  "Strict glossary load for the projection. Returns {:ok glossary
+   :warnings [...]} or {:error ...} — :warnings are the structured
+   glossary-load lints (sl-67dj, Warden P3-13) the caller renders as
+   :glossary :warn diagnostics, the config-lints pattern."
+  [cfg]
   (let [result (glossary/load-all-glossaries-strict (:glossaries cfg))]
     (if (:error result)
       {:error (:error result)}
-      {:ok (:ok result)})))
+      {:ok (:ok result) :warnings (:warnings result)})))
 
 (defn- load-intents-projection [cfg]
   (let [intents-path (get-in cfg [:glossaries :intents])
@@ -387,7 +375,7 @@
 (defn- projection-inputs [project-context cfg step-load setup-path]
   (let [glossaries (:glossaries cfg)
         subject-paths (keep identity [(:subjects glossaries)])
-        verb-paths (vals (:verbs glossaries))
+        verb-paths (:verbs glossaries)
         intent-files (glob-files (:intents glossaries) "*.edn")
         macro-paths (config/get-macro-registry-paths cfg)
         step-files (mapcat step-files-under (config/get-step-paths cfg))]
@@ -436,7 +424,7 @@
 
 (defn- svo-effective
   "The EFFECTIVE :svo strictness levels from a LOADED config (post
-   `runner.config/apply-conditional-object-default`, so the conditional
+   `shiftlefter.config/apply-conditional-object-default`, so the conditional
    :unknown-object flip is already applied), display-normalized the way the
    binder reads them (:strict -> :error, stepengine/bind.clj). Nil in
    Vanilla mode (no :svo key)."
@@ -465,7 +453,7 @@
 
 (defn- config-mode
   "Mode of a loaded config: :shifted iff :svo is present, else :vanilla.
-   Post sl-ieie, `runner.config/load-config` includes :svo iff the user's
+   Post sl-ieie, `shiftlefter.config/load-config` includes :svo iff the user's
    config had it, so this reflects user intent."
   [cfg]
   (if (contains? cfg :svo) :shifted :vanilla))
@@ -511,7 +499,12 @@
         decl-by-name (into {} (map (juxt :name identity)) decls)
         mode (config-mode cfg)
         stepdefs (:stepdefs step-load)
-        interfaces (:interfaces cfg)
+        ;; sl-a7sx (Warden W-B2): a non-map :interfaces is already a
+        ;; :config/invalid-interfaces diagnostic in `blocking` (the
+        ;; projection continues past config errors so orient can show
+        ;; them); render the rest against zero interfaces instead of
+        ;; crashing in configured-types / interface-projection.
+        interfaces (let [i (:interfaces cfg)] (if (map? i) i {}))
         ;; sl-s2oa: stepdef :interface metadata is a TYPE — lint only
         ;; stepdefs whose type some configured instance provides
         configured-iface-types (suite-lint/configured-types interfaces)
@@ -521,8 +514,11 @@
                                   stepdefs)
         ;; Suite-lint is runner-real in BOTH modes (compile-suite gates it
         ;; only on :interfaces), so it stays unconditional here.
+        ;; sl-67dj: project-declared glossary types come from the LOADED
+        ;; glossary's actual mounts (:sources = declared-type → path, built
+        ;; by the loader), not from config keys — config is a path list now.
         suite-lint (suite-lint/lint-suite lintable-stepdefs
-                                          (keys (get-in cfg [:glossaries :verbs]))
+                                          (keys (get-in glossary-map [:sources :verbs]))
                                           interfaces
                                           adapter-registry)
         ;; Tier-2 stepdef/glossary validation is Shifted-only in the runner
@@ -619,12 +615,18 @@
                                          " glossaries only in Shifted mode; showing"
                                          " framework defaults)"))]]
                    [glossary-result nil])
+                 ;; sl-67dj (Warden P3-13): structured glossary-load warnings
+                 ;; (e.g. :glossary/override-flag-ignored) ride as :warn
+                 ;; diagnostics — the config-lints pattern; never flip :status.
+                 glossary-lints (map #(diagnostic :glossary :warn %)
+                                     (:warnings glossary-result))
                  intents-result (load-intents-projection cfg)
                  step-load (load-stepdefs-projection! (config/get-step-paths cfg))
                  macro-load (load-macros-projection cfg)
                  setup-decls (load-setup-declarations project-context cfg)
                  blocking (vec (concat config-diagnostics
                                        glossary-warnings
+                                       glossary-lints
                                        (when (:error glossary-result)
                                          [(diagnostic :glossary :error (:error glossary-result))])
                                        (when (:error intents-result)

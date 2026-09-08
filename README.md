@@ -4,7 +4,7 @@
 
 An agent can write you a passing browser test in one shot today. That's not the hard part anymore. The hard part is the **second** shot, and the tenth: each regeneration re-derives your app from scratch — its own selectors, its own names, its own idea of who "the user" is — and the suite drifts faster the more agents (and models) touch it. ShiftLefter gives that loop something stable to stand on: a typed vocabulary you define once, shared by every agent and every human on the team, and validated before anything runs. ([The full problem statement and fit check →](docs/FIT.md))
 
-## Status: v0.5.5
+## Status: v0.5.6
 
 ShiftLefter is an early, openly-scoped foundation for driving real software behavior from Gherkin — multiple users, multiple interfaces, all checked before anything runs. The core — driving a browser with multiple independent actors over a typed glossary you control — is solid and meant to be built on. The surrounding test-suite machinery and the traceability graph are on the way.
 
@@ -95,12 +95,15 @@ This is all you need to run features, format files, start the REPL (`sl repl`), 
 ShiftLefter ships an agent surface a coding agent can't discover by grepping —
 built-in vocabulary (`sl agent-doc builtins`) and project validation (`sl orient`).
 You can't run a command to discover the command exists (the bootstrap paradox), so
-the entry point has to be advertised *outside* the tool. On a fresh install the
-installer runs `sl init`, which writes the breadcrumb stanza into `AGENTS.md`
-for you (marker-guarded create-or-append). On a project that already has `sl/`,
-the installer prints the stanza instead — **paste it into your agent file**
-(`AGENTS.md` / `CLAUDE.md` / `.cursor/rules`) or startup prompt. The same stanza
-ships as a flat `agents-breadcrumb.md` in the release artifact.
+the entry point has to be advertised *outside* the tool. But `AGENTS.md` is
+yours, so the installer asks before touching it: pass `--write-agents` (or
+answer the interactive prompt) and `sl init --write-agents` appends the
+breadcrumb stanza marker-guarded — create-or-append, an existing stanza never
+edited; pass `--no-write-agents` and it stays untouched; with no answer (the
+non-interactive default) nothing is written and the stanza is printed instead —
+**paste it into your agent file** (`AGENTS.md` / `CLAUDE.md` / `.cursor/rules`)
+or startup prompt. The same stanza ships as a flat `agents-breadcrumb.md` in
+the release artifact.
 
 ### Writing Custom Step Definitions
 
@@ -394,13 +397,13 @@ Add type-checking to your step definitions with Subject-Verb-Object validation. 
 
 Configure enforcement in `sl/shiftlefter.edn`. Glossaries at the
 conventional paths next to the config (`sl/glossary/subjects.edn`,
-`sl/glossary/verbs/<type>.edn`, `sl/glossary/intents/`) are discovered
+`sl/glossary/verbs/*.edn`, `sl/glossary/intents/`) are discovered
 automatically; an explicit `:glossaries` map overrides them:
 
 ```clojure
 {:glossaries                             ;; optional — these ARE the conventions
  {:subjects "glossary/subjects.edn"
-  :verbs {:web "glossary/verbs/web.edn"}}
+  :verbs ["glossary/verbs/web.edn"]}     ;; each file's own :type is its mount key
 
  :interfaces
  {:web {:type :web :adapter :etaoin :config {:headless true}}}
@@ -756,7 +759,7 @@ CLI commands return consistent exit codes for scripting and CI integration.
 | 1 | One or more scenarios failed (a step assertion or step exception — valid tests, app wrong), or pending steps when not allowed |
 | 2 | Planning failure — invalid before execution: undefined steps, parse errors, config errors, no features found, bad flags/arguments, and **empty selection** (a tag filter matching 0 of N, feature files with no scenarios, CLI paths narrowing every group away). Nothing executed. |
 | 3 | Runner crash (unexpected exception) |
-| 4 | Run degraded: one or more scenarios hit an infrastructure failure (`:error` — a lifecycle hook threw, capability provisioning failed, capture infrastructure failed, or the harness crashed mid-scenario). The harness broke, so the run proves nothing about the app — distinct from 1 by design. |
+| 4 | Run degraded: one or more scenarios have no verdict — either the harness's own machinery broke (`:error` — a lifecycle hook threw, capability provisioning failed, capture infrastructure failed, or the harness crashed mid-scenario; counted `error`) or a step's adapter classified its failure `:observation` — no answer existed (connection refused, transport timeout, DNS; counted `unobserved`). Either way the run proves nothing about the app for those scenarios — distinct from 1 by design. |
 
 Precedence: 3 anywhere; 2 is pre-execution exclusive; during execution worst
 wins, 4 over 1 over 0. Across `setup.clj` groups the suite aggregates
@@ -765,12 +768,18 @@ selection binds) and requires a nonempty selection — an empty selection
 exits 2 in dry runs too, and its record carries the counts and what was
 searched so a CI wrapper can make its own call upstream.
 
-Today an infrastructure failure that surfaces inside a step — a connection
-refused mid-run, say — is indistinguishable from the app being wrong and
-reports as an ordinary scenario failure (exit 1); only the harness's own
-`:error` family reaches 4. A future release may classify such step-level
-infrastructure failures into the degraded verdict — one more reason to gate
-on nonzero, not on a specific value.
+The axis behind the ladder: 0 and 1 are verdicts about the app; 2, 3 and 4
+are three ways the run failed to be a measurement (your request, our code,
+the observation channel). A step keeps 4 honest by tagging the exception
+it throws with one recognized ex-data key, `:error/class` (`:assertion` /
+`:sut` / `:observation`; absent = today's behavior) — an adapter's
+classification counts when its throw reaches the step; the
+built-in SMS and browser families ship pre-classified, and
+`{:runner {:halt-on-observation-failure true}}` stops starting scenarios
+once one goes dark (the key takes `false` | `:group` | `:run`; `true` is
+`:run` — with `setup.clj` groups, `:run` skips every group not yet started,
+`:group` halts only the group that went dark). The full ladder, the class contract and the triage
+guidance: [docs/architecture/exit-codes.md](docs/architecture/exit-codes.md).
 
 ### `sl fmt --check`
 | Code | Meaning |

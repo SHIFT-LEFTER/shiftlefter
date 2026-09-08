@@ -246,7 +246,10 @@ Two behaviors that surprise consumers of stricter test tools:
   simply absent), and can be entirely green beside a nonzero exit. Either way
   the exit code is the gate: a CI job that keys on the report's presence — or
   its greenness — must ALSO check the process exit code, or it will read a
-  missing (or partial, all-green) report as success.
+  missing (or partial, all-green) report as success. Relatedly, `--dry-run`
+  with `--junit-xml` (or `--html`) is refused at invocation — one stderr line,
+  exit 2, no file (sl-7dq5): a dry run executes nothing, so it would otherwise
+  print a success line and silently write no report.
 
 **Impact**:
 Consumers should not assume a formal XSD contract. We validate output against a

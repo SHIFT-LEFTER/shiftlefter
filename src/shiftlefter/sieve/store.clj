@@ -3,6 +3,7 @@
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [shiftlefter.project-context :as project-context]
             [shiftlefter.sieve.contract :as contract])
   (:import [java.io PushbackReader]))
 
@@ -14,6 +15,10 @@
   (fs/path (or (:root opts) default-root)))
 
 (defn- ensure-parent! [path]
+  ;; Writes under the default project-local root self-ignore .shiftlefter at
+  ;; the creation site (sl-7dq5 F9); an override root is the caller's dir.
+  (when (fs/starts-with? path default-root)
+    (project-context/ensure-self-ignore! (str (fs/parent (fs/path default-root)))))
   (fs/create-dirs (fs/parent path)))
 
 (defn- write-edn! [path value]

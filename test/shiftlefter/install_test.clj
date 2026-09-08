@@ -2,12 +2,14 @@
   "End-to-end test of release/install.sh against a fabricated release-zip
    (no real uberjar/java). Validates the install + scaffold-delegation
    behavior: a FRESH install (no sl/ at the caller's cwd) invokes `sl init`
-   (the cn7 fold — one write moment); a PRE-EXISTING sl/ skips the scaffold
-   and falls back to printing the breadcrumb stanza (k0s AC2 emit path).
-   The zip's `sl` is a stub that echoes its argv, so what's asserted here is
-   the installer's wiring, not the scaffold itself (that's
-   shiftlefter.init-scaffold-test). Self-skips where bash/zip/unzip are
-   absent."
+   (the cn7 fold — one write moment); a PRE-EXISTING sl/ skips the scaffold.
+   AGENTS.md consent is tri-state (sl-7dq5 F1): --write-agents /
+   --no-write-agents pre-answer, and the flag-absent non-TTY default —
+   exactly what this harness exercises, since clojure.java.shell/sh attaches
+   no TTY — is no-write + the printed stanza offer. The zip's `sl` is a stub
+   that echoes its argv, so what's asserted here is the installer's wiring,
+   not the scaffold itself (that's shiftlefter.init-scaffold-test).
+   Self-skips where bash/zip/unzip are absent."
   (:require [babashka.fs :as fs]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
@@ -62,13 +64,51 @@
           (testing "places the sl wrapper + jar (k0s AC1, AC8 local-zip)"
             (is (fs/exists? (fs/path cwd "sl" "sl")))
             (is (fs/exists? (fs/path cwd "sl" "shiftlefter-v9.9.9.jar"))))
-          (testing "fresh install delegates to sl init (the cn7 fold)"
+          (testing "fresh install delegates to sl init (the cn7 fold) WITHOUT
+                    the agents write — flag-absent non-TTY is the safe default
+                    (sl-7dq5 F1)"
             (is (str/includes? (:out result) "Scaffolding project files (sl init)"))
-            (is (str/includes? (:out result) "sl stub invoked: init")))
-          (testing "the scaffold path does not print the paste-me breadcrumb banner"
-            (is (not (str/includes? (:out result) "Agent on-ramp breadcrumb"))))
+            (is (str/includes? (:out result) "sl stub invoked: init"))
+            (is (not (str/includes? (:out result) "sl stub invoked: init --write-agents"))))
+          (testing "nobody answered the AGENTS.md question — the stanza prints
+                    as the offer (was: silent write; the pin inverted with the
+                    ownership-boundary ruling)"
+            (is (str/includes? (:out result) "Agent on-ramp breadcrumb"))
+            (is (str/includes? (:out result) "sl init --write-agents")))
           (testing "prints a PATH instruction without editing shell profiles"
             (is (str/includes? (:out result) "export PATH="))))
+        (finally (fs/delete-tree dir))))))
+
+(deftest fresh-install-write-agents-flags
+  (if-not tools-present?
+    (is true "bash/zip/unzip unavailable — skipping installer E2E")
+    (let [dir (str (fs/create-temp-dir))]
+      (try
+        (let [zip (make-fake-zip! dir "9.9.9")]
+          (testing "--write-agents pre-answers yes: init gets the flag, no offer banner"
+            (let [cwd (str (fs/path dir "proj-yes"))
+                  _ (fs/create-dirs cwd)
+                  result (run-install cwd ["--zip" zip "--write-agents"])]
+              (is (zero? (:exit result)) (:err result))
+              (is (str/includes? (:out result) "sl stub invoked: init --write-agents"))
+              (is (not (str/includes? (:out result) "Agent on-ramp breadcrumb")))))
+          (testing "--no-write-agents pre-answers no: plain init, no banner —
+                    the user answered, the installer doesn't nag"
+            (let [cwd (str (fs/path dir "proj-no"))
+                  _ (fs/create-dirs cwd)
+                  result (run-install cwd ["--zip" zip "--no-write-agents"])]
+              (is (zero? (:exit result)) (:err result))
+              (is (str/includes? (:out result) "sl stub invoked: init"))
+              (is (not (str/includes? (:out result) "--write-agents")))
+              (is (not (str/includes? (:out result) "Agent on-ramp breadcrumb")))))
+          (testing "--no-breadcrumb is DEAD (sl-7dq5: it suppressed only the
+                    print, not the write — the surface lied about its one
+                    control): unknown option, exit 1"
+            (let [cwd (str (fs/path dir "proj-dead"))
+                  _ (fs/create-dirs cwd)
+                  result (run-install cwd ["--zip" zip "--no-breadcrumb"])]
+              (is (= 1 (:exit result)))
+              (is (str/includes? (:err result) "Unknown option: --no-breadcrumb")))))
         (finally (fs/delete-tree dir))))))
 
 (deftest fresh-install-writes-binaries-only-gitignore
@@ -148,8 +188,80 @@
               (is (str/includes? (:out result) "sl agent-doc builtins"))
               (is (str/includes? (:out result) "sl orient"))
               (is (not (fs/exists? (fs/path cwd "AGENTS.md"))))))
-          (testing "--no-breadcrumb suppresses the stanza on the skip path"
-            (let [result (run-install cwd ["--zip" zip "--no-breadcrumb"])]
+          (testing "--no-write-agents suppresses the stanza on the skip path
+                    (the explicit no replaced --no-breadcrumb, sl-7dq5)"
+            (let [result (run-install cwd ["--zip" zip "--no-write-agents"])]
               (is (zero? (:exit result)) (:err result))
+              (is (not (str/includes? (:out result) "Agent on-ramp breadcrumb")))))
+          (testing "--write-agents on the skip path still honors the explicit
+                    ask via init's bail-arm exception (sl-7dq5)"
+            (let [result (run-install cwd ["--zip" zip "--write-agents"])]
+              (is (zero? (:exit result)) (:err result))
+              (is (str/includes? (:out result) "sl stub invoked: init --write-agents"))
               (is (not (str/includes? (:out result) "Agent on-ramp breadcrumb"))))))
+        (finally (fs/delete-tree dir))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-6vz8 (Warden W30) — the interactive TTY consent arm (install.sh ~:131–:145)
+;; -----------------------------------------------------------------------------
+;;
+;; The arm asks only when stderr is a TTY and /dev/tty is readable, and reads
+;; the answer from /dev/tty directly (under `curl | bash` stdin is the script).
+;; clojure.java.shell/sh attaches no TTY, so the three tests above can only
+;; reach the non-interactive default. This one drives a real pty with
+;; expect(1). Recorded so nobody retries it: script(1) with piped stdin does
+;; NOT work — `printf 'y\n' | script -q /dev/null bash …` delivers the bytes
+;; before the prompt's read opens /dev/tty, and the read sees EOF (probed
+;; 2026-09-03). Opt-in ^:daemon suite as dispatched; self-skips without
+;; expect.
+
+(defn- expect-present? [] (have? "expect"))
+
+(defn- expect-script
+  "An expect script that spawns the installer against `zip`, answers the
+   consent prompt with `answer` (\"y\" or \"\" for the default), and exits
+   with the installer's own exit code."
+  [zip answer]
+  (str "set timeout 30\n"
+       "spawn bash " installer " --zip " zip "\n"
+       "expect {\n"
+       "  -re {\\[y/N\\]} { send \"" answer "\\r\" }\n"
+       "  timeout { puts \"NO-PROMPT\"; exit 97 }\n"
+       "}\n"
+       "expect eof\n"
+       "catch wait result\n"
+       "exit [lindex $result 3]\n"))
+
+(defn- run-install-on-pty
+  "Run the installer under expect with `cwd` as the working directory;
+   expect's spawn inherits it, so the pre-existing-sl/ check sees `cwd`."
+  [cwd zip answer]
+  (let [script (str (fs/path cwd ".." (str "consent-" answer ".exp")))]
+    (spit script (expect-script zip answer))
+    (shell/sh "expect" "-f" script :dir cwd)))
+
+(deftest ^:daemon interactive-consent-arm-on-a-real-tty
+  (if-not (and tools-present? (expect-present?))
+    (is true "bash/zip/unzip/expect unavailable — skipping the pty consent E2E")
+    (let [dir (str (fs/create-temp-dir))]
+      (try
+        (let [zip (make-fake-zip! dir "9.9.9")]
+          (testing "y on the prompt: init gets --write-agents, no offer banner"
+            (let [cwd (str (fs/path dir "proj-yes"))
+                  _ (fs/create-dirs cwd)
+                  result (run-install-on-pty cwd zip "y")]
+              (is (zero? (:exit result)) (str (:out result) (:err result)))
+              (is (str/includes? (:out result) "[y/N]") "the arm actually asked")
+              (is (str/includes? (:out result) "sl stub invoked: init --write-agents"))
+              (is (not (str/includes? (:out result) "Agent on-ramp breadcrumb")))))
+          (testing "empty answer on the prompt: defaulted-no — plain init AND
+                    the stanza printed as the offer (nobody answered)"
+            (let [cwd (str (fs/path dir "proj-default"))
+                  _ (fs/create-dirs cwd)
+                  result (run-install-on-pty cwd zip "")]
+              (is (zero? (:exit result)) (str (:out result) (:err result)))
+              (is (str/includes? (:out result) "[y/N]") "the arm actually asked")
+              (is (str/includes? (:out result) "sl stub invoked: init"))
+              (is (not (str/includes? (:out result) "sl stub invoked: init --write-agents")))
+              (is (str/includes? (:out result) "Agent on-ramp breadcrumb")))))
         (finally (fs/delete-tree dir))))))

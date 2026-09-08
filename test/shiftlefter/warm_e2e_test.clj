@@ -170,6 +170,91 @@
           (is (= (:port d1) (:port d2)) "second call reused the same port")))))))
 
 ;; -----------------------------------------------------------------------------
+;; 1b. daemon.log stays EMPTY across warm runs (sl-78u4, Warden W1)
+;; -----------------------------------------------------------------------------
+
+(deftest ^:daemon daemon-log-stays-empty-after-warm-runs
+  ;; The shipped diagnosis is "daemon.log is a crash sink; 0 bytes = healthy"
+  ;; (bin/sl, docs/daemon.md, the sl-7dq5 entry). Since sl-vjve W26 one other
+  ;; line may appear there, rarely — `reaped orphaned session <id>`, a client
+  ;; that died mid-run without closing its session — which healthy warm runs
+  ;; never produce, so this guard's 0-byte bar stands. The sl-xjx0 no-ack-wait
+  ;; session close made nREPL log a "Socket closed" handler trace there on
+  ;; EVERY healthy warm run; the client now reads the close ack. This guard
+  ;; is the lasting part of the fix: a healthy spawn + two warm runs leave
+  ;; the sink at exactly 0 bytes.
+  (skip-without-jar
+    (fn []
+      (with-root
+        (fn [root]
+          (let [args ["run" "ok.feature" "--step-paths" "steps"]
+                log (io/file root ".shiftlefter" "daemon.log")]
+            (is (= 0 (:exit (run-sl root args))) "spawning run")
+            (is (= 0 (:exit (run-sl root args))) "first warm reuse")
+            (is (= 0 (:exit (run-sl root args))) "second warm reuse")
+            ;; The trace, when it happens, lands AFTER the client has exited
+            ;; (the daemon writes it while handling our EOF) — settle first
+            ;; so a regression cannot slip past the assertion by timing.
+            (Thread/sleep 1000)
+            (is (some? (read-daemon root)) "the daemon is up (warm path engaged)")
+            (is (.exists log) "the crash sink exists once a daemon spawned")
+            (is (= 0 (.length log))
+                (str "daemon.log must stay empty on healthy warm runs; got:\n"
+                     (slurp log)))))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-6vz8 (Warden W29) — the bin/sl twin of the F9 creation-site self-ignore
+;; -----------------------------------------------------------------------------
+
+(deftest ^:daemon wrapper-spawn-self-ignores-shiftlefter-dir
+  ;; bin/sl's spawn_daemon is the FIRST creator of .shiftlefter/ on a
+  ;; hand-copied jar's warm path and writes the self-ignoring .gitignore
+  ;; itself (bin/sl ~:405–:412, the shell twin of the four Clojure sites
+  ;; pinned in self_ignore_sites_test). Pin: after a spawning run in a fresh
+  ;; git repo, the dir carries `*` and nothing under .shiftlefter/ shows in
+  ;; porcelain. The fixture files themselves are untracked by design — only
+  ;; the framework's litter dir is asserted silent.
+  (skip-without-jar
+    (fn []
+      (if-not (command-exists? "git")
+        (is true "skipped — git unavailable")
+        (with-root
+          (fn [root]
+            (is (zero? (:exit (sh "git" "init" "-q" :dir root))))
+            (is (= 0 (:exit (run-sl root ["run" "ok.feature" "--step-paths" "steps"])))
+                "spawning run")
+            (is (some? (read-daemon root)) "the daemon is up (warm path engaged)")
+            (is (= "*\n" (slurp (str (fs/path root ".shiftlefter" ".gitignore"))))
+                "the wrapper wrote the self-ignore at creation")
+            (let [porcelain (:out (sh "git" "status" "--porcelain" :dir root))]
+              (is (not (str/includes? porcelain ".shiftlefter"))
+                  (str "nothing under .shiftlefter/ may reach git; porcelain:\n"
+                       porcelain))))))))
+  ;; Second leg — the shape that LOSES the race. The trivial fixture above
+  ;; won it even against the no-ack client; Warden's differential (and the
+  ;; re-run at fix time) reproduced the trace reliably on the shipped
+  ;; example 07 (custom capture kind, :every-step policy, results dir
+  ;; written) and only sometimes on 03/svo-demo. Drive the real example
+  ;; through the wrapper: one spawning run + three warm runs, 0 bytes.
+  (skip-without-jar
+    (fn []
+      (let [example (str (fs/path project-root "examples" "07-custom-capture-kind"))
+            log (io/file example ".shiftlefter" "daemon.log")]
+        (when (fs/exists? example)
+          (try
+            (run-sl example ["daemon" "stop"])
+            (when (.exists log) (io/delete-file log))
+            (dotimes [n 4]
+              (is (= 0 (:exit (run-sl example ["run" "sl/features/"])))
+                  (str "example 07 run " n)))
+            (Thread/sleep 1000)
+            (is (= 0 (.length log))
+                (str "example 07: daemon.log must stay empty across warm runs; got:\n"
+                     (slurp log)))
+            (finally
+              (try (run-sl example ["daemon" "stop"]) (catch Exception _ nil)))))))))
+
+;; -----------------------------------------------------------------------------
 ;; 2. Exit-code parity warm vs cold for 0 / 1 / 2 / 3 (+ 4 below, sl-7c7i)
 ;; -----------------------------------------------------------------------------
 
@@ -402,7 +487,7 @@
 (deftest ^:daemon shellcheck-wrapper-scripts
   (if-not (command-exists? "shellcheck")
     (is true "skipped — shellcheck not installed")
-    (doseq [script ["bin/sl" "bin/sl-dev" "bin/kaocha"]]
+    (doseq [script ["bin/sl" "bin/sl-dev" "bin/kaocha" "release/install.sh"]]
       (testing script
         (let [r (sh "shellcheck" (str (fs/path project-root script)))]
           (is (= 0 (:exit r)) (str "shellcheck " script ":\n" (:out r) (:err r))))))))

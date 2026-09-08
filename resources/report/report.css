@@ -9,7 +9,7 @@
  *   .scenario .scenario-name .tags .tag .duration
  *   .steps .step .step-status .step-text .macro-marker .error-detail
  *   .diagnostics .run-footer
- * Status modifiers: .st-passed .st-failed .st-error .st-pending .st-skipped
+ * Status modifiers: .st-passed .st-failed .st-error .st-unobserved .st-pending .st-skipped
  * State: body.failures-only, .scenario.red, .feature.has-red
  */
 
@@ -111,6 +111,14 @@ body {
   font-weight: 600;
 }
 
+/* sl-78u4 (Warden W10): the one-line :halted record under the run meta. */
+.run-halted {
+  margin: 0.15rem 0;
+  color: var(--error);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
 .run-counts {
   list-style: none;
   display: flex;
@@ -134,7 +142,8 @@ body {
 }
 
 .count.st-failed,
-.count.st-error {
+.count.st-error,
+.count.st-unobserved {
   color: var(--failed);
 }
 
@@ -230,7 +239,8 @@ body {
   color: var(--failed);
 }
 
-.status-word.st-error {
+.status-word.st-error,
+.status-word.st-unobserved {
   color: var(--error);
 }
 

@@ -39,8 +39,9 @@
    - `:glossary/orphan-type`
      A user-declared verb glossary path targets `:type :foo` but no
      configured interface has `:type :foo`. Verbs in that glossary will
-     never be matched. Only project-declared glossaries (via
-     `:glossaries :verbs` config map) are checked — framework
+     never be matched. Only project-declared glossaries (the types the
+     project's own verb files declare — sl-67dj: read from the loaded
+     glossary's `:sources :verbs` mounts) are checked — framework
      defaults are exempt so a project that doesn't use the bundled
      `:sms` interface isn't punished for the default `:sms` glossary
      resource being loaded.
@@ -85,9 +86,13 @@
 (defn configured-types
   "The set of interface TYPES the config provides (sl-s2oa): each entry's
    :type, an entry without :type reading as the type named by its own key
-   (the run path never normalizes config, so type-less entries exist)."
+   (the run path never normalizes config, so type-less entries exist).
+   A non-map :interfaces (normalize's :config/invalid-interfaces to name)
+   provides no types — #{} rather than a destructure crash (sl-a7sx)."
   [interfaces]
-  (into #{} (map (fn [[nm idef]] (or (:type idef) nm))) interfaces))
+  (if (map? interfaces)
+    (into #{} (map (fn [[nm idef]] (or (:type idef) nm))) interfaces)
+    #{}))
 
 (defn- check-undefined-interface
   "Returns an issue if no configured interface instance provides
@@ -202,11 +207,11 @@
 
 (defn- check-glossary-orphan-types
   "Returns issues — one per orphaned project-declared verb-glossary type.
-   `project-glossary-types` is the set of types the user explicitly
-   configured a glossary path for (typically `(keys (get-in config
-   [:glossaries :verbs]))`). Framework default glossaries are not in
-   scope here — the project may load them transparently without
-   declaring an interface for each."
+   `project-glossary-types` is the set of types the project's own verb
+   glossary files DECLARE (sl-67dj — typically `(keys (get-in
+   loaded-glossary [:sources :verbs]))`, the loader's actual mounts).
+   Framework default glossaries are not in scope here — the project may
+   load them transparently without declaring an interface for each."
   [project-glossary-types interfaces]
   (when (and (seq project-glossary-types) (seq interfaces))
     (let [iface-types (set (keep :type (vals interfaces)))
@@ -273,9 +278,13 @@
    Parameters:
    - `stepdef-infos`           — seq of stepdef-info maps to lint
    - `project-glossary-types`  — coll of interface-type keywords the
-                                 project explicitly declared a verb-
-                                 glossary path for (typically
-                                 `(keys (get-in config [:glossaries :verbs]))`).
+                                 project's own verb glossary files
+                                 declare (sl-67dj — typically `(keys
+                                 (get-in loaded-glossary [:sources :verbs]))`,
+                                 the loader's actual mounts; nil in the
+                                 vanilla run path, where no glossary
+                                 loads and the orphan check is skipped
+                                 by choice).
                                  Framework defaults are NOT included —
                                  a project shouldn't be flagged for
                                  default `:sms` glossary loading just

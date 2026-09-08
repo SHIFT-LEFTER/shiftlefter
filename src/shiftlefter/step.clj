@@ -193,11 +193,84 @@
     (update-vals d sanitize-observed)
     (sanitize-observed d)))
 
+(def error-classes
+  "The step/adapter error-and-observation contract's closed value set for
+   the `:error/class` ex-data key (sl-kowi, F15) — THE one literal:
+   `stepengine.exec`'s `:error/class` spec and the step loop's lift both
+   reference it, and `poll-until` consults it for Rider C inheritance.
+     :assertion   — the witness answered; the answer missed the expectation
+     :sut         — the witness answered WITH an error; still product evidence
+     :observation — no answer existed; proves nothing about the app
+   Absent or unrecognized = unclassified (today's behavior)."
+  #{:assertion :sut :observation})
+
+(def ^:private empty-observation-hint
+  "The teaching line for a timeout whose predicate only ever returned nil
+   (sl-afs9, F14): the nil-to-continue idiom leaves :last-value empty, so
+   the error itself names the observe-and-judge idiom that fills it."
+  "pred returned nil to continue; return the observation and pass :until to populate :last-value")
+
+(def ^:private empty-poll-history
+  "The per-poll history `poll-until` folds every attempt into (sl-78u4,
+   Warden W2): four public counters (the `:poll-counts` digest on the
+   timeout record), `:returned` (any return, nil included — decides whether
+   the :last-value channel exists), and the two last-attempt channels
+   `:last-value` / `:last-error`, present only once seen. Counts, never a
+   history of values."
+  {:attempts 0 :answered 0 :threw 0 :observation-throws 0 :returned 0})
+
+(defn- observation-throw? [e]
+  (= :observation (:error/class (ex-data e))))
+
+(defn- record-attempt
+  "Fold one `poll-attempt` result into the history. `:answered` counts
+   NON-NIL returns only — the ruling's 'ever answered' (a nil return is an
+   attempt, not an answer; `false` is a judged observation and counts)."
+  [history attempt]
+  (let [history (update history :attempts inc)]
+    (if (contains? attempt :error)
+      (let [e (:error attempt)]
+        (cond-> (-> history (update :threw inc) (assoc :last-error e))
+          (observation-throw? e) (update :observation-throws inc)))
+      (let [v (:value attempt)]
+        (cond-> (-> history (update :returned inc) (assoc :last-value v))
+          (some? v) (update :answered inc))))))
+
+(defn- inherited-error-class
+  "Rider C (sl-afs9; PRECEDENCE ruled at sl-78u4, Warden W2 — ever-answered
+   wins the verdict): the `:error/class` a poll timeout inherits from its
+   retry history, ONLY when no attempt ever answered (returned non-nil).
+   Then `:observation` if ANY attempt threw an observation-class error (a
+   dark throw anywhere in a never-answered history is the witness never
+   talking), else the last retry error's recognized class (`:sut` /
+   `:assertion` — exit-1 territory either way). Any non-nil answer at any
+   attempt = the witness talked = assertion territory: never classified
+   here, whatever the last attempt did. 'Last attempt wins' and 'worst
+   wins' were both rejected."
+  [{:keys [answered observation-throws last-error]}]
+  (when (zero? answered)
+    (cond
+      (pos? observation-throws) :observation
+      last-error (let [c (:error/class (ex-data last-error))]
+                   (when (contains? error-classes c) c)))))
+
 (defn- timeout-record
   "Build the structured :step/poll-timeout ex-info (sl-99u2 AC: elapsed,
-   deadline, deadline SOURCE, last observed value — legible everywhere)."
-  [{:keys [deadline-ms interval-ms deadline-source]} elapsed attempt opts]
-  (let [last-error (:error attempt)
+   deadline, deadline SOURCE, last observed value — legible everywhere).
+
+   Two channels, SIDE BY SIDE when both exist (sl-78u4, Warden W2):
+   `:last-value` (the most recent RETURN, nil included, sanitized) and
+   `:last-error` (the most recent `:retry-error?` throw — message/type/
+   sanitized data). Plus `:poll-counts` — the open-map digest
+   `{:attempts :answered :threw :observation-throws}`, four integers,
+   always present on a timeout. sl-afs9 adds: `:hint` when the poll
+   returned but never a non-nil value and no :until was supplied (the
+   nil-idiom's empty record teaches the observe-and-judge idiom; `false`
+   is a judged observation, no hint), and `:error/class` inherited per
+   `inherited-error-class` (Rider C — ever-answered wins)."
+  [{:keys [deadline-ms interval-ms deadline-source]} elapsed history opts]
+  (let [{:keys [last-error last-value answered returned]} history
+        returned? (pos? returned)
         description (:description opts)
         msg (str "Timed out after " elapsed "ms"
                  " (deadline " deadline-ms "ms via " (name deadline-source)
@@ -209,12 +282,19 @@
                      :elapsed-ms elapsed
                      :deadline-ms deadline-ms
                      :deadline-source deadline-source
-                     :interval-ms interval-ms}
-                    (if last-error
+                     :interval-ms interval-ms
+                     :poll-counts (select-keys history [:attempts :answered
+                                                        :threw :observation-throws])}
+                    (when last-error
                       {:last-error {:message (ex-message last-error)
                                     :type (:type (ex-data last-error))
-                                    :data (sanitize-error-data (ex-data last-error))}}
-                      {:last-value (sanitize-observed (:value attempt))})
+                                    :data (sanitize-error-data (ex-data last-error))}})
+                    (when returned?
+                      {:last-value (sanitize-observed last-value)})
+                    (when (and returned? (zero? answered) (not (contains? opts :until)))
+                      {:hint empty-observation-hint})
+                    (when-let [c (inherited-error-class history)]
+                      {:error/class c})
                     (:context opts)))))
 
 (defn- poll-attempt
@@ -232,19 +312,25 @@
 
 (defn poll-until
   "The oracle kernel: call `pred` (no-arg) at the resolved poll interval
-   until it returns truthy or the resolved deadline elapses. Returns pred's
-   truthy result. ORACLES ONLY — never wrap a mutation (mutations don't
-   retry) and never wait on a bare negation (waiting for disappearance is
-   an oracle over a negated predicate).
+   until `:until` accepts its return (default: truthy) or the resolved
+   deadline elapses. Returns the accepted value. ORACLES ONLY — never wrap
+   a mutation (mutations don't retry) and never wait on a bare negation
+   (waiting for disappearance is an oracle over a negated predicate).
+
+   THE IDIOM is observe-and-judge (sl-afs9, F14): the predicate RETURNS
+   the observation (a job snapshot, a count, the messages seen) and
+   `:until` judges doneness over it, so a timeout carries the last
+   observation — the diagnosis. The nil-to-continue form (no :until,
+   pred returns nil until done) still works, but its timeout has an
+   empty :last-value; the record says so (:hint).
 
    Timing resolves via `timing` (instance > interface > global > default);
    opts pass through, plus:
 
    - :until         — success test over pred's return value; default
-                      truthiness. Set it when the predicate OBSERVES a
-                      value (a count, a payload) so the timeout record can
-                      carry the last observation; poll-until then returns
-                      the observed value that satisfied it.
+                      truthiness. Pass it whenever the predicate observes
+                      a value; poll-until then returns the observation
+                      that satisfied it and a timeout records the last one.
    - :retry-error?  — predicate over exceptions; matches count as a failed
                       poll (recorded as :last-error), everything else
                       propagates immediately. Default: none.
@@ -253,10 +339,19 @@
    - :context       — map merged into the timeout ex-data.
 
    On timeout throws :step/poll-timeout ex-info carrying :elapsed-ms,
-   :deadline-ms, :deadline-source, :interval-ms, and the sanitized last
-   observed value (:last-value) or last retryable error (:last-error),
-   flowing through normal step-failure reporting. At least one attempt
-   always runs; the final attempt lands at the deadline edge."
+   :deadline-ms, :deadline-source, :interval-ms, the :poll-counts digest
+   ({:attempts :answered :threw :observation-throws} — counts across the
+   whole poll, never a history of values), and the two channels side by
+   side when both exist: :last-value (the most recent return; sanitized)
+   and :last-error (the most recent :retry-error? match; message/type/
+   sanitized data). Plus :hint when the poll returned but never a non-nil
+   value and no :until was supplied, and :error/class inherited per Rider
+   C with EVER-ANSWERED precedence (sl-78u4): a non-nil answer at ANY
+   attempt is the witness talking — assertion territory, never classified
+   here; a never-answered poll that saw a dark (observation-class) throw at
+   any attempt leaves the scenario unobserved. Flows through normal
+   step-failure reporting. At least one attempt always runs; the final
+   attempt lands at the deadline edge."
   ([ctx pred] (poll-until ctx pred {}))
   ([ctx pred opts]
    (let [resolved (timing ctx opts)
@@ -264,15 +359,16 @@
          until (or (:until opts) identity)
          {:keys [deadline-ms interval-ms]} resolved
          start (System/currentTimeMillis)]
-     (loop []
+     (loop [history empty-poll-history]
        (let [attempt (poll-attempt pred (:retry-error? opts))
+             history (record-attempt history attempt)
              elapsed (- (System/currentTimeMillis) start)]
          (if (and (contains? attempt :value) (until (:value attempt)))
            (:value attempt)
            (if (>= elapsed deadline-ms)
-             (throw (timeout-record resolved elapsed attempt opts))
+             (throw (timeout-record resolved elapsed history opts))
              (do (Thread/sleep (long (min interval-ms (- deadline-ms elapsed))))
-                 (recur)))))))))
+                 (recur history)))))))))
 
 (s/fdef poll-until
   :args (s/cat :ctx map? :pred ifn? :opts (s/? map?)))

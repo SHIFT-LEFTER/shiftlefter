@@ -78,6 +78,12 @@
    - :adapter-opts — map merged into Etaoin options (e.g., :size, :prefs, :user-agent).
      `automation-hygiene-prefs` merges under :prefs; user prefs win per-key.
    - :webdriver-url — URL of WebDriver server (optional, uses default if not provided)
+   - :page-load-timeout-ms — positive integer; the WebDriver page-load
+     timeout set on the session at creation (sl-od2v). Absent = Chrome's
+     default (300s). A server that accepts and never answers makes the
+     navigation step throw the driver's `timeout` answer when it elapses,
+     which the navigation site classifies `:observation` (exit 4) — with
+     this set, that verdict arrives in seconds instead of minutes.
 
    Returns:
    - Success: {:ok {:browser EtaoinBrowser :etaoin-driver raw-driver}}
@@ -100,6 +106,10 @@
           opts (build-driver-opts config path-driver)
           ;; Create session via Etaoin
           eta-driver (eta/chrome opts)
+          ;; sl-od2v: the page-load timeout, when configured (etaoin takes
+          ;; seconds). Absent = the driver's default, unchanged.
+          _ (when-let [ms (:page-load-timeout-ms config)]
+              (eta/set-page-load-timeout eta-driver (/ ms 1000.0)))
           ;; Create EtaoinBrowser for protocol operations
           etaoin-browser (browser/make-etaoin-browser eta-driver)]
       {:ok {:browser etaoin-browser

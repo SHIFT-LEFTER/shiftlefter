@@ -28,6 +28,14 @@ fixed-path copy) is the self-contained human report; it sits beside the
 `attachments/` directories so relative references resolve, and the whole
 run directory zips and travels as one artifact
 ([the run results directory](CI.md#the-run-results-directory)).
+Its status vocabulary mirrors the exit ladder: a scenario whose failure
+carried `:error/class :observation` renders the word **UNOBSERVED**
+(styled by the `st-unobserved` modifier, distinct from ERROR — the harness
+family — and from FAILED, a verdict), the header's counts row gains an
+`N unobserved` entry whenever that count is positive, and a halted run
+shows the `halted after scenario N (<name>): observation failure` line
+under the run meta. The same words appear on the multi-group invocation
+TOC's rows.
 
 ## The machine-record contract
 
@@ -53,6 +61,45 @@ Three rules cover every consumer:
   [CI.md](CI.md) — this page deliberately doesn't restate it. `:counts`
   rides every summary, all-zero when nothing executed, so you can read it
   without branching on the code.
+
+**Multi-group runs** (more than one `setup.clj` group after CLI narrowing)
+add two things, absent everywhere else so single-group streams stay
+byte-identical:
+
+- Every per-group summary form carries top-level **`:group/label`** and
+  **`:group/index`** (0-based declared order — the durable join key when
+  labels collide; under CLI narrowing the indexes keep their declared
+  values and may have gaps, so `alpha` + `charlie` out of three groups are
+  `0` and `2`). Order is no longer the only way to join forms to groups.
+- After all group forms, **one final invocation aggregate form** carries the
+  suite verdict: `{:run/id … :run/seed … :invocation/exit-code N
+  :invocation/status kw :invocation/groups [{:group/label … :group/index …
+  :run/exit-code … :run/status …} …]}`. It deliberately does **not** carry
+  `:run/exit-code`, so the summary discriminator above never matches it.
+  Verdict rule: read `:invocation/exit-code` if that form is present, else
+  the lone summary's `:run/exit-code` is the verdict. The aggregate is
+  absent on a crash (exit 3 — the stream ends where the crash cut it) and
+  on planning failures that precede the group loop (no groups ran; the lone
+  summary is the verdict). Under `--dry-run` it is still emitted, with
+  `:invocation/status :dry-run` and exit code 0 — a plan verdict, never
+  `:passed` for a run that measured nothing — so a CI plan gate reading the
+  aggregate finds it. Under `{:runner {:halt-on-observation-failure :run}}`
+  a group that went dark halts the invocation: the aggregate carries
+  `:halted {:after-scenario N :scenario "<name>" :group/label "<group>"}`,
+  and every group not yet started has a row with `:run/status :skipped` and
+  **no** `:run/exit-code` — it never ran, so no verdict exists (the same
+  absence rule this form already uses for itself). The aggregate also
+  carries `:invocation/results-path` (config-root-relative, the
+  `results/<stamp>` directory every group's own `:run/results-path` sits
+  under; absent when no results dir was made, as under `--dry-run`) — so
+  the invocation-level run dir is read, never derived by stripping the
+  group slug.
+
+**Dry-run summaries** (single- or multi-group) additionally carry
+`:run/reports-not-written`, a vector of report kinds (`[:html :junit-xml]`),
+whenever a report is declared by flag or by the `[:runner :report …]` config
+mirror: the dry run proceeds and writes nothing, and this key (plus one
+stderr line in console mode) says so. Absent when no report is declared.
 
 ## The evidence walk
 
@@ -94,7 +141,9 @@ triage courtesy), and `:attachment/error`.
 Paths follow the **portability contract** (canonical:
 `src/shiftlefter/attachments.clj` namespace docstring): a *relative* path is
 run-dir-relative (group-root-relative under `setup.clj` groups) — portable,
-resolve it against the directory you archived. An *absolute* path outside
+resolve it against the directory you archived. The summary names that
+directory itself as `:run/results-path` (config-root-relative), so resolve
+relative refs beneath it — no directory guessing. An *absolute* path outside
 the run directory stays verbatim — legible but non-portable; render it as
 text, never a link.
 
@@ -174,9 +223,9 @@ fixture server; needs ChromeDriver):
 cd examples/02-browser-zero-code
 ../../bin/sl run sl/features/ \
   --capture screenshot=every-step,console=every-step --edn > /tmp/run.edn
-# refs are GROUP-root-relative: example 02's setup.clj declares one group,
-# `login`, so pass <run-dir>/login. A project with no setup.clj passes the
-# run dir itself (newest dir under sl/results/).
+# refs are GROUP-root-relative: pass the group's summary :run/results-path
+# (config-root-relative — here it resolves under sl/), e.g.
+# sl/results/<STAMP>/login. No setup.clj = the run dir itself.
 bb render-digest.bb /tmp/run.edn sl/results/<STAMP>/login
 ```
 

@@ -403,41 +403,17 @@
    `:on-provision? false` on the adapter's declaration records the drop
    as deliberate (and `verify-declared-registry` then enforces it).
 
+   Removal of a default entry is NOT this fn's concern: both compiling
+   pipelines run the plan-aware exact `bound-adapter-errors`, which owns
+   registry membership (the W21 config-referenced removal arm that once
+   lived here was deleted at sl-k1pv — it had no remaining caller).
+
    Returns a vector of warning maps (empty when clean) — the caller
    surfaces them on the non-exit-flipping setup-lints channel."
-  [decls live-registry referenced-adapters]
+  [decls live-registry]
   (let [live (or live-registry adapters/default-registry)
-        decl-by-name (into {} (map (juxt :name identity)) decls)
-        ;; sl-xjx0 (Warden W21): the extreme lossy case — a default adapter
-        ;; ABSENT from the live registry entirely. Removal is a delta the
-        ;; declaration grammar cannot express this release and verify's
-        ;; live-half iteration cannot see, so an empty registry used to
-        ;; pass every check while first provisioning failed live with
-        ;; :adapter/unknown. Scoped to `referenced-adapters` (the config's
-        ;; :interfaces adapter set): a minimal registry that covers
-        ;; everything the config uses is an established, harmless shape —
-        ;; the warn fires exactly when the :adapter/unknown failure is
-        ;; reachable. Since sl-kkoh this arm is the PLANS-NOT-IN-HAND
-        ;; fallback only: the run seam passes no referenced adapters and
-        ;; uses the exact plan-aware `bound-adapter-errors` instead
-        ;; (config-referenced-but-unbound removed defaults are certainly
-        ;; safe for that invocation, so the run stays silent about them).
-        removed (vec
-                 (for [nm (sort (keys adapters/default-registry))
-                       :when (and (contains? (set referenced-adapters) nm)
-                                  (not (contains? live nm)))]
-                   {:type :setup/default-adapter-removed
-                    :adapter nm
-                    :message (str "default adapter " nm " is absent from the"
-                                  " returned registry but a configured"
-                                  " interface uses it — dry-run still binds"
-                                  " against it and its first provisioning"
-                                  " will fail live with :adapter/unknown;"
-                                  " build on the defaults ((assoc"
-                                  " reg/default-registry ...)) unless the"
-                                  " removal is deliberate")}))]
-    (into
-     removed
+        decl-by-name (into {} (map (juxt :name identity)) decls)]
+    (vec
      (for [[nm entry] (sort-by key live)
            :let [default-entry (get adapters/default-registry nm)
                  decl (get decl-by-name nm)
@@ -470,9 +446,11 @@
    refinement): every adapter a BOUND, SELECTED scenario references must
    exist in the live registry, or its first provisioning certainly dies
    with :adapter/unknown. Exactness cuts both ways: an adapter the plans
-   never touch is certainly safe for this invocation and stays silent
-   (the config-referenced approximation lives on only in
-   `lossy-override-warnings`' removal arm, for callers without plans).
+   never touch is certainly safe for this invocation and stays silent.
+   Both compiling pipelines call this check (the setup pipeline's
+   run-group! since sl-kkoh; the single-suite pipeline since sl-k1pv —
+   which also deleted the config-referenced removal approximation that
+   once backed callers without plans, none having materialized).
 
    `touched-by-adapter` is {adapter-name #{interface-instances}} — built
    by the caller from the compiled plans (collect-provisioning-targets +
@@ -594,25 +572,41 @@
    When no CLI paths are given, mark every group's resolved features
    for downstream consumption (preserves declared order).
 
+   Every surviving entry carries `::declared-index` — its 0-based position
+   in setup.clj's declared order, stamped BEFORE narrowing drops any group
+   (sl-baup, Warden W5). That number is the `:group/index` every report
+   surface stamps: an index-NAME that ties back to the declared group
+   whatever the selection, so under narrowing the indexes keep their
+   declared values and may have gaps (alpha+charlie ⇒ 0 and 2). Never
+   recomputed over the survivors.
+
    `base-dir` (optional) — used to resolve setup-entry relative :features."
   ([setups cli-abs-paths]
    (filter-setups-by-cli-paths setups cli-abs-paths nil))
   ([setups cli-abs-paths base-dir]
-   (if (empty? cli-abs-paths)
-     ;; Full run — pre-resolve so resolve-group-features doesn't re-glob.
-     (mapv (fn [entry]
-             (assoc entry ::resolved-features (expand-group-features entry base-dir)))
-           setups)
-     (let [selected (set cli-abs-paths)]
-       (->> setups
-            (map (fn [entry]
-                   (assoc entry
-                          ::resolved-features
-                          (->> (expand-group-features entry base-dir)
-                               (filter selected)
-                               vec))))
-            (filter #(seq (::resolved-features %)))
-            vec)))))
+   (let [declared (map-indexed (fn [i entry] (assoc entry ::declared-index i)) setups)]
+     (if (empty? cli-abs-paths)
+       ;; Full run — pre-resolve so resolve-group-features doesn't re-glob.
+       (mapv (fn [entry]
+               (assoc entry ::resolved-features (expand-group-features entry base-dir)))
+             declared)
+       (let [selected (set cli-abs-paths)]
+         (->> declared
+              (map (fn [entry]
+                     (assoc entry
+                            ::resolved-features
+                            (->> (expand-group-features entry base-dir)
+                                 (filter selected)
+                                 vec))))
+              (filter #(seq (::resolved-features %)))
+              vec))))))
+
+(defn declared-index
+  "The group's declared 0-based position as stamped by
+   filter-setups-by-cli-paths (sl-baup); `fallback` for entries that never
+   went through the filter (direct callers)."
+  [entry fallback]
+  (::declared-index entry fallback))
 
 (defn resolve-group-features
   "Get the absolute paths to actually run for this group.

@@ -21,6 +21,7 @@
   (:require
    [babashka.fs :as fs]
    [clojure.java.shell :as shell]
+   [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [shiftlefter.runner.report.html :as html]
    [shiftlefter.runner.reporter :as reporter]))
@@ -106,6 +107,12 @@
   (doc! dir "unknown-status.html"
         {:run-ctx run-ctx :scenarios [(scen-pass)] :diagnostics nil
          :summary {:run-id "r-1" :exit-code 7 :status :weird}})
+  ;; sl-78u4 (Warden W10): the :halted record renders as one header line.
+  (doc! dir "halted.html"
+        {:run-ctx run-ctx :scenarios [(scen-pass) (scen-fail)] :diagnostics nil
+         :summary {:run-id "r-1" :exit-code 4 :status :degraded
+                   :halted {:after-scenario 1 :scenario "p"}
+                   :counts {:passed 1 :failed 0 :pending 0 :skipped 1 :unobserved 1}}})
   (doc! dir "empty.html"
         {:run-ctx run-ctx :scenarios [] :diagnostics nil
          :summary {:run-id "r-1" :exit-code 0 :status :passed
@@ -133,8 +140,11 @@
                    {:label "gamma" :exit-code 2 :status :planning-failed}
                    {:label "delta" :path "delta/report.html" :exit-code 4 :status :degraded
                     :counts {:passed 1 :failed 0 :pending 1 :skipped 0}}
-                   {:label "eps" :exit-code 3 :status :crashed}]}
-    :summary {:run-id "r-1" :exit-code 4 :status :degraded}}))
+                   {:label "eps" :exit-code 3 :status :crashed}
+                   ;; sl-78u4: a :run-scope-halt-skipped group — no exit code.
+                   {:label "zeta" :status :skipped}]}
+    :summary {:run-id "r-1" :exit-code 4 :status :degraded
+              :halted {:after-scenario 2 :scenario "d2" :group/label "delta"}}}))
 
 ;; ---------------------------------------------------------------------------
 ;; the smoke
@@ -169,10 +179,24 @@
         (try
           (generate-pages! dir)
           (let [{:keys [exit out err]}
-                (shell/sh "node" (str (fs/absolutize (fs/path smoke-dir "smoke.js"))) dir)]
+                (shell/sh "node" (str (fs/absolutize (fs/path smoke-dir "smoke.js"))) dir)
+                header-of (fn [page]
+                            (->> (str/split-lines out)
+                                 (drop-while #(not (str/includes? % page)))
+                                 second
+                                 str))]
             (is (zero? exit)
                 (str "report renderer smoke failed — a shipped report page "
                      "renders empty or errors at runtime (the t86d class):\n"
-                     out "\n" err)))
+                     out "\n" err))
+            (testing "sl-78u4 (Warden W10): the :halted record is a header
+                      line on the run page AND the invocation TOC (the smoke
+                      harness prints each page's rendered header text)"
+              (is (str/includes?
+                   (header-of "halted.html")
+                   "halted after scenario 1 (p): observation failure"))
+              (is (str/includes?
+                   (header-of "toc.html")
+                   "halted after scenario 2 (d2): observation failure — in group delta"))))
           (finally
             (fs/delete-tree dir)))))))

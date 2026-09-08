@@ -1,5 +1,6 @@
 (ns shiftlefter.project-projection-test
   (:require [babashka.fs :as fs]
+            [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [shiftlefter.project-context :as project-context]
@@ -523,6 +524,31 @@ steps =
         (is (= :shifted (:mode p)))
         (is (= :error (:status p)))
         (is (some #(and (= :glossary (:stage %)) (= :error (:severity %)))
+                  (:diagnostics p)))))))
+
+(deftest projection-glossary-lints-are-warn-diagnostics
+  ;; sl-67dj (Warden P3-13): structured glossary-load warnings surface as
+  ;; :glossary :warn diagnostics — visible in orient and --edn — without
+  ;; flipping :status. The dead :override-defaults flag is the canonical case.
+  (with-temp-project
+    (fn [dir]
+      (make-basic-project! dir)
+      (write-edn! (fs/path dir "sl" "glossary" "verbs-web.edn")
+                  {:type :web
+                   :override-defaults true
+                   :verbs {:tap {:desc "Tap"
+                                 :frames {:default {:args []
+                                                    :pattern "S taps O"}}}}})
+      (let [cfg-path (fs/path dir "sl" "shiftlefter.edn")
+            cfg (edn/read-string (slurp (str cfg-path)))]
+        (write-edn! cfg-path
+                    (assoc-in cfg [:glossaries :verbs] ["glossary/verbs-web.edn"])))
+      (let [p (projection/build-projection (project-context dir)
+                                           {:source :working-tree})]
+        (is (= :ok (:status p)) "a warning never flips projection status")
+        (is (some #(and (= :glossary (:stage %))
+                        (= :warn (:severity %))
+                        (= :glossary/override-flag-ignored (:type %)))
                   (:diagnostics p)))))))
 
 ;; -----------------------------------------------------------------------------

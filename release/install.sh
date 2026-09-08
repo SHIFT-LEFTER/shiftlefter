@@ -4,14 +4,18 @@
 # Installs a runnable `sl` + jar into ./sl/ by REUSING the release-zip
 # artifact (build.clj release-zip) — it does not repackage anything. On a
 # FRESH install (no pre-existing sl/) it then runs `sl init`, which scaffolds
-# the project (sl/shiftlefter.edn, glossary, starter feature), writes the
-# agent on-ramp stanza into AGENTS.md (marker-guarded create-or-append), and
-# makes .shiftlefter/ self-ignoring. The installer also writes a
+# the project (sl/shiftlefter.edn, glossary, starter feature) and makes
+# .shiftlefter/ self-ignoring. The installer also writes a
 # TARGET_DIR/.gitignore (if absent) covering only the landed binaries — jar,
 # CDS archive, lib/ — so authored project files stay committable while a
-# `git add -A` never stages ~96MB of tooling. When sl/ pre-existed the scaffold is
-# skipped entirely and the breadcrumb stanza is PRINTED instead for manual
-# pasting (init also bails on its own if sl/shiftlefter.edn exists).
+# `git add -A` never stages ~96MB of tooling. When sl/ pre-existed the
+# scaffold is skipped entirely (init also bails if sl/shiftlefter.edn exists).
+#
+# AGENTS.md is YOURS (sl-7dq5 F1): the agent on-ramp stanza is appended only
+# with your explicit consent — --write-agents / --no-write-agents pre-answer
+# it; with neither flag an interactive install asks once, and a
+# non-interactive install defaults to NO write and prints the stanza for
+# manual pasting instead (an unattended install never hangs on a question).
 #
 # Usage:
 #   install.sh --zip PATH        Install from a local release-zip (dev + drive)
@@ -19,32 +23,35 @@
 #   install.sh                   Install the pinned default version (prod)
 #
 # Options:
-#   --dir TARGET     Install directory (default: ./sl)
-#   --no-breadcrumb  Skip printing the breadcrumb stanza
-#   -h | --help      Show this help
+#   --dir TARGET       Install directory (default: ./sl)
+#   --write-agents     Append the agent on-ramp stanza to AGENTS.md (marker-guarded)
+#   --no-write-agents  Never touch AGENTS.md; skip the printed stanza too
+#   -h | --help        Show this help
 
 set -euo pipefail
 
 # Pinned default release version. Tracks build.clj's `version` at release time.
-DEFAULT_VERSION="0.5.5"
+DEFAULT_VERSION="0.5.6"
 REPO_SLUG="SHIFT-LEFTER/shiftlefter"
 
 ZIP_PATH=""
 VERSION=""
 TARGET_DIR="sl"
-PRINT_BREADCRUMB=true
+# Tri-state AGENTS.md consent (sl-7dq5 F1): "" = unanswered, true, false.
+WRITE_AGENTS=""
 
 usage() {
-    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --zip)           ZIP_PATH="${2:?--zip needs a path}"; shift 2 ;;
-        --version)       VERSION="${2:?--version needs a value}"; shift 2 ;;
-        --dir)           TARGET_DIR="${2:?--dir needs a path}"; shift 2 ;;
-        --no-breadcrumb) PRINT_BREADCRUMB=false; shift ;;
-        -h|--help)       usage; exit 0 ;;
+        --zip)             ZIP_PATH="${2:?--zip needs a path}"; shift 2 ;;
+        --version)         VERSION="${2:?--version needs a value}"; shift 2 ;;
+        --dir)             TARGET_DIR="${2:?--dir needs a path}"; shift 2 ;;
+        --write-agents)    WRITE_AGENTS=true; shift ;;
+        --no-write-agents) WRITE_AGENTS=false; shift ;;
+        -h|--help)         usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; echo "Use --help for usage." >&2; exit 1 ;;
     esac
 done
@@ -113,28 +120,69 @@ echo "Add it to your PATH:"
 echo "    export PATH=\"$abs_target:\$PATH\""
 echo
 
+# --- Resolve AGENTS.md consent (sl-7dq5 F1 tri-state) -------------------------
+# Explicit flags pre-answered above; otherwise ask ONLY when a human is
+# attached (stderr is a TTY and /dev/tty is readable — under `curl | bash`
+# stdin is the script, so the prompt must read the terminal directly).
+# Anything non-interactive defaults to NO write: an unattended install never
+# hangs on a question. WRITE_AGENTS_DEFAULTED marks "nobody answered" — that
+# arm still gets the stanza printed as an offer; an explicit no does not
+# (you answered; the installer doesn't nag).
+WRITE_AGENTS_DEFAULTED=false
+if [[ -z "$WRITE_AGENTS" ]]; then
+    if [[ -t 2 && -r /dev/tty ]]; then
+        printf 'Append the ShiftLefter agent on-ramp stanza to AGENTS.md (marker-guarded)? [y/N] ' >&2
+        read -r reply < /dev/tty || reply=""
+        case "$reply" in
+            [yY]*) WRITE_AGENTS=true ;;
+            "")    WRITE_AGENTS=false; WRITE_AGENTS_DEFAULTED=true ;;
+            *)     WRITE_AGENTS=false ;;
+        esac
+    else
+        WRITE_AGENTS=false
+        WRITE_AGENTS_DEFAULTED=true
+    fi
+fi
+
+print_breadcrumb() {
+    local stanza="$TARGET_DIR/agents-breadcrumb.md"
+    if [[ -f "$stanza" ]]; then
+        echo "=============================================================================="
+        echo "Agent on-ramp breadcrumb"
+        echo
+        echo "Paste this into your agent file (AGENTS.md / CLAUDE.md / .cursor/rules) or"
+        echo "startup prompt so a cold coding agent is routed to the ShiftLefter surface."
+        echo "(Or have it appended for you: $TARGET_DIR/sl init --write-agents)"
+        echo "=============================================================================="
+        echo
+        cat "$stanza"
+    else
+        echo "Note: breadcrumb stanza not found in the release artifact." >&2
+    fi
+}
+
 # --- Scaffold the project (sl init) ------------------------------------------
 # Fresh install only: init scaffolds sl/shiftlefter.edn + glossary + starter
-# feature, writes the AGENTS.md stanza itself, and self-ignores .shiftlefter/.
+# feature and self-ignores .shiftlefter/. AGENTS.md rides the consent above —
+# `sl init --write-agents` performs the marker-guarded write, and on a
+# pre-existing project init bails the scaffold but still honors the explicit
+# ask (the sl-7dq5 bail-arm exception), so both paths are one mechanism.
 if [[ "$SL_DIR_PREEXISTED" == false ]]; then
     echo "Scaffolding project files (sl init) ..."
-    "$TARGET_DIR/sl" init
+    if [[ "$WRITE_AGENTS" == true ]]; then
+        "$TARGET_DIR/sl" init --write-agents
+    else
+        "$TARGET_DIR/sl" init
+    fi
 else
     echo "Pre-existing sl/ detected — skipping the project scaffold (sl init)."
-    # --- Emit the agent on-ramp breadcrumb (skip-path fallback) ---------------
-    if [[ "$PRINT_BREADCRUMB" == true ]]; then
-        stanza="$TARGET_DIR/agents-breadcrumb.md"
-        if [[ -f "$stanza" ]]; then
-            echo "=============================================================================="
-            echo "Agent on-ramp breadcrumb"
-            echo
-            echo "Paste this into your agent file (AGENTS.md / CLAUDE.md / .cursor/rules) or"
-            echo "startup prompt so a cold coding agent is routed to the ShiftLefter surface."
-            echo "=============================================================================="
-            echo
-            cat "$stanza"
-        else
-            echo "Note: breadcrumb stanza not found in the release artifact." >&2
-        fi
+    if [[ "$WRITE_AGENTS" == true ]]; then
+        "$TARGET_DIR/sl" init --write-agents
     fi
+fi
+
+# Nobody answered the AGENTS.md question — nothing was written, so print the
+# stanza as the offer.
+if [[ "$WRITE_AGENTS_DEFAULTED" == true ]]; then
+    print_breadcrumb
 fi

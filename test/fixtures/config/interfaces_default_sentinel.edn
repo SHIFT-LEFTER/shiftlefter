@@ -1,0 +1,11 @@
+;; Fixture (sl-g2lj): keep-one-bring-one — the builtin :web by reference
+;; (:default = the shipped def verbatim), a user-defined :api instance, and
+;; :admin-web showing NAME-vs-TYPE (a second :web-TYPE instance under a
+;; non-builtin name; the builtin def is never consulted for it).
+{:interfaces {:web :default
+              :api {:type :api
+                    :adapter :http-mock
+                    :config {:base-url "http://localhost:9092"}}
+              :admin-web {:type :web
+                          :adapter :etaoin
+                          :config {:base-url "http://localhost:9092/admin"}}}}

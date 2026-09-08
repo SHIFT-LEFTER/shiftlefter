@@ -60,7 +60,11 @@ Per project, under the instance root (the nearest ancestor with
 ```
 .shiftlefter/
   daemon.edn    # port, pid, jar identity, java path, started-at, idle timeout
-  daemon.log    # the daemon's own stdout/stderr (auto-spawn only)
+  daemon.log    # the daemon's own stdout/stderr (auto-spawn only): 0 bytes = healthy;
+                # a crash trace, or — rarely, a minor sign of ill health — one
+                # `reaped orphaned session <id>` line per client that died
+                # mid-run without closing its session (Ctrl-C, killed process,
+                # cancelled CI job)
   spawn.lock    # transient; prevents two callers racing to spawn
 ```
 
@@ -121,7 +125,15 @@ happens, verified live (2026-08-11):
   is already on your terminal; only output produced after the kill is lost.
   End-of-run file artifacts (reports, run dir) are still written when the run
   finishes. An immediate retry after Ctrl-C gets the `:daemon/busy` rejection
-  until the abandoned run completes.
+  until the abandoned run completes. The killed client's abandoned nREPL
+  session is reaped daemon-side by a periodic orphan sweep (sl-ntlx) — within
+  ~10 minutes of its run completing, never while the run executes — so
+  repeated Ctrl-Cs don't accumulate sessions in a long-lived daemon. Each
+  reap writes one `sl daemon: reaped orphaned session <id>` line to
+  `daemon.log`. Any other nREPL session on the daemon port — a hand-connected
+  REPL included — is reaped the same way once it has sat through two idle
+  sweep ticks, mid-eval or not: the port is the warm client's, not a REPL
+  host.
 - **The only real abort is `sl daemon stop`** (or killing the daemon pid) —
   and it takes the whole daemon. The graceful half waits for the in-flight
   run to finish; the wrapper then escalates SIGTERM → SIGKILL, which does not

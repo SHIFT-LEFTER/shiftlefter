@@ -93,14 +93,17 @@ The weave gives every failure a place, and the place decides the semantics:
 | A Before hook throws, or returns a non-map | Scenario `:error` (never `:failed`), steps skipped; only the frames whose Befores succeeded unwind. |
 | Capability provisioning fails | Scenario `:error` — same family as a hook throw (broken harness, never a broken app); Afters still unwind — without capabilities, so an After checks for the capability it wants. |
 | A step fails | Scenario `:failed`; an `:on-failure` capture fires at that instant, before Afters. |
+| A step throws with `:error/class :observation` (the witness went dark — no answer existed) | Scenario `:error`, counted `unobserved` (distinct from the harness's `error` bucket); the step stays `:failed` and its error carries the class. Under `{:runner {:halt-on-observation-failure true}}` no further scenario starts — in-flight ones finish and keep their verdicts, the rest are `skipped`; the key is `false` \| `:group` \| `:run` (`true` = `:run`): with `setup.clj` groups, `:run` also skips every group not yet started (its `:start` never runs), `:group` halts only the group that went dark. `:sut`/`:assertion` classes are recorded and rendered; the scenario stays `:failed`. |
 | An After hook throws, or its attachments claim is malformed | Scenario `:error` even when every step passed — broken cleanup is a lying suite. One failing After doesn't stop the unwind. |
 | Capture infrastructure fails on an otherwise-green scenario | Scenario `:error`, capture-attributed. An already-red scenario keeps its status; the ref records the miss visibly. |
 | `:stop` throws | Reported — console and envelope — but the exit code doesn't change: the exit code is this run's verdict, already earned by the time teardown runs; environment damage is the *next* run's planning input. That is what the dirty-teardown marker is — written now, announced at the next run's start, then cleared. |
 
 Any scenario `:error` makes the run exit **4** (run degraded — the harness
-broke, so the run proves nothing about the app), distinct from exit 1 (a
-scenario failed: valid tests, app wrong). Across groups, exit codes
-aggregate worst-wins: 2 > 4 > 1 > 0. The full mechanics behind
+broke, or the observation channel went dark, so the run proves nothing
+about the app for that scenario), distinct from exit 1 (a scenario failed:
+valid tests, app wrong). Across groups, exit codes aggregate worst-wins:
+2 > 4 > 1 > 0 — the ladder and the error-class contract are in
+[the exit-codes page](architecture/exit-codes.md). The full mechanics behind
 each row: [hook payloads and failure semantics](AGENT.md#scenario-lifecycle-hooks)
 (`sl agent-doc hooks`), [capture policy](hooks.md#failure-diagnostics--now-a-config-line),
 and [what the framework writes](project-layout.md#what-the-framework-writes).

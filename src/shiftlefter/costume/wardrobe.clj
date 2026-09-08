@@ -191,6 +191,10 @@
   [costume-name]
   (let [dir (costume-dir costume-name)
         chrome-dir (chrome-profile-dir costume-name)]
+    ;; The wardrobe root's parent is .shiftlefter — self-ignore at the
+    ;; creation site (sl-7dq5 F9; belt beside ensure-gitignored!'s root
+    ;; .gitignore append, which guards the tracked-repo case).
+    (project-context/ensure-self-ignore! (fs/parent (wardrobe-dir)))
     (fs/create-dirs chrome-dir)
     dir))
 

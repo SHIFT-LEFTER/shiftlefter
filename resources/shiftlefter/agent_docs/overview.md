@@ -66,8 +66,9 @@ Core commands:
   destructive drain: per-step under `every-step` (each file holds exactly
   that step's entries, plus a final tail sweep), once post-steps when red
   under `on-failure`; Chrome/Edge only, other drivers no-op. Refs render as
-  attachments in the human report surfaces (HTML, JUnit, console); the
-  `--edn` summary carries no refs yet. A capture-infrastructure failure on an
+  attachments in the human report surfaces (HTML, JUnit, console) and the
+  `--edn` summary carries them all in its top-level `:attachments` index
+  (docs/REPORTS.md § The machine-record contract). A capture-infrastructure failure on an
   otherwise-green scenario flips it to `:error`, capture-attributed —
   check `:data {:kind … :capability …}` to triage "all N errors are
   capture-attributed; ship, fix harness". Capture time never pollutes step

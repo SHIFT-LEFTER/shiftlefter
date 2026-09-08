@@ -42,6 +42,13 @@ underspecified values — and underspecified values are where the rot lives. Eve
 feature below is that one move applied to a different axis of a test. Read them as
 consequences, not features.
 
+One ordering, said out loud because the rest of this page can hide it. The typed
+vocabulary is the *how*. The *why* is older and plainer: **never guess before the
+run, never lie after it.** Where the two pull apart, the design sides with the
+second — it keeps a plain-Gherkin mode, leaves a raw locator legible rather than
+banned, and refuses to promote an error it cannot classify into a claim it cannot
+back. In each case it withholds the claim rather than insist on the type.
+
 ## Subjects are never anonymous
 
 The classic step says *"I click login."* Who is *I*? In the next scenario it's

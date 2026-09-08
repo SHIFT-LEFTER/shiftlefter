@@ -39,7 +39,8 @@
             [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.svo.keys :as keys]
             [shiftlefter.intent.resolve :as intent-resolve]
-            [shiftlefter.intent.state :as intent-state]))
+            [shiftlefter.intent.state :as intent-state]
+            [shiftlefter.text :as text]))
 
 ;; -----------------------------------------------------------------------------
 ;; Specs — SVO Validation Issue Shapes
@@ -79,66 +80,6 @@
   (s/keys :req-un [::valid? ::issues]))
 
 ;; -----------------------------------------------------------------------------
-;; Levenshtein Distance (for typo suggestions)
-;; -----------------------------------------------------------------------------
-
-(defn- levenshtein
-  "Compute Levenshtein edit distance between two strings."
-  [s1 s2]
-  (let [len1 (count s1)
-        len2 (count s2)]
-    (cond
-      (zero? len1) len2
-      (zero? len2) len1
-      :else
-      (let [cost-fn (fn [i j]
-                      (if (= (nth s1 (dec i)) (nth s2 (dec j))) 0 1))
-            matrix (vec (for [i (range (inc len1))]
-                          (vec (for [j (range (inc len2))]
-                                 (cond
-                                   (zero? i) j
-                                   (zero? j) i
-                                   :else 0)))))
-            fill-cell (fn [m i j]
-                        (assoc-in m [i j]
-                                  (min (inc (get-in m [(dec i) j]))
-                                       (inc (get-in m [i (dec j)]))
-                                       (+ (get-in m [(dec i) (dec j)])
-                                          (cost-fn i j)))))]
-        (get-in (reduce (fn [m [i j]]
-                          (fill-cell m i j))
-                        matrix
-                        (for [i (range 1 (inc len1))
-                              j (range 1 (inc len2))]
-                          [i j]))
-                [len1 len2])))))
-
-(defn- keyword->str
-  "Convert a keyword to its string form without leading colon.
-   Handles namespaced keywords: `:user/alice` → `\"user/alice\"`."
-  [kw]
-  (if (namespace kw)
-    (str (namespace kw) "/" (name kw))
-    (name kw)))
-
-(defn suggest-similar
-  "Find the most similar keyword from candidates.
-   Uses full keyword string (including namespace) for comparison.
-   Returns the best match if distance <= max-distance, else nil.
-   Public since sl-yh7 — the bindings lint reuses it for
-   consumed-without-producer did-you-mean."
-  [target candidates max-distance]
-  (when (and target (seq candidates))
-    (let [target-str (keyword->str target)
-          scored (map (fn [kw]
-                        {:keyword kw
-                         :distance (levenshtein target-str (keyword->str kw))})
-                      candidates)
-          best (apply min-key :distance scored)]
-      (when (<= (:distance best) max-distance)
-        (:keyword best)))))
-
-;; -----------------------------------------------------------------------------
 ;; Validation Functions
 ;; -----------------------------------------------------------------------------
 
@@ -154,7 +95,7 @@
      :message "SVO step resolved without a subject"}
     (when-not (glossary/known-subject? glossary subject)
       (let [all-forms (glossary/all-subject-forms glossary)
-            suggestion (suggest-similar subject all-forms 2)]
+            suggestion (text/suggest-similar subject all-forms 2)]
         {:type :svo/unknown-subject
          :subject subject
          :known all-forms
@@ -167,7 +108,7 @@
   (when verb
     (when-not (glossary/known-verb? glossary interface-type verb)
       (let [known (glossary/known-verbs glossary interface-type)
-            suggestion (suggest-similar verb known 2)]
+            suggestion (text/suggest-similar verb known 2)]
         {:type :svo/unknown-verb
          :verb verb
          :interface-type interface-type
@@ -181,7 +122,7 @@
   (when interface-name
     (when-not (contains? interfaces interface-name)
       (let [known (vec (keys interfaces))
-            suggestion (suggest-similar interface-name known 2)]
+            suggestion (text/suggest-similar interface-name known 2)]
         {:type :svo/unknown-interface
          :interface interface-name
          :known known
@@ -249,7 +190,7 @@
        :message (str "presses takes a single key, not text: " object-str
                      " — to enter text, use fills (S fills O with '…')")})
     (when-not (keys/known-key? object-str)
-      (let [suggestion (suggest-similar (keyword object-str)
+      (let [suggestion (text/suggest-similar (keyword object-str)
                                         (map keyword keys/key-names) 2)]
         (cond-> {:type :svo/unknown-key
                  :object object-str
@@ -351,7 +292,7 @@
                 (let [suggestion (when (#{:unknown-intent :no-location
                                           :no-location-for-interface}
                                         (:type loc-error))
-                                   (suggest-similar
+                                   (text/suggest-similar
                                     (keyword object-str)
                                     (map keyword (intent-resolve/located-intents
                                                   intents interface))
@@ -417,7 +358,7 @@
    - opts: Optional enforcement options:
      - :unknown-object — :error, :warn, or :off (:strict = deprecated alias
        for :error). The :off here is only the no-opts fallback — the
-       effective default is computed by runner.config/load-config (:warn
+       effective default is computed by shiftlefter.config/load-config (:warn
        when an :intents glossary is configured, sl-femd).
 
    Returns:
@@ -637,7 +578,7 @@
 (defn- format-keyword
   "Format a keyword for display, preserving namespace."
   [kw]
-  (str ":" (keyword->str kw)))
+  (str ":" (text/keyword->str kw)))
 
 (defn- format-known-list
   "Format a list of known values for display.

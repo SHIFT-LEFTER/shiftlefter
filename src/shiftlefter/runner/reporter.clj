@@ -136,10 +136,21 @@
 ;; nat-int?. Results are never affected; observations may be gapped.
 (s/def ::dropped-events pos-int?)
 
+;; sl-7dq5 F11b: the group run dir, config-root-relative (forward slashes) —
+;; the envelope's :run/results-path. Absent when the run created no results
+;; dir (dry-run, exit 2/3, :defaults contexts): absent-when-unknown.
+(s/def ::results-path string?)
+
+;; sl-kowi (Ruling 4): the halt record — present only when
+;; :halt-on-observation-failure fired: `{:after-scenario N :scenario name}`,
+;; N = 1-based plan index of the first observation-class finalization.
+(s/def ::after-scenario pos-int?)
+(s/def ::halted (s/keys :req-un [::after-scenario]))
+
 (s/def ::run-summary
   (s/keys :req-un [::run-id ::exit-code ::counts
                    :shiftlefter.runner.run/status]
-          :opt-un [::dropped-events]))
+          :opt-un [::dropped-events ::results-path ::halted]))
 
 (def ^:private safe-token-part-re
   ;; Fast-path charset for keyword/symbol name parts (sl-27uh): names made
@@ -254,6 +265,10 @@
       (:exception-class error) (assoc :exception-class (:exception-class error))
       (:data error)            (assoc :data (scrub (:data error)))
       (:value error)           (assoc :value (pr-edn-str (:value error)))
+      ;; sl-kowi: the step/adapter error class (:assertion/:sut/
+      ;; :observation) — a keyword, EDN-native; this one projection feeds
+      ;; EDN, the HTML island and JUnit.
+      (:error/class error)     (assoc :error/class (:error/class error))
       ;; Hook failure attribution (sl-esq): hook name + registration home
       ;; + the @hook= tag's file:line — all EDN-native by construction.
       (:hook error)            (assoc :hook (:hook error))

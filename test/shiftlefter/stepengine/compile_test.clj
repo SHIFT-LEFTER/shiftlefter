@@ -298,7 +298,7 @@
                         {:ns 's :file "s.clj" :line 1})
     (let [config {:svo {:unknown-subject :warn :unknown-verb :error}
                   :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
-                               :verbs {:web "test/fixtures/glossaries/verbs-web-project.edn"}}
+                               :verbs ["test/fixtures/glossaries/verbs-web-project.edn"]}
                   :interfaces {:web {:type :web :adapter :etaoin}}}
           pickle (make-pickle "test" ["I have 5 items"])
           {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
@@ -339,7 +339,7 @@
                         {:ns 's :file "s.clj" :line 1})
     (let [config {:svo {:unknown-verb :error}
                   :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
-                               :verbs {:web "nonexistent/verbs.edn"}}}
+                               :verbs ["nonexistent/verbs.edn"]}}
           pickle (make-pickle "test" ["a step"])
           {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
       (is (not runnable?))
@@ -367,7 +367,7 @@
 
 (def ^:private ieie-glossaries
   {:subjects "test/fixtures/glossaries/subjects.edn"
-   :verbs {:web "test/fixtures/glossaries/verbs-web-project.edn"}})
+   :verbs ["test/fixtures/glossaries/verbs-web-project.edn"]})
 
 (deftest test-vanilla-skips-stepdef-glossary-validation
   (testing "no :svo key → Tier-2 stepdef check and SVO stage skipped; suite runs (sl-ieie)"
@@ -396,6 +396,78 @@
       (is (= :stepdef/unknown-frame (-> diagnostics :stepdef-issues first :type))))))
 
 ;; -----------------------------------------------------------------------------
+;; File-authoritative :type (sl-67dj) — run-path pins
+;; -----------------------------------------------------------------------------
+
+(deftest test-shifted-mode-missing-type-verb-glossary
+  (testing "a :type-less verb file is a planning-class error on the run path"
+    (registry/register! #"a step"
+                        (fn [] nil)
+                        {:ns 's :file "s.clj" :line 1})
+    (let [config {:svo {:unknown-verb :error}
+                  :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
+                               :verbs ["test/fixtures/glossaries/missing-type-verbs.edn"]}}
+          pickle (make-pickle "test" ["a step"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
+      (is (not runnable?))
+      (is (= :glossary/missing-type (-> diagnostics :errors first :type)))
+      (is (= "test/fixtures/glossaries/missing-type-verbs.edn"
+             (-> diagnostics :errors first :path))))))
+
+(deftest test-glossary-lints-ride-compile-diagnostics
+  (testing "structured glossary-load warnings reach compile diagnostics
+            (sl-67dj, Warden P3-13) without blocking the run"
+    (registry/register! #"I have (\d+) items"
+                        (fn [n] n)
+                        {:ns 's :file "s.cljc" :line 1})
+    (let [config {:svo {}
+                  :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
+                               :verbs ["test/fixtures/glossaries/override-verbs.edn"]}
+                  :interfaces {:web {:type :web :adapter :etaoin}}}
+          pickle (make-pickle "test" ["I have 5 items"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
+      (is runnable? "warnings never block")
+      (is (= 1 (count (:glossary-lints diagnostics))))
+      (is (= :glossary/override-flag-ignored
+             (-> diagnostics :glossary-lints first :type))))))
+
+(deftest test-orphan-type-lint-fed-by-declared-types
+  (testing "shifted mode: a project verb file whose DECLARED type no
+            configured interface provides trips :glossary/orphan-type —
+            the lint reads the loader's actual mounts (sl-67dj)"
+    (registry/register! #"I have (\d+) items"
+                        (fn [n] n)
+                        {:ns 's :file "s.clj" :line 1})
+    (let [config {:svo {}
+                  :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
+                               :verbs ["test/fixtures/glossaries/verbs-github-web.edn"]}
+                  :interfaces {:web {:type :web :adapter :etaoin}}}
+          pickle (make-pickle "test" ["I have 5 items"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
+      (is (not runnable?))
+      (is (some #(= :glossary/orphan-type (:type %))
+                (:suite-lint-issues diagnostics))
+          "the declared :github/web mount, unbacked by any interface, is the orphan"))))
+
+(deftest test-vanilla-run-path-skips-orphan-type-lint
+  (testing "vanilla mode: the orphan-type check is SKIPPED — chosen
+            semantics (sl-67dj plan verdict): vanilla never loads glossary
+            files, so declared types are unknowable on the run path; the
+            projection (which always loads, sl-hjnp) keeps the lint live"
+    (registry/register! #"I have (\d+) items"
+                        (fn [n] n)
+                        {:ns 's :file "s.clj" :line 1})
+    (let [config {;; no :svo key → vanilla; glossaries present but never loaded
+                  :glossaries {:verbs ["test/fixtures/glossaries/verbs-github-web.edn"]}
+                  :interfaces {:web {:type :web :adapter :etaoin}}}
+          pickle (make-pickle "test" ["I have 5 items"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
+      (is runnable?)
+      (is (empty? (:suite-lint-issues diagnostics))
+          "no orphan-type lint for the unloaded :github/web declaration")
+      (is (empty? (:errors diagnostics))))))
+
+;; -----------------------------------------------------------------------------
 ;; Interface Annotation Pipeline (sl-1ya)
 ;; -----------------------------------------------------------------------------
 
@@ -403,7 +475,7 @@
   "Minimal Shifted config with :sms and :web interfaces configured."
   {:svo {:unknown-subject :warn :unknown-verb :warn :unknown-interface :warn}
    :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
-                :verbs {:web "test/fixtures/glossaries/verbs-web-project.edn"}}
+                :verbs ["test/fixtures/glossaries/verbs-web-project.edn"]}
    :interfaces {:web {:type :web :adapter :etaoin}
                 :sms {:type :sms :adapter :mock}}})
 

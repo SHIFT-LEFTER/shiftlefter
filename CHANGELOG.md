@@ -1,3 +1,466 @@
+# Changelog: 0.5.6
+
+**Release Date:** 2026-09-08
+
+The theme of this release is **never lie after the run** — the other half
+of 0.5.5's line. A step or adapter can now say *no answer existed*, and the
+run reports exactly that (exit 4, `unobserved`) instead of indicting the
+app; a poll timeout carries what it saw; a dry run names what it did not
+write; every config shape the docs advertise reaches the advertised
+planning error instead of a crash or a silent downgrade; and the
+architecture pages are generated from the code's own extraction, so the
+map is regenerated, not remembered.
+
+## Stats
+
+```
+2491 tests, 9676 assertions, 0 failures (./bin/kaocha unit — the fast suite)
+27 tests, 139 assertions, 0 failures (./bin/kaocha daemon — warm-path shell E2E through the built jar)
+13 tests, 55 assertions, 0 failures (SHIFTLEFTER_LIVE_WEBDRIVER=1 ./bin/kaocha e2e — live-browser example validators)
+Cucumber compliance: 46/46 good, 11/11 bad (100%)
+Verified against Chrome 152.0.7977.76 / ChromeDriver 152.0.7977.82
+```
+
+## Highlights
+
+- **A dead service is exit 4, not "the app is wrong."** A step may tag
+  the exception it throws with `:error/class` (the built-in SMS and browser
+  families do); `:observation` means no answer existed, counts the scenario
+  `unobserved`, and a server that accepts and never answers is classified
+  at the navigation site.
+- **Poll timeouts carry the observation.** `:until` is the await idiom;
+  the timeout record says what the predicate last saw, what it last threw,
+  and how many attempts answered.
+- **Halt the run when it goes dark.** `:halt-on-observation-failure` is
+  `false` | `:group` | `:run` — stop starting scenarios, never kill one in
+  flight.
+- **Config shapes reach the advertised error.** `:interfaces` replaces the
+  builtins wholesale; `:verbs` is a path list and each glossary file
+  declares its own `:type`; a nil or non-map `:interfaces`, a retired
+  `:verbs` map, or a typo'd `:svo` level is a planning error, never a
+  crash and never a quiet downgrade.
+- **The multi-group machine record joins by identity.** Every per-group
+  `--edn` summary carries `:group/label` and a declared `:group/index`;
+  one invocation aggregate carries the verdict and the run directory.
+- **The architecture pages are generated projections** — six of them now,
+  the exit-codes ladder included, drift-guarded so a hand edit fails the
+  suite. And `AGENTS.md` is yours: `sl init` offers, and writes only on
+  `--write-agents`.
+
+<!-- no-entry: sl-1ru0 (release prep, steps 6+7 pre-tag: version bumps, dated header, Stats block, pin sweep, post-bump codox regen and runs; process record, no shipped behavior) -->
+<!-- no-entry: sl-jaoq (Warden M1: ChromeDriver 152 lockstep on the dev machine + the CLAUDE.md pointer; machine state, no shipped surface) -->
+<!-- no-entry: sl-r1bv (release-tail step 4 mechanical: site-sync doc set +exit-codes +index, codox regen, CI.md install recipes pinned to the v0.5.6 tag; no shipped behavior) -->
+<!-- no-entry: sl-g1y8 (the v0.5.6 release gate bead — process record; the release itself is this section) -->
+<!-- no-entry: sl-q1q6 (docs + example honesty + a costume test — the class is read from step throws only; example 07's inert capture-fn tag removed; no shipped behavior change) -->
+<!-- no-entry: sl-nm9o (docs, canon rewords, and guards — project-layout pin guard, derived-page wordlist, explicit public-export skips, F15b into the packaged authoring topic; no shipped behavior) -->
+<!-- no-entry: sl-6vz8 (tests only: crash-under-edn aggregate absence, the four self-ignore creation sites + the bin/sl twin, install.sh's interactive consent arm; no shipped surface) -->
+<!-- no-entry: sl-gq9n (instrument run bead retired unrun — folded into the f04q arm menu; board state only, no shipped surface) -->
+<!-- no-entry: sl-f04q (instrument protocol + wiki corpora; no shipped surface) -->
+<!-- no-entry: sl-xwwv (test-only: pins the exit-code tournament; no shipped surface) -->
+<!-- no-entry: sl-czs5 (dev-repo review tooling — the mo registration hook; no shipped surface) -->
+<!-- no-entry: sl-f9y6 (instrument run — f04q Arm A regrade; notes + wiki archive only, no shipped surface) -->
+<!-- no-entry: sl-wi69 (dev-repo instrument tooling — the scripts/coldread/ cold-read runner; no shipped surface) -->
+<!-- no-entry: sl-6hz4 (instrument run — f04q Arm B dual-model inversion + Stage 3 grading; notes/coldread-runs + wiki archive only, no shipped surface) -->
+<!-- no-entry: sl-wti5 (the v0.5.5 release gate bead — process record; the release itself is the section below) -->
+<!-- no-entry: sl-hz0x (site-repo artifact refresh — /report samples regenerated through the tagged v0.5.5 jar + the five human-doc pages re-synced; the SL-side change is the dev-only sync script's slug-subset filter, no shipped SL surface) -->
+
+## Features
+
+<!-- entry: sl-kowi -->
+- **The step/adapter error-class contract: `:error/class`, `unobserved`
+  counting, and `:halt-on-observation-failure`.** A dead service mid-run
+  used to report exit 1 "scenario failed" — evidence conflated with claim.
+  Now a step or adapter may tag the exception it throws with one recognized
+  ex-data key, `:error/class` (`:assertion` — the app answered and missed;
+  `:sut` — the app answered *with* an error; `:observation` — no answer
+  existed). `:observation` flips the scenario to `:error` and counts it
+  `unobserved` — a bucket disjoint from the harness's `error` — so the run
+  exits 4 (degraded) instead of indicting the app; `:sut`/`:assertion` are
+  recorded and rendered (`FAILED (SUT error)`, a `class:` line under the
+  failure, the key in every envelope, a JUnit message prefix) and change
+  nothing else. Absent key = unchanged behavior; an error-free run's counts
+  are byte-identical. The built-in SMS family ships classified (a failed
+  provider query is `:observation`; a message that never arrives through a
+  healthy provider stays product evidence), as does the browser family (a
+  WebDriver transport throw, `:etaoin/http-ex`, is `:observation`, and so is
+  a navigation the network refused — `opens the browser to` a dead port or
+  unresolvable host throws `SUT unreachable: ERR_CONNECTION_REFUSED for
+  <url>` from a closed set of Chromium `net::ERR_*` codes; every other
+  driver *answer* — element-not-found included — stays exit 1). New
+  run-level config `{:runner {:halt-on-observation-failure :run}}`
+  (`:group` halts one setup group; `true` reads as `:run`; default `false`;
+  no flag): after a scenario goes dark, no further scenario starts —
+  in-flight scenarios under `--max-parallel` finish and keep their verdicts,
+  everything unstarted (including the `@serial` tail) is `skipped`, the
+  summary says `halted after scenario N (<name>): observation failure` and
+  the `--edn` summary carries `:halted`. Exit is 4 either way. The exit-code
+  table is unchanged; its prose now states the ladder — 0/1 are verdicts
+  about the app, 2/3/4 are three ways the run failed to be a measurement —
+  and a new exit-codes ladder page (`docs/architecture/exit-codes.md`;
+  skeleton first, prose pass below) joins the exit-contract drift guard.
+
+<!-- entry: sl-afs9 -->
+- **Poll timeouts carry the last observation: `:until` is the canonical
+  await idiom.** The taught polling idiom returned nil to keep going, so
+  every timeout record's `:last-value` was structurally empty — the
+  observed state (a job at 85%, the three messages that DID arrive) was
+  fetched and discarded. The kernel always had the channel; the idioms on
+  top of it were the gap. Now: the docs teach observe-and-judge first (the
+  predicate returns the observation, `:until` judges it) and name both
+  timeout channels — `:last-value` (the predicate returned) and
+  `:last-error` (a `:retry-error?` not-yet) — with the nil form demoted to
+  a footnote; a nil-idiom timeout carries `:hint "pred returned nil to
+  continue; return the observation and pass :until to populate
+  :last-value"`, so the empty record teaches the fix; the built-in SMS
+  receive family models the idiom (a receive timeout's `:last-value` now
+  says `{:seen 2 :bodies [...]}` instead of nil) and its polling wrapper
+  forwards caller opts so `:until` reaches the kernel from any layer. Also
+  (Rider C, the error-class seam in the kernel): a poll timeout inherits
+  `:error/class :observation` when the witness never answered — no attempt
+  returned a non-nil value and some attempt threw an observation-class
+  error — leaving the scenario `unobserved` (exit 4); any answer at any
+  attempt keeps the timeout an ordinary failure (the precise precedence
+  rule and the `:poll-counts` digest are in the Fixes entry that settled
+  it). No `:observe` option; the kernel's shape is unchanged otherwise.
+
+<!-- entry: sl-od2v -->
+- **A server that accepts and never answers is now exit 4, and the
+  browser adapter takes a page-load timeout.** The navigation step's
+  classification read only Chromium `net::ERR_*` codes, so a page-load
+  timeout — the driver's `timeout` answer to a silent server — fell
+  through as an unclassified failure, exit 1: the product indicted for
+  silence. That answer is now classified `:observation` at the same single
+  navigation site (`SUT silent: navigation timed out for <url>`), and
+  `ERR_TIMED_OUT` / `ERR_EMPTY_RESPONSE` join the unreachable set. Because
+  Chrome's default page-load timeout is five minutes, the etaoin adapter
+  gains `:config {:page-load-timeout-ms N}` on the interface entry (absent
+  = the driver's default), so that exit 4 arrives in seconds. Known hole,
+  recorded on the ladder page: a server that accepts and closes without a
+  byte may make Chrome return its own error page, and the scenario then
+  fails at the first element lookup as `:assertion` — or, depending on the
+  Chrome build, yield `ERR_CONNECTION_RESET`, which the closed set
+  classifies.
+
+<!-- entry: sl-pwbp -->
+<!-- entry: sl-kvn6 -->
+- **Multi-group `--edn` streams gained group identity and a suite-verdict
+  form; the console shows per-group exit codes.** A machine consumer of a
+  multi-group run had to join summary forms to groups by stream order
+  alone, and the suite verdict lived only in the process exit. Now each
+  per-group summary form carries `:group/label` + `:group/index` (the
+  group's declared position — the durable join key), and after all groups
+  ONE invocation aggregate form carries the verdict:
+  `{:invocation/exit-code N :invocation/status kw :invocation/groups
+  [{:group/label … :group/index … :run/exit-code … :run/status …} …]}` —
+  deliberately not `:run/exit-code`, so the documented summary
+  discriminator never matches it. Absent-unless-multi: single-group and
+  classic streams are byte-identical to before; absent on a crash and on
+  planning failures that precede the group loop. The console gains one
+  stderr verdict line per group in multi-group runs — `Setup group
+  "alpha": exit code 0 (passed)` — including planning-failed groups, which
+  previously rendered their numeric code in the HTML TOC alone.
+
+<!-- entry: sl-alha -->
+- **The multi-group `--edn` aggregate names the invocation's run
+  directory, and the HTML report's `UNOBSERVED` vocabulary is documented.**
+  The aggregate form gains the additive `:invocation/results-path`
+  (config-root-relative `results/<stamp>`; group rows keep their own
+  `:run/results-path`), so a consumer reads the invocation dir instead of
+  stripping group slugs. `docs/REPORTS.md` now describes the report's
+  UNOBSERVED status word, its `st-unobserved` modifier, the `N unobserved`
+  counts row and the halt line, which shipped with the exit-4 contract.
+
+<!-- entry: sl-zzrx -->
+- **The exit-codes ladder page joins the derived architecture family, and
+  the family gains a front door.** The ladder page now lives at
+  `docs/architecture/exit-codes.md` as a generated projection of a
+  canonical source, drift-guarded like the five architecture maps — a
+  hand edit to the published page fails the suite, and the exit-code
+  table on it stays pinned to the canonical table in the code by the
+  same guard that covers every other surface stating the contract. A new
+  `docs/architecture/index.md` lists all six pages and explains how a
+  page earns its place: mechanical derivation from a canonical source,
+  regeneration scripted, drift a test failure — the pages are
+  regenerated, not remembered. The old `docs/EXIT-CODES.md` path is
+  retired; every reference now points at the new location.
+
+<!-- entry: sl-r54o -->
+- **The exit-codes ladder page has its prose, and `sl agent-doc
+  exit-codes` is new.** The ladder page shipped as a skeleton; the reasoning now rides
+  along — why 4 trumps 1, what exit 2 does and doesn't prove at group and
+  suite scope, the witness razor and its give-backs, exit-4 triage, and
+  how to classify your own adapters. A packaged `exit-codes` agent-doc
+  topic distills it to the bare decision procedure (also inlined in
+  docs/AGENT.md), and its table joins the exit-contract drift guard as
+  the eighth surface.
+
+<!-- entry: sl-9uuv -->
+- **The architecture pages become generated projections.** The five
+  `docs/architecture/` maps (module map, invocation map, control loop,
+  data-shape ledger, REPL lifetimes) are now GENERATED — mechanical
+  projections of canonical internal sources, produced by
+  `scripts/derive-arch-docs.bb` and drift-guarded like `docs/AGENT.md`
+  (a hand edit fails the suite). The public pages keep the architecture —
+  diagrams, tables, file:line pins, extraction dates — and drop the
+  internal working apparatus (findings ledgers, issue-tracker references,
+  process vocabulary); each ends with a standard note on how the map
+  stays true. Spine anchors are now release-line eras and full-ISO dates
+  rather than development-repo SHAs, so every reference on a public page
+  resolves for a public reader. This lands the change the architecture
+  docs needed to do their public job — adoption-facing credibility:
+  the project knows its own shape, and the map is regenerated, not
+  remembered.
+
+<!-- entry: sl-tx33 -->
+- **First-publish read of the derived architecture pages: seven
+  unresolvable-reference sites fixed at the source.** A cold read of the
+  architecture pages as first published found seven places where a
+  public reader hit a reference that does not resolve outside the
+  development repo. Fixed in the canonical `notes/architecture/` sources
+  and re-derived, so the public `docs/architecture/` projections carry
+  only references a public reader can follow.
+
+<!-- entry: sl-zxt5 -->
+- **The architecture maps' extracted counts are now freshness-guarded.**
+  The module map's require-edge count and the invocation map's
+  dispatch-branch count are stamped in the pages as machine-readable
+  phrases, and the test suite re-runs the extraction behind each stamp
+  every run — a stale stamp fails naming the stamp to update and the
+  command to re-run. The module-map extraction now reads each file's `ns`
+  form as data and counts real `(:require …)` edges only (316 at this
+  stamp), retiring the earlier token grep whose 525 rows included every
+  file's own namespace line and prose mentions in docstrings; a docstring
+  edit cannot move the guarded number. The extraction is runnable from a
+  checkout (`shiftlefter.arch-doc.freshness`; the module map's § Method
+  carries the one-liner). Alongside, the release process gains a standing,
+  non-waivable docs pass: every release includes an audience-fitness read
+  of anything that became public or changed audience since the previous
+  tag — including the derived architecture pages' diff — narrowable by an
+  explicit recorded ruling, never skipped whole.
+
+<!-- entry: sl-7dq5 -->
+- **Five smalls from the first real-world drive.** (1) AGENTS.md
+  is yours: `sl init` no longer writes it by default — it prints the offer,
+  and `sl init --write-agents` performs the marker-guarded write on an
+  explicit ask (it also works after first init: the one narrow exception to
+  the coarse bail). `install.sh` gains tri-state consent — `--write-agents` /
+  `--no-write-agents` pre-answer, an interactive install prompts once, a
+  non-interactive install defaults to no-write and prints the stanza instead.
+  `--no-breadcrumb` is removed (it suppressed only the print, never the
+  write). (2) `sl run --dry-run` with `--html`/`--junit-xml` — the flag or
+  the `[:runner :report …]` config mirror — used to print a success line and
+  silently write no file; the missing reports are now noticed, not written:
+  the dry run proceeds, one stderr line names the reports it did not write,
+  and the `--edn` summary carries `:run/reports-not-written`. (3)
+  `.shiftlefter/` self-ignores at every creation site (wrapper and runtime),
+  so a hand-copied jar's first run leaves `git status` clean — no longer
+  only when the installer ran `sl init`. (4) The `--edn` summary carries
+  `:run/results-path` (the group run dir, config-root-relative): the pointer
+  from envelope to artifacts, replacing mtime guessing; absent when no
+  results dir exists, so existing consumers and goldens are unaffected. (5)
+  Adapter-authoring docs teach log-attempt-then-outcome, so a
+  refused/timed-out request still appears in the `:http-log`-style evidence
+  capture. (Also diagnosed, no code change: `daemon.log` is the daemon JVM's
+  crash sink — 0 bytes means healthy.)
+
+## Breaking Changes
+
+<!-- entry: sl-67dj -->
+- **Verb glossary `:type` is now file-authoritative; config `:verbs` becomes
+  a path list.** A verb glossary file's `:type` key is REQUIRED and is the
+  mount key the loader files it under — a file without one is a planning
+  error (`:glossary/missing-type`, exit 2). Config's `:glossaries :verbs`
+  stops restating the type: the type-keyed map (`:verbs {:web "path"}`)
+  becomes a plain list of paths (`:verbs ["path"]`), with no transition shim
+  — the old map form is a planning error naming the list form (see the
+  config-shapes fix below). Conventional discovery now picks up every
+  `glossary/verbs/*.edn` instead of probing a closed name set, and type
+  identifiers are an open namespaced space — a bundle's `:github/web`
+  mounts without colliding with anyone's `:web`. The framework's own
+  default loader is cleaned the same way (each shipped file mounts under
+  its declared type), `sl glossary` provenance now reports actual mounts,
+  and the `:glossary/orphan-type` lint reads the loaded glossary's declared
+  types. Glossary-load warnings (e.g. the dead `:override-defaults` flag)
+  now also reach the structured channels — `:warn` diagnostics in `sl
+  orient`/`--edn` and `:glossary-lints` in the runner's EDN envelope —
+  instead of stderr logging only (a finding of the 0.5.5 release audit).
+  **Migration:** rewrite `:verbs {:web "glossary/verbs/web.edn"}` as
+  `:verbs ["glossary/verbs/web.edn"]` and add `:type :web` to the file —
+  or drop the key and let discovery find `glossary/verbs/*.edn`.
+
+<!-- entry: sl-g2lj -->
+- **A user `:interfaces` map now replaces the builtin defaults wholesale.**
+  The change 0.5.5's provisional-semantics note announced. No `:interfaces`
+  key = the builtin defaults, unchanged (today: the `:web`/`:etaoin`
+  instance). `:interfaces` present = your map is the COMPLETE set — a
+  browser-less project finally has zero phantom interfaces and `sl orient`
+  says so. Per entry: the value `:default` includes
+  the shipped builtin def of that name VERBATIM (no overrides through the
+  sentinel), and a full map is used as-is under any name — including `:web`,
+  which then fully shadows the builtin; a user map and a builtin def are
+  never merged, and a full map must declare its `:type` (never inferred from
+  the name). New planning-class config errors: `:default` under a name with
+  no builtin (`:config/unknown-default-interface`), a present-but-non-map
+  `:interfaces` value (`:config/invalid-interfaces`, previously silently
+  ignored), and — reserving room for future builtin aliasing — `sl/`-
+  namespaced interface names or types (`:config/reserved-interface-name`,
+  `:config/reserved-interface-type`). `:interfaces nil` is explicit zero.
+  The `sl init` scaffold now writes `:interfaces {:web :default}`, and the
+  config reference (docs/SVO.md § `:interfaces`) carries the full semantics
+  table. The closed interface TYPE set is untouched (opening it is the
+  bundle design bead). **Migration:** an `:interfaces` map that only ADDED
+  an interface beside the builtin `:web` — an SMS-only project's `:sms`
+  entry, say — now loses `:web`; add `:web :default` to keep it.
+
+- **Two removals on the install/init surface, and one moved page.**
+  `sl init` no longer writes `AGENTS.md` by default, and `install.sh
+  --no-breadcrumb` is gone: pass `--write-agents` (to either tool) to get
+  the file, `--no-write-agents` to say no in CI — the five-smalls entry
+  above carries the whole consent story. The exit-codes ladder page moved
+  from `docs/EXIT-CODES.md` to `docs/architecture/exit-codes.md`; update
+  bookmarks and links. **Behavior changes that are not breaking:**
+  `:halt-on-observation-failure true` still means `:run` under the new
+  tri-state, and `sl run --dry-run` with `--html`/`--junit-xml` now
+  proceeds and names what it did not write instead of being refused — both
+  described in their entries.
+
+## Fixes
+
+<!-- entry: sl-78u4 -->
+- **Three shipped contract claims made true: the halt policy is a
+  tri-state that really halts the run, the poll rider decides on whether
+  the witness ever answered, and `daemon.log` stays empty on healthy warm
+  runs.** `:halt-on-observation-failure` now takes `false` | `:group` |
+  `:run` (`true` reads as `:run`, so nothing written against the earlier
+  entry changes meaning): under `:run` a `setup.clj` group that goes dark
+  halts the whole invocation — groups not yet started are skipped outright,
+  their `:start` never runs, their `--edn` aggregate rows say `:run/status
+  :skipped` with no `:run/exit-code`, and the aggregate carries the
+  `:halted` record (with `:group/label`); `:group` halts only the group
+  that went dark. The HTML report and the invocation TOC now show the halt
+  as one header line. A poll timeout's `:error/class :observation` is
+  inherited only when no attempt ever returned a non-nil value and some
+  attempt threw a dark error — any answer at any attempt is the witness
+  talking, exit 1 — and the record carries `:last-value` and `:last-error`
+  side by side plus a `:poll-counts` digest `{:attempts :answered :threw
+  :observation-throws}`. Internally, the warm-path dispatch client now
+  reads the session-close acknowledgement before hanging up, so nREPL no
+  longer logs a "Socket closed" handler trace into the daemon's crash sink
+  on every healthy warm run; a daemon-suite guard pins it at 0 bytes.
+
+<!-- entry: sl-a7sx -->
+- **Config shapes this release's entries advertise now reach the
+  advertised planning error — and a dry run tells the truth about
+  reports.** The release audit found one root under five findings: a
+  shape the entries above describe reached a crash (exit 3) or a lie
+  instead of the promised exit 2. Now `:interfaces nil` (explicitly zero
+  interfaces) is normalized to `{}` at load, so a browser suite fails
+  suite-lint under `--dry-run` exactly like `{}` does instead of passing
+  green and exiting 1 live; a present-but-non-map `:interfaces` (`[:web]`,
+  `"web"`, `:default`) reports `:config/invalid-interfaces` on both `sl run`
+  and `sl orient` instead of crashing; and the retired type-keyed
+  `:glossaries {:verbs {:web "…"}}` map (or any non-list `:verbs`) reports
+  `:config/invalid-glossaries` naming the path-list form, while a list
+  literal loads like a vector. **Behavior change:** `sl run --dry-run` with
+  `--html`/`--junit-xml` is no longer refused at invocation, as it briefly
+  was inside this release's span — flag and the `[:runner :report …]`
+  config mirror that `sl init` scaffolds now behave the same: the dry run
+  proceeds, exit 0, one stderr line names what was not written, and the
+  `--edn` summary carries the additive `:run/reports-not-written` vector of
+  kinds. The multi-group `--dry-run --edn` invocation aggregate is emitted
+  with `:invocation/status :dry-run` rather than claiming `:passed`.
+
+<!-- entry: sl-baup -->
+- **`:group/index` is the group's declared position, an index-name that
+  survives CLI narrowing.** It was assigned over the groups that survived
+  path narrowing, so `sl run features/bravo.feature --edn` against three
+  declared groups reported bravo as index 0 and two invocations with
+  different narrowing joined by index to different groups — the documented
+  "durable join key" joined wrong. The index is now stamped from
+  `setup.clj`'s declared order before narrowing drops anything and carried
+  to every surface (per-group summaries, dry-run summaries, the invocation
+  aggregate rows, the HTML TOC): under narrowing the numbers keep their
+  declared values and may have gaps (`alpha` + `charlie` of three ⇒ `0`
+  and `2`). Unnarrowed runs are unchanged.
+
+<!-- entry: sl-k1pv -->
+- **The no-setup.clj pipeline now runs the exact bound-adapter registry
+  check.** A config adapter typo (or any bound scenario whose interface's
+  adapter is absent from the registry) on a project without `setup.clj` is
+  now a plan-time planning error (exit 2, `:setup/bound-adapter-missing`) —
+  it previously survived planning and died at first provisioning with
+  `:adapter/unknown` (exit 4). Same check, same error key, same
+  selection-exactness as the setup pipeline's check: an adapter no
+  selected, bound scenario touches stays silent. One divergence, by design:
+  on this pipeline the check also fires under `--dry-run` — with no `:start`
+  the registry is fully knowable at plan time, and a PLAN-verdict exit 0
+  must mean a runnable plan (the setup pipeline's dry-run keeps deferring,
+  since only its live `:start` builds the registry). Housekeeping riding
+  the same pass: `lossy-override-warnings` loses its caller-less
+  `:setup/default-adapter-removed` removal arm (registry membership belongs
+  to the exact check on both pipelines now) and drops to 2 arguments.
+
+<!-- entry: sl-3bqv -->
+- **Two framework-owned closed sets now error instead of ignoring.** An
+  `:svo` enforcement level outside `:warn` / `:error` / `:off` (a typo like
+  `:warm`) was accepted at load and then treated as non-blocking — the
+  strict setting you wrote silently became a warning. It is now a
+  planning-time config error (`:config/invalid-svo-level`) with a
+  did-you-mean over the enum, on `sl run` and `sl orient` alike
+  (`:unknown-object` still accepts the deprecated `:strict` alias). An
+  unknown key in a `hooks.clj` entry was stripped without a word; it is
+  now a hooks error naming the key and the accepted keys.
+
+<!-- entry: sl-q4cb -->
+- **Two config edges stop misbehaving quietly.** A string-keyed `:timing`
+  map (`{"deadline-ms" 5}`) crashed the loader inside the did-you-mean
+  suggester; it now reaches the timing planning error naming the key. A
+  `:default` key written INSIDE a full interface map
+  (`{:web {:default true :type :web …}}`) was silently ignored; config lint
+  now warns that `:default` is an entry value, not a key, and that a full
+  map is never merged with the builtin.
+
+<!-- entry: sl-vjve -->
+- **The daemon's orphan-session sweep no longer competes with your run for
+  the dispatch lock, and every reap is named.** A sweep tick used to
+  try-acquire the same lock a warm dispatch try-acquires, so an invocation
+  landing on a tick was rejected with "another run is in progress" when no
+  run was in progress (a spurious reject in 3000 back-to-back dispatches
+  under a 1 ms sweep). The sweep now takes a separate admission gate,
+  reads the run lock's state without acquiring it, and does nothing at all
+  while no session is ledgered — a dispatch is busy-rejected only when
+  another run really holds the lock. Each reaped session now writes one
+  `sl daemon: reaped orphaned session <id>` line to the daemon's stderr
+  (`daemon.log` under the wrapper): rare, and a minor sign of ill health —
+  a client died mid-run without closing its session. `docs/daemon.md` now
+  says that any other session on the daemon port, a hand-connected REPL
+  included, is reaped by the same two-strike rule, mid-eval or not.
+
+<!-- entry: sl-ntlx -->
+- **Internal: the warm daemon reaps sessions leaked by killed clients.** A
+  warm `sl` invocation killed mid-run (Ctrl-C) never sends its nREPL session
+  close, and nREPL retains the session — plus a parked thread — until daemon
+  shutdown. The daemon now runs a periodic orphan-session sweep (every 5
+  minutes, two-strike, only while no dispatch is in flight) that closes such
+  sessions once their abandoned run completes. Abort semantics are unchanged:
+  Ctrl-C still lets the in-flight run finish inside the daemon (the abort
+  story remains open design work). No user-facing surface changes.
+
+## Internal
+
+<!-- entry: sl-raf4 -->
+- **Config becomes its own top-level module.** The config-language
+  namespace (specs, loading, lint, validation, accessors for
+  `shiftlefter.edn`) moves from `shiftlefter.runner.config` to
+  `shiftlefter.config`, beside the existing `shiftlefter.config.user` —
+  substrate fed TO the runner, not owned by it. The did-you-mean helpers
+  (Levenshtein + `suggest-similar`), previously two private copies, dedupe
+  into a new neutral `shiftlefter.text` namespace. No behavior change; no
+  user-facing surface moves — `shiftlefter.edn` keys, CLI flags, and all
+  outputs are untouched.
+
+---
+
 # Changelog: 0.5.5
 
 **Release Date:** 2026-08-25

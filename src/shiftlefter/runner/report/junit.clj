@@ -279,22 +279,31 @@
    Scenario :error (the infrastructure-failure family, sl-esq/sl-7c7i:
    hook throw, capability provisioning, capture, harness) renders <error>
    with the error's type as the type attribute, reading the
-   SCENARIO-level :error map."
+   SCENARIO-level :error map.
+
+   Error class (sl-kowi): the class travels as a grep-able message prefix
+   — `[unobserved] ` on an observation-class scenario error, `[SUT error] `
+   on a failed step classed :sut. The type attribute keeps the error type;
+   the envelope carries the key structurally."
   [scenario allow-pending? counts]
   (case (:status scenario)
     :passed nil
     :failed (let [fs (first-step-of-status scenario :failed)
                   err (:error fs)
                   tag (if (:exception-class err) "error" "failure")
-                  etype (or (:exception-class err) (some-> (:type err) name))]
-              (el tag {:type etype :message (failure-message fs counts)} nil))
+                  etype (or (:exception-class err) (some-> (:type err) name))
+                  prefix (when (= :sut (:error/class err)) "[SUT error] ")]
+              (el tag {:type etype
+                       :message (str prefix (failure-message fs counts))} nil))
     :error (let [err (:error scenario)
                  t (:type err)
                  etype (cond
                          (nil? t) "hook"
                          (namespace t) (str (namespace t) "/" (name t)) ; "hook/before-failed"
-                         :else (name t))]
-             (el "error" {:type etype :message (scenario-error-message err)} nil))
+                         :else (name t))
+                 prefix (when (= :observation (:error/class err)) "[unobserved] ")]
+             (el "error" {:type etype
+                          :message (str prefix (scenario-error-message err))} nil))
     :pending (let [ps (first-step-of-status scenario :pending)
                    text (clean (get-in ps [:step :step/text]))
                    msg (str "pending: " text)]

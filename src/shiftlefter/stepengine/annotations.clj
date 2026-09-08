@@ -37,7 +37,8 @@
 
    See `notes/sms-interface-plan.md`, sl-1ya."
   (:require [clojure.spec.alpha :as s]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [shiftlefter.text :as text]))
 
 ;; -----------------------------------------------------------------------------
 ;; Specs
@@ -76,33 +77,6 @@
 ;; Did-You-Mean (Levenshtein over interface keywords, sl-563)
 ;; -----------------------------------------------------------------------------
 
-(defn- levenshtein
-  "Edit distance between two strings (insertions/deletions/substitutions
-   each cost 1). Iterative two-row DP."
-  [a b]
-  (let [m (count a) n (count b)]
-    (cond
-      (zero? m) n
-      (zero? n) m
-      :else
-      (loop [i 0 prev (vec (range (inc n)))]
-        (if (= i m)
-          (peek prev)
-          (let [ai (.charAt ^String a i)
-                curr (loop [j 0 row (transient [(inc i)])]
-                       (if (= j n)
-                         (persistent! row)
-                         (let [bj (.charAt ^String b j)
-                               cost (if (= ai bj) 0 1)
-                               above (get prev (inc j))
-                               left (nth row j)
-                               diag (get prev j)]
-                           (recur (inc j)
-                                  (conj! row (min (inc above)
-                                                  (inc left)
-                                                  (+ diag cost)))))))]
-            (recur (inc i) curr)))))))
-
 (defn- closest-interface
   "Return the known interface keyword closest to `target` by edit distance,
    or nil if none is close enough to be a useful suggestion.
@@ -116,7 +90,7 @@
           len (count target-name)
           threshold (max 2 (quot len 3))
           [best dist] (->> known
-                           (map (fn [k] [k (levenshtein target-name (name k))]))
+                           (map (fn [k] [k (text/levenshtein target-name (name k))]))
                            (sort-by second)
                            first)]
       (when (and best (<= dist threshold) (pos? dist))

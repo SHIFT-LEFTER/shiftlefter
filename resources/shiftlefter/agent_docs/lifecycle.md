@@ -65,6 +65,27 @@ envelope.
   capabilities.
 - Step fails → scenario `:failed`; `:on-failure` capture fires at that
   instant, before Afters.
+- Step throws with `:error/class :observation` (the witness went dark — no
+  answer existed: refused, transport timeout, DNS) → scenario `:error`,
+  counted `unobserved` (disjoint from the harness's `error` bucket), exit
+  4; the step stays `:failed` with the class on its error. The other two
+  classes (`:sut` = the app answered WITH an error, `:assertion` = the app
+  answered and missed) are recorded and rendered only — scenario `:failed`,
+  exit 1. Absent key = unchanged behavior. Builtin SMS/browser adapters
+  ship classified; tag your own adapter's throw at its catch site — the
+  class is read when that throw reaches the STEP; hook, provisioning and
+  capture throws are the harness bucket (`error`), never `unobserved`.
+- `{:runner {:halt-on-observation-failure true}}` (default off) → after an
+  observation-class scenario, no further scenario STARTS; in-flight ones
+  (`--max-parallel`) finish and keep their verdicts, everything unstarted
+  (incl. the `@serial` tail) is `skipped`; the summary says `halted after
+  scenario N (<name>): observation failure` and the EDN summary carries
+  `:halted {:after-scenario N :scenario "<name>"}`. Exit 4 either way.
+  The key is `false` | `:group` | `:run` (`true` = `:run`): with `setup.clj`
+  groups, `:run` skips every group not yet started (its `:start` never
+  runs; the invocation aggregate carries the `:halted` record and the
+  skipped groups' rows say `:run/status :skipped`), `:group` halts only the
+  group that went dark.
 - After hook throws or its attachments claim is malformed → scenario
   `:error` even when every step passed. One failing After doesn't stop the
   unwind.
@@ -76,9 +97,13 @@ envelope.
   environment damage is the NEXT run's planning input — which is what the
   dirty-teardown marker is (written now, announced at the next run's start,
   then cleared).
-- Any scenario `:error` → exit 4 (run degraded: the harness broke, the run
-  proves nothing about the app), distinct from exit 1 (a scenario failed).
-- Exit codes aggregate worst-wins across groups: 2 > 4 > 1 > 0.
+- Any scenario `:error` → exit 4 (run degraded: the harness broke or the
+  observation channel went dark — the run proves nothing about the app for
+  that scenario), distinct from exit 1 (a scenario failed). Exit 4 is not
+  an acquittal: red, blocking; only the indictment of the app is withheld.
+- Exit codes aggregate worst-wins across groups: 2 > 4 > 1 > 0. 0/1 are
+  verdicts about the app; 2/3/4 are three ways the run failed to be a
+  measurement (your request / SL's code / the observation channel).
 
 ## Parallelism
 
@@ -123,8 +148,13 @@ file is written) plus the run-directory bytes. The summary's top-level
 appears only there); `:failures` entries carry their own refs inline for
 join-free triage — same refs, deliberate duplication. `:run/seed` on every
 summary is the run's seed — rerun with `--seed <that value>` to reproduce
-user-code randomness. Building a custom rendering from the record:
-`docs/REPORTS.md` (contract + runnable recipe).
+user-code randomness. In a multi-group run each group's summary carries
+`:group/label` + `:group/index` (join by index, not stream order — the
+index is the group's DECLARED position, so under CLI narrowing the numbers
+keep their declared values and may have gaps), and one
+final `:invocation/exit-code` form carries the suite verdict — read it if
+present, else the lone summary's `:run/exit-code`. Building a custom
+rendering from the record: `docs/REPORTS.md` (contract + runnable recipe).
 
 Related topics: `hooks` (registration, payloads, attachments claim),
 `layout` (which files attach user code, what the framework writes).

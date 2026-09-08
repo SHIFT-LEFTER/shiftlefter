@@ -64,13 +64,27 @@
   "The :message-log capture fn — the ~10-line contract in the flesh.
    Dumps the whole SMS conversation (both directions) as text/plain.
    nil = empty log, nothing to capture; a query error THROWS (it is a
-   failed capture, not an empty one)."
+   failed capture, not an empty one).
+
+   Where the throw lands: a capture fn's throw is HARNESS-family by ruling
+   — the engine records it as `:capture/failed`, the scenario counts
+   `error` (never `unobserved`), and the halt policy does not arm. The
+   step/adapter error contract's `:error/class` key is read from STEP
+   throws only, so tagging this throw would be inert (an earlier revision
+   did, and called it the user-adapter idiom — it wasn't; the 0.5.6 audit
+   caught it). The shipped idiom is the SMS builtin STEPS: a failed
+   provider query inside a step throws `:sms/query-failed` carrying
+   `:error/class :observation` (the provider is the witness, not the app;
+   a failed query saw nothing), and the runner counts that scenario
+   `unobserved`, exit 4. Classify at the catch site whose throw reaches
+   the step."
   [{:keys [handle]}]
   (let [{:keys [ok error]} (sms/query-messages handle {:since-ts Instant/EPOCH})]
     (cond
       error      (throw (ex-info (str "message-log query failed: "
                                       (:message error))
-                                 {:type :sms/query-failed :error error}))
+                                 {:type :sms/query-failed
+                                  :error error}))
       (empty? ok) nil
       :else      {:data       (str (str/join "\n" (map format-message ok)) "\n")
                   :media-type "text/plain"

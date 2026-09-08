@@ -6,7 +6,7 @@ door:
 
 ```text
 <project>/
-  AGENTS.md              agent on-ramp stanza (written by sl init, marker-guarded)
+  AGENTS.md              agent on-ramp stanza (only via `sl init --write-agents`, marker-guarded)
   .shiftlefter/          framework operational state — self-ignoring under sl init
   sl/                    the ShiftLefter project (yours, committed)
     sl, shiftlefter-*.jar  launcher + jar (installer convention)
@@ -30,7 +30,7 @@ Defaults are relative to the config root (`sl/`). Explicit config always wins.
 | feature files | yes | no `setup.clj`: `[:runner :features]` default `["features/"]`; with `setup.clj`: the declared plan IS the corpus | config key / CLI paths (subset of the plan under setup) |
 | `glossary/subjects.edn` | in Shifted mode | probed at `glossary/subjects.edn` | `:glossaries` — explicit value, *including nil*, used as written |
 | intents | in practice, Shifted web | probed at `glossary/intents/` | `:glossaries {:intents …}` |
-| verb glossaries | no (built-ins cover) | probed at `glossary/verbs/<iface>.edn` | `:glossaries {:verbs …}` |
+| verb glossaries | no (built-ins cover) | probed at `glossary/verbs/*.edn`; each file's `:type` is its mount key | `:glossaries {:verbs [paths]}` |
 | dev steps | no | `[:runner :step-paths]` default `["steps/"]` | config / `--step-paths` |
 | `setup.clj`, `hooks.clj` | no | sibling of the active config, fixed names | none — fixed by design |
 | macro registries | with `:macros {:enabled? true}` | `:registry-paths` required; INI files or directories (dir loads every `.ini`, recursive, sorted) | configured paths (0.6 moves INI → typed EDN, hard cut) |
@@ -78,11 +78,12 @@ future attachment mechanism.
 The framework writes only into places it owns (below); files the user owns
 are never written unprompted — changes arrive as proposals (SIEVE proposes,
 never applies): proposed, never written without an explicit yes. Two
-named, marker-guarded exceptions, both on explicit commands: `sl init`
+named, marker-guarded exceptions, both the direct object of an explicit
+user command (the sl-7dq5 ownership boundary): `sl init --write-agents`
 writes the agent on-ramp stanza into `AGENTS.md` (create-or-append between
-markers; an existing stanza is never edited — on a preexisting project the
-installer only prints it for you to paste), and `sl costume init` appends
-the protective wardrobe line to `.gitignore`.
+markers; an existing stanza is never edited; plain `sl init` never touches
+it — it prints the offer instead), and `sl costume init` appends the
+protective wardrobe line to `.gitignore`.
 
 - `sl/results/<STAMP>/` per invocation: `report.html`, per-scenario
   `attachments/<slug>/`, per-group subdirs under `setup.clj`. Self-ignoring

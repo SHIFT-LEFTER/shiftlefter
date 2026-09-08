@@ -1,5 +1,7 @@
 (ns shiftlefter.costume.browser-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
+            [shiftlefter.browser.errors :as browser-errors]
             [shiftlefter.costume.browser :as cbrowser]
             [shiftlefter.browser.protocol :as bp]))
 
@@ -274,6 +276,38 @@
       (is (true? @reconnect-called))
       ;; The retry happened on the new browser
       (is (= [[:click! {:q {:css "button"}}]] @call-log-2)))))
+
+(deftest costume-browser-reconnects-once-then-classification-lands
+  ;; sl-q1q6 (Warden W11): a refused navigation on a costume is an
+  ;; :etaoin/http-error, which session-error? matches — the costume first
+  ;; rebuilds its session and retries ONCE; the navigation step's
+  ;; classify-navigation then classifies the RETRY's throw. Pre-existing
+  ;; predicate, recorded consequence: one reconnect per dead-SUT navigation,
+  ;; the classification still lands.
+  (testing "one reconnect, then the retry's refused answer is classified :observation"
+    (let [refused (fn [url]
+                    (ex-info "throw+: {...}"
+                             {:type :etaoin/http-error :status 500
+                              :response {:value {:error "unknown error"
+                                                 :message (str "unknown error: net::ERR_CONNECTION_REFUSED "
+                                                               url)}}}))
+          ;; Only open-to! matters here — the other protocol methods are
+          ;; never reached (a partial reify is the honest mock).
+          dead-browser (fn [] #_{:clj-kondo/ignore [:missing-protocol-method]}
+                         (reify bp/IBrowser
+                           (open-to! [_ url] (throw (refused url)))))
+          reconnects (atom 0)
+          reconnect-fn (fn [_] (swap! reconnects inc) (dead-browser))
+          pb (cbrowser/make-costume-browser (dead-browser) :test-subject reconnect-fn)
+          url "http://127.0.0.1:59999/nope"
+          thrown (try (browser-errors/classify-navigation #(bp/open-to! pb url) url)
+                      nil
+                      (catch clojure.lang.ExceptionInfo e e))]
+      (is (= 1 @reconnects) "exactly one session rebuild before the retry")
+      (is (some? thrown))
+      (is (= :observation (:error/class (ex-data thrown))))
+      (is (= "ERR_CONNECTION_REFUSED" (:net-error (ex-data thrown))))
+      (is (str/starts-with? (ex-message thrown) "SUT unreachable: ERR_CONNECTION_REFUSED")))))
 
 (deftest costume-browser-reconnect-failure-test
   (testing "surfaces original error when reconnect fails"

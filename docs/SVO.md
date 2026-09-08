@@ -86,9 +86,12 @@ acts as an inheritable default, a persona's own `:wears` wins, and
 `:wears nil` on a persona opts out of the default.
 
 **`glossary/verbs/web.edn`** — project verbs that extend the built-in `:web`
-vocabulary. Each verb entry declares a `:desc` and a closed set of **frames**
-(the argument shapes the verb accepts); a verb with no extra arguments uses a
-single `:default` frame:
+vocabulary. The file's `:type` is REQUIRED and authoritative — it is the mount
+key the loader files these verbs under (a file without `:type` is a planning
+error). Any keyword works, namespaced included (`:github/web`) — type
+identifiers are an open space. Each verb entry declares a `:desc` and a closed
+set of **frames** (the argument shapes the verb accepts); a verb with no extra
+arguments uses a single `:default` frame:
 
 ```clojure
 {:type :web
@@ -119,7 +122,8 @@ turns glossaries off):
 ```clojure
 {:glossaries                           ; optional — these ARE the conventions
  {:subjects "glossary/subjects.edn"
-  :verbs    {:web "glossary/verbs/web.edn"}
+  :verbs    ["glossary/verbs/web.edn"] ; list of files; each file's own
+                                       ; :type is its mount key
   :intents  "glossary/intents"}       ; drives object validation
 
  :interfaces
@@ -379,8 +383,9 @@ does.`
 ```clojure
 {:glossaries
  {:subjects "glossary/subjects.edn"
-  :verbs    {:web "glossary/verbs/web.edn"}   ; interface type → path
-  :intents  "glossary/intents"}}              ; path; drives object validation
+  :verbs    ["glossary/verbs/web.edn"]  ; list of paths — each file's own
+                                        ; :type is its mount key (sl-67dj)
+  :intents  "glossary/intents"}}        ; path; drives object validation
 ```
 
 ### `:interfaces`
@@ -392,6 +397,43 @@ does.`
 
 Each interface declares a `:type` (verb vocabulary), an `:adapter` (capability
 provider, e.g. `:etaoin` for browsers), and adapter `:config`.
+
+**Replace semantics** (since 0.5.6; announced as provisional in 0.5.5):
+
+| Config | Meaning |
+|--------|---------|
+| No `:interfaces` key | The builtin defaults are mounted, unchanged (today: the `:web`/`:etaoin` instance). |
+| `:interfaces` present | Your map is the **complete** set — it replaces the builtin defaults wholesale (the explicit-`:glossaries` precedent). |
+| Entry value `:default` | The shipped builtin def of that name, **verbatim**. No overrides travel through the sentinel — to customize, write the full map. |
+| Entry value = full map | Your definition, used **as-is**, under any name — including builtin names. `:web {…}` is legal and fully shadows the builtin; the builtin def is never consulted. A user map and a builtin def are **never merged**. |
+| `:default` under a name with no builtin | Planning-time config error (`:config/unknown-default-interface`), never a silent empty. |
+
+A full-map entry must declare its `:type` — the type is never inferred from
+the name. The NAME addresses an instance; the TYPE selects its verb
+vocabulary: `:admin-web {:type :web :adapter :etaoin}` is a second browser
+instance under a non-builtin name, speaking the full `:web` vocabulary.
+`:interfaces nil` is explicit too: zero interfaces. The `sl/` keyword
+namespace is reserved for builtin interface names and types — user-defined
+`:sl/*` names or `:type :sl/*` values are planning-time errors.
+
+Keep one, bring one:
+
+```clojure
+{:interfaces
+ {:web :default                        ; the builtin browser, by reference
+  :api {:type :api :adapter :http}}}   ; yours, as written
+```
+
+The [`examples/04-sms-2fa`](../examples/04-sms-2fa) shape, with a second
+browser instance:
+
+```clojure
+{:interfaces
+ {:web       :default                            ; builtin browser, verbatim
+  :sms       {:type :sms :adapter :sms-mock}     ; brought by the project
+  :admin-web {:type :web :adapter :etaoin}}}     ; NAME ≠ TYPE: new name,
+                                                 ; builtin :web vocabulary
+```
 
 ### `:svo`
 
@@ -433,9 +475,11 @@ above and [COSTUMES.md](COSTUMES.md).
 
 ### Verbs
 
-A verb is an **interface-level** action. A verb entry requires `:desc` **and**
-`:frames` — a closed set of argument shapes; a verb with no extra arguments uses one
-`:default` frame:
+A verb is an **interface-level** action. A verb glossary file must declare its
+`:type` — the mount key the loader files it under (file-authoritative,
+sl-67dj); any keyword is legal, namespaced included. A verb entry requires
+`:desc` **and** `:frames` — a closed set of argument shapes; a verb with no
+extra arguments uses one `:default` frame:
 
 ```clojure
 {:type :web

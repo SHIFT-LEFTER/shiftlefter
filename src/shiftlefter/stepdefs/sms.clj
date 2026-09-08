@@ -37,8 +37,11 @@
    bottoming out at this ns's receive-class defaults — 30s deadline,
    500ms interval (tight enough for 2FA latency, loose enough to avoid
    hammering provider APIs). Bind `*receive-timeout-ms*` or
-   `*poll-interval-ms*` to override every rung. No match within the
-   budget throws the kernel's structured `:step/poll-timeout` record.
+   `*poll-interval-ms*` to override every rung. The receive poll is
+   observe-and-judge (sl-afs9): each pass returns the observed message set
+   and `:until` judges the match, so no match within the budget throws the
+   kernel's structured `:step/poll-timeout` record with `:last-value`
+   naming what DID arrive (`{:seen N :bodies [...] :hit nil}`).
 
    `:see :count` is single-shot (no polling) and always uses
    `:sms/scenario-start-ts` as the `:since-ts` floor — assertion on a
@@ -187,18 +190,24 @@
 
 (defn- with-poll-timeout
   "Poll `f` on the deadline substrate (sl-99u2) with this ns's
-   receive-class defaults until it returns a truthy value or the resolved
-   deadline elapses. Returns f's truthy result, or throws the kernel's
-   structured `:step/poll-timeout` with `context` merged in. Adapter
-   errors (`:sms/query-failed`) propagate immediately — a transient
-   provider blip is a real error, not a not-yet."
-  [ctx f context]
-  (step/poll-until ctx f
-                   {:defaults receive-timing-defaults
-                    :deadline-ms *receive-timeout-ms*
-                    :interval-ms *poll-interval-ms*
-                    :context context
-                    :default-type :sms}))
+   receive-class defaults until `:until` accepts its return (default:
+   truthy) or the resolved deadline elapses. Returns the accepted value,
+   or throws the kernel's structured `:step/poll-timeout` with `context`
+   merged in. Adapter errors (`:sms/query-failed`) propagate immediately —
+   a transient provider blip is a real error, not a not-yet.
+
+   Rider B (sl-afs9): the 4-arity forwards caller `opts` to the kernel
+   (merged over this wrapper's timing map) so `:until` — the
+   observe-and-judge idiom — reaches `poll-until` from this layer."
+  ([ctx f context] (with-poll-timeout ctx f context {}))
+  ([ctx f context opts]
+   (step/poll-until ctx f
+                    (merge {:defaults receive-timing-defaults
+                            :deadline-ms *receive-timeout-ms*
+                            :interval-ms *poll-interval-ms*
+                            :context context
+                            :default-type :sms}
+                           opts))))
 
 ;; -----------------------------------------------------------------------------
 ;; Receive: shared core
@@ -213,15 +222,32 @@
   (when-let [{:keys [full bindings]} (bindings/match-named pattern (:body msg))]
     {:msg msg :full full :bindings bindings}))
 
+(defn- query-failed
+  "The `:sms/query-failed` ex-info, classified `:observation` (sl-kowi):
+   the provider API is the WITNESS, not the SUT — a failed query means the
+   mailbox could not be seen, which proves nothing about the app. (A
+   message that never arrives through a HEALTHY witness is the opposite
+   case — an absent event, product evidence — and stays a poll timeout.)"
+  [error]
+  (ex-info (str "ISMS query-messages failed: " (:message error))
+           {:type :sms/query-failed
+            :error error
+            :error/class :observation}))
+
 (defn- attempt-receive
   "One non-blocking pass: query the adapter once and try to match.
-   Returns the same hit-or-nil shape as `match-message`."
+   Returns the OBSERVATION (Rider A, sl-afs9 — observe-and-judge):
+   `{:seen <count> :bodies [<body> …] :hit <match-or-nil>}`, where `:hit`
+   is `match-message`'s hit shape. The receive poll judges doneness on
+   `:hit`, so a timeout's :last-value says what DID arrive — \"3 seen,
+   none matching\", bodies included — instead of nil."
   [sms pattern filters]
   (let [{:keys [ok error]} (sms-proto/query-messages sms filters)]
     (when error
-      (throw (ex-info (str "ISMS query-messages failed: " (:message error))
-                      {:type :sms/query-failed :error error})))
-    (some #(match-message pattern %) ok)))
+      (throw (query-failed error)))
+    {:seen (count ok)
+     :bodies (mapv :body ok)
+     :hit (some #(match-message pattern %) ok)}))
 
 (defn- update-receive-state
   "Stash a successful match into ctx: named-group bindings into the
@@ -248,10 +274,14 @@
         filters {:since-ts  since-ts
                  :to        to-phone
                  :direction :inbound}
-        hit     (with-poll-timeout ctx
-                  #(attempt-receive sms pattern filters)
-                  {:to-phone to-phone :match match-str :since-ts since-ts})]
-    (update-receive-state ctx hit)))
+        ;; Observe-and-judge (sl-afs9): the poll fn returns the observed
+        ;; message set; :until judges the match; the kernel hands back the
+        ;; observation that satisfied it.
+        observed (with-poll-timeout ctx
+                   #(attempt-receive sms pattern filters)
+                   {:to-phone to-phone :match match-str :since-ts since-ts}
+                   {:until :hit})]
+    (update-receive-state ctx (:hit observed))))
 
 ;; -----------------------------------------------------------------------------
 ;; Patterns
@@ -376,8 +406,7 @@
                              :to        to-phone
                              :direction :inbound})]
     (when error
-      (throw (ex-info (str "ISMS query-messages failed: " (:message error))
-                      {:type :sms/query-failed :error error})))
+      (throw (query-failed error)))
     (let [actual (count ok)]
       (when-not (= expected actual)
         (throw (ex-info (str "Expected " expected " messages to " to-phone

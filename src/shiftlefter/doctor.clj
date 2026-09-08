@@ -40,7 +40,7 @@
             [shiftlefter.browser.chrome :as chrome]
             [shiftlefter.config.user :as user]
             [shiftlefter.project-context :as project-context]
-            [shiftlefter.runner.config :as config]
+            [shiftlefter.config :as config]
             [shiftlefter.runner.reporter :as reporter]))
 
 ;; -----------------------------------------------------------------------------

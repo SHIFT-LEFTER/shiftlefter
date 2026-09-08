@@ -37,7 +37,10 @@ and the session (`:alice`). No "I" — every browser step has an explicit actor.
 {:interfaces {:web {:type :web :adapter :etaoin}}}
 ```
 
-That's the whole config for the default WebDriver backend. (To use Playwright
+That's the whole config for the default WebDriver backend — and it IS the
+whole interface set: a written `:interfaces` map replaces the builtin
+defaults wholesale (`:web :default` re-includes the shipped def verbatim;
+see [SVO.md § `:interfaces`](SVO.md#interfaces)). (To use Playwright
 instead, see [INSTALL-TIERS.md](INSTALL-TIERS.md#browser-backend-configuration).)
 
 ## 3. Run it

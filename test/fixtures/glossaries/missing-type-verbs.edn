@@ -1,0 +1,6 @@
+;; Verb glossary WITHOUT :type (sl-67dj): a broken file — strict load is a
+;; planning-class :glossary/missing-type error; lenient load warns and skips.
+{:verbs
+ {:tapdance {:desc "A verb that must never mount"
+             :frames {:default {:args []
+                                :pattern "S tapdances O"}}}}}

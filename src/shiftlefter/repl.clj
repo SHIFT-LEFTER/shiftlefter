@@ -64,7 +64,7 @@
             [shiftlefter.stepengine.bind :as bind]
             [shiftlefter.stepengine.compile :as compile]
             [shiftlefter.stepengine.exec :as exec]
-            [shiftlefter.runner.config :as config]
+            [shiftlefter.config :as config]
             [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.step :as step]
@@ -259,7 +259,7 @@
 
    Example:
    ```clojure
-   (shifted! {:glossaries {:verbs {:web \"path/to/verbs-web.edn\"}}})
+   (shifted! {:glossaries {:verbs [\"path/to/verbs-web.edn\"]}})
    (verbs)
    ;; => {:web [:click :fill :see]}
    (verbs :web)
@@ -281,7 +281,7 @@
 
    Example:
    ```clojure
-   (shifted! {:glossaries {:verbs {:web \"...\" :api \"...\"}}})
+   (shifted! {:glossaries {:verbs [\"verbs-web.edn\" \"verbs-api.edn\"]}})
    (interfaces)
    ;; => [:web :api]
    ```"
@@ -469,10 +469,12 @@
             ;; payloads + step ctx carry it, sub-seeds derive from it).
             ;; MIRROR NOTE: the runner builds its exec-opts at
             ;; runner/core.clj (search :run-seed). The engine consumes
-            ;; five: :interfaces :timing :run-seed (mirrored here) plus
-            ;; :provisioning and :max-parallel — skipped here ON PURPOSE:
-            ;; repl/run stays lazy + sequential (sl-vmc5) while sl run
-            ;; defaults :eager. A new engine-consumed exec-opt added
+            ;; six: :interfaces :timing :run-seed (mirrored here) plus
+            ;; :provisioning, :max-parallel and :halt-on-observation-failure
+            ;; (sl-kowi) — skipped here ON PURPOSE: repl/run stays lazy +
+            ;; sequential (sl-vmc5) while sl run defaults :eager, and it
+            ;; runs one scenario (nothing to halt). A new engine-consumed
+            ;; exec-opt added
             ;; there must be hand-mirrored here — or its omission
             ;; recorded — and vice versa.
             (let [run-seed (.nextLong (java.util.concurrent.ThreadLocalRandom/current)
@@ -621,7 +623,7 @@
    declares an :interface, a loaded config (`shifted!`) has an
    `:interfaces` entry for the resolved instance, and the ctx lacks the
    capability, provision it via the engine's lazy primitive — the exact
-   path the :lazy mode was built for (runner/config.clj's own comment:
+   path the :lazy mode was built for (config.clj's own comment:
    bare REPL callers have no plan to scan). The capability lands
    :ephemeral in the NAMED ctx, so `reset-ctxs!`/`clear!` close it (the
    sl-tss7 :closed branch, now REPL-reachable). No config, or no entry

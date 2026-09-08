@@ -1,21 +1,26 @@
+<!-- GENERATED — DO NOT EDIT. Derived from the internal source
+     notes/architecture/repl-lifetimes.md (development repo) by
+     scripts/derive-arch-docs.bb. Edit the source, then re-run:
+     bb scripts/derive-arch-docs.bb -->
+
 # REPL Custody & Lifetimes — who owns what, and how long it lives
 
-Artifact E of the architecture series (sibling of the
-[invocation map](invocation-map.md)). Stamped against **HEAD `b692ca50`**
-(2026-08-18). This is deliberately **not a flow map**: the REPL is the
+Stamped against the code of the v0.5.5 release line (2026-08-18). This is
+deliberately **not a flow map**: the REPL is the
 only surface where things outlive the invocation, so the questions that
 matter are *custody* (which verb owns this resource) and *lifetime*
 (which layer it dies with).
 
-**Why this map exists:** every REPL bug of the c76w exercise cycle was a
-misplacement on the ladder below. The chromedriver leak (sl-34fu) was a
-JVM-scoped resource nobody owned; the durability overclaim (sl-t8bj) put
-a JVM-scoped Chrome on the disk layer; the missing relaunch (sl-2de7)
+**Why this map exists:** every REPL bug of an internal exercise cycle
+just before v0.5.5 was a
+misplacement on the ladder below. The chromedriver leak was a
+JVM-scoped resource nobody owned; the durability overclaim put
+a JVM-scoped Chrome on the disk layer; the missing relaunch
 was a state-machine edge nobody had drawn; the bare-browser gap and the
-broken `:closed` branch (sl-vmc5) were a context-scoped resource that
+broken `:closed` branch were a context-scoped resource that
 could neither be created nor reaped. This is the diagram that would have
-prevented all five. Placements below cite those beads' banked
-measurements rather than re-measuring (§ Evidence).
+prevented all five. Placements below cite recorded measurements rather
+than re-measuring.
 
 ## Where the REPL joins the engine
 
@@ -24,7 +29,7 @@ differences are exactly two, and both are lifetime facts:
 
 - **`repl/as`** (`repl.clj:682`) executes a **single step with no plan
   and no hooks**: it calls `exec/invoke-step` directly (`repl.clj:655`)
-  with a hand-built ctx. Since sl-vmc5 it lazily provisions a bare
+  with a hand-built ctx. Since the bare-browser fix it lazily provisions a bare
   browser for a subject with no costume, through the engine's own
   primitive: `ensure-step-capability` (`repl.clj:615`) →
   `exec/ensure-capability-for-svo` → `provisioning.clj:201`, yielding a
@@ -41,14 +46,14 @@ differences are exactly two, and both are lifetime facts:
 - **`repl/step`** (`repl.clj:517`, free mode) has **no provisioning path
   at all** — by design, not omission: provisioning is SVO-keyed (a
   capability is a subject + interface), and free mode has no bound SVO,
-  so there is nothing to provision against (ruled 08-18). Consequence:
+  so there is nothing to provision against. Consequence:
   the unnamed `session-ctx` can never hold a browser, and `reset-ctx!`
   is a pure data reset with no cleanup obligation.
 - The other genuine difference: **dynamic-var rebinding is the REPL's
   timing surface** — `binding` any of `*retry-timeout-ms*` /
   `*wait-timeout-ms*` / `*receive-timeout-ms*` / `*poll-interval-ms*`
   enters the `:timing` resolution ladder at the top `:override` rung
-  (`step.clj:134`, sl-99u2).
+  (`step.clj:134`).
 
 ### Two reapers, two lifetimes
 
@@ -83,17 +88,17 @@ graph TB
     end
     subgraph CTX["CONTEXT-SCOPED — dies with reset-ctxs!/clear!"]
         NAMED["named contexts (repl.clj:81)<br/>all ctx data keys"]
-        ASEPH["as-provisioned ephemeral browsers<br/>(sl-vmc5; :closed branch repl.clj:342 →<br/>quit-driver! session.clj:170 — WebDriver<br/>session + its chromedriver both die)"]
+        ASEPH["as-provisioned ephemeral browsers<br/>(:closed branch repl.clj:342 →<br/>quit-driver! session.clj:170 — WebDriver<br/>session + its chromedriver both die)"]
         SESS["session-ctx (repl.clj:80)<br/>data only — free mode never provisions"]
     end
     subgraph JVM["JVM-SCOPED — dies with the REPL JVM (child processes)"]
-        COSTCHROME["costume Chromes + their chromedrivers<br/>(JVM children — sl-t8bj measured:<br/>pids 37291/48212 dead after bounce)"]
-        REG["live-drivers registry (costume.clj:157)<br/>one driver per costume — sl-34fu fix:<br/>adopt-driver! replaces-and-reaps"]
+        COSTCHROME["costume Chromes + their chromedrivers<br/>(JVM children — measured:<br/>both dead after a JVM bounce)"]
+        REG["live-drivers registry (costume.clj:157)<br/>one driver per costume — the fix:<br/>adopt-driver! replaces-and-reaps"]
         SUBJ["connected-subjects (repl.clj:82)<br/>repl-config (repl.clj:88)"]
         SIEVE["sieve dev-server driver (user.clj:57,<br/>sieve/server.clj:293) — nobody's costume:<br/>no context, no capability, no registry;<br/>only sieve-stop! reaps it"]
     end
     subgraph DISK["DISK-SCOPED — the only true survivor"]
-        WARD["wardrobe profiles (wardrobe.clj:54)<br/>chrome-profile dirs + browser-meta.edn —<br/>durability = profile + relaunch,<br/>NEVER process survival (sl-t8bj)"]
+        WARD["wardrobe profiles (wardrobe.clj:54)<br/>chrome-profile dirs + browser-meta.edn —<br/>durability = profile + relaunch,<br/>NEVER process survival"]
     end
     CALL --> CTX --> JVM --> DISK
 ```
@@ -104,13 +109,13 @@ Placement notes:
   matters (they die with the scenario that made them), even though the
   same *kind* of resource is context-scoped when `as` makes it — the
   reaper, not the resource, decides the layer.
-- **Costume Chromes are JVM-scoped, not disk-scoped.** sl-t8bj's
+- **Costume Chromes are JVM-scoped, not disk-scoped.** The recorded
   measurement (deliberate JVM bounce, nothing closed by hand): both
   costume Chromes dead with the JVM; `list-costumes` honestly reported
   `:dead`; `connect-costume!` relaunched from the persisted profiles.
   The user-visible durability promise holds — its mechanism is the disk
   layer, not the process.
-- **The chromedriver custody answer (sl-34fu):** each costume owns at
+- **The chromedriver custody answer:** each costume owns at
   most one live driver, held in the `live-drivers` registry
   (`costume.clj:157`). `adopt-driver!` (`:160`) replaces-and-reaps on
   every `connect-costume!` (`:384`, `:410`) and every auto-reconnect
@@ -125,18 +130,18 @@ Placement notes:
   registry — invisible to `reset-ctxs!`, `clear!`, and the costume
   verbs; `user/sieve-stop!` (`user.clj:71`) is its only reaper. It has
   confused three separate investigations; it is on the map so it never
-  confuses a fourth. Live verification for this artifact (outside the
-  c76w beads' cover): in this session's fresh REPL, boot printed
+  confuses a fourth. Live verification at the stamp (outside the recorded
+  measurements' cover): in a fresh REPL, boot printed
   `[sieve] Failed to start: Address already in use` and `user/sieve-env`
-  is nil — port 3333 was already held by **another** session's JVM,
+  is nil — port 3333 was already held by **another** JVM,
   which is this placement demonstrated: a sieve driver is
   JVM-scoped to whoever launched it and invisible to everyone else's
   cleanup verbs.
 
-## The daemon JVM — same ladder, different JVM (sl-s35y)
+## The daemon JVM — same ladder, different JVM
 
 The warm daemon is a second long-lived JVM this map previously did not
-place (Warden W6, sl-p1op): everything JVM-scoped above is
+place: everything JVM-scoped above is
 **daemon-JVM-scoped** when the resource was made by a warm `sl run` —
 in particular a worn costume's Chrome and its chromedriver (the same
 `live-drivers` registry, one driver per costume, in the daemon's
@@ -146,8 +151,7 @@ process). The reaper-decides-the-layer law applied:
   JVM — costume Chromes are its children), plus the per-costume
   destroy/relaunch flows exactly as in the dev REPL.
 - **NOT a reaper:** run end. A warm run's worn costume staying alive
-  between invocations is costume **persistence working** (sl-tss7, W6
-  ruled 08-23) — the same design as the dev REPL JVM, and why
+  between invocations is costume **persistence working** — the same design as the dev REPL JVM, and why
   consecutive warm runs share authenticated browser state while cold
   runs never do.
 - **Inspection verb:** `sl daemon status` lists the daemon's live
@@ -160,18 +164,18 @@ process). The reaper-decides-the-layer law applied:
 
 ## Overlay 1 — cleanup-verb reach
 
-Which layers each verb may touch. The geometry is the sl-tss7 contract
-(close-leak + mode-awareness landed as one interlocked change); cited to
-its regression tests, not re-proven.
+Which layers each verb may touch. The geometry is the cleanup contract
+(close-leak + mode-awareness landed as one interlocked change);
+cited to its regression tests, not re-proven.
 
 | Verb | Reaches | Never touches | Contract pins |
 |---|---|---|---|
 | `reset-ctx!` (repl.clj:106) | unnamed `session-ctx` data | any browser (none can exist there) | — |
-| `reset-ctxs!` (repl.clj:113) / `clear!` (repl.clj:489) | context layer: `:closed` for ephemeral `:web` capabilities (real WebDriver quit + driver kill), then drops all named-ctx state; `clear!` also empties `connected-subjects` + registry | costumes (`:skipped-persistent` — mode-aware skip), the `live-drivers` registry, the wardrobe, the sieve driver | `repl_close_leak_test.clj:73` (`:closed` + exactly one quit), `:88` (real `eta/chrome` shape — the vmc5 regression), `:100` (zero quits on a costume because cleanup consults `:mode`), `:120` (exact `:skipped-persistent` action), `:136` (mixed ctxs, one quit); `repl_test.clj:301/:309` (`:none`, honest `:close-failed`) |
+| `reset-ctxs!` (repl.clj:113) / `clear!` (repl.clj:489) | context layer: `:closed` for ephemeral `:web` capabilities (real WebDriver quit + driver kill), then drops all named-ctx state; `clear!` also empties `connected-subjects` + registry | costumes (`:skipped-persistent` — mode-aware skip), the `live-drivers` registry, the wardrobe, the sieve driver | `repl_close_leak_test.clj:73` (`:closed` + exactly one quit), `:88` (real `eta/chrome` shape — the bare-browser regression), `:100` (zero quits on a costume because cleanup consults `:mode`), `:120` (exact `:skipped-persistent` action), `:136` (mixed ctxs, one quit); `repl_test.clj:301/:309` (`:none`, honest `:close-failed`) |
 | `run` (engine reaper) | its own scenario's ephemerals, per scenario | anything `as` provisioned; costumes | `repl_bare_browser_test.clj:84` |
 | `destroy-costume!` (costume.clj:589) | JVM + disk: kills Chrome by **port truth** (not recorded pid), reaps the owned driver, deletes the profile dir | other costumes' resources | `costume_test.clj:551` (reap+forget), `:569` (failed destroy keeps the handle) |
 | `sieve-stop!` (user.clj:71) | the sieve server + its driver | everything else | code-read (dev tooling) |
-| JVM death | everything JVM-scoped (child processes die with it) | the disk layer | sl-t8bj measurement |
+| JVM death | everything JVM-scoped (child processes die with it) | the disk layer | the JVM-bounce measurement |
 
 The asymmetry is the lesson: **only `destroy-costume!` ever kills a
 costume's Chrome** (`repl_close_leak_test.clj:16`), and nothing
@@ -179,20 +183,21 @@ short of JVM death reaps the sieve driver except its own verb.
 
 ## Overlay 2 — the costume state machine
 
-Edges cite the verb's docstring or originating bead. `reset-ctxs!` is
+Edges cite the verb's docstring or the change that introduced them.
+`reset-ctxs!` is
 deliberately **not an edge** — a context reset cannot move a costume
 through this machine (`:skipped-persistent`); that absence is the
-mode-awareness half of the tss7 contract.
+mode-awareness half of the cleanup contract.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Launched: init-costume! (costume.clj:277)<br/>launch-only, pristine profile,<br/>refuses existing
     Launched --> Launched: human logs in<br/>(credentials land in the profile)
-    Launched --> Attached: connect-costume! (costume.clj:357)<br/>attach WebDriver + adopt-driver!<br/>replaces-and-reaps (sl-34fu)
+    Launched --> Attached: connect-costume! (costume.clj:357)<br/>attach WebDriver + adopt-driver!<br/>replaces-and-reaps
     Attached --> Attached: drive via repl/as<br/>auto-reconnect on session error<br/>(browser.clj:92/110) — reconnect<br/>adopts-and-reaps (costume.clj:248/241)
-    Attached --> Dead: JVM exit or Chrome death<br/>(Chrome is a JVM child — sl-t8bj)
+    Attached --> Dead: JVM exit or Chrome death<br/>(Chrome is a JVM child)
     Dead --> Attached: connect-costume!<br/>relaunches from the profile
-    Launched --> Relaunched: relaunch-costume! (costume.clj:452,<br/>sl-2de7) — launch-only reopen for<br/>human RE-login; idempotent when alive;<br/>spawns no driver
+    Launched --> Relaunched: relaunch-costume! (costume.clj:452)<br/>— launch-only reopen for<br/>human RE-login; idempotent when alive;<br/>spawns no driver
     Dead --> Relaunched: relaunch-costume!
     Relaunched --> Attached: connect-costume!
     Attached --> [*]: destroy-costume! (costume.clj:589)<br/>port-truth kill + reap + delete profile
@@ -200,64 +205,26 @@ stateDiagram-v2
     Dead --> [*]: destroy-costume!<br/>(profile deleted; the costume<br/>is gone from disk too)
 ```
 
-The sl-2de7 edge is the one the original machine lacked: once a costume
+The relaunch edge is the one the original machine lacked: once a costume
 existed, launch-only (browser open, **no** session attached — what
 re-authentication needs) was unreachable without dropping to internals.
 
-## Findings
-
-**F1 — the sieve driver's holder is reload-fragile and unregistered.**
-`user/sieve-env` is a plain `def` (not `defonce`), so
-`(require 'user :reload)` re-evaluates the init form and **strands the
-previous Chrome/chromedriver pair** with no handle left to stop them.
-It is also absent from the repo's own register of JVM-scoped state (the
-defonce inventory at `daemon.clj:94-125`). Disposition (plan-verdict
-approved): hazard noted here; filed as a dev-tooling bead at close.
-
-**F2 — free mode never provisions, by design.** `repl/step` has no
-provisioning path; ruled a design fact (08-18): provisioning is
-SVO-keyed — a capability is a subject + interface — and free mode has
-no bound SVO, so there is nothing to provision against. Becomes a bead
-only if free-mode browser demand ever appears.
-
-**F3 — there is no `with-ctx` macro.** Context selection is
-argument-passing (`as`/`ctx`/`set-ctx!` take the name); this map never
-implies scoped-binding semantics that don't exist.
-
-## Evidence
-
-- **sl-34fu** (driver leak): measured +1 chromedriver per connect, none
-  reclaimed, 11 live at peak; fix = the `live-drivers` registry with
-  adopt-and-reap; registry regression tests
-  `costume_test.clj:487-589`.
-- **sl-t8bj** (lifetime overclaim): measured JVM bounce — both costume
-  Chromes (pids 37291/48212) dead with the JVM; relaunch from profile
-  verified same run. Durability = disk layer.
-- **sl-2de7** (missing relaunch): the launch-only re-login edge;
-  `relaunch-costume!` docstring + registry-untouched pins
-  (`costume.clj:452-476`).
-- **sl-vmc5** (bare-browser gap + `:closed` fix): `as`/`run` lazy
-  provisioning via the engine primitive; the `:closed` branch now calls
-  `quit-driver!` (which also kills the spawned chromedriver) instead of
-  the shape-mismatched `close-session!` that reported `:close-failed`
-  and leaked.
-- **sl-tss7** (cleanup contract): close-leak fix + mode-awareness landed
-  interlocked; the reach table above cites its regression tests.
-- **Fresh verification this session** (outside the above cover): the
-  sieve placement — boot log `[sieve] Failed to start: Address already
-  in use` with `user/sieve-env` nil while another JVM holds port 3333;
-  placement facts pinned to `dev/user.clj:57-77` and
-  `sieve/server.clj:277-319`.
-
 ## Siblings
 
-- [The invocation map](invocation-map.md) — artifact A: every verb
+- [The invocation map](invocation-map.md): every verb
   through the shared spine (the `repl` lane's `:repl` sentinel is where
   this map takes over).
-- D — [module map](module-map.md).
-- C — [the data-shape ledger](data-shapes.md): every boundary-crossing
+- [module map](module-map.md).
+- [the data-shape ledger](data-shapes.md): every boundary-crossing
   shape with producer/spec/consumers/stability; its ctx/capability rows
   are this map's custody column at rest.
-- B — [the control loop](control-loop.md): the single-run time axis this
+- [the control loop](control-loop.md): the single-run time axis this
   map's state axis crosses — what one scenario provisions, this map's
   reapers own.
+
+## How this page stays true
+
+This page is a mechanical projection of a live-maintained internal source,
+regenerated — never hand-edited — by the derivation pipeline and
+drift-guarded by the test suite: a hand edit here fails a test, and so
+does a page that no longer matches its source.

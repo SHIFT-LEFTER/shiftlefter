@@ -25,7 +25,7 @@
             [shiftlefter.gherkin.io :as io]
             [shiftlefter.intent.resolve :as intent-resolve]
             [shiftlefter.project-context :as project-context]
-            [shiftlefter.runner.config :as config]
+            [shiftlefter.config :as config]
             [shiftlefter.runner.discover :as discover]
             [shiftlefter.runner.tag-disposition :as tagd]
             [shiftlefter.stepengine.compile :as compile]

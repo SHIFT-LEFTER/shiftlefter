@@ -1,0 +1,7 @@
+;; Fixture (sl-g2lj): explicit :interfaces nil = ZERO interfaces (the
+;; :glossaries-nil doctrine) — a parse/lint-only project that provisions
+;; nothing. load-config normalizes the nil to {} (sl-a7sx) so downstream
+;; consumers see one zero-interfaces shape.
+{:runner {:step-paths ["steps/"]
+          :allow-pending? false}
+ :interfaces nil}

@@ -131,10 +131,12 @@ declarative data declarations — state what must be true, not code that makes
 it true — and the seeding hooks of today become the migration fodder of that
 release. That's fine. It's what the bottom rung is for.
 
-One current limitation, stated plainly: a hook that must reach an external
-system (reset a database, call an internal CLI) shells out or uses what's
-already on the framework classpath. Adding your own dependencies to the hook
-classpath is a planned extension, not a current feature.
+A hook that must reach an external system (reset a database, call an
+internal CLI) shells out, uses what's already on the framework classpath, or
+uses a library you drop into `sl/lib/` — every jar there rides the classpath
+of every run, cold and warm alike; a JDBC driver for a seeding hook is the
+flagship case. See [Install tiers § Third-Party
+Libraries](INSTALL-TIERS.md#third-party-libraries-sllib).
 
 ### Failure diagnostics — now a config line
 
@@ -257,6 +259,10 @@ directory and the `--edn` envelope either way. The worked example — a
 mock-SMS adapter contributing
 `:message-log`, browser-free, nothing to install — is
 [`examples/07-custom-capture-kind`](https://github.com/SHIFT-LEFTER/shiftlefter/tree/main/examples/07-custom-capture-kind).
+And if your adapter's transport helper feeds the log this capture dumps,
+log the attempt *before* executing it — see [extending-vocabulary.md §
+Evidence in a custom adapter](extending-vocabulary.md#evidence-in-a-custom-adapter-log-the-attempt-then-the-outcome):
+a log-after-response helper loses exactly the fatal request.
 
 ### Custom captures — the After-hook attachments claim
 
@@ -342,7 +348,9 @@ to make them findable, not survivable.
 If you're bringing an existing Cucumber suite: your `.feature` files parse
 unchanged, and nothing forces a rewrite of features you haven't touched —
 vanilla mode (built-in steps plus your own step definitions, in Clojure) is a
-compatibility *guarantee*, not a migration stage you must pass through. Your
+supported way to run, not a migration stage you must pass through — a suite
+you already have is exactly the *specific reason* the
+[glossary](GLOSSARY.md) asks for before you reach for Vanilla. Your
 step definitions themselves don't come over; [Adoption](adoption.md) is honest
 about where migration actually stands. The hook story rides each migration
 slice for free: global Befores land as `:global?` hooks, screenshot

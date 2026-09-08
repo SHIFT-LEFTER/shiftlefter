@@ -547,7 +547,9 @@
           (is (= 2 (:exit-code @result-box)) "suite exit aggregates the 2")
           (is (= [:ok-start] @lifecycle-events)
               "healthy group still executed after the failing one")
-          (is (= 2 (count forms)) (str "TWO EDN forms on stdout; got " out))
+          ;; 3 forms since sl-pwbp: the invocation aggregate form follows
+          ;; the two group summaries (pin moved with the ruled change).
+          (is (= 3 (count forms)) (str "THREE EDN forms on stdout; got " out))
           (is (some #(and (= 2 (:run/exit-code %))
                           (some (fn [e] (= "boom-group" (:group e)))
                                 (get-in % [:planning :errors])))
@@ -557,6 +559,41 @@
                           (= 1 (get-in % [:counts :passed])))
                     forms)
               "the healthy group's run summary is present alongside"))))))
+
+(deftest single-group-edn-stream-carries-no-group-identity-or-aggregate
+  (testing "the sl-pwbp absent-unless-multi contract, asserted explicitly:
+            a single-group setup.clj --edn stream is byte-shape-identical
+            to the pre-pwbp stream — one summary form, no :group/label or
+            :group/index, no invocation aggregate form (its lone summary's
+            :run/exit-code IS the suite verdict)"
+    (with-temp-project
+      (fn [dir]
+        (spit-file dir "shiftlefter.edn" (pr-str {:runner {:step-paths []}}))
+        (spit-file dir "features/solo.feature"
+                   "Feature: Solo\n  Scenario: Solo passes\n    Given a trivial assertion\n")
+        (spit-file dir "steps/solo.clj"
+                   "(ns solo-steps
+                      (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+                    (defstep #\"a trivial assertion\" [] nil)")
+        (spit-file dir "setup.clj"
+                   "(ns setup)
+                    (def setups
+                      [{:label \"solo-group\"
+                        :start (fn [_] {})
+                        :features [\"features/solo.feature\"]}])")
+        (let [{:keys [result out]} (run-captured
+                                    {:paths []
+                                     :edn true
+                                     :config-path (str (fs/path dir "shiftlefter.edn"))
+                                     :step-paths [(str (fs/path dir "steps"))]})
+              forms (read-forms out)]
+          (is (= 0 (:exit-code result)))
+          (is (= 1 (count forms)) "one summary form, no aggregate")
+          (let [summary (first forms)]
+            (is (= 0 (:run/exit-code summary)))
+            (is (not (contains? summary :group/label)))
+            (is (not (contains? summary :group/index))))
+          (is (not-any? :invocation/exit-code forms)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; sl-lbrc: capability-cleanup failures surface as warn-level diagnostics —
@@ -679,7 +716,9 @@
                         (let [form (edn/read {:eof ::eof} rdr)]
                           (if (= ::eof form) acc (recur (conj acc form))))))]
           (is (= 0 (:exit-code @result-box)))
-          (is (= 2 (count forms)))
+          ;; 3 forms since sl-pwbp: two group summaries + the invocation
+          ;; aggregate form.
+          (is (= 3 (count forms)))
           (is (= 1 (count (filter #(get-in % [:diagnostics :cleanup-failures])
                                   forms)))
               "exactly one group's summary carries cleanup failures")
@@ -746,7 +785,10 @@
                                       " teardown failed (environment may be dirty):")))
           (is (str/includes? err "port still bound"))
           (is (= 1 (count entries)))
-          (is (= tf (first entries)) "marker entry = the group-result entry"))))))
+          (is (= tf (first entries)) "marker entry = the group-result entry")
+          ;; sl-7dq5 F9: the marker write is a .shiftlefter creation site —
+          ;; the dir self-ignores at birth.
+          (is (= "*\n" (slurp (str (fs/path dir ".shiftlefter" ".gitignore"))))))))))
 
 (deftest stop-throw-emits-supplementary-edn-form
   (testing "EDN mode: the group summary is followed by ONE supplementary
@@ -1069,8 +1111,9 @@
                  (mapv :type (get-in lint-form [:diagnostics :setup-lints]))))
           (is (= ["registry-a" "registry-b"]
                  (-> lint-form :diagnostics :setup-lints first :groups)))
-          (is (= 3 (count forms))
-              "lint form + one summary per group, all on stdout"))))))
+          (is (= 4 (count forms))
+              "lint form + one summary per group + the sl-pwbp invocation
+               aggregate form, all on stdout"))))))
 
 (defn- spit-warning-and-error-project!
   "The fisk-#3 config: ONE plan carrying both a shared feature (warning)
@@ -1485,8 +1528,13 @@
    `:requires-protocols [IBrowser]` on the stepdef (sl-8cvd P2-2 — the
    shape every bundled stepdef has, which used to trip the suite-lint
    capability arm ahead of the exact registry check). :start/:stop record
-   to lifecycle-events. Returns execute! opts."
-  [dir live-adapters {:keys [extra-interface? tag-toucher? requires-protocols?]}]
+   to lifecycle-events. :single-suite? (sl-k1pv) writes NO setup.clj and
+   returns feature :paths instead — the no-setup.clj pipeline, where the
+   registry is statically the default one and `live-adapters` is unused;
+   :extra-unknown-interface? adds :extra2 → :bogus-adapter (a NOVEL name)
+   that no scenario touches. Returns execute! opts."
+  [dir live-adapters {:keys [extra-interface? tag-toucher? requires-protocols?
+                             single-suite? extra-unknown-interface?]}]
   (let [verbs (str (fs/absolutize "test/fixtures/glossaries/verbs-web-project.edn"))]
     (spit-file dir "glossary/subjects.edn"
                (pr-str {:subjects {:user {:desc "u" :instances [{:id :alice}]}}}))
@@ -1494,11 +1542,14 @@
                (pr-str (cond-> {:runner {:step-paths []}
                                 :svo {}
                                 :glossaries {:subjects "glossary/subjects.edn"
-                                             :verbs {:web verbs}}
+                                             :verbs [verbs]}
                                 :interfaces {:web {:type :web :adapter :mock-web}}}
                          extra-interface?
                          (assoc-in [:interfaces :extra]
-                                   {:type :sms :adapter :sms-mock}))))
+                                   {:type :sms :adapter :sms-mock})
+                         extra-unknown-interface?
+                         (assoc-in [:interfaces :extra2]
+                                   {:type :sms :adapter :bogus-adapter}))))
     (spit-file dir "features/bound.feature"
                (str "Feature: B\n\n"
                     (when tag-toucher? "  @wip\n")
@@ -1517,7 +1568,8 @@
                     ":svo {:subject :$1 :verb :swipe :frame :default :object :$2}}
                   [ctx _s _t] ctx)
                 (defstep #\"nothing happens\" [] nil)"))
-    (spit-file dir "setup.clj"
+    (when-not single-suite?
+      (spit-file dir "setup.clj"
                (str "(ns setup
                   (:require [shiftlefter.runner.core-setup-test :as t]
                             [shiftlefter.test-helpers.adapter-registry :as mock]))
@@ -1530,8 +1582,10 @@
                     (pr-str (into {} (map (fn [nm] [nm {}])) live-adapters))
                     ")
                               :stop (fn [] (t/record-event! :stop))})
-                    :features [\"features/bound.feature\"]}])"))
-    {:paths       []
+                    :features [\"features/bound.feature\"]}])")))
+    {:paths       (if single-suite?
+                    [(str (fs/path dir "features"))]
+                    [])
      :config-path (str (fs/path dir "shiftlefter.edn"))
      :step-paths  [(str (fs/path dir "steps"))]}))
 
@@ -1641,3 +1695,102 @@
               {:keys [result]} (run-captured (assoc opts :dry-run true))]
           (is (= 0 (:exit-code result)))
           (is (= [] @lifecycle-events) "dry-run never ran :start"))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-k1pv: the same exact check on the SINGLE-SUITE (no setup.clj) pipeline.
+;; One law across both pipelines: check when knowable, defer when not. Here
+;; there is no :start, the registry is statically the default one, so the
+;; check fires at plan time — dry-run included (the deliberate divergence
+;; from the setup pipeline's live-only posture above).
+;; -----------------------------------------------------------------------------
+
+(deftest single-suite-bound-adapter-missing-is-a-planning-error
+  (testing "no setup.clj: a config adapter absent from the default registry,
+            touched by a bound scenario — exit 2 with the exact
+            :setup/bound-adapter-missing at plan time, instead of dying at
+            first provisioning with :adapter/unknown"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-bound-adapter-project! dir [] {:single-suite? true})
+              {:keys [result out]} (run-captured (assoc opts :edn true))
+              summary (first (filter :run/exit-code (read-forms out)))
+              err (-> summary :planning :errors first)]
+          (is (= 2 (:exit-code result)))
+          (is (= 2 (:run/exit-code summary)))
+          (is (= :setup/bound-adapter-missing (:type err)))
+          (is (= :mock-web (-> err :data :adapter))
+              "--edn carries the adapter under :data (serialize-error projection)")
+          (is (= [:web] (-> err :data :interfaces)))
+          (is (not (contains? err :group))
+              "no group stamp — there is no setup group on this pipeline"))))))
+
+(deftest single-suite-untouched-unknown-adapter-is-silent
+  (testing "selection-exactness on the single-suite pipeline: a configured
+            interface on an unknown adapter that NO bound scenario touches
+            is certainly safe for this invocation — exit 0, silent
+            (honest-late: the config-referenced approximation stays dead)"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-bound-adapter-project!
+                    dir [] {:single-suite? true
+                            :extra-unknown-interface? true})
+              ;; make :web bindable: point it at a DEFAULT adapter so only
+              ;; the untouched :extra2 → :bogus-adapter is unknown
+              _ (spit-file dir "shiftlefter.edn"
+                           (-> (slurp (str (fs/path dir "shiftlefter.edn")))
+                               (str/replace ":mock-web" ":etaoin")))
+              {:keys [result err]} (run-captured (assoc opts :dry-run true))]
+          (is (= 0 (:exit-code result)))
+          (is (not (str/includes? err "bogus-adapter"))
+              "no bound-adapter error text for the untouched adapter"))))))
+
+(deftest single-suite-filtered-out-toucher-is-silent
+  (testing "selection-exactness under tag filtering, single-suite: when the
+            only toucher of the unknown adapter is filtered out, the
+            surviving selection is certainly safe"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-bound-adapter-project! dir []
+                                                 {:single-suite? true
+                                                  :tag-toucher? true})]
+          (let [{:keys [result]} (run-captured opts)]
+            (is (= 2 (:exit-code result))
+                "control: unfiltered, the @wip toucher errors"))
+          (let [{:keys [result]} (run-captured
+                                  (assoc opts :tag-filter {:exclude #{"@wip"}}))]
+            (is (= 0 (:exit-code result))
+                "filtered: the toucher is deselected, the run is safe")))))))
+
+(deftest single-suite-dry-run-runs-the-bound-adapter-check
+  (testing "dry-run FIRES the check on this pipeline — deliberate divergence
+            from dry-run-skips-the-bound-adapter-check above: with no :start
+            the registry is plan-time-knowable, and a PLAN-verdict exit 0
+            must mean a runnable plan (the 7c7i precedent)"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-bound-adapter-project! dir [] {:single-suite? true})
+              {:keys [result err]} (run-captured (assoc opts :dry-run true))]
+          (is (= 2 (:exit-code result)))
+          (is (str/includes? err ":adapter/unknown")
+              "the certain-death message reaches stderr at plan time"))))))
+
+(deftest single-suite-requires-protocols-gets-the-exact-error
+  (testing "sl-8cvd consistency on the single-suite pipeline: the
+            :requires-protocols stepdef shape whose adapter is unknown gets
+            the exact :setup/bound-adapter-missing, never the false 'only
+            provides []' remedy, and no suite-lint shadow"
+    (with-temp-project
+      (fn [dir]
+        (let [opts (write-bound-adapter-project! dir []
+                                                 {:single-suite? true
+                                                  :requires-protocols? true})
+              {:keys [result out err]} (run-captured (assoc opts :edn true))
+              summary (first (filter :run/exit-code (read-forms out)))]
+          (is (= 2 (:exit-code result)))
+          (is (= :setup/bound-adapter-missing
+                 (-> summary :planning :errors first :type)))
+          (is (= :mock-web (-> summary :planning :errors first :data :adapter)))
+          (is (not (str/includes? (str out err) "only provides"))
+              "the false capability remedy never appears")
+          (is (empty? (get-in summary [:planning :suite-lint-issues]))
+              "no :stepdef/missing-capability shadow"))))))

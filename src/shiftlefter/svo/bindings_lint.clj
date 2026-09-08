@@ -34,7 +34,7 @@
    its static guarantees."
   (:require [clojure.string :as str]
             [shiftlefter.stepengine.bindings :as bindings]
-            [shiftlefter.svo.validate :as validate]))
+            [shiftlefter.text :as text]))
 
 ;; -----------------------------------------------------------------------------
 ;; Per-step extraction
@@ -120,7 +120,7 @@
         consumption-issues
         (keep (fn [{:keys [name token]}]
                 (when-not (contains? produced-so-far name)
-                  (let [suggestion (validate/suggest-similar
+                  (let [suggestion (text/suggest-similar
                                     name (vec produced-so-far) 2)]
                     (cond-> {:type :bindings/consumed-without-producer
                              :token token

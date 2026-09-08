@@ -95,9 +95,10 @@ capability cleanup.**
   `(:status result)` — there is no separate on-failure hook kind. The
   return is the ATTACHMENTS CLAIM: nil (no claim) or
   `{:attachments [{:attachment/kind :screenshot :attachment/path "..."} ..]}`
-  — refs to files the hook wrote, which then ride the scenario envelope and
-  render in the human report surfaces (HTML, JUnit, console; the `--edn`
-  summary carries no refs yet). The contract is full-strict: any other return
+  — refs to files the hook wrote, which then ride the scenario envelope,
+  render in the human report surfaces (HTML, JUnit, console) and appear in
+  the `--edn` summary's top-level `:attachments` index. The contract is
+  full-strict: any other return
   (a map with extra or misspelled keys, a malformed ref, a non-map value)
   is `:hook/invalid-return` → scenario `:error`. A claimed file that does
   not exist keeps the scenario outcome but the ref is marked

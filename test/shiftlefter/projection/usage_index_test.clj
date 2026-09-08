@@ -59,7 +59,8 @@
   (write-edn! (fs/path dir "sl" "glossary" "subjects.edn")
               {:subjects {:user {:desc "Application user" :instances [:alice :bob]}}})
   (write-edn! (fs/path dir "sl" "glossary" "verbs-web.edn")
-              {:verbs {:frobs {:desc "Frobnicate"
+              {:type :web
+               :verbs {:frobs {:desc "Frobnicate"
                                :frames {:default {:args [] :pattern "S frobs O"}}}}})
   (write-edn! (fs/path dir "sl" "glossary" "intents" "Login.edn")
               {:intent "Login"
@@ -72,7 +73,7 @@
               {:runner {:step-paths ["steps/"] :features ["features/"]
                         :macros {:enabled? false}}
                :glossaries {:subjects "glossary/subjects.edn"
-                            :verbs {:web "glossary/verbs-web.edn"}
+                            :verbs ["glossary/verbs-web.edn"]
                             :intents "glossary/intents"}
                :interfaces {:web {:type :web :adapter :etaoin :config {:headless true}}}
                :svo {:unknown-subject :error}}))

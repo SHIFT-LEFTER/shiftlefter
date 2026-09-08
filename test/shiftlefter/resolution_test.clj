@@ -32,7 +32,7 @@
 (defn- shifted-config [overrides]
   (merge {:runner {:macros {:enabled? false}}
           :glossaries {:subjects "glossary/subjects.edn"
-                       :verbs {:web "glossary/verbs-web.edn"}
+                       :verbs ["glossary/verbs-web.edn"]
                        :intents "glossary/intents"}
           :interfaces {:web {:type :web :adapter :etaoin :config {:headless true}}}
           :svo {:unknown-subject :error}}
@@ -47,7 +47,8 @@
               {:subjects {:user {:desc "Application user" :instances [:alice :bob]}
                           :guest {:desc "Visitor"}}})
   (write-edn! (fs/path dir "sl" "glossary" "verbs-web.edn")
-              {:verbs {:click {:desc "Project click override"
+              {:type :web
+               :verbs {:click {:desc "Project click override"
                                :frames {:default {:args [] :pattern "S clicks O"}}}
                        :frobs {:desc "Frobnicate"
                                :frames {:default {:args [] :pattern "S frobs O"}}}}})
@@ -370,7 +371,8 @@
   [dir]
   (make-shifted-project! dir)
   (write-edn! (fs/path dir "sl" "glossary" "verbs-web.edn")
-              {:verbs {:click {:desc "Project click override"
+              {:type :web
+               :verbs {:click {:desc "Project click override"
                                :frames {:default {:args [] :pattern "S clicks O"}}}
                        :frobs {:desc "Frobnicate"
                                :frames {:default {:args [] :pattern "S frobs O"}}}

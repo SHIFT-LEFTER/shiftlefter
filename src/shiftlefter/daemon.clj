@@ -19,6 +19,7 @@
             [clojure.java.io :as jio]
             [babashka.fs :as fs]
             [nrepl.server :as nrepl]
+            [nrepl.transport :as transport]
             [shiftlefter.core :as core]
             [shiftlefter.paths :as paths]
             [shiftlefter.project-context :as project-context]
@@ -113,6 +114,8 @@
 ;;       (custody-status! below).
 ;;   DAEMON CONTROL (this ns — lifecycle, not user state; reset by serve!):
 ;;     - daemon-state, shutdown-hook-registered (below)
+;;     - the per-serve! session ledger + :sweep-marked strike set (sl-ntlx) live
+;;       INSIDE daemon-state, not as defonces — recreated by each serve!
 ;;
 ;; Scope today: airtight across invocations of ONE project (per-instance daemon).
 ;; The post-0.5 jar-anchored-shared-daemon option (one JVM, many projects) would
@@ -122,11 +125,17 @@
 
 (def ^:private default-idle-timeout-min 60)
 
+(def ^:private default-session-sweep-ms
+  "Orphan-session sweep period (sl-ntlx). Version-internal constant, not a
+   user knob: a leaked session is reaped within at most two periods."
+  (* 5 60 1000))
+
 (defonce ^{:private true
            :doc "Active daemon control, or nil. Singleton per JVM (one daemon
                  per instance root; this ns loads only in a serving JVM). Keys:
                  :server :scheduler :timeout-ms :edn-file :done :idle-gen
-                 :idle-future. serve! replaces it on each start; stop clears it."}
+                 :idle-future :session-ledger :sweep-marked. serve! replaces it
+                 on each start; stop clears it."}
   daemon-state (atom nil))
 
 (defonce ^{:private true
@@ -134,14 +143,40 @@
                  once per JVM (tests start/stop serve! repeatedly)."}
   shutdown-hook-registered (atom false))
 
-;; One lock serializes dispatch!; global registries make concurrent dispatch
-;; unsafe (parallelism is post-0.5, F6). The idle-reap task and stop! also take
-;; this lock (blocking), so a reap can never fire mid-dispatch and a graceful
-;; stop waits for the in-flight run. dispatch! itself only TRY-acquires
-;; (sl-luhn, Chair-ratified): a second invocation against a busy daemon is
-;; REJECTED with exit 2 / :daemon/busy instead of queueing silently — a silent
-;; queue is indistinguishable from a hang for the agents this surface serves.
+;; Two locks, each with exactly one job (sl-luhn; split at sl-vjve W25):
+;;
+;;   dispatch-lock — ONE RUN AT A TIME. Held for the whole of dispatch!;
+;;   global registries make concurrent dispatch unsafe (parallelism is
+;;   post-0.5, F6). The idle-reap task and stop! take it BLOCKING, so a reap
+;;   can never fire mid-dispatch and a graceful stop waits for the in-flight
+;;   run. dispatch! itself only TRY-acquires (sl-luhn, Chair-ratified): a
+;;   second invocation against a busy daemon is REJECTED with exit 2 /
+;;   :daemon/busy instead of queueing silently — a silent queue is
+;;   indistinguishable from a hang for the agents this surface serves.
+;;   Only another RUN can ever hold this lock against a dispatch: the
+;;   orphan sweep never acquires it (it used to tryLock it per tick, and a
+;;   dispatch landing on a tick was told "another run is in progress" — a
+;;   lie; Warden W25, repro notes/warden/0.5.6-batch-audit/busy-race.clj).
+;;
+;;   sweep-gate — ADMISSION vs SWEEP. Serializes the instant a dispatch is
+;;   admitted (its dispatch-lock tryLock) against one sweep tick's
+;;   strike-and-close, so a tick can never close a session a dispatch is
+;;   about to run on (nREPL's close interrupt-stops the session thread
+;;   mid-eval — the sweep stays abort-neutral by construction). dispatch!
+;;   holds it only across that tryLock — released before running or
+;;   rejecting, so a second run never queues behind a first. A tick holds
+;;   it for one strike-and-close: microseconds, since the close is an
+;;   interrupt with no join.
+;;
+;;   LOCK ORDER: sweep-gate, then dispatch-lock — never the reverse.
+;;   dispatch! takes the gate, then TRIES the run lock; the tick takes the
+;;   gate and only READS the run lock's state (isLocked), never acquiring
+;;   it. TICK NEVER BLOCKS: every lock the sweep touches is a tryLock, and
+;;   a tick with nothing ledgered takes no lock at all — the shared
+;;   scheduler thread (which also serves the idle reaper) is never parked,
+;;   and the split cannot deadlock by construction.
 (def ^:private ^ReentrantLock dispatch-lock (ReentrantLock.))
+(def ^:private ^ReentrantLock sweep-gate (ReentrantLock.))
 
 ;; -----------------------------------------------------------------------------
 ;; Helpers — filesystem / metadata
@@ -195,7 +230,10 @@
    over the target. A reader never sees a half-written daemon.edn."
   [^File file data]
   (let [dir (.getParentFile file)]
-    (.mkdirs dir)
+    ;; daemon.edn's parent is the instance root's .shiftlefter — self-ignore
+    ;; at the creation site (sl-7dq5 F9): a hand-copied jar's first run must
+    ;; leave git status clean, not only an installer-scaffolded project.
+    (project-context/ensure-self-ignore! (str dir))
     (let [tmp (File/createTempFile "daemon" ".edn" dir)]
       (spit tmp (pr-str data))
       (Files/move (.toPath tmp) (.toPath file)
@@ -263,6 +301,112 @@
     (when-let [server (:server st)] (nrepl/stop-server server))
     (delete-edn! (:edn-file st))
     (deliver (:done st) reason)))
+
+;; -----------------------------------------------------------------------------
+;; Orphan-session sweep (sl-ntlx)
+;; -----------------------------------------------------------------------------
+;;
+;; A warm client killed mid-invocation (Ctrl-C — docs/daemon.md § Aborting a
+;; run) never sends its W5 `op close`, and nREPL does not close sessions on
+;; transport close: one retained session + parked SessionThread per interrupted
+;; invocation. The reap must happen daemon-side, and only while the session is
+;; IDLE — in nREPL 1.7.0 a session close interrupt-stops its SessionThread even
+;; mid-eval, so a close fired at kill time would abort the still-running
+;; dispatch (abort semantics are sl-617t's design work; this sweep is
+;; deliberately abort-neutral). An idle orphan's thread parks in queue.take and
+;; exits cleanly on the interrupt.
+;;
+;; Two safety mechanisms:
+;;   - LEDGER, not a registry sweep: nREPL's session registry is JVM-global
+;;     (and private). serve! wraps its server's handler to record only the
+;;     sessions cloned THROUGH THIS DAEMON — an in-JVM embedder (the test
+;;     fixture; a dev REPL sharing the JVM) can never have ITS sessions reaped.
+;;   - TWO-STRIKE close under the sweep-gate: a session is closed only when
+;;     seen at two consecutive ticks that each found the run lock FREE (read,
+;;     never taken — see the lock comment block). An in-flight dispatch holds
+;;     the run lock (ticks skip), a fresh clone is at most one strike old, and
+;;     the strike set is rebuilt from the ledger every successful tick, so ids
+;;     that close normally are pruned, never re-swept. Every reaped id is
+;;     named on the daemon's stderr (Warden W26): a reap is rare and a minor
+;;     sign of ill health — a client died mid-run without closing its session.
+;;     Any session on this port that is not a warm client is subject to the
+;;     same two-strike rule, mid-eval included (docs/daemon.md § Aborting).
+
+(defn- clone-sniffing-transport
+  "Delegate to `inner`, recording any :new-session id (a clone response) into
+   `ledger` on the way out."
+  [inner ledger]
+  (reify transport/Transport
+    (recv [_] (transport/recv inner))
+    (recv [_ timeout] (transport/recv inner timeout))
+    (send [this msg]
+      (when-let [id (:new-session msg)]
+        (swap! ledger conj id))
+      (transport/send inner msg)
+      this)))
+
+(def ^:private noop-transport
+  "Transport for sweep-synthesized ops: responses are dropped, nothing recv'd."
+  (reify transport/Transport
+    (recv [_] nil)
+    (recv [_ _timeout] nil)
+    (send [this _msg] this)))
+
+(defn- wrap-session-ledger
+  "Wrap the daemon server's nREPL handler so `ledger` (atom of a set) tracks
+   exactly the session ids this daemon created: clone responses add (via a
+   sniffing transport — the id is only in the response), close requests remove.
+   At the wrapper's altitude :session is still the raw id string; the session
+   middleware resolves it to the session object further in."
+  [handler ledger]
+  (fn [{:keys [op session] :as msg}]
+    (case op
+      "clone" (handler (update msg :transport clone-sniffing-transport ledger))
+      "close" (do (when (string? session)
+                    (swap! ledger disj session))
+                  (handler msg))
+      (handler msg))))
+
+(defn- reap-line
+  "The one stderr line per reaped session (Warden W26). Rare by design, and
+   a minor sign of ill health: the only way a session earns two strikes is
+   that its client died mid-run without closing it."
+  [id]
+  (str "sl daemon: reaped orphaned session " id
+       " — its client exited without closing it (Ctrl-C, a killed process,"
+       " or a cancelled CI job)"))
+
+(defn- sweep-orphan-sessions!
+  "One sweep tick: close every ledgered session seen at the previous
+   successful tick too (two strikes), naming each reaped id on *err*.
+
+   Ledger empty => nothing to do and no lock touched (the daemon's usual
+   idle state). Otherwise TRY the sweep-gate — a dispatch mid-admission wins
+   and the tick skips — and under it READ dispatch-lock: a run in flight
+   skips the tick too (strikes never advance during a run; reaping can
+   wait). The tick never acquires dispatch-lock and never blocks — the
+   lock comment block above is the contract. Closes ride the public close
+   op through the daemon's own wrapped handler, which prunes the ledger.
+   The outer catch is load-bearing: scheduleWithFixedDelay silently cancels
+   the task on an escaped exception — the sweep must never throw."
+  []
+  (try
+    (when-let [st @daemon-state]
+      (let [ledger (:session-ledger st)]
+        (when (and (seq @ledger) (.tryLock sweep-gate))
+          (try
+            (when-not (.isLocked dispatch-lock)
+              (let [handler (:handler (:server st))
+                    doomed  (filter (:sweep-marked st #{}) @ledger)]
+                (doseq [id doomed]
+                  (handler {:op "close" :session id :id "sl-daemon-sweep"
+                            :transport noop-transport})
+                  (binding [*out* *err*]
+                    (println (reap-line id))))
+                (swap! daemon-state assoc :sweep-marked @ledger)))
+            (finally (.unlock sweep-gate))))))
+    (catch Throwable t
+      (print-throwable! t))))
 
 (defn custody-status!
   "Print this daemon's costume custody (sl-s35y, Warden W6 ruled): one
@@ -343,6 +487,11 @@
    1. Serialize — one dispatch at a time (dispatch-lock, TRY-acquire); global
       registries make concurrent dispatch unsafe (parallelism is post-0.5, F6).
       Lock busy => REJECT, exit 2 with :daemon/busy (sl-luhn; see reject-busy!).
+      The tryLock happens under sweep-gate (taken blocking, released the
+      instant the try resolves — before running or rejecting), so an orphan
+      sweep tick can never masquerade as a busy run and a tick can never
+      close the session this dispatch is about to run on (sl-vjve W25; lock
+      order sweep-gate -> dispatch-lock, see the lock comment block).
       Uniform across all warm commands by construction — per-command queueing
       would re-introduce the silent block. The reject path does NOT touch the
       idle timer: reset-idle-timer! mutates daemon-state unsynchronized, and
@@ -361,7 +510,8 @@
    6. Reset the idle timer (in a finally — any dispatch, even a rejected one,
       counts as activity)."
   [request]
-  (if-not (.tryLock dispatch-lock)
+  (.lock sweep-gate)
+  (if-not (try (.tryLock dispatch-lock) (finally (.unlock sweep-gate)))
     (reject-busy! (:argv request))
     (try
       (let [argv (:argv request)
@@ -407,10 +557,16 @@
    On spawn, emit ONE breadcrumb to *err* (tty-gated): `ShiftLefter daemon started
    — sl daemon status`. Never on warm dispatches — the wrapper stays silent there.
 
+   Also arms the orphan-session sweep (sl-ntlx): a periodic tick on the same
+   scheduler that two-strike-closes sessions whose warm client died without
+   sending the W5 close. See the sweep section above for the safety story.
+
    opts (all optional):
      :idle-timeout-min N  user-facing knob (default 60); recorded in daemon.edn.
      :idle-timeout-ms M   TEST-ONLY seam — sub-second reap, bypasses the minute
                           granularity. Not a CLI flag, not in the locked surface.
+     :session-sweep-ms M  TEST-ONLY seam — orphan-sweep period (default 5 min).
+                          Not a CLI flag, not in the locked surface.
      :root DIR            instance root override (default: resolved anchor, else
                           user-cwd). Tests point this at a temp dir.
      :jar-path PATH       jar metadata override; required in dev/test where there
@@ -419,11 +575,15 @@
   [opts]
   (let [timeout-min (or (:idle-timeout-min opts) default-idle-timeout-min)
         timeout-ms  (or (:idle-timeout-ms opts) (* (long timeout-min) 60 1000))
+        sweep-ms    (long (or (:session-sweep-ms opts) default-session-sweep-ms))
         root        (or (:root opts) (instance-root) (paths/user-cwd))
         edn-file    (jio/file root ".shiftlefter" "daemon.edn")
         jm          (jar-meta opts)
+        ledger      (atom #{})
         server      (nrepl/start-server :port (or (:port opts) 0)
-                                        :handler (nrepl/default-handler))
+                                        :handler (wrap-session-ledger
+                                                  (nrepl/default-handler) ledger))
+        sched       (scheduler)
         done        (promise)]
     (write-edn! edn-file
                 (merge {:port             (:port server)
@@ -432,15 +592,29 @@
                         :started-at       (str (Instant/now))
                         :idle-timeout-min (long timeout-min)}
                        jm))
-    (reset! daemon-state {:server     server
-                          :scheduler  (scheduler)
-                          :timeout-ms timeout-ms
-                          :edn-file   edn-file
-                          :done       done
-                          :idle-gen   0
-                          :idle-future nil})
+    (reset! daemon-state {:server         server
+                          :scheduler      sched
+                          :timeout-ms     timeout-ms
+                          :edn-file       edn-file
+                          :done           done
+                          :idle-gen       0
+                          :idle-future    nil
+                          :session-ledger ledger
+                          :sweep-marked   #{}})
     (ensure-shutdown-hook!)
     (reset-idle-timer!)
+    ;; Orphan-session sweep tick (sl-ntlx). Cancelled by stop-daemon!'s
+    ;; scheduler shutdownNow; deliberately NO sweep at stop — the stop! eval's
+    ;; own session is mid-eval, and closing it would interrupt-stop the thread
+    ;; running the shutdown. The tick runs under the *err* serve! was called
+    ;; with (the daemon's own stderr — daemon.log under bin/sl; a captured
+    ;; writer in the in-JVM harness), so reap lines (W26) land where the
+    ;; daemon's stderr goes rather than on the scheduler thread's root binding.
+    (let [err *err*]
+      (.scheduleWithFixedDelay sched
+                               ^Runnable (fn [] (binding [*err* err]
+                                                  (sweep-orphan-sessions!)))
+                               sweep-ms sweep-ms TimeUnit/MILLISECONDS))
     (emit-breadcrumb!)
     @done       ;; block until idle-reaped or stopped
     0))

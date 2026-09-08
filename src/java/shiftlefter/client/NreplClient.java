@@ -152,7 +152,7 @@ public final class NreplClient {
                 sendDict(out, "op", "eval", "session", session, "id", "2",
                          "code", STATUS_CODE);
                 int statusRc = awaitResult(in);
-                sendDict(out, "op", "close", "session", session, "id", "3");
+                closeSession(sock, out, in, session);
                 return statusRc;
             }
 
@@ -163,13 +163,58 @@ public final class NreplClient {
             // 3. Release the session (sl-xjx0, Warden W5): nREPL retains every
             //    cloned session (each with a parked SessionThread) until an
             //    explicit close — one leaked session + thread per warm `sl`
-            //    invocation otherwise, with no reaper short of the 60-min idle
-            //    shutdown. One buffered close message, no ack-wait (the server
-            //    processes it after we disconnect; zero added latency). The
-            //    stop path skips this (daemon is shutting down) and exception
-            //    paths fall through to the socket close as before.
-            sendDict(out, "op", "close", "session", session, "id", "3");
+            //    invocation otherwise. The stop path skips this (daemon is
+            //    shutting down) and exception paths fall through to the
+            //    socket close as before. A client killed before this line
+            //    (Ctrl-C mid-run) sends no close; the daemon's periodic
+            //    orphan-session sweep reaps that session once its run
+            //    completes (sl-ntlx).
+            closeSession(sock, out, in, session);
             return rc;
+        }
+    }
+
+    /** Bound on the close-ack read: a wedged daemon must never hang the client's exit. */
+    private static final int CLOSE_ACK_TIMEOUT_MS = 500;
+
+    /**
+     * Send the session close and READ ITS ACK before the socket goes (sl-78u4,
+     * Warden W1 — Chair ruling 09-03). The sl-xjx0 design sent the close with
+     * no ack-wait; nREPL's handle loop then read our EOF and closed the
+     * transport while the close op was still on its executor, so
+     * handle-session-close's response write threw "Socket closed" and nREPL
+     * logged the trace to the daemon's stderr = .shiftlefter/daemon.log — on
+     * every healthy warm run, falsifying "0 bytes = healthy". Reading the one
+     * bencode reply (status done + session-closed for our id) means the
+     * server finishes the op BEFORE the transport disappears. Bounded by a
+     * short read timeout; timeout, EOF and any read failure all fall through
+     * to the caller's socket close — the ack is a courtesy to the daemon's
+     * log, never a gate on the client's exit code.
+     */
+    private static void closeSession(Socket sock, OutputStream out, PushbackInputStream in,
+                                     String session) throws IOException {
+        sendDict(out, "op", "close", "session", session, "id", "3");
+        try {
+            sock.setSoTimeout(CLOSE_ACK_TIMEOUT_MS);
+            while (true) {
+                Object msg = readBencode(in);
+                if (msg instanceof Map) {
+                    Map<?, ?> m = (Map<?, ?>) msg;
+                    Object id = m.get("id");
+                    boolean ours = id instanceof byte[]
+                        && "3".equals(new String((byte[]) id, StandardCharsets.UTF_8));
+                    if (ours && statusContains(m.get("status"), "done")) {
+                        return;
+                    }
+                }
+            }
+        } catch (IOException e) {
+            // Ack never came (SocketTimeoutException — wedged daemon), the
+            // server closed first (EOFException), or the reply was malformed
+            // (any other IOException from readBencode): the run already
+            // finished and its exit code is decided — the session is the
+            // daemon's problem now; leave. Fit-pass C1: the catch must be as
+            // wide as the contract ("never a gate on the client's exit code").
         }
     }
 

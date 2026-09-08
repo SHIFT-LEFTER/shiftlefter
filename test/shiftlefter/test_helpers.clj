@@ -21,8 +21,8 @@
     shiftlefter.gherkin.pickler
     shiftlefter.gherkin.printer
     shiftlefter.graph
-    ;; sl-hlkz: first fdef in runner.config (lint-config)
-    shiftlefter.runner.config
+    ;; sl-hlkz: first fdef in shiftlefter.config (lint-config)
+    shiftlefter.config
     ;; sl-yvaz: load-setup's fdef (::config — the resolved map :start gets)
     shiftlefter.runner.setup
     ;; sl-hse note: shiftlefter.stepengine.registry has an s/fdef on

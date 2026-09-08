@@ -85,6 +85,24 @@
 (s/def ::hook-list
   (s/coll-of ::hook-entry :kind vector?))
 
+(def hook-entry-keys
+  "The framework-owned CLOSED set of keys a hook entry may carry — the
+   ::hook-entry spec's vocabulary, spelled out so a typo can be named
+   (sl-3bqv). `s/keys` is open by design, and `resolved-entry`'s
+   select-keys used to strip anything else without a word: a misspelled
+   :requires-serial silently did nothing."
+  #{:name :before :after :global? :requires-serial :provides})
+
+(defn- unknown-entry-keys
+  "[[name unknown-keys] ...] for entries carrying keys outside
+   `hook-entry-keys`, in registry order; empty when clean."
+  [entries]
+  (->> entries
+       (keep (fn [entry]
+               (let [unknown (vec (remove hook-entry-keys (keys entry)))]
+                 (when (seq unknown) [(:name entry) unknown]))))
+       vec))
+
 ;; -----------------------------------------------------------------------------
 ;; File Resolution — sibling-of-config, exactly like setup.clj
 ;; -----------------------------------------------------------------------------
@@ -139,8 +157,11 @@
    2. load-file the path (raises on syntax/eval errors).
    3. Resolve `hooks/hooks` — may be a var holding a vector or a fn
       that takes config. Both shapes are accepted.
-   4. Validate against ::hook-list; reject duplicate :name entries
-      (the registry sells NAMES — one name, one meaning).
+   4. Validate against ::hook-list; reject unknown entry keys (sl-3bqv —
+      a closed, framework-owned set errors, it never ignores: a
+      misspelled :requires-serial must not silently do nothing); reject
+      duplicate :name entries (the registry sells NAMES — one name, one
+      meaning).
 
    Returns:
    - {:ok [hook-entry ...] :path path} on success (vector order preserved —
@@ -153,13 +174,27 @@
     (let [hooks-var (resolve-hooks-var)
           raw       (var-get hooks-var)
           entries   (if (fn? raw) (raw config) raw)
-          dups      (when (sequential? entries) (duplicate-names entries))]
+          dups      (when (sequential? entries) (duplicate-names entries))
+          unknown   (when (s/valid? ::hook-list entries) (unknown-entry-keys entries))]
       (cond
         (not (s/valid? ::hook-list entries))
         {:error {:type    :hooks/invalid-shape
                  :message (str "hooks.clj `hooks` failed validation: "
                                (s/explain-str ::hook-list entries))
                  :explain (s/explain-data ::hook-list entries)
+                 :path    hooks-path}}
+
+        (seq unknown)
+        {:error {:type    :hooks/unknown-key
+                 :message (str "hooks.clj entry "
+                               (str/join ", " (map (fn [[n ks]]
+                                                     (str (pr-str n) " carries unknown key"
+                                                          (when (next ks) "s") " " (pr-str ks)))
+                                                   unknown))
+                               " — a hook entry's keys are "
+                               (pr-str (vec (sort hook-entry-keys)))
+                               "; an unknown key would be ignored, so it is an error")
+                 :unknown unknown
                  :path    hooks-path}}
 
         (seq dups)

@@ -42,7 +42,7 @@
             [shiftlefter.svo.keys :as svo-keys]
             [shiftlefter.svo.locator-index :as locator-index]
             [shiftlefter.projection.usage-index :as usage-index]
-            [shiftlefter.svo.validate :as svo-validate]))
+            [shiftlefter.text :as text]))
 
 (def output-version 1)
 
@@ -717,7 +717,7 @@
    (map keyword (sort svo-keys/key-names))))
 
 (defn- miss-suggestions [proj {:keys [kw bare]}]
-  (let [similar (svo-validate/suggest-similar kw (suggestion-candidates proj) 2)
+  (let [similar (text/suggest-similar kw (suggestion-candidates proj) 2)
         tokens (pattern-token-hits proj bare)]
     (vec (distinct (concat tokens (if (coll? similar)
                                     similar

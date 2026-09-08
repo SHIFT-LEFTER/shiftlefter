@@ -7,7 +7,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [shiftlefter.adapters.registry :as adapters]
             [shiftlefter.project-context :as project-context]
-            [shiftlefter.runner.config :as config]
+            [shiftlefter.config :as config]
             [shiftlefter.runner.core :as runner]
             [shiftlefter.events :as events]
             [shiftlefter.stepengine.registry :as registry]
@@ -58,8 +58,12 @@
                             :allow-pending? false}
                    :svo {:unknown-subject :warn}
                    :glossaries {:subjects subjects
-                                :verbs {:web verbs}}
-                   :interfaces {:web {:type :web :adapter :mock-web}}}))
+                                :verbs [verbs]}
+                   ;; a DEFAULT-registry adapter name: since sl-k1pv the
+                   ;; single-suite pipeline runs the exact bound-adapter
+                   ;; check (dry-run included), so a phantom name is a
+                   ;; planning error now
+                   :interfaces {:web {:type :web :adapter :etaoin}}}))
     (spit (str (fs/path project "sl" "steps" "steps.clj"))
           (str "(ns steps.shifted-warn\n"
                "  (:require [shiftlefter.stepengine.registry :refer [defstep]]))\n"
@@ -88,9 +92,11 @@
                                     :allow-pending? false}
                            :svo {}
                            :glossaries {:subjects "glossary/subjects.edn"
-                                        :verbs {:web verbs}}
-                           :interfaces {:web {:type :web :adapter :mock-web}
-                                        :admin {:type :web :adapter :mock-web}}}
+                                        :verbs [verbs]}
+                           ;; default-registry names (see write-shifted-warn-
+                           ;; project! — the sl-k1pv check reaches dry-run here)
+                           :interfaces {:web {:type :web :adapter :etaoin}
+                                        :admin {:type :web :adapter :etaoin}}}
                     costumes (assoc :costumes costumes))))
     (spit (str (fs/path project "sl" "steps" "steps.clj"))
           (str "(ns steps.costume-lint\n"
@@ -528,7 +534,7 @@
       (try
         (write-shifted-warn-project! project)
         (let [ctx (project-context/resolve {:invocation-root project})
-              adapter-registry (mock/registry {:mock-web {}})
+              adapter-registry (mock/registry {:etaoin {}})
               output (java.io.StringWriter.)
               result (binding [*err* output]
                        (runner/execute! {:project-context ctx

@@ -1,5 +1,12 @@
-(ns shiftlefter.runner.config
-  "Configuration loading for ShiftLefter runner.
+(ns shiftlefter.config
+  "The config-language module for `shiftlefter.edn`: specs, loading/merge,
+   lint, validation, and accessors. Substrate, not runner machinery —
+   consumed by the invocation surfaces (core/repl/doctor/orient), the
+   runner, the stepengine, and the projections alike; the runner's
+   orchestration stages (runner/core `load-config-stage`) FEED it, they
+   don't own it. Sits beside `shiftlefter.config.user` (machine config).
+   Extracted from `shiftlefter.runner.config` at sl-raf4 (the F5 deep
+   fix); the sibling did-you-mean helpers live in `shiftlefter.text`.
 
    ## Config Precedence
 
@@ -15,10 +22,13 @@
              :allow-pending? false
              :macros {:enabled? false}}
     :glossaries {:subjects \"glossary/subjects.edn\"
-                 :verbs {:web \"glossary/verbs/web.edn\"}}
-    :interfaces {:web {:type :web
-                       :adapter :etaoin
-                       :config {:headless true}}}
+                 :verbs [\"glossary/verbs/web.edn\"]} ; each file's :type is
+                                                    ; its mount key (sl-67dj)
+    :interfaces {:web {:type :web        ; presence of :interfaces = the
+                       :adapter :etaoin  ; COMPLETE set, replacing the builtin
+                       :config {:headless true}}} ; defaults wholesale; an
+                                         ; entry value :default re-includes
+                                         ; the builtin def verbatim (sl-g2lj)
     :svo {:unknown-subject :warn
           :unknown-verb :warn
           :unknown-interface :error
@@ -39,7 +49,7 @@
             [clojure.string :as str]
             [shiftlefter.gherkin.io :as io]
             [shiftlefter.project-context :as project-context]
-            [shiftlefter.svo.validate :as svo-validate]))
+            [shiftlefter.text :as text]))
 
 ;; -----------------------------------------------------------------------------
 ;; Specs — Config Shape
@@ -95,9 +105,25 @@
 ;; invocation. Positive 64-bit long, decimal-printed; recorded in the run
 ;; record (:run/seed) and handed down to hooks/steps/:start.
 (s/def ::seed pos-int?)
+;; sl-kowi (Ruling 4): the halt policy. [:runner :halt-on-observation-failure]
+;; is run-level and config-only (no CLI flag); absent/false = grind on (the
+;; honest default — skipping is a form of not-running what was asked, and
+;; the environment can recover mid-run). true = after any scenario
+;; finalizes observation-class, no further scenario STARTS (in-flight ones
+;; finish and keep their verdicts; the rest are :skipped). Exit is 4 either
+;; way — the halt changes wall-clock and report noise, never the verdict.
+;; TRI-STATE since sl-78u4 (Warden W3): false | :group | :run, with true
+;; reading as :run. The key names the group TOPOLOGY: :run = the groups are
+;; partitions of ONE environment (a dark channel in one says the rest would
+;; time out too — unstarted groups are skipped entirely, their :start never
+;; runs); :group = the groups are DIFFERENT environments (a dark channel in
+;; one says nothing about the others — siblings run to completion).
+(s/def ::halt-on-observation-failure
+  (s/or :off false? :on true? :scope #{:group :run}))
 (s/def ::runner (s/keys :req-un [::step-paths ::allow-pending?]
                         :opt-un [::features ::macros ::provisioning ::report
-                                 ::max-parallel ::capture ::seed]))
+                                 ::max-parallel ::capture ::seed
+                                 ::halt-on-observation-failure]))
 
 ;; Timing sub-config (sl-99u2) — the deadline substrate. Appears at the top
 ;; level (global rung) and as a sibling key on interface entries (instance/
@@ -108,7 +134,11 @@
 (s/def ::interval-ms pos-int?)
 (s/def ::timing (s/keys :opt-un [::deadline-ms ::interval-ms]))
 
-;; Interface sub-config
+;; Interface sub-config. ::interfaces is the LOADED (post-expansion) shape:
+;; in the user's file an entry value may also be the :default sentinel
+;; (= include the builtin def of that name verbatim), which load-config
+;; expands via expand-interface-defaults before anything consumes the map
+;; (sl-g2lj).
 (s/def ::type keyword?)
 (s/def ::adapter keyword?)
 ;; :shared-impl? true means a single adapter impl is shared across all
@@ -146,7 +176,12 @@
 
 ;; Glossaries sub-config
 (s/def ::subjects (s/nilable string?))
-(s/def ::verbs (s/nilable (s/map-of keyword? string?)))
+;; sl-67dj: a LIST of file paths — each file's own :type is its mount key
+;; (file-authoritative; the old type-keyed map restated what the file already
+;; declared). :kind sequential? (sl-a7sx, Warden W33): a list literal loads
+;; exactly like a vector — the spec matches the shipped loader, and the
+;; shape is enforced by normalize's :config/invalid-glossaries arm.
+(s/def ::verbs (s/nilable (s/coll-of string? :kind sequential?)))
 (s/def ::intents (s/nilable string?))
 (s/def ::glossaries (s/nilable (s/keys :opt-un [::subjects ::verbs ::intents])))
 
@@ -197,7 +232,10 @@
             :macros {:enabled? false}}
    ;; Glossary paths — nil means use framework defaults only
    :glossaries nil
-   ;; Interface definitions — name -> {:type :adapter :config}
+   ;; Interface definitions — name -> {:type :adapter :config}. Mounted only
+   ;; when the user's config has NO :interfaces key: a user :interfaces map
+   ;; replaces this set WHOLESALE (sl-g2lj, Design A); a per-entry :default
+   ;; re-includes a builtin def from here verbatim (expand-interface-defaults).
    :interfaces {:web {:type :web
                       :adapter :etaoin
                       :config {}}}
@@ -280,22 +318,26 @@
    context's :config-root (sl/glossary/... in the discovered layout):
 
    - glossary/subjects.edn
-   - glossary/verbs/<type>.edn for each known interface type
+   - glossary/verbs/*.edn (every EDN file in the directory — sl-67dj: each
+     file's own :type is its mount key, so discovery no longer enumerates a
+     closed type set; type identifiers are an open namespaced space)
    - glossary/intents/ (directory)
 
-   Returns a :glossaries-shaped map of the RELATIVE paths that exist, or nil
-   when none do. Whole-map semantics (Chair ruling 2026-08-03): this runs only
-   when the user's config has no :glossaries key at all — any explicit
-   :glossaries value, including nil, is used as written."
+   Returns a :glossaries-shaped map of the RELATIVE paths that exist (verb
+   paths sorted for determinism), or nil when none do. Whole-map semantics
+   (Chair ruling 2026-08-03): this runs only when the user's config has no
+   :glossaries key at all — any explicit :glossaries value, including nil,
+   is used as written."
   [context]
   (let [root (:config-root context)
         probe (fn [rel] (when (fs/exists? (fs/path root rel)) rel))
         subjects (probe "glossary/subjects.edn")
-        verbs (into {}
-                    (keep (fn [t]
-                            (when-let [rel (probe (str "glossary/verbs/" (name t) ".edn"))]
-                              [t rel])))
-                    known-interface-types)
+        verbs-dir (fs/path root "glossary" "verbs")
+        verbs (when (fs/directory? verbs-dir)
+                (->> (fs/glob verbs-dir "*.edn")
+                     (mapv #(str "glossary/verbs/" (fs/file-name %)))
+                     sort
+                     vec))
         intents (when (fs/directory? (fs/path root "glossary" "intents"))
                   "glossary/intents")]
     (when (or subjects (seq verbs) intents)
@@ -323,6 +365,30 @@
 ;; Public API
 ;; -----------------------------------------------------------------------------
 
+(defn expand-interface-defaults
+  "Expand `:default` sentinel entries in a user `:interfaces` map (sl-g2lj,
+   Design A). A user `:interfaces` map is the COMPLETE interface set —
+   `load-config` replaces the builtin defaults with it wholesale — and an
+   entry value of `:default` re-includes the shipped builtin def of that
+   NAME verbatim. No overrides travel through the sentinel, and a full-map
+   entry is used as-is under any name (including builtin names): user
+   definitions and builtin defs are NEVER merged. A `:default` under a name
+   with no builtin is left in place for `normalize` to reject
+   (`:config/unknown-default-interface` — planning error, never
+   silent-empty). Non-map input (including nil = explicitly zero
+   interfaces) is returned as written. Public for direct tests; production
+   callers go through `load-config`."
+  [user-interfaces]
+  (if (map? user-interfaces)
+    (reduce-kv (fn [m iface-name entry]
+                 (assoc m iface-name
+                        (if (= :default entry)
+                          (get-in default-config [:interfaces iface-name] :default)
+                          entry)))
+               {}
+               user-interfaces)
+    user-interfaces))
+
 (defn load-config
   "Load configuration with precedence.
 
@@ -348,6 +414,16 @@
    the ONE place the effective default is computed — downstream :off
    fallbacks (stepengine.bind, svo.validate) are nothing-configured safety
    nets, not defaults.
+
+   Interface invariant (sl-g2lj, Design A): the result's :interfaces is the
+   builtin default set iff the USER's config has no :interfaces key. When the
+   key is present the user's map is the COMPLETE set (wholesale replace —
+   the explicit-:glossaries precedent): entry value :default re-includes the
+   builtin def of that name verbatim (expand-interface-defaults; no overrides
+   through the sentinel), a full-map entry is used as-is under any name
+   (never merged with a builtin), and an explicit nil means zero interfaces
+   (normalized to {} at load — sl-a7sx — so nil and {} are one shape
+   downstream).
 
    Throws on:
    - Explicit config path doesn't exist
@@ -383,7 +459,23 @@
                  merged (if (contains? user-config :glossaries)
                           merged
                           (assoc merged :glossaries
-                                 (probe-conventional-glossaries context)))]
+                                 (probe-conventional-glossaries context)))
+                 ;; User :interfaces replaces the builtin set WHOLESALE
+                 ;; (sl-g2lj, Design A — the :glossaries/:svo whole-key
+                 ;; pattern): presence of the key makes the user's map the
+                 ;; complete set. :default entries expand to the builtin defs
+                 ;; verbatim; an explicit nil means zero interfaces and is
+                 ;; normalized to {} HERE (sl-a7sx, Warden W-B1) so every
+                 ;; downstream consumer sees ONE zero-interfaces shape —
+                 ;; the suite-lint truthiness gate (stepengine.compile) and
+                 ;; the projection's configured-types both read {} as
+                 ;; "present, complete, empty" and nil as "exempt".
+                 merged (if (contains? user-config :interfaces)
+                          (assoc merged :interfaces
+                                 (expand-interface-defaults
+                                  (let [ifaces (:interfaces user-config)]
+                                    (if (nil? ifaces) {} ifaces))))
+                          merged)]
              ;; Shifted mode is user opt-in: keep :svo (with defaults merged
              ;; under it) only when the user's config has the key (sl-ieie).
              (if (contains? user-config :svo)
@@ -469,6 +561,27 @@
   [config]
   (get-in config [:runner :max-parallel] 1))
 
+(defn halt-policy
+  "The config-declared halt policy as a tri-state (sl-78u4, Warden W3):
+   `false` (default — grind on), `:group` (halt the group whose scenario
+   went dark; siblings run), or `:run` (halt the whole invocation; groups
+   not yet started are skipped entirely). `true` reads as `:run` — every
+   pre-tri-state doc sentence stays true. Config-only, no CLI flag."
+  [config]
+  (let [v (get-in config [:runner :halt-on-observation-failure] false)]
+    (cond
+      (true? v) :run
+      (contains? #{:group :run} v) v
+      :else false)))
+
+(defn halt-on-observation-failure?
+  "The engine's boolean (sl-kowi, Ruling 4): true when ANY halt scope is
+   on. Threaded to the engine as the :halt-on-observation-failure exec-opt;
+   the SCOPE is the runner's business (`halt-policy` — under :run the
+   runner threads one shared gate atom across the setup groups)."
+  [config]
+  (boolean (halt-policy config)))
+
 (defn capture-policy
   "Return the config-declared capture policy map ({kind policy}), default {}
    (every kind :never). Config mirror for --capture (sl-3q9r); the flag wins
@@ -538,6 +651,7 @@
    :provisioning      [:runner :provisioning]
    :report            [:runner :report]
    :max-parallel      [:runner :max-parallel]
+   :halt-on-observation-failure [:runner :halt-on-observation-failure]
    :seed              [:runner :seed]
    :capture           [:runner :capture]
    :junit-xml         [:runner :report :junit-xml]
@@ -596,6 +710,20 @@
                :suggested-path [k]
                :message (str "config key " k " is read at the TOP level, not"
                              " under :runner — [:runner " k "] was ignored")}))
+      ;; sl-q4cb (Warden W36): the :default SENTINEL is an entry VALUE
+      ;; ({:web :default}); as a KEY inside a full interface map it reads
+      ;; like the merge form the g2lj design deliberately excluded, and
+      ;; today it is honored by being ignored. Name it.
+      (into (for [[iface-name idef] (when (map? (:interfaces config)) (:interfaces config))
+                  :when (and (map? idef) (contains? idef :default))]
+              {:type :config/misplaced-key
+               :key :default
+               :found-path [:interfaces iface-name :default]
+               :message (str "config key :default inside [:interfaces " iface-name
+                             "] was ignored — :default is an entry VALUE"
+                             " ({:interfaces {" iface-name " :default}} re-includes the"
+                             " builtin verbatim); a full map is used as-is and is never"
+                             " merged with the builtin")}))
       ;; sl-xjx0 (Warden W14, cheap warn — the real adapter-awareness is
       ;; sl-bbqb): costume attach is hardwired etaoin this release; a costume
       ;; declared for an interface whose adapter is anything else passes
@@ -653,7 +781,7 @@
 
     (seq (remove known-timing-keys (keys timing)))
     (let [unknown (vec (remove known-timing-keys (keys timing)))
-          suggestion (svo-validate/suggest-similar
+          suggestion (text/suggest-similar
                       (first unknown) (vec known-timing-keys) 3)]
       (str "has unknown key" (when (next unknown) "s") " " (pr-str unknown)
            " — known: " (pr-str (vec (sort known-timing-keys)))
@@ -675,6 +803,39 @@
    Returns nil if valid, or error map if invalid."
   [interface-name interface-def]
   (cond
+    ;; sl-g2lj RIDER: the sl/ namespace is reserved for builtin interface
+    ;; NAMES — rejected now so future builtin aliasing (sl/web, the bundle
+    ;; bead sl-interface-bundles-wj9c) is not foreclosed. Checked first: it
+    ;; applies to :default-sentinel entries too.
+    (and (keyword? interface-name) (= "sl" (namespace interface-name)))
+    {:type :config/reserved-interface-name
+     :message (str "Interface " (pr-str interface-name) " uses the sl/"
+                   " namespace, which is reserved for builtin interfaces")
+     :data {:interface interface-name
+            :definition interface-def}}
+
+    ;; sl-g2lj: an unexpanded :default sentinel — load-config expands every
+    ;; sentinel that names a builtin, so one surviving to validation names
+    ;; none. Planning error, never silent-empty.
+    (= :default interface-def)
+    {:type :config/unknown-default-interface
+     :message (str "Interface " (pr-str interface-name) " declares :default,"
+                   " but there is no builtin interface of that name —"
+                   " builtins: "
+                   (pr-str (vec (sort (keys (:interfaces default-config))))))
+     :data {:interface interface-name
+            :builtins (vec (sort (keys (:interfaces default-config))))}}
+
+    ;; sl-g2lj: an entry is a definition map or the :default sentinel,
+    ;; nothing else.
+    (not (map? interface-def))
+    {:type :config/invalid-interface
+     :message (str "Interface " (pr-str interface-name) " must be a"
+                   " definition map or :default (include the builtin def"
+                   " verbatim), got: " (pr-str interface-def))
+     :data {:interface interface-name
+            :definition interface-def}}
+
     ;; Must have :type
     (nil? (:type interface-def))
     {:type :config/invalid-interface
@@ -688,6 +849,18 @@
      :message (str "Interface :" (name interface-name) " missing required :adapter key")
      :data {:interface interface-name
             :definition interface-def}}
+
+    ;; sl-g2lj RIDER: sl/-namespaced TYPES are reserved for builtins —
+    ;; ordered BEFORE the closed-set check so the reservation keeps its own
+    ;; message when the type space opens (sl-interface-bundles-wj9c).
+    (and (keyword? (:type interface-def))
+         (= "sl" (namespace (:type interface-def))))
+    {:type :config/reserved-interface-type
+     :message (str "Interface " (pr-str interface-name) " declares :type "
+                   (pr-str (:type interface-def)) " — the sl/ namespace is"
+                   " reserved for builtin interface types")
+     :data {:interface interface-name
+            :type (:type interface-def)}}
 
     ;; :type must be known
     (not (contains? known-interface-types (:type interface-def)))
@@ -725,10 +898,26 @@
 
 (defn- validate-interfaces-config
   "Validate all interface definitions.
-   Returns vector of errors (may be empty)."
+   Returns a seq of errors (may be empty/nil).
+
+   sl-g2lj: :interfaces presence is meaningful (wholesale replace), so a
+   present-but-non-map value is an ERROR rather than silently ignored —
+   except nil, the explicit zero-interfaces value. load-config normalizes
+   that nil to {} (sl-a7sx), so the nil arm here only serves direct
+   `normalize` callers handing in a raw map."
   [config]
   (let [interfaces (:interfaces config)]
-    (when (map? interfaces)
+    (cond
+      (nil? interfaces) nil
+
+      (not (map? interfaces))
+      [{:type :config/invalid-interfaces
+        :message (str ":interfaces must be a map of interface name ->"
+                      " definition map (or :default), got: "
+                      (pr-str interfaces))
+        :data {:definition interfaces}}]
+
+      :else
       (keep (fn [[name def]]
               (validate-single-interface name def))
             interfaces))))
@@ -749,7 +938,7 @@
     (and (map? interfaces)
          (not (contains? interfaces (:interface costume-def))))
     (let [declared (:interface costume-def)
-          suggestion (svo-validate/suggest-similar declared (keys interfaces) 2)]
+          suggestion (text/suggest-similar declared (keys interfaces) 2)]
       {:type :config/unknown-costume-interface
        :message (str "Costume :" (name costume-name) " declares :interface "
                      (pr-str declared) ", which is not a configured interface"
@@ -789,6 +978,93 @@
               (validate-single-costume (:interfaces config) name def))
             costumes))))
 
+(def svo-levels
+  "The framework-owned CLOSED set of :svo enforcement levels (sl-3bqv,
+   doctrine bullet 9: a closed set has no leniency knob — it errors, it
+   never ignores). :unknown-object additionally accepts :strict, the
+   deprecated alias for :error (sl-femd)."
+  #{:warn :error :off})
+
+(def ^:private svo-keys
+  #{:unknown-subject :unknown-verb :unknown-interface :unknown-object})
+
+(defn- validate-svo-config
+  "Validate the :svo enforcement LEVELS at load (sl-3bqv). The ::svo enum
+   specs sat under a ::config spec nothing gated, so a typo'd level
+   (:warm) flowed through compute-severity as a non-:error value —
+   silently non-blocking. Every non-nil :svo map's known keys must hold a
+   level from `svo-levels` (:unknown-object also :strict); anything else
+   is a HARD planning error with a did-you-mean over the enum. Unknown
+   keys inside :svo stay lint-config's business (top-level scope) — this
+   validator is about the VALUES. Returns a seq of errors (nil when clean)."
+  [config]
+  (let [svo (:svo config)]
+    (cond
+      (nil? svo) nil
+
+      (not (map? svo))
+      [{:type :config/invalid-svo-level
+        :message (str ":svo must be a map of enforcement levels, got: " (pr-str svo))
+        :data {:definition svo}}]
+
+      :else
+      (keep (fn [k]
+              (let [level (get svo k)
+                    allowed (cond-> svo-levels (= k :unknown-object) (conj :strict))]
+                (when (and (contains? svo k) (not (contains? allowed level)))
+                  (let [suggestion (text/suggest-similar level (vec (sort allowed)) 2)]
+                    {:type :config/invalid-svo-level
+                     :message (str "[:svo " k "] must be one of "
+                                   (pr-str (vec (sort allowed)))
+                                   ", got: " (pr-str level)
+                                   (when suggestion
+                                     (str " — did you mean " (pr-str suggestion) "?")))
+                     :data (cond-> {:key k :level level :allowed (vec (sort allowed))}
+                             suggestion (assoc :suggestion suggestion))}))))
+            (sort svo-keys)))))
+
+(def ^:private glossaries-shape-hint
+  "The one sentence every :config/invalid-glossaries error carries — names
+   the path-LIST form so the retired type-keyed map is actionable."
+  (str ":glossaries is a map — :subjects and :intents are single file paths,"
+       " :verbs is a LIST of verb-glossary file paths whose own :type is each"
+       " file's mount key (since 0.5.6; the type-keyed {:web \"path\"} map is"
+       " retired), e.g. {:verbs [\"glossary/verbs/web.edn\"]}"))
+
+(defn- invalid-glossaries-error [what found]
+  {:type :config/invalid-glossaries
+   :message (str what " — " glossaries-shape-hint "; got: " (pr-str found))
+   :data {:definition found}})
+
+(defn- validate-glossaries-config
+  "Validate the :glossaries SHAPE (sl-a7sx, Warden W33). The ::config spec
+   was documentation-only: the retired type-keyed :verbs map, a string
+   :verbs, or a non-string :subjects/:intents crashed the path resolver
+   (exit 3) instead of reaching a planning error. Returns a seq of
+   :config/invalid-glossaries errors (nil/empty when clean). File
+   existence and content stay the loaders' business."
+  [config]
+  (let [glossaries (:glossaries config)]
+    (cond
+      (nil? glossaries) nil
+
+      (not (map? glossaries))
+      [(invalid-glossaries-error ":glossaries must be a map" glossaries)]
+
+      :else
+      (let [{:keys [verbs subjects intents]} glossaries]
+        (keep identity
+              [(when (and (some? verbs)
+                          (not (and (sequential? verbs) (every? string? verbs))))
+                 (invalid-glossaries-error
+                  ":glossaries :verbs must be a list of file paths" verbs))
+               (when (and (some? subjects) (not (string? subjects)))
+                 (invalid-glossaries-error
+                  ":glossaries :subjects must be a single file path" subjects))
+               (when (and (some? intents) (not (string? intents)))
+                 (invalid-glossaries-error
+                  ":glossaries :intents must be a single file path" intents))])))))
+
 (defn normalize
   "Normalize and validate configuration.
 
@@ -804,10 +1080,20 @@
    Validation rules:
    - If [:runner :macros :enabled?] is true, [:runner :macros :registry-paths]
      must be a non-empty vector, else error :macro/config-missing-registry-paths
+   - :interfaces, when present and non-nil, must be a map; each entry a
+     definition map or an (expanded-by-load-config) :default sentinel —
+     an unexpanded sentinel names no builtin and errors (sl-g2lj)
+   - Interface names and types must not use the reserved sl/ namespace
+     (sl-g2lj rider)
    - Each interface must have :type and :adapter
    - Interface :type must be known (:web, :api, :sms, :email)
    - :timing (top-level or per-interface), when present, must conform to
      ::timing (sl-99u2)
+   - :glossaries, when present and non-nil, must be a map whose :verbs is
+     a list of path strings and whose :subjects/:intents are single path
+     strings (:config/invalid-glossaries, sl-a7sx)
+   - :svo enforcement levels must be from the closed set `svo-levels`
+     (:config/invalid-svo-level with did-you-mean, sl-3bqv)
    - Empty config is valid
 
    Top-level :webdriver/:webdriver-url are NOT validated or normalized here —
@@ -816,10 +1102,14 @@
   [config]
   (let [interface-errors (validate-interfaces-config config)
         costume-errors (validate-costumes-config config)
+        glossary-errors (validate-glossaries-config config)
+        svo-errors (validate-svo-config config)
         errors (concat (keep identity [(validate-macro-config config)
                                        (validate-timing-config config)])
                        interface-errors
-                       costume-errors)]
+                       costume-errors
+                       glossary-errors
+                       svo-errors)]
     (if (seq errors)
       (assoc config :errors (vec errors))
       config)))
@@ -833,13 +1123,39 @@
 
    Returns map with:
    - :subjects — path to subjects glossary (or nil)
-   - :verbs — map of interface-type -> path (or nil)
+   - :verbs — vector of verb glossary file paths (or nil); each file's own
+     :type is its mount key (sl-67dj, file-authoritative)
 
    Example return:
    {:subjects \"glossary/subjects.edn\"
-    :verbs {:web \"glossary/verbs/web.edn\"}}"
+    :verbs [\"glossary/verbs/web.edn\"]}"
   [config]
   (:glossaries config))
+
+(defn resolve-glossary-config-paths
+  "Resolve every path in a :glossaries config value against the project
+   context (one shared implementation, sl-67dj — previously duplicated
+   verbatim in the projection and the runner). :verbs is a path LIST;
+   :subjects/:intents are single paths. Returns nil for a nil config.
+
+   Shape-safe (sl-a7sx, Warden W33): this runs BEFORE normalize on both
+   channels, so it resolves only the values that ARE paths (strings) and
+   passes anything else through untouched for normalize's
+   :config/invalid-glossaries arm to name — it never throws on the retired
+   type-keyed map, a string :verbs, or a non-string :subjects."
+  [project-context glossary-config]
+  (when glossary-config
+    (let [resolve-path #(project-context/resolve-config-path project-context %)]
+      (cond-> glossary-config
+        (string? (:subjects glossary-config))
+        (update :subjects resolve-path)
+
+        (string? (:intents glossary-config))
+        (update :intents resolve-path)
+
+        (sequential? (:verbs glossary-config))
+        (update :verbs (fn [paths]
+                         (mapv #(if (string? %) (resolve-path %) %) paths)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Interface Config Accessors

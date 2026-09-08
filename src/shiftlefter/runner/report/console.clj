@@ -67,6 +67,26 @@
   [status use-color?]
   (colorize (str/upper-case (name status)) (status-color status) use-color?))
 
+(defn- format-scenario-status
+  "The status token for a scenario line (sl-kowi): an observation-class
+   :error renders `UNOBSERVED` (the witness went dark — distinct from
+   ERROR, the harness family, and from FAILED, a verdict); a :failed
+   scenario whose failing step is :sut-classed renders `FAILED (SUT
+   error)`. Everything else is `format-status` verbatim."
+  [scenario-result status use-color?]
+  (cond
+    (and (= :error status)
+         (= :observation (-> scenario-result :error :error/class)))
+    (colorize "UNOBSERVED" :red use-color?)
+
+    (and (= :failed status)
+         (some #(and (= :failed (:status %)) (= :sut (-> % :error :error/class)))
+               (:steps scenario-result)))
+    (str (format-status status use-color?) " "
+         (colorize "(SUT error)" :red use-color?))
+
+    :else (format-status status use-color?)))
+
 ;; -----------------------------------------------------------------------------
 ;; Failure Formatting
 ;; -----------------------------------------------------------------------------
@@ -97,6 +117,22 @@
          (str "     " (colorize "definition-step: " :gray use-color?)
               (:file def-step) ":" (:line def-step) ":" (:column def-step) "\n"))))))
 
+(def ^:private error-class-gloss
+  "One-line gloss per sl-kowi error class — the witness relation, stated
+   at the failure so the reader routes without opening the ladder page."
+  {:observation "no answer existed; this step proves nothing about the app"
+   :sut "the app answered with an error"
+   :assertion "the app answered; the answer missed the expectation"})
+
+(defn- format-error-class-line
+  "The gray `class:` continuation line for an error map carrying
+   `:error/class` (sl-kowi); nil when unclassified — unclassified output is
+   byte-identical to before."
+  [error use-color?]
+  (when-let [c (:error/class error)]
+    (str "     " (colorize (str "class: " (name c) " — " (error-class-gloss c))
+                           :gray use-color?) "\n")))
+
 (defn- format-step-failure
   "Format a single step failure for display."
   [step-result idx source-file use-color?]
@@ -110,21 +146,25 @@
          (format-macro-provenance step source-file use-color?)
          (when error
            (str "     " (colorize (str "Error: " (:message error)) :red use-color?) "\n"))
+         (format-error-class-line error use-color?)
          (when-let [data (:data error)]
            (str "     " (colorize (str "Data: " (pr-str data)) :gray use-color?) "\n")))))
 
 (defn- format-scenario-error
   "Format a scenario-level :error (the infrastructure-failure family,
-   sl-esq/sl-7c7i: hook throw, capability provisioning, capture, harness).
+   sl-esq/sl-7c7i: hook throw, capability provisioning, capture, harness;
+   plus the observation-class flip, sl-kowi — headed `Unobserved`).
    Hook-attributed errors keep the dual attribution: the hook's name +
    registration home, and the @hook= tag's file:line."
   [error use-color?]
-  (str "  " (colorize (str (if (:hook error)
-                             (str "Hook '" (:hook error) "' failed")
-                             "Scenario error")
+  (str "  " (colorize (str (cond
+                             (:hook error) (str "Hook '" (:hook error) "' failed")
+                             (= :observation (:error/class error)) "Unobserved"
+                             :else "Scenario error")
                            (when-let [t (:type error)] (str " (" t ")"))
                            ": " (:message error))
                       :red use-color?) "\n"
+       (format-error-class-line error use-color?)
        (when-let [reg (:path (:registration error))]
          (str "     " (colorize "registered at: " :gray use-color?) reg "\n"))
        (when-let [ts (:tag-source error)]
@@ -277,7 +317,7 @@
         expand-macros? (:expand-macros opts)
         groups (group-steps-for-display (:steps scenario-result))]
     (binding [*out* *err*]
-      (println (str (format-status status use-color?) " "
+      (println (str (format-scenario-status scenario-result status use-color?) " "
                     (colorize (:pickle/name pickle) :bold use-color?)))
       (when verbose?
         (doseq [{:keys [type result children]} groups]
@@ -508,25 +548,56 @@
    - opts: {:no-color bool :verbose bool :duration-ms N}"
   [result opts]
   (let [use-color? (colors-enabled? opts)
-        {:keys [passed failed error pending skipped]} (:counts result)
-        total (+ (or passed 0) (or failed 0) (or error 0)
+        {:keys [passed failed error unobserved pending skipped]} (:counts result)
+        total (+ (or passed 0) (or failed 0) (or error 0) (or unobserved 0)
                  (or pending 0) (or skipped 0))
         ;; Segments joined with ", " — identical output to the historical
         ;; nested-when chain for the four original statuses; :error (sl-esq)
-        ;; appears only when positive.
+        ;; and :unobserved (sl-kowi) appear only when positive.
         segments (keep (fn [[n label color]]
                          (when (pos? (or n 0))
                            (colorize (str n " " label) color use-color?)))
                        [[passed "passed" :green]
                         [failed "failed" :red]
+                        [unobserved "unobserved" :red]
                         [error "error" :red]
                         [pending "pending" :yellow]
                         [skipped "skipped" :cyan]])]
     (binding [*out* *err*]
       (println)
       (println (str total " scenario(s): " (str/join ", " segments)))
+      ;; sl-kowi (Ruling 4): the halt line — only when the policy fired.
+      (when-let [{:keys [after-scenario scenario]} (:halted result)]
+        (println (colorize (str "halted after scenario " after-scenario
+                                (when scenario (str " (" scenario ")"))
+                                ": observation failure")
+                           :red use-color?)))
       (when-let [duration (:duration-ms opts)]
         (println (colorize (format "Completed in %.2fs" (/ duration 1000.0)) :gray use-color?))))))
+
+(defn print-group-verdict!
+  "One per-group verdict line for the multi-group console epilogue
+   (sl-kvn6, riding sl-pwbp): the console analog of the HTML invocation
+   TOC row — until now numeric per-group codes rendered ONLY there.
+   Printed by the runner's group loop right after each group completes
+   (the one seam that also sees planning-failed groups, which never reach
+   a reporter's on-run-end). Outputs to stderr.
+
+   `group-result` is run-with-setups!'s per-group result map
+   (:group-label :exit-code :status). A group the :run-scope halt SKIPPED
+   (sl-78u4, Warden W3) has no exit code — it never started — and renders
+   `skipped (halted)`."
+  [group-result opts]
+  (let [{:keys [group-label exit-code status]} group-result
+        use-color? (colors-enabled? opts)
+        skipped? (nil? exit-code)
+        color (cond skipped? :gray (zero? exit-code) :green :else :red)
+        verdict (if skipped?
+                  "skipped (halted)"
+                  (str "exit code " exit-code " (" (name status) ")"))]
+    (binding [*out* *err*]
+      (println (str "Setup group " (pr-str group-label) ": "
+                    (colorize verdict color use-color?))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Reporter (sl-21z)

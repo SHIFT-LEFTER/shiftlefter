@@ -1,0 +1,10 @@
+;; Fixture (sl-g2lj): a browser-less project — the 8i5r drive's api-only
+;; take-home shape. :interfaces present = the COMPLETE set: no phantom
+;; builtin :web may appear in the loaded config.
+{:runner {:step-paths ["steps/"]
+          :allow-pending? false}
+ :interfaces {:sms {:type :sms
+                    :adapter :sms-mock
+                    :config {:sender "+15550100"}}}
+ :svo {:unknown-subject :warn
+       :unknown-interface :error}}

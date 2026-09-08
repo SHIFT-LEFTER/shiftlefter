@@ -15,17 +15,35 @@
                           ;; means an old record
     :run/exit-code 0|1|2|3|4
     :run/status :passed|:failed|:planning-failed|:crashed|:degraded
+    :run/results-path \"results/<stamp>[/<group-slug>]\"
+                          ;; this run-scope's results dir (sl-7dq5 F11b),
+                          ;; config-root-relative, forward slashes — the
+                          ;; pointer from envelope to artifacts; resolve
+                          ;; relative attachment refs beneath it. Absent
+                          ;; when the run created no results dir (dry-run,
+                          ;; exit 2/3, config-less :defaults contexts).
+    :group/label \"..\"    ;; + :group/index N (0-based declared order) —
+                          ;; group identity, present on per-group summaries
+                          ;; of MULTI-group runs only (sl-pwbp); see the
+                          ;; form stream section below
     :counts {:passed N :failed N :pending N :skipped N
              :error N          ;; only when positive — infrastructure-
                                ;; failure family (sl-esq, sl-7c7i)
+             :unobserved N     ;; only when positive — :error scenarios of
+                               ;; observation class (sl-kowi); disjoint
+                               ;; from :error, both exit 4
              :scenarios N :steps N}
                         ;; counts ride EVERY summary (sl-7c7i AC):
                         ;; all-zero on exit 2/3, where nothing executed
+    :halted {:after-scenario N :scenario \"name\"}
+                        ;; only when :halt-on-observation-failure fired
+                        ;; (sl-kowi): unstarted scenarios are :skipped
     :dropped-events N   ;; observe-plane events the bus refused at admission
                         ;; during THIS run-scope (sl-d7ks); absent when zero.
                         ;; Results are never affected — the report plane
                         ;; doesn't ride the bus; observations may be gapped.
-    :planning {...}     ;; present when exit-code 2 (may carry :config-lints)
+    :planning {...}     ;; present when exit-code 2 (may carry :config-lints
+                        ;; and :glossary-lints)
     :failures [{...}]   ;; present when exit-code 1 or 4; entries may carry
                         ;; :attachments — the failing step's/scenario's own
                         ;; refs, inline for join-free triage
@@ -49,8 +67,14 @@
     :diagnostics {:svo-issues [...]     ;; warn-level, non-blocking (sl-qk8l)
                   :config-lints [...]   ;; sl-lnj1 — unknown/misplaced
                                         ;; top-level config keys; shape is
-                                        ;; runner.config ::lint-warnings,
+                                        ;; shiftlefter.config ::lint-warnings,
                                         ;; scrubbed. Absent on clean runs.
+                  :glossary-lints [...] ;; sl-67dj (Warden P3-13) — structured
+                                        ;; glossary-load warnings from the
+                                        ;; strict loaders (:type/:path/
+                                        ;; :message maps, e.g. :glossary/
+                                        ;; override-flag-ignored), scrubbed.
+                                        ;; Absent on clean runs.
                   :capture-lints [...]} ;; sl-3q9r — capture warns (stderr
                                         ;; suppressed under --edn; they ride
                                         ;; here instead, once per run): maps
@@ -78,6 +102,24 @@
 
    - classic pipeline: one summary form.
    - setup.clj orchestration: one summary form PER GROUP, in group order.
+   - MULTI-group runs only (sl-pwbp, absent-unless-multi): each per-group
+     summary form carries top-level `:group/label` + `:group/index`
+     (0-based declared order — the durable join key when labels collide;
+     under CLI narrowing the indexes keep their declared values and may
+     have gaps, sl-baup), and ONE final invocation aggregate form follows
+     all group forms:
+     `{:run/id .. :run/seed .. :invocation/exit-code N :invocation/status
+     kw :invocation/groups [{:group/label .. :group/index .. :run/exit-code
+     .. :run/status ..} ..]}` — the suite verdict readable from the stream.
+     Deliberately `:invocation/exit-code`, never `:run/exit-code`: the
+     published consumer discriminator \"summaries are the forms carrying
+     :run/exit-code\" (docs/REPORTS.md) must not match the aggregate.
+     Consumer verdict rule: the `:invocation/exit-code` form if present,
+     else the lone summary's `:run/exit-code`. The aggregate is ABSENT in
+     single-group and classic streams (byte-stable — sl-esq law), absent
+     on crash (exit 3 unwinds past aggregation; the stream ends where the
+     crash cut it), and absent on suite-level exit-2s that precede the
+     group loop (no groups ran; the lone summary IS the verdict).
    - supplementary diagnostics forms may appear BETWEEN or BEFORE
      summaries: `{:run/id .. :group? .. :diagnostics {..}}` — producers are
      teardown surfacing (a group's :stop threw → emitted after that group's
@@ -121,6 +163,8 @@
       (:exception-class error) (assoc :exception-class (:exception-class error))
       (:data error) (assoc :data (:data error))
       (:value error) (assoc :value (:value error))
+      ;; sl-kowi: the step/adapter error class, already EDN-native.
+      (:error/class error) (assoc :error/class (:error/class error))
       ;; Hook failure attribution (sl-esq): hook name + registration home
       ;; + the @hook= tag's file:line.
       (:hook error) (assoc :hook (:hook error))
@@ -324,7 +368,10 @@
         ;; sl-lnj1: config-lint warnings ride the planning block too — a run
         ;; that fails planning still had a lintable config.
         (seq (:config-lints diagnostics))
-        (assoc :config-lints (vec (:config-lints diagnostics)))))))
+        (assoc :config-lints (vec (:config-lints diagnostics)))
+        ;; sl-67dj (Warden P3-13): glossary-load warnings likewise.
+        (seq (:glossary-lints diagnostics))
+        (assoc :glossary-lints (vec (:glossary-lints diagnostics)))))))
 
 (defn execution-diagnostics
   "Extract diagnostics for EDN output on non-blocked runs (exit code 0/1
@@ -336,13 +383,17 @@
    byte-identical)."
   [diagnostics]
   (when diagnostics
-    (let [{:keys [svo-issues config-lints cleanup-failures capture-lints
-                  counts]} diagnostics]
+    (let [{:keys [svo-issues config-lints glossary-lints cleanup-failures
+                  capture-lints counts]} diagnostics]
       (not-empty
        (cond-> {}
          (seq svo-issues)   (assoc :svo-issues svo-issues
                                    :counts (select-keys counts [:svo-issue-count]))
          (seq config-lints) (assoc :config-lints (vec config-lints))
+         ;; Glossary-load warnings (sl-67dj, Warden P3-13): warn-level truth
+         ;; from the strict loaders (e.g. :glossary/override-flag-ignored) —
+         ;; stderr is suppressed under --edn, so this is the machine channel.
+         (seq glossary-lints) (assoc :glossary-lints (vec glossary-lints))
          ;; Capability-cleanup failures (sl-lbrc): a leaked driver on an
          ;; otherwise-green run — warn-level truth, never the exit code.
          (seq cleanup-failures) (assoc :cleanup-failures (vec cleanup-failures))
@@ -376,7 +427,17 @@
   (let [base (cond-> {:run/id run-id
                       :run/exit-code exit-code
                       :run/status (verdict/exit-code->status exit-code)}
-               (:seed opts) (assoc :run/seed (:seed opts)))]
+               (:seed opts) (assoc :run/seed (:seed opts))
+               ;; sl-7dq5 F11b: envelope → artifacts pointer. Absent when
+               ;; the run created no results dir (dry-run, exit 2/3,
+               ;; :defaults contexts) — absent-when-unknown, golden-safe.
+               (:results-path opts) (assoc :run/results-path (:results-path opts))
+               ;; sl-pwbp: group identity — pure projection; callers pass
+               ;; these only in multi-group invocations (absent-unless-
+               ;; multi, golden-safe), so single-group summaries stay
+               ;; byte-identical.
+               (:group-label opts) (assoc :group/label (:group-label opts))
+               (some? (:group-index opts)) (assoc :group/index (:group-index opts)))]
     (case exit-code
       ;; Executed (pass, fail, or degraded) — include counts, failures,
       ;; and diagnostics if present. Exit 4 (degraded, sl-7c7i) carries
@@ -392,6 +453,11 @@
                                               :steps step-count))
                   (pos? exit-code)
                   (assoc :failures (vec (extract-failures scenarios)))
+
+                  ;; sl-kowi: the halt record — absent unless the policy
+                  ;; fired (golden-safe).
+                  (:halted opts)
+                  (assoc :halted (:halted opts))
 
                   ;; Attachment index (sl-oxiz): absent when no scenario
                   ;; carries a ref — attachment-less summaries stay
@@ -424,6 +490,69 @@
       3 (assoc base
                :counts zero-counts
                :error (serialize-error (:error opts))))))
+
+(defn invocation-summary
+  "Build the ONE invocation aggregate form for a multi-group run (sl-pwbp)
+   — emitted after every group's summary so a machine consumer reads the
+   suite verdict from the stream instead of only the process exit.
+
+   `group-results` are run-with-setups!'s per-group result maps, in
+   declared order; rows echo the per-group summary key vocabulary verbatim
+   (`:group/index` is the join key — each result's DECLARED position,
+   carried, so a narrowed run's rows keep their declared numbers with
+   gaps; sl-baup). Top-level key is `:invocation/exit-code`
+   ON PURPOSE — the published discriminator \"summaries are the forms
+   carrying :run/exit-code\" (docs/REPORTS.md) must not match this form.
+
+   `opts` (the 5-arity):
+   - `:dry-run?` (sl-a7sx, Warden W6): dry-run is invocation-wide (no
+     mixed case), so a clean dry run's aggregate says `:invocation/status
+     :dry-run` with exit code 0 — a plan verdict, never `:passed` for a run
+     that measured nothing. A dry run whose exit code is NONZERO (a group
+     failed planning, exit 2) keeps the exit-derived status —
+     `:planning-failed` beside exit 2 is the truth the rows already tell.
+   - `:halted` (sl-78u4, Warden W3): under `:halt-on-observation-failure
+     :run` the gate's record — the group summary's `{:after-scenario N
+     :scenario name}` plus `:group/label` of the group that went dark —
+     rides the aggregate; absent otherwise. Groups the halt SKIPPED (never
+     started, their :start never ran) have rows with `:run/status :skipped`
+     and NO `:run/exit-code`: no verdict exists, and absence is how this
+     very form already says so.
+   - `:results-path` (sl-alha, Warden W32): the INVOCATION-level run dir,
+     config-root-relative (`results/<stamp>`) — rides as
+     `:invocation/results-path`, additive, absent when no results dir
+     exists (dry-run, :defaults contexts). Group rows keep their own
+     `:run/results-path` on the per-group summaries; a consumer no longer
+     derives the invocation dir by slug-stripping.
+   The 4-arity is the plain live-run form."
+  ([run-id seed exit-code group-results]
+   (invocation-summary run-id seed exit-code group-results {}))
+  ([run-id seed exit-code group-results {:keys [dry-run? halted results-path]}]
+   (let [status (if (and dry-run? (zero? exit-code))
+                  :dry-run
+                  (verdict/exit-code->status exit-code))
+         rows (vec (map-indexed
+                    (fn [position r]
+                      ;; sl-baup: the DECLARED index carried on the group
+                      ;; result — never recomputed over the rows, so under
+                      ;; CLI narrowing the numbers keep their declared
+                      ;; values and may have gaps.
+                      (cond-> {:group/label (:group-label r)
+                               :group/index (:group-index r position)
+                               :run/status (:status r)}
+                        (contains? r :exit-code)
+                        (assoc :run/exit-code (:exit-code r))))
+                    group-results))]
+     (cond-> {:run/id run-id
+              :invocation/exit-code exit-code
+              :invocation/status status
+              :invocation/groups rows}
+       ;; sl-08f7 core-record family: the runner path always passes the
+       ;; seed; the guard only spares direct callers (build-summary's
+       ;; discipline).
+       seed (assoc :run/seed seed)
+       halted (assoc :halted halted)
+       results-path (assoc :invocation/results-path results-path)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Output
@@ -478,7 +607,16 @@
                      :seed (:seed run-summary)
                      ;; nil when absent — build-summary's cond-> skips it,
                      ;; so absent-when-zero survives the threading (sl-d7ks).
-                     :dropped-events (:dropped-events run-summary)}))
+                     :dropped-events (:dropped-events run-summary)
+                     ;; sl-7dq5 F11b: same nil-threads-as-absent discipline.
+                     :results-path (:results-path run-summary)
+                     ;; sl-kowi: the halt record, same discipline.
+                     :halted (:halted run-summary)
+                     ;; sl-pwbp: group identity rides the :run-end payload
+                     ;; only in multi-group invocations — nil threads as
+                     ;; absent, same discipline.
+                     :group-label (:group-label run-summary)
+                     :group-index (:group-index run-summary)}))
     nil))
 
 (defn make-reporter

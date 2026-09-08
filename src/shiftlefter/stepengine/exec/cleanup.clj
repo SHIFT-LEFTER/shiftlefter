@@ -276,6 +276,68 @@
         cap-cleanup (cleanup-ephemeral-capabilities! scenario-ctx interfaces registry)]
     (assoc result :capability-cleanup cap-cleanup :duration-ms duration-ms)))
 
+;; -----------------------------------------------------------------------------
+;; Halt on observation failure (sl-kowi, Ruling 4)
+;; -----------------------------------------------------------------------------
+
+(defn- observation-failure?
+  "True when a finalized scenario result is observation-class: status
+   :error with the attribution carrying `:error/class :observation`."
+  [result]
+  (and (= :error (:status result))
+       (step-loop/observation-error? (:error result))))
+
+(defn- halted-scenario-result
+  "The result for a scenario that was never STARTED because the run halted
+   (`:halt-on-observation-failure`): plain :skipped, every step :skipped —
+   the non-runnable-plan shape (step_loop execute-scenario). No per-
+   scenario marker; the suite result's `:halted` record carries the why."
+  [plan]
+  {:status :skipped
+   :plan plan
+   :steps (mapv #(prov/make-step-result % :skipped nil nil) (:plan/steps plan))
+   :scenario-ctx {}})
+
+(defn- halt-record
+  "The suite-level `:halted` record for the FIRST observation-class
+   finalization: `{:after-scenario N :scenario <name>}`, N = 1-based plan
+   index of the triggering scenario."
+  [idx plan]
+  {:after-scenario (inc idx)
+   :scenario (-> plan :plan/pickle :pickle/name)})
+
+(defn- run-or-skip
+  "Run `plan` (plan index `idx`) unless the halt gate is already set, in
+   which case return the skipped result without starting it. After a REAL
+   run, arm the gate (first trigger wins) when the result is
+   observation-class and the policy is on. Both branches fire `on-complete`
+   themselves ONLY when `fire?` — pool tasks hand results back over the
+   queue and let the coordinator fire it (invariant 1)."
+  [halted halt? plan idx opts fire? run-fn]
+  (let [result (if @halted
+                 (halted-scenario-result plan)
+                 (let [r (run-fn plan)]
+                   (when (and halt? (observation-failure? r))
+                     ;; Armed BEFORE the completion is handed back, so any
+                     ;; task that starts after this one returns sees it —
+                     ;; stop-starting is exact; nothing in flight is touched.
+                     (compare-and-set! halted nil (halt-record idx plan)))
+                   r))]
+    (when-let [on-complete (and fire? (:on-scenario-complete opts))]
+      (on-complete result))
+    result))
+
+(defn- execute-plans-sequential
+  "The :max-parallel 1 path — plan order, one at a time, on the coordinator.
+   Byte-identical to the pre-halt runner when the gate never arms."
+  [plans opts halted]
+  (let [halt? (true? (:halt-on-observation-failure opts))]
+    (vec (map-indexed
+          (fn [idx plan]
+            (run-or-skip halted halt? plan idx opts true
+                         #(execute-scenario-with-cleanup % opts)))
+          plans))))
+
 (defn- execute-plans-parallel
   "The N>1 scheduler (sl-q9wp). Two phases:
 
@@ -301,30 +363,39 @@
    crash for that scenario and is converted to a failed result (first step
    bears the error, matching the eager-provisioning failure shape).
 
+   Halt (sl-kowi, Ruling 4): tasks are all pre-submitted; each checks the
+   `halted` gate FIRST and, once it is armed, returns a skipped result
+   without starting — STOP STARTING, never kill in flight. Scenarios
+   already running complete and keep their verdicts. If the gate is armed
+   by the time the pool drains, the whole serial tail is skipped.
+
    Returns the results vector in PLAN order."
-  [plans opts n]
+  [plans opts n halted]
   (let [on-complete  (:on-scenario-complete opts)
+        halt?        (true? (:halt-on-observation-failure opts))
         indexed      (map-indexed vector plans)
         serial?      (fn [[_idx plan]]
                        (true? (get-in plan [:plan/schedule :serial?])))
         serial-plans (filter serial? indexed)
         pool-plans   (remove serial? indexed)
         completions  (LinkedBlockingQueue.)
-        executor     (Executors/newFixedThreadPool n)]
+        executor     (Executors/newFixedThreadPool n)
+        guarded-run  (fn [plan]
+                       (try
+                         (execute-scenario-with-cleanup plan opts)
+                         (catch Throwable t
+                           (prov/eager-failure-result
+                            plan
+                            {:type :scenario/harness-crash
+                             :message (str "Escaped scenario execution: "
+                                           (ex-message t))
+                             :exception-class (.getName (class t))}))))]
     (try
       (doseq [[idx plan] pool-plans]
         (let [task (bound-fn* ; conveyance: the sl-aa5 future pattern (R6)
                     (fn []
-                      (let [result
-                            (try
-                              (execute-scenario-with-cleanup plan opts)
-                              (catch Throwable t
-                                (prov/eager-failure-result
-                                 plan
-                                 {:type :scenario/harness-crash
-                                  :message (str "Escaped scenario execution: "
-                                                (ex-message t))
-                                  :exception-class (.getName (class t))})))]
+                      (let [result (run-or-skip halted halt? plan idx opts
+                                                false guarded-run)]
                         (.put completions [idx result]))))]
           (.submit ^ExecutorService executor ^Runnable task)))
       (let [pool-results
@@ -336,9 +407,9 @@
                   (recur (assoc acc idx result) (dec remaining)))))
             all-results
             (reduce (fn [acc [idx plan]]
-                      (let [result (execute-scenario-with-cleanup plan opts)]
-                        (when on-complete (on-complete result))
-                        (assoc acc idx result)))
+                      (assoc acc idx
+                             (run-or-skip halted halt? plan idx opts true
+                                          #(execute-scenario-with-cleanup % opts))))
                     pool-results
                     serial-plans)]
         (mapv all-results (range (count plans))))
@@ -367,13 +438,31 @@
        `:scenario/finished` on the observe plane. User-facing reporters
        are NOT driven from here — they run live but in plan order (sl-dgk
        puts report dispatch behind the runner's plan-order release buffer).
+     - :halt-on-observation-failure — boolean, default false (sl-kowi,
+       Ruling 4). When true: after any scenario finalizes observation-
+       class (:error with `:error/class :observation`), no further
+       scenario STARTS — in-flight scenarios (N>1) run to completion and
+       keep their verdicts; every unstarted scenario (the rest of the
+       queue AND the @serial tail) becomes :skipped, all steps :skipped.
+       The exit code is 4 either way; the halt changes wall-clock and
+       report noise, never the verdict.
+     - :halt-gate — optional shared gate atom (sl-78u4, Warden W3). Under
+       `:halt-on-observation-failure :run` the runner creates ONE atom per
+       invocation and threads it through every setup group's execute-suite
+       call, so a halt in one group is seen by the rest. Absent (single
+       suite, or :group scope) a fresh per-suite atom is created here.
 
    Returns:
    - {:scenarios [{:status ... :plan ... :steps ... :capability-cleanup ...} ...]
       :counts {:passed N :failed N :pending N :skipped N
-               :error N}   ;; only when positive — infrastructure failure
-                           ;; family: hook/provisioning/capture/harness
-                           ;; (sl-esq, sl-7c7i)
+               :error N        ;; only when positive — infrastructure failure
+                               ;; family: hook/provisioning/capture/harness
+                               ;; (sl-esq, sl-7c7i)
+               :unobserved N}  ;; only when positive — :error scenarios of
+                               ;; observation class (sl-kowi); DISJOINT
+                               ;; from :error
+      :halted {:after-scenario N :scenario name}  ;; only when the halt
+                                                  ;; policy fired
       :status :passed|:failed}
 
    `:scenarios` is in PLAN order at every :max-parallel.
@@ -388,27 +477,35 @@
   ([plans] (execute-suite plans {}))
   ([plans opts]
    (let [max-parallel (or (:max-parallel opts) 1)
+         ;; The halt gate (sl-kowi): nil until the first observation-class
+         ;; finalization arms it with the halt record. Inert unless
+         ;; :halt-on-observation-failure is on. The runner hands in a
+         ;; SHARED atom under :run scope (sl-78u4) — one gate, many groups.
+         halted (or (:halt-gate opts) (atom nil))
          results
          (if (> max-parallel 1)
-           (execute-plans-parallel plans opts max-parallel)
-           ;; Sequential path — unchanged (sl-q9wp acceptance 1: N=1 is
-           ;; byte-identical to before by construction).
-           (let [on-complete (:on-scenario-complete opts)
-                 run-one (fn [plan]
-                           (let [result (execute-scenario-with-cleanup plan opts)]
-                             (when on-complete (on-complete result))
-                             result))]
-             (mapv run-one plans)))
+           (execute-plans-parallel plans opts max-parallel halted)
+           ;; Sequential path (sl-q9wp acceptance 1: N=1 is byte-identical
+           ;; to before when the halt gate never arms).
+           (execute-plans-sequential plans opts halted))
          counts (frequencies (map :status results))
+         ;; :unobserved (sl-kowi) is carved OUT of the :error tally: the two
+         ;; buckets are disjoint — "error" = harness machinery broke (fix
+         ;; harness); "unobserved" = the witness went dark (check
+         ;; environment). Both reach exit 4.
+         unobserved (count (filter observation-failure? results))
+         error (- (get counts :error 0) unobserved)
          suite-passed? (every? #(= :passed (:status %)) results)]
-     {:scenarios results
-      ;; :error (sl-esq; family widened to hook/provisioning/capture/
-      ;; harness, sl-7c7i) is emitted only when positive so error-free
-      ;; runs keep the historical four-key map byte-identical.
-      :counts (cond-> {:passed (get counts :passed 0)
-                       :failed (get counts :failed 0)
-                       :pending (get counts :pending 0)
-                       :skipped (get counts :skipped 0)}
-                (pos? (get counts :error 0))
-                (assoc :error (get counts :error)))
-      :status (if suite-passed? :passed :failed)})))
+     (cond-> {:scenarios results
+              ;; :error (sl-esq; family widened to hook/provisioning/capture/
+              ;; harness, sl-7c7i) and :unobserved (sl-kowi) are emitted only
+              ;; when positive so error-free runs keep the historical
+              ;; four-key map byte-identical.
+              :counts (cond-> {:passed (get counts :passed 0)
+                               :failed (get counts :failed 0)
+                               :pending (get counts :pending 0)
+                               :skipped (get counts :skipped 0)}
+                        (pos? error) (assoc :error error)
+                        (pos? unobserved) (assoc :unobserved unobserved))
+              :status (if suite-passed? :passed :failed)}
+       @halted (assoc :halted @halted)))))

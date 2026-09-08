@@ -41,19 +41,27 @@ D3). `sl run`'s codes:
 | 1 | One or more scenarios failed (valid tests, app wrong), or pending steps when not allowed |
 | 2 | Planning failure (undefined steps, parse errors, config errors, no features found, bad flags, empty selection) — **single-group: no JUnit file; multi-group: the file covers only the groups that ran** — gate on the exit code |
 | 3 | Runner crash (unexpected exception) |
-| 4 | Run degraded: an infrastructure failure (hook throw, capability provisioning, capture, harness) — the run proves nothing about the app |
+| 4 | Run degraded: the harness's own machinery broke (hook throw, capability provisioning, capture, harness — counted `error`) or a step's adapter classified its failure `:observation` (no answer existed — counted `unobserved`) — the run proves nothing about the app for those scenarios |
 
-Canonical table for all commands: [README → Return Codes](../README.md#return-codes).
+Canonical table for all commands: [README → Return Codes](../README.md#return-codes);
+the ladder, the `:error/class` contract and the triage guidance:
+[the exit-codes page](architecture/exit-codes.md).
 Background on the no-file/partial-file semantics and the JUnit format itself:
 [ERRATA E009](../ERRATA.md#e009-junit-xml-has-no-official-spec--we-target-the-consumer-subset).
 
-One forward-looking note for gate authors: today an infrastructure failure
-that surfaces inside a step — a connection refused mid-run, say — is
-indistinguishable from the app being wrong and reports as an ordinary
-scenario failure (exit 1); only the harness's own `:error` family reaches 4.
-A future release may classify such step-level infrastructure failures into
-the degraded verdict — one more reason to gate on nonzero, not on a specific
-value.
+One note for gate authors: a step-level infrastructure failure — a
+connection refused mid-run, say — reaches 4 only when the adapter that did
+the I/O classified it (`:error/class :observation`); the built-in SMS and
+browser families do, a custom adapter that doesn't keeps today's exit 1.
+Exit 4 is a machine-legible stop sign — *don't touch the code; this run
+proved nothing here; check the environment* — and in CI
+`{:runner {:halt-on-observation-failure :run}}` turns a deploy that never
+came up into a fast fail instead of N timeouts — with `:run`, every
+`setup.clj` group not yet started is skipped outright, its `:start` never
+run (the key is `false` | `:group` | `:run`; `true` reads as `:run`; choose
+`:group` when your groups are different environments and a dark one says
+nothing about the others). One more reason to gate on nonzero, not on a
+specific value.
 
 The HTML report behaves differently on exit 2 (since 0.5.4): late planning
 failures — undefined or ambiguous steps, arity mismatches, a hooks error —
@@ -201,17 +209,24 @@ Any image with **Java 21 or later** runs ShiftLefter — a JRE is enough, e.g.
 
 ## Installing `sl` in the job
 
-The installer drops a runnable `sl` + jar into `./sl/`:
+The installer drops a runnable `sl` + jar into `./sl/`. Fetch the script
+from the release **tag**, not from `main`: the script and the jar it
+downloads must be the same release (the flags below exist only in the
+0.5.6 script), and a tag never moves under a pipeline the way `main` does.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh \
-  | bash -s -- --version 0.5.5 --no-breadcrumb
+curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/v0.5.6/release/install.sh \
+  | bash -s -- --version 0.5.6 --no-write-agents
 ```
 
-- **Pin `--version`** to the release your team is on, so CI doesn't silently
-  move when the default changes.
-- `--no-breadcrumb` skips the agent on-ramp stanza — it's for humans pasting
-  into agent files, not for CI logs.
+- **Pin the tag in the URL and `--version` to the same release** — the one
+  your team is on. The tag fixes the installer; `--version` fixes the jar it
+  fetches; a script from one release may not understand another's flags.
+  Neither moves when the default changes.
+- `--no-write-agents` pre-answers the AGENTS.md question with no: nothing is
+  written and the stanza offer stays out of your CI logs. (A non-interactive
+  install already defaults to no-write, but it then prints the
+  stanza as the offer; in automation, explicit beats implicit.)
 - **Cache `./sl/`** keyed by version so the download happens once, and skip
   the install when the cache hit: `[ -x sl/sl ] || curl …`.
 
@@ -229,12 +244,12 @@ image: eclipse-temurin:21-jre
 stages: [test]
 
 cache:
-  key: "sl-0.5.5"
+  key: "sl-0.5.6"
   paths: [sl/]
 
 .install-sl: &install-sl
   - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl unzip
-  - '[ -x sl/sl ] || curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh | bash -s -- --version 0.5.5 --no-breadcrumb'
+  - '[ -x sl/sl ] || curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/v0.5.6/release/install.sh | bash -s -- --version 0.5.6 --no-write-agents'
 
 smoke:
   stage: test
@@ -303,8 +318,8 @@ jobs:
           java-version: '21'
       - name: Install sl
         run: |
-          curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/main/release/install.sh \
-            | bash -s -- --version 0.5.5 --no-breadcrumb
+          curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/v0.5.6/release/install.sh \
+            | bash -s -- --version 0.5.6 --no-write-agents
       - name: Run features
         # PRs run the @smoke subset; main runs everything.
         run: |
@@ -396,6 +411,11 @@ sl run features/ --step-paths steps/ --dry-run
 
 Both run in seconds on a bare JRE image — worth a first pipeline stage so the
 browser job never starts on a suite that can't bind.
+
+There is no standalone config-check command, on purpose: every invocation
+lints the config, so `sl run --dry-run` *is* the no-execution gate — exit 2
+with the diagnostics, `:config-lints` included under `--edn`. `sl doctor`
+is the machine check (Java, ChromeDriver, PATH), never a project check.
 
 ## Parallelism: inside the job, not across jobs
 

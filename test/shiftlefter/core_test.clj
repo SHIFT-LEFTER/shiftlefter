@@ -522,6 +522,31 @@
       (is (= 2 code))
       (is (str/includes? (str err) "Use --help for usage."))))
 
+  (testing "run --dry-run with --html/--junit-xml PROCEEDS (sl-a7sx, Warden
+            W23 — Chair ruling 09-03 reversing sl-7dq5 F8's exit-2 refusal):
+            exit 0, the success line, ONE stderr line naming both reports as
+            not written, and no file — flag and config mirror now agree"
+    (let [html (str (jio/file *temp-dir* "r.html"))
+          junit (str (jio/file *temp-dir* "out.xml"))
+          out  (java.io.StringWriter.)
+          err  (java.io.StringWriter.)
+          code (binding [*out* out *err* err]
+                 (core/dispatch ["run" "--dry-run"
+                                 "-c" "test/fixtures/config/minimal.edn"
+                                 "--step-paths" "test/fixtures/steps"
+                                 "--html" html "--junit-xml" junit
+                                 "test/fixtures/features/simple.feature"]))
+          notices (filter #(str/starts-with? % "dry run: report(s) not written")
+                          (str/split-lines (str err)))]
+      (is (= 0 code))
+      (is (str/includes? (str err) "bound successfully (dry run)"))
+      (is (= 1 (count notices)) "exactly one notice line")
+      (is (str/includes? (first notices) (str "html " html)))
+      (is (str/includes? (first notices) (str "junit-xml " junit)))
+      (is (not (str/includes? (str err) "cannot combine")) "the refusal is retired")
+      (is (not (.exists (jio/file html))))
+      (is (not (.exists (jio/file junit))))))
+
   (testing "unknown command returns 2, hint on *err*, stdout clean (sl-von)"
     (let [out  (java.io.StringWriter.)
           err  (java.io.StringWriter.)

@@ -1,0 +1,7 @@
+;; Namespaced-type verb glossary (sl-67dj open-space pin): a third-party
+;; bundle's :github/web must mount without colliding with anyone's :web.
+{:type :github/web
+ :verbs
+ {:fork {:desc "Fork a repository"
+         :frames {:default {:args []
+                            :pattern "S forks O"}}}}}

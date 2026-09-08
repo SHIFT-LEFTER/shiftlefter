@@ -176,3 +176,136 @@
                   (catch clojure.lang.ExceptionInfo e e))]
       (is (string? (get-in (ex-data ex) [:last-error :data])))
       (is (= (ex-data ex) (edn/read-string (pr-str (ex-data ex))))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-afs9 (F14): the empty timeout teaches the idiom; Rider C inheritance
+;; -----------------------------------------------------------------------------
+
+(defn- timeout-data [pred opts]
+  (try (step/poll-until {} pred (fast-opts opts))
+       nil
+       (catch clojure.lang.ExceptionInfo e (ex-data e))))
+
+(def ^:private the-hint
+  "pred returned nil to continue; return the observation and pass :until to populate :last-value")
+
+(deftest poll-until-hint-fires-only-on-the-nil-idiom
+  (testing "nil-to-continue with no :until → :last-value nil AND the hint"
+    (let [data (timeout-data (constantly nil) {})]
+      (is (contains? data :last-value))
+      (is (nil? (:last-value data)))
+      (is (= the-hint (:hint data)))))
+  (testing "false is a judged observation — no hint (the sl-99u2 pin stays)"
+    (let [data (timeout-data (constantly false) {})]
+      (is (false? (:last-value data)))
+      (is (not (contains? data :hint)))))
+  (testing "observe-and-judge: :last-value is the last observation, no hint"
+    (let [data (timeout-data (constantly {:state "running" :pct 85})
+                             {:until #(= "done" (:state %))})]
+      (is (= (pr-str {:state "running" :pct 85}) (:last-value data)))
+      (is (not (contains? data :hint)))))
+  (testing "an :until that never accepted a nil observation still hints nothing — :until was supplied"
+    (let [data (timeout-data (constantly nil) {:until some?})]
+      (is (nil? (:last-value data)))
+      (is (not (contains? data :hint)))))
+  (testing "the retry path never hints — :last-error is the channel"
+    (let [data (timeout-data #(throw (ex-info "not yet" {:type :test/transient}))
+                             {:retry-error? (constantly true)})]
+      (is (contains? data :last-error))
+      (is (not (contains? data :last-value)))
+      (is (not (contains? data :hint)))))
+  (testing "the record still round-trips as EDN with the hint aboard"
+    (let [data (timeout-data (constantly nil) {})]
+      (is (= data (edn/read-string (pr-str data)))))))
+
+(deftest poll-until-inherits-the-class-from-a-witness-that-never-answered
+  (testing "Rider C: every attempt threw a classified error → the timeout carries the class"
+    (doseq [c [:observation :sut :assertion]]
+      (let [data (timeout-data #(throw (ex-info "refused" {:type :t/refused :error/class c}))
+                               {:retry-error? #(= :t/refused (:type (ex-data %)))})]
+        (is (= :step/poll-timeout (:type data)))
+        (is (= c (:error/class data)) (str c " is inherited"))
+        (is (= c (get-in data [:last-error :data :error/class]))
+            "the sanitized last-error data still shows it too"))))
+  (testing "an unclassified retry error inherits nothing"
+    (let [data (timeout-data #(throw (ex-info "not yet" {:type :test/transient}))
+                             {:retry-error? (constantly true)})]
+      (is (not (contains? data :error/class)))))
+  (testing "an unrecognized class value is ignored"
+    (let [data (timeout-data #(throw (ex-info "x" {:type :t :error/class :bogus}))
+                             {:retry-error? (constantly true)})]
+      (is (not (contains? data :error/class)))))
+  (testing "a timeout with ANY :last-value is never classified — the witness was answering"
+    (let [data (timeout-data (constantly {:state "running"})
+                             {:until #(= "done" (:state %))})]
+      (is (contains? data :last-value))
+      (is (not (contains? data :error/class)))))
+  (testing "the class set is the one literal the runner's spec uses"
+    (is (= #{:assertion :sut :observation} step/error-classes))))
+
+;; -----------------------------------------------------------------------------
+;; sl-78u4 (Warden W2): EVER-ANSWERED wins the verdict; the :poll-counts digest
+;; -----------------------------------------------------------------------------
+
+(defn- scripted
+  "A predicate that plays `script` in order: a fn entry is CALLED (throw
+   from it), anything else is returned. Repeats the last entry."
+  [script]
+  (let [n (atom -1)]
+    (fn []
+      (let [i (swap! n inc)
+            entry (nth script (min i (dec (count script))))]
+        (if (fn? entry) (entry) entry)))))
+
+(defn- dark [] (throw (ex-info "refused" {:type :t/refused :error/class :observation})))
+(def ^:private retry-refused {:retry-error? #(= :t/refused (:type (ex-data %)))})
+
+(deftest poll-until-ever-answered-wins-the-verdict
+  (testing "two real observations, then a dark throw at the deadline edge —
+            the witness TALKED: no class (assertion territory, exit 1), both
+            channels side by side, and the digest confesses the history
+            (Warden CASE A; before the fix: :observation, :last-value gone)"
+    (let [data (timeout-data (scripted [{:state "running" :pct 40} {:pct 80} dark])
+                             (merge retry-refused
+                                    {:until #(= "done" (:state %))
+                                     :deadline-ms 60 :interval-ms 20}))]
+      (is (not (contains? data :error/class)))
+      (is (= "{:pct 80}" (:last-value data)) "the most recent ANSWER (sanitized), not nil")
+      (is (= :t/refused (get-in data [:last-error :type])) "and the last throw beside it")
+      ;; The final attempt lands at the deadline edge, so the throw count is
+      ;; clock-dependent — assert the shape, exact where it is exact.
+      (let [{:keys [attempts answered threw observation-throws]} (:poll-counts data)]
+        (is (= 2 answered))
+        (is (pos? threw))
+        (is (= threw observation-throws) "every throw was the dark one")
+        (is (= attempts (+ answered threw)) "no nil returns in this history"))))
+  (testing "two dark throws, then a nil answer — never answered: :observation
+            (Warden CASE B; before the fix: no class at all)"
+    (let [data (timeout-data (scripted [dark dark nil])
+                             (merge retry-refused {:deadline-ms 60 :interval-ms 20}))]
+      (is (= :observation (:error/class data)))
+      (is (contains? data :last-value) "the nil return is still the last value")
+      (is (nil? (:last-value data)))
+      (is (= :t/refused (get-in data [:last-error :type])))
+      (is (= the-hint (:hint data)) "nil-idiom hint still teaches")
+      (let [{:keys [attempts answered threw observation-throws]} (:poll-counts data)]
+        (is (= 0 answered))
+        (is (= 2 threw observation-throws))
+        (is (>= attempts 3) "two throws plus at least the nil return"))))
+  (testing "a dark throw ANYWHERE in a never-answered history wins over a
+            later unclassified retry error"
+    (let [data (timeout-data (scripted [dark #(throw (ex-info "later" {:type :t/refused}))])
+                             (merge retry-refused {:deadline-ms 40 :interval-ms 20}))]
+      (is (= :observation (:error/class data)))
+      (is (= 1 (get-in data [:poll-counts :observation-throws])))))
+  (testing "`false` is a judged observation — an answer, never classified"
+    (let [data (timeout-data (scripted [false dark])
+                             (merge retry-refused {:deadline-ms 40 :interval-ms 20}))]
+      (is (not (contains? data :error/class)))
+      (is (= 1 (get-in data [:poll-counts :answered])))))
+  (testing "the digest rides every timeout — the plain nil-idiom one too"
+    (let [data (timeout-data (constantly nil) {:deadline-ms 30 :interval-ms 10})]
+      (is (= 0 (get-in data [:poll-counts :answered])))
+      (is (= 0 (get-in data [:poll-counts :threw])))
+      (is (pos? (get-in data [:poll-counts :attempts])))
+      (is (not (contains? data :last-error))))))

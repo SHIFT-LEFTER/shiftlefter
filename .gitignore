@@ -30,7 +30,8 @@ _docs
 CLAUDE.md
 
 # Agent tooling (user-specific)
-.claude/
+.claude/*
+!.claude/settings.json
 .glance-hue
 
 # bv (beads viewer) local config and caches

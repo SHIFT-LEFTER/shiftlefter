@@ -193,7 +193,8 @@ belong to a *nested* component instance. Playwright can do that filtering
 two ways, chosen per interface in `shiftlefter.edn`:
 
 ```edn
-{:interfaces {:web {:adapter :playwright
+{:interfaces {:web {:type :web
+                    :adapter :playwright
                     :pruning :fast}}}   ; the default — omit unless :safe
 ```
 
@@ -220,21 +221,37 @@ In your `shiftlefter.edn`:
 
 ```edn
 {:interfaces
- {:web {:adapter :playwright
+ {:web {:type :web
+        :adapter :playwright
         :config {:headless true}}}}
 ```
 
-The default is `:etaoin` — no configuration needed.
+The default is `:etaoin` — with no `:interfaces` key in your config, the
+builtin `:web` instance is used and nothing needs declaring. Once you write
+`:interfaces`, your map is the complete set and each entry is a complete
+definition — declare the `:type` (see
+[SVO.md § `:interfaces`](SVO.md#interfaces)).
 
 ### Passing Backend-Specific Options
 
 Use `:adapter-opts` in your interface config to pass options directly to the backend library. These are merged into the backend's native option map without translation.
 
+One first-class key sits beside it on the Etaoin adapter: `:page-load-timeout-ms` sets the WebDriver page-load timeout at session creation (absent = Chrome's default, five minutes). A server that accepts and never answers makes the navigation step fail with the driver's `timeout` answer, which the framework classifies as the observation channel going dark (exit 4, not 1) — with this key set, that verdict arrives in seconds:
+
+```clojure
+{:interfaces
+ {:web {:type :web
+        :adapter :etaoin
+        :config {:headless true
+                 :page-load-timeout-ms 10000}}}}
+```
+
 **Etaoin examples:**
 
 ```edn
 {:interfaces
- {:web {:adapter :etaoin
+ {:web {:type :web
+        :adapter :etaoin
         :config {:headless true
                  :adapter-opts {:size {:width 1280 :height 720}
                                 :prefs {"download.default_directory" "/tmp"}}}}}}
@@ -244,7 +261,8 @@ Use `:adapter-opts` in your interface config to pass options directly to the bac
 
 ```edn
 {:interfaces
- {:web {:adapter :playwright
+ {:web {:type :web
+        :adapter :playwright
         :config {:headless false
                  :adapter-opts {:browser-type :firefox}}}}}
 ```
@@ -266,7 +284,8 @@ you set wins, and setting one key back does not lose the other defaults:
 
 ```edn
 {:interfaces
- {:web {:adapter :etaoin
+ {:web {:type :web
+        :adapter :etaoin
         :config {:adapter-opts
                  ;; opt back in to leak detection; the other two defaults stay
                  {:prefs {"profile.password_manager_leak_detection" true}}}}}}

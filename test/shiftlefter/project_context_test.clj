@@ -218,3 +218,41 @@
           (is (false? (:portable? ctx')))
           (is (= :project-context/path-escapes-project (:type diag)))
           (is (= outside (:path diag))))))))
+
+;; -----------------------------------------------------------------------------
+;; Creation-site self-ignore (sl-7dq5 F9)
+;; -----------------------------------------------------------------------------
+
+(deftest ensure-self-ignore-creates-dir-and-gitignore
+  (with-temp-dir
+    (fn [dir]
+      (let [sdir (str (fs/path dir ".shiftlefter"))]
+        (project-context/ensure-self-ignore! sdir)
+        (is (fs/directory? sdir))
+        (is (= "*\n" (slurp (str (fs/path sdir ".gitignore")))))))))
+
+(deftest ensure-self-ignore-never-clobbers-existing-gitignore
+  (with-temp-dir
+    (fn [dir]
+      (let [sdir (str (fs/path dir ".shiftlefter"))
+            gi (fs/path sdir ".gitignore")]
+        (fs/create-dirs sdir)
+        (spit (str gi) "daemon.log\n")
+        (project-context/ensure-self-ignore! sdir)
+        (is (= "daemon.log\n" (slurp (str gi)))
+            "a user-customized ignore file is authored content")))))
+
+(deftest self-ignored-dir-leaves-scratch-git-repo-clean
+  ;; The F9 acceptance shape: runtime state written into .shiftlefter/ in a
+  ;; repo the installer never touched must leave `git status` clean.
+  (with-temp-dir
+    (fn [dir]
+      (init-git! dir)
+      (let [sdir (project-context/ensure-self-ignore!
+                  (str (fs/path dir ".shiftlefter")))]
+        (spit (str (fs/path sdir "daemon.edn")) "{}")
+        (spit (str (fs/path sdir "daemon.log")) "")
+        (let [status (shell/sh "git" "status" "--porcelain" :dir dir)]
+          (is (zero? (:exit status)))
+          (is (= "" (:out status))
+              "nothing under .shiftlefter/ may reach git"))))))

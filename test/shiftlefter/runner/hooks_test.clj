@@ -137,6 +137,32 @@
               {:keys [error]} (hooks/load-hooks path {})]
           (is (= :hooks/invalid-shape (:type error))))))))
 
+(deftest load-hooks-rejects-unknown-entry-keys
+  ;; sl-3bqv: the entry key set is framework-owned and closed; a typo'd
+  ;; :requires-serial used to be stripped silently by resolved-entry.
+  (testing "an unknown key is an error naming the entry, the key and the set"
+    (with-temp-dir
+      (fn [dir]
+        (let [path (spit-file dir "hooks.clj"
+                              (str "(ns hooks)\n(def hooks [{:name \"a\" :before (fn [_] nil)"
+                                   " :requires_serial true}])"))
+              {:keys [error]} (hooks/load-hooks path {})]
+          (is (= :hooks/unknown-key (:type error)))
+          (is (= [["a" [:requires_serial]]] (:unknown error)))
+          (is (str/includes? (:message error) "\"a\" carries unknown key [:requires_serial]"))
+          (is (str/includes? (:message error) ":requires-serial"))
+          (is (= path (:path error)))))))
+  (testing "the full key set loads clean"
+    (with-temp-dir
+      (fn [dir]
+        (let [path (spit-file dir "hooks.clj"
+                              (str "(ns hooks)\n(def hooks [{:name \"a\" :before (fn [_] nil)"
+                                   " :after (fn [_] nil) :global? true :requires-serial true"
+                                   " :provides [:token]}])"))
+              {:keys [ok error]} (hooks/load-hooks path {})]
+          (is (nil? error))
+          (is (= 1 (count ok))))))))
+
 (deftest load-hooks-rejects-duplicate-names
   (testing "Duplicate :name = planning error naming the duplicates"
     (with-temp-dir

@@ -69,15 +69,18 @@
     (fn [root]
       (let [{:keys [status written agents-file]} (init/scaffold! root)
             {:keys [exit plan-count]} (dry-run-scaffold root)]
-        (testing "scaffold reports every ruled artifact"
+        (testing "scaffold reports every ruled artifact — and by default
+                  AGENTS.md is NOT one of them (sl-7dq5 F1 ownership
+                  boundary: a user-owned agent file is written only on an
+                  explicit ask)"
           (is (= :scaffolded status))
-          (is (= :created agents-file))
+          (is (= :not-written agents-file))
+          (is (not (fs/exists? (fs/path root "AGENTS.md"))))
           (is (= ["sl/shiftlefter.edn"
                   "sl/glossary/subjects.edn"
                   "sl/glossary/intents/login.edn.example"
                   "sl/features/login.feature"
-                  ".shiftlefter/.gitignore"
-                  "AGENTS.md"]
+                  ".shiftlefter/.gitignore"]
                  written)))
         (testing "the proof AC: sl run --dry-run exits 0 on the scaffold output"
           (is (= 0 exit))
@@ -154,7 +157,11 @@
 (deftest agents-file-created-with-markers-and-reused-stanza
   (with-temp-root
     (fn [root]
-      (init/scaffold! root)
+      (let [{:keys [written agents-file]}
+            (init/scaffold! root {:write-agents? true})]
+        (is (= :created agents-file))
+        (is (= "AGENTS.md" (last written))
+            "the explicit ask reports the write as an artifact"))
       (let [content (slurp (fs/file root "AGENTS.md"))
             stanza (slurp (io/resource "shiftlefter/onramp/agents-breadcrumb.md"))]
         (is (str/includes? content init/onramp-begin-marker))
@@ -167,7 +174,7 @@
     (fn [root]
       (let [prior "# My project\n\nExisting agent notes.\n"]
         (spit (fs/file root "AGENTS.md") prior)
-        (let [{:keys [agents-file]} (init/scaffold! root)
+        (let [{:keys [agents-file]} (init/scaffold! root {:write-agents? true})
               content (slurp (fs/file root "AGENTS.md"))]
           (is (= :appended agents-file))
           (testing "prior content intact, stanza appended after it"
@@ -180,11 +187,39 @@
       (let [existing (str "# Mine\n" init/onramp-begin-marker
                           "\nhand-edited stanza\n" init/onramp-end-marker "\n")]
         (spit (fs/file root "AGENTS.md") existing)
-        (let [{:keys [agents-file written]} (init/scaffold! root)]
+        (let [{:keys [agents-file written]} (init/scaffold! root {:write-agents? true})]
           (is (= :skipped agents-file))
           (is (not-any? #{"AGENTS.md"} written))
           (testing "never edits an existing stanza — byte-identical"
             (is (= existing (slurp (fs/file root "AGENTS.md"))))))))))
+
+(deftest bail-arm-write-agents-performs-only-the-trio-write
+  ;; The one narrow, named exception to the coarse bail (Chair-approved
+  ;; 08-28, sl-7dq5 F1): an EXPLICIT --write-agents on a bailed scaffold
+  ;; performs only the marker-guarded AGENTS.md write — the offer's named
+  ;; command must work after first init, or the surface lies about its one
+  ;; control (the --no-breadcrumb sin).
+  (with-temp-root
+    (fn [root]
+      (fs/create-dirs (fs/path root "sl"))
+      (spit (fs/file root "sl" "shiftlefter.edn") "{}")
+      (testing "bail WITHOUT the flag stays a pure no-op"
+        (let [report (init/scaffold! root)]
+          (is (= :bailed (:status report)))
+          (is (not (contains? report :agents-file)))
+          (is (not (fs/exists? (fs/path root "AGENTS.md"))))))
+      (testing "bail WITH the flag writes the stanza, nothing else"
+        (let [report (init/scaffold! root {:write-agents? true})]
+          (is (= :bailed (:status report)))
+          (is (= :created (:agents-file report)))
+          (is (str/includes? (slurp (fs/file root "AGENTS.md"))
+                             init/onramp-begin-marker))
+          (is (= "{}" (slurp (fs/file root "sl" "shiftlefter.edn")))
+              "config untouched")
+          (is (not (fs/exists? (fs/path root "sl" "features")))
+              "no scaffold artifact appears")))
+      (testing "a second flagged run skips on the marker (trio semantics)"
+        (is (= :skipped (:agents-file (init/scaffold! root {:write-agents? true}))))))))
 
 (deftest shiftlefter-dir-self-ignores
   (with-temp-root

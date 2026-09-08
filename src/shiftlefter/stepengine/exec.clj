@@ -23,6 +23,7 @@
      after their scenario, even on failure"
   (:require [clojure.spec.alpha :as s]
             [shiftlefter.attachments :as attachments]
+            [shiftlefter.step :as step]
             [shiftlefter.stepengine.exec.cleanup :as cleanup]
             [shiftlefter.stepengine.exec.provisioning :as provisioning]
             [shiftlefter.stepengine.exec.step-loop :as step-loop]))
@@ -41,7 +42,23 @@
 (s/def ::status #{:passed :pending :failed :skipped :error})
 (s/def ::type keyword?)
 (s/def ::message string?)
-(s/def ::error (s/keys :req-un [::type ::message]))
+;; :error/class (sl-kowi, F15) — the step/adapter error-and-observation
+;; contract: ONE recognized ex-data key on any exception a step or adapter
+;; throws, pre-classifying the failure at the site that did the I/O.
+;;   :assertion   — the witness answered; the answer missed the expectation
+;;   :sut         — the witness answered WITH an error (500, failed job);
+;;                  still product evidence
+;;   :observation — no answer existed (refused, transport timeout, DNS);
+;;                  proves nothing about the app, cause-agnostic by design
+;; Absent (or unrecognized) = today's behavior. The class rides the step's
+;; :error map; steps still never carry the :error STATUS — finalize flips an
+;; :observation-classed scenario to :error and counts it :unobserved.
+;; :assertion/:sut are record-and-render only (scenario stays :failed).
+;; The value set is `shiftlefter.step/error-classes` — the one literal the
+;; kernel (Rider C inheritance, sl-afs9), this spec and the lift share.
+(s/def :error/class step/error-classes)
+(s/def ::error (s/keys :req-un [::type ::message]
+                       :opt [:error/class]))
 (s/def ::scenario map?)
 
 (s/def ::invoke-result
@@ -74,10 +91,15 @@
 ;; historical four-key counts map byte-identical in --edn output. Counts the
 ;; infrastructure-failure family (hook/provisioning/capture/harness, sl-7c7i).
 (s/def :shiftlefter.counts/error nat-int?)
+;; :unobserved (sl-kowi): :error scenarios whose attribution class is
+;; :observation — the witness between spec and app went dark. Disjoint from
+;; :error (which keeps the SL-machinery family only); same absent-unless-
+;; positive rule. Two rendered buckets under one exit code (4).
+(s/def :shiftlefter.counts/unobserved nat-int?)
 
 (s/def ::counts
   (s/keys :req-un [::passed ::failed ::pending ::skipped]
-          :opt-un [:shiftlefter.counts/error]))
+          :opt-un [:shiftlefter.counts/error :shiftlefter.counts/unobserved]))
 
 (s/def ::scenarios (s/coll-of map?))
 

@@ -7,7 +7,8 @@
    pattern: load the stepdefs into a fresh registry, build a ctx with a
    subject-keyed mock impl, invoke (:fn stepdef) directly, assert the
    returned ctx + adapter side-effects."
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [shiftlefter.sms.mock :as mock]
             [shiftlefter.sms.protocol :as sms-proto]
             [shiftlefter.stepdefs.sms :as sms-step]
@@ -376,3 +377,66 @@
             result (invoke see-step after-recv "alice" "2" "+15551234567")]
         (is (= after-recv result)
             ":see should pass with count=2 even after :receive advanced last-receive-ts")))))
+
+;; -----------------------------------------------------------------------------
+;; Error class (sl-kowi): the provider is the witness
+;; -----------------------------------------------------------------------------
+
+(def ^:private dark-provider
+  "An ISMS whose query fails outright — the mailbox cannot be SEEN. Only
+   query-messages is exercised by the receive/see families."
+  (reify sms-proto/ISMS
+    (send! [_ _] {:error {:type :sms/unavailable :message "dark"}})
+    (query-messages [_ _] {:error {:type :sms/unavailable :message "provider down"}})))
+
+(deftest test-query-failed-is-classified-observation
+  (testing ":receive — a failed provider query throws :sms/query-failed classed
+            :observation immediately (no polling: a dead witness is not a not-yet)"
+    (let [ctx (ctx-with-sms dark-provider :alice)
+          step (find-sms-stepdef :receive :default)
+          thrown (try (invoke step ctx "alice" "+15558888888" "anything")
+                      nil
+                      (catch Exception e (ex-data e)))]
+      (is (= :sms/query-failed (:type thrown)))
+      (is (= :observation (:error/class thrown)))
+      (is (= "provider down" (-> thrown :error :message)))))
+  (testing ":see :count — same classification at the second query site"
+    (let [ctx (ctx-with-sms dark-provider :alice)
+          step (find-sms-stepdef :see :count)
+          thrown (try (invoke step ctx "alice" "2" "+15558888888")
+                      nil
+                      (catch Exception e (ex-data e)))]
+      (is (= :sms/query-failed (:type thrown)))
+      (is (= :observation (:error/class thrown)))))
+  (testing "Rider A (sl-afs9): a receive timeout through a healthy witness carries
+            the OBSERVATION — what did arrive — not nil"
+    (let [m (mock/make-mock-sms)
+          ctx (ctx-with-sms m :alice)
+          step (find-sms-stepdef :receive :default)]
+      (Thread/sleep 5)
+      (sms-proto/simulate-inbound! m {:from "+1" :to "+15558888888" :body "your lunch is ready"})
+      (sms-proto/simulate-inbound! m {:from "+1" :to "+15558888888" :body "meeting moved to 3"})
+      (binding [sms-step/*receive-timeout-ms* 100
+                sms-step/*poll-interval-ms* 50]
+        (let [thrown (try (invoke step ctx "alice" "+15558888888" "code: (\\d+)")
+                          nil
+                          (catch Exception e (ex-data e)))
+              lv (str (:last-value thrown))]
+          (is (= :step/poll-timeout (:type thrown)))
+          (is (str/includes? lv ":seen 2") "two messages were seen")
+          (is (str/includes? lv "your lunch is ready") "the bodies that did arrive ride the record")
+          (is (str/includes? lv "meeting moved to 3"))
+          (is (str/includes? lv ":hit nil") "none matched")
+          (is (not (contains? thrown :hint)) "an observation was recorded — no hint")
+          (is (not (contains? thrown :error/class)) "a healthy witness is never classified")))))
+  (testing "a message that never arrives through a HEALTHY witness stays a poll
+            timeout — an absent event is product evidence, not darkness"
+    (let [ctx (ctx-with-sms (mock/make-mock-sms) :alice)
+          step (find-sms-stepdef :receive :default)]
+      (binding [sms-step/*receive-timeout-ms* 100
+                sms-step/*poll-interval-ms* 50]
+        (let [thrown (try (invoke step ctx "alice" "+15558888888" "anything")
+                          nil
+                          (catch Exception e (ex-data e)))]
+          (is (= :step/poll-timeout (:type thrown)))
+          (is (not (contains? thrown :error/class))))))))

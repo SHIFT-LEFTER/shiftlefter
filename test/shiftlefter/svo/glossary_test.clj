@@ -180,28 +180,37 @@
     (let [g (atom nil)
           logs (log-capture/with-captured-logs
                  #(reset! g (glossary/load-all-glossaries
-                             {:verbs {:web (fixture-path "override-verbs.edn")}})))]
+                             {:verbs [(fixture-path "override-verbs.edn")]})))]
       (is (some (log-capture/level-msg? :warn override-warning-text) logs))
       (is (contains? (get-in @g [:verbs :web]) :tap))
       (is (contains? (get-in @g [:verbs :web]) :click)
           "defaults survive — the flag did not override")))
-  (testing "strict loader: warns (never errors) and returns :ok"
-    (let [result (atom nil)
+  (testing "strict loader: STRUCTURED warnings (sl-67dj, Warden P3-13),
+            never errors, returns :ok"
+    (let [result (glossary/load-all-glossaries-strict
+                  {:subjects (fixture-path "override-subjects.edn")
+                   :verbs [(fixture-path "override-verbs.edn")]})]
+      (is (contains? result :ok)
+          "the flag's presence never fails a strict load")
+      (is (= 2 (count (:warnings result)))
+          "one structured warning per flag-carrying file")
+      (is (every? #(= :glossary/override-flag-ignored (:type %))
+                  (:warnings result)))
+      (is (every? #(and (string? (:path %)) (string? (:message %)))
+                  (:warnings result))
+          "warnings carry :path and :message for the lints channel")))
+  (testing "flag-free files draw no override warning on either channel"
+    (let [strict (atom nil)
           logs (log-capture/with-captured-logs
-                 #(reset! result (glossary/load-all-glossaries-strict
-                                  {:subjects (fixture-path "override-subjects.edn")
-                                   :verbs {:web (fixture-path "override-verbs.edn")}})))]
-      (is (= 2 (count (filter (log-capture/level-msg? :warn override-warning-text)
-                              logs)))
-          "one warning per flag-carrying file")
-      (is (contains? @result :ok)
-          "the flag's presence never fails a strict load")))
-  (testing "flag-free files draw no override warning"
-    (let [logs (log-capture/with-captured-logs
-                 #(glossary/load-all-glossaries
-                   {:subjects (fixture-path "subjects.edn")
-                    :verbs {:web (fixture-path "verbs-web-project.edn")}}))]
-      (is (not-any? (log-capture/level-msg? :warn override-warning-text) logs)))))
+                 #(do (glossary/load-all-glossaries
+                       {:subjects (fixture-path "subjects.edn")
+                        :verbs [(fixture-path "verbs-web-project.edn")]})
+                      (reset! strict
+                              (glossary/load-all-glossaries-strict
+                               {:subjects (fixture-path "subjects.edn")
+                                :verbs [(fixture-path "verbs-web-project.edn")]}))))]
+      (is (not-any? (log-capture/level-msg? :warn override-warning-text) logs))
+      (is (empty? (:warnings @strict))))))
 
 ;; -----------------------------------------------------------------------------
 ;; load-all-glossaries Tests
@@ -210,7 +219,7 @@
 (deftest load-all-glossaries-test
   (testing "loads from config paths and merges with defaults"
     (let [config {:subjects (fixture-path "subjects.edn")
-                  :verbs {:web (fixture-path "verbs-web-project.edn")}}
+                  :verbs [(fixture-path "verbs-web-project.edn")]}
           g (glossary/load-all-glossaries config)]
       ;; Project subjects loaded (type keys)
       (is (contains? (:subjects g) :user))
@@ -227,7 +236,7 @@
 
   (testing "handles nil paths gracefully"
     (let [config {:subjects nil
-                  :verbs {:web nil}}
+                  :verbs nil}
           g (glossary/load-all-glossaries config)]
       ;; Still has defaults
       (is (= {} (:subjects g)))
@@ -714,7 +723,7 @@
 (deftest strict-mode-rejects-bad-verb-glossary
   (testing "load-all-glossaries-strict returns :error for non-conforming verb entries"
     (let [config {:subjects (fixture-path "subjects.edn")
-                  :verbs {:web (fixture-path "bad-verbs-web.edn")}}
+                  :verbs [(fixture-path "bad-verbs-web.edn")]}
           result (glossary/load-all-glossaries-strict config)]
       (is (contains? result :error) "strict mode produces an error result")
       (let [err (:error result)]
@@ -732,7 +741,7 @@
 (deftest strict-mode-accepts-good-verb-glossary
   (testing "strict mode passes for conforming project glossary"
     (let [config {:subjects (fixture-path "subjects.edn")
-                  :verbs {:web (fixture-path "verbs-web-project.edn")}}
+                  :verbs [(fixture-path "verbs-web-project.edn")]}
           result (glossary/load-all-glossaries-strict config)]
       (is (contains? result :ok))
       (is (contains? (get-in result [:ok :verbs :web]) :swipe))
@@ -741,7 +750,7 @@
 (deftest lenient-mode-warns-on-bad-verb-glossary
   (testing "lenient load-all-glossaries does NOT throw on bad entries; loads anyway"
     (let [config {:subjects (fixture-path "subjects.edn")
-                  :verbs {:web (fixture-path "bad-verbs-web.edn")}}
+                  :verbs [(fixture-path "bad-verbs-web.edn")]}
           result (atom nil)
           ;; sl-5wj: warnings go through clojure.tools.logging now,
           ;; capture them via the test-helpers log factory instead of
@@ -759,7 +768,7 @@
 (deftest verb-entry-error-message-shape
   (testing "error messages identify the verb, missing key, and path"
     (let [config {:subjects (fixture-path "subjects.edn")
-                  :verbs {:web (fixture-path "bad-verbs-web.edn")}}
+                  :verbs [(fixture-path "bad-verbs-web.edn")]}
           err (-> (glossary/load-all-glossaries-strict config) :error :all-errors)
           swipe-err (first (filter #(= :swipe (:verb %)) err))
           pinch-err (first (filter #(= :pinch (:verb %)) err))]
@@ -798,7 +807,7 @@
 (deftest strict-loader-attaches-provenance
   (let [result (glossary/load-all-glossaries-strict
                 {:subjects (fixture-path "subjects.edn")
-                 :verbs {:web (fixture-path "verbs-web-project.edn")}})
+                 :verbs [(fixture-path "verbs-web-project.edn")]})
         g (:ok result)]
     (testing "markers computed at merge time"
       (is (= :user-file (get-in g [:provenance :verbs :web :swipe]))
@@ -809,14 +818,15 @@
           "framework glossaries for other interface types stay marked")
       (is (= :user-file (get-in g [:provenance :subjects :user]))
           "no default subjects ship — project subjects are :user-file"))
-    (testing ":sources carries the resolved config paths"
+    (testing ":sources maps each file's DECLARED type to its path (sl-67dj —
+              actual-mount provenance, assembled by the loader)"
       (is (= (fixture-path "subjects.edn") (get-in g [:sources :subjects])))
       (is (= (fixture-path "verbs-web-project.edn")
              (get-in g [:sources :verbs :web]))))))
 
 (deftest strict-loader-marks-collisions-config-override
   (let [result (glossary/load-all-glossaries-strict
-                {:verbs {:web (fixture-path "verbs-web-collide.edn")}})
+                {:verbs [(fixture-path "verbs-web-collide.edn")]})
         g (:ok result)]
     (is (= :config-override (get-in g [:provenance :verbs :web :click]))
         "a project verb colliding with a builtin is marked :config-override")
@@ -826,9 +836,70 @@
 (deftest lenient-loader-attaches-provenance
   (let [g (glossary/load-all-glossaries
            {:subjects (fixture-path "subjects.edn")
-            :verbs {:web (fixture-path "verbs-web-project.edn")}})]
+            :verbs [(fixture-path "verbs-web-project.edn")]})]
     (is (= :user-file (get-in g [:provenance :verbs :web :pinch])))
     (is (= :builtin (get-in g [:provenance :verbs :web :fill])))))
+
+;; -----------------------------------------------------------------------------
+;; File-authoritative :type (sl-67dj) — the file's :type is the mount key;
+;; config is a plain path list.
+;; -----------------------------------------------------------------------------
+
+(deftest file-declared-type-is-the-mount-key
+  (testing "a file declaring a namespaced type mounts under it — type
+            identifiers are an OPEN namespace-friendly space (:github/web
+            must work; no enum in the loader)"
+    (let [result (glossary/load-all-glossaries-strict
+                  {:verbs [(fixture-path "verbs-github-web.edn")]})
+          g (:ok result)]
+      (is (contains? (:verbs g) :github/web))
+      (is (contains? (get-in g [:verbs :github/web]) :fork))
+      (is (= (fixture-path "verbs-github-web.edn")
+             (get-in g [:sources :verbs :github/web]))
+          "provenance keyed by the declared namespaced type")
+      (is (contains? (get-in g [:verbs :web]) :click)
+          "framework defaults coexist — :github/web collides with nobody's :web")))
+  (testing "lenient loader mounts by declared type identically"
+    (let [g (glossary/load-all-glossaries
+             {:verbs [(fixture-path "verbs-github-web.edn")]})]
+      (is (contains? (get-in g [:verbs :github/web]) :fork)))))
+
+(deftest same-type-files-extend
+  (testing "two files declaring the same :type EXTEND each other
+            (always-extend doctrine, sl-h7c3)"
+    (let [result (glossary/load-all-glossaries-strict
+                  {:verbs [(fixture-path "verbs-web-project.edn")
+                           (fixture-path "verbs-web-collide.edn")]})
+          g (:ok result)]
+      (is (contains? (get-in g [:verbs :web]) :swipe)
+          "first file's verbs mounted")
+      (is (= "Project click override" (get-in g [:verbs :web :click :desc]))
+          "second file's restated entry replaced wholesale")
+      (is (= (fixture-path "verbs-web-collide.edn")
+             (get-in g [:sources :verbs :web]))
+          "the later same-type file wins the :sources slot; verbs still extend"))))
+
+(deftest strict-missing-type-is-planning-error
+  (testing "a verb file without :type is a broken file — planning-class error"
+    (let [result (glossary/load-all-glossaries-strict
+                  {:verbs [(fixture-path "missing-type-verbs.edn")]})]
+      (is (contains? result :error))
+      (let [err (:error result)]
+        (is (= :glossary/missing-type (:type err)))
+        (is (= (fixture-path "missing-type-verbs.edn") (:path err)))
+        (is (re-find #"must declare a keyword :type" (:message err)))))))
+
+(deftest lenient-missing-type-warns-and-skips
+  (testing "lenient loader skips a :type-less file with a warning"
+    (let [g (atom nil)
+          logs (log-capture/with-captured-logs
+                 #(reset! g (glossary/load-all-glossaries
+                             {:verbs [(fixture-path "missing-type-verbs.edn")]})))]
+      (is (some (log-capture/level-msg? :warn "must declare a keyword :type") logs))
+      (is (not (contains? (get-in @g [:verbs :web]) :tapdance))
+          "the :type-less file's verbs did not mount anywhere")
+      (is (contains? (get-in @g [:verbs :web]) :click)
+          "defaults unaffected"))))
 
 (deftest costume-for-subject-test
   (let [glossary {:subjects {:operator {:instances [:alice] :wears :finance}

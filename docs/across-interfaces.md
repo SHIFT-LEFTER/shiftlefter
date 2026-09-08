@@ -147,9 +147,20 @@ Built-in verb vocabularies for `:web` and `:sms` load automatically. Adapters
 shipped today include `:etaoin` and `:playwright` (browser) and `:sms-twilio` /
 `:sms-mock` (SMS).
 
-The built-in default `:web` instance deep-merges **under** your `:interfaces`
-map rather than being replaced by it — a project that declares only `:sms`
-still has the default `:web` instance, and `sl orient` shows it. These merge
-semantics are provisional: a future release may make a user `:interfaces` map
-replace the defaults wholesale. Full runnable example:
+A user `:interfaces` map is the **complete** set — it replaces the builtin
+defaults wholesale. A project that declares only `:sms` has exactly one
+interface (no phantom `:web`), and `sl orient` says so. To keep a builtin
+alongside your own, include it by reference — `:default` means the shipped
+builtin def of that name, verbatim:
+
+```clojure
+{:interfaces {:web :default                         ; builtin browser, kept
+              :sms {:type :sms :adapter :sms-mock}}} ; brought by the project
+```
+
+A full-map entry is used as-is under any name (a user `:web {…}` fully
+shadows the builtin — user maps and builtin defs are never merged) and must
+declare its `:type`; the type is never inferred from the name. See
+[SVO.md](SVO.md#interfaces) for the full semantics table. Full runnable
+example:
 [`examples/04-sms-2fa`](https://github.com/SHIFT-LEFTER/shiftlefter/tree/main/examples/04-sms-2fa).

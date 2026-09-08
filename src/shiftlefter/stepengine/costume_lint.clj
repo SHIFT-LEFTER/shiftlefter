@@ -32,7 +32,7 @@
    costume declaration MUST become a (type, instance) pair — this comment
    exists so that refactor trips loudly here, not silently."
   (:require [shiftlefter.stepengine.exec.provisioning :as provisioning]
-            [shiftlefter.svo.validate :as svo-validate]))
+            [shiftlefter.text :as text]))
 
 (defn- step-location
   "Location map in the :svo-issues shape (bindings-lint pattern)."
@@ -84,7 +84,7 @@
                              (when (= instance (:interface cdef)) cname))
                            costumes)
           suggestion (when-not cross-type?
-                       (svo-validate/suggest-similar costume candidates 2))]
+                       (text/suggest-similar costume candidates 2))]
       (cond-> {:type :costume/wrong-interface
                :severity :error
                :subject (:subject svo)
@@ -178,7 +178,7 @@
            ;; whose old text then prescribed declaring the typo'd name —
            ;; instructions to legitimize the defect. With a near-match
            ;; among the DECLARED names, lead with the typo hypothesis.
-           (let [suggestion (svo-validate/suggest-similar
+           (let [suggestion (text/suggest-similar
                              costume (keys costumes) 2)]
              (cond-> {:type :costume/undeclared
                       :severity :warn

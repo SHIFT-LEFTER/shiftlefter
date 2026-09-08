@@ -20,8 +20,12 @@ A verb is an **interface-level** action: `click`, `fill`, `see`, `navigate`,
 authoritative current list — each verb with its frames and step patterns — is
 `sl agent-doc builtins`.
 
-You *can* add a verb to a project glossary, but think twice. A glossary verb only
-makes the validator *accept* the word — it doesn't make anything happen. A genuinely
+You *can* add a verb to a project glossary, but think twice. A verb glossary
+file must declare its `:type` — the mount key the loader files it under
+(file-authoritative, sl-67dj; the config's `:glossaries :verbs` is just a list
+of file paths, and any keyword type works, namespaced included). A glossary
+verb only makes the validator *accept* the word — it doesn't make anything
+happen. A genuinely
 new interface-level verb also needs a `defstep` to back it (see
 [the escape hatch](#when-you-actually-write-a-step-definition)), and that's
 adapter-author territory, not the normal path.
@@ -142,6 +146,44 @@ no Clojure toolchain is required (the jar loads `.clj` files directly):
 The bundled libraries available to step definitions (JSON, HTTP, filesystem, …) are
 listed in [INSTALL-TIERS.md](INSTALL-TIERS.md#tier-b-write-custom-steps-java-only).
 
+## Evidence in a custom adapter: log the attempt, then the outcome
+
+If your adapter feeds an evidence log — a transcript a capture kind will dump
+when a scenario fails (see [hooks.md § Contributing a capture
+kind](hooks.md#contributing-a-capture-kind--custom-adapters)) — record the
+attempted operation **before** executing it, then record the outcome. A helper
+that logs only after a response arrives has a structural blind spot: the fatal
+request — connection refused, timeout, DNS failure — is exactly the one that
+never gets a response, so the evidence trail ends one line before the moment of
+death. This bit the first real `:api` adapter we built: the service was killed
+mid-run, the capture fired faithfully, and the transcript's last entry was the
+final *healthy* request.
+
+```clojure
+;; BLIND: the fatal request never reaches the log
+(defn request! [impl req]
+  (let [resp (http/request req)]
+    (log-entry! impl req resp)          ; never runs when http/request throws
+    resp))
+
+;; HONEST: attempt first, outcome second — a refused request appears
+;; in the capture with its failure noted
+(defn request! [impl req]
+  (let [entry (log-attempt! impl req)]
+    (try
+      (let [resp (http/request req)]
+        (log-outcome! impl entry resp)
+        resp)
+      (catch java.io.IOException e
+        (log-outcome! impl entry {:failed (ex-message e)})
+        (throw e)))))
+```
+
+The capture fn itself stays dumb — it dumps whatever the log holds
+(`examples/07-custom-capture-kind` is the ten-line contract in the flesh);
+whether the moment of death is *in* that log is decided here, at the helper,
+by ordering alone.
+
 ## Timing in a custom step: call the kernel, don't reimplement the doctrine
 
 Built-in steps follow one timing doctrine, and it has three clauses:
@@ -164,23 +206,34 @@ namespace your steps already require for ctx accessors) is the oracle kernel:
   (:require [shiftlefter.stepengine.registry :refer [defstep]]
             [shiftlefter.step :as step]))
 
-;; an oracle: poll until the exported report file appears
-(defstep #"^the nightly report has landed$"
-  [ctx]
-  (step/poll-until ctx #(.exists (java.io.File. "out/report.csv")))
+;; an oracle, observe-and-judge: the predicate RETURNS what it observed
+;; (a job snapshot), and :until judges whether that observation is "done"
+(defstep #"^the export job (\S+) has finished$"
+  [ctx job-id]
+  (step/poll-until ctx #(fetch-job job-id)            ; => {:state "running" :pct 85}
+                   {:until #(= "done" (:state %))})
   ctx)
 ```
 
-`poll-until` polls the predicate until it returns truthy, at the framework's
-resolved interval and deadline. On timeout it throws a structured, legible
-failure through normal step reporting: elapsed time, the deadline, **where the
-deadline came from**, and the last observed value. When your predicate observes
-a value (a count, a payload), pass `:until` so the timeout record can carry the
-observation:
+`poll-until` polls the predicate at the framework's resolved interval and
+deadline until `:until` accepts its return. On timeout it throws a
+structured, legible failure through normal step reporting: elapsed time,
+the deadline, **where the deadline came from**, and the last attempt
+through exactly one of two channels — `:last-value`, the last thing the
+predicate returned (`{:state "running" :pct 85}` is the diagnosis, not
+just "timed out"), or `:last-error`, the last exception a `:retry-error?`
+predicate accepted as a not-yet (the built-in browser oracles ride that
+channel). Any observation works — a count, a payload:
 
 ```clojure
 (step/poll-until ctx #(count (fetch-rows)) {:until #(<= 5 %)})
 ```
+
+The nil-to-continue form (`(step/poll-until ctx #(when done? …))`, no
+`:until`) still works — the default test is truthiness — but it leaves
+`:last-value` empty on timeout: a predicate that returns nil to keep
+polling has thrown away what it saw. The timeout record says so (`:hint`).
+Return the observation instead.
 
 Never wrap a mutation in `poll-until`, and never poll a bare negation — those
 clauses are prohibitions, not missing helpers.

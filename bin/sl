@@ -394,6 +394,15 @@ wait_for_edn() {
 # one spawner under concurrent first-calls, so only one daemon per root is ever
 # started; losers just wait for the winner's daemon.edn. Spawn goes through the
 # CDS-enabled java (fast start) and backgrounds via nohup, stderr -> daemon.log.
+# daemon.log is a CRASH SINK, not a logger (sl-7dq5 diagnosis): it captures
+# only the daemon JVM's own process stdout/stderr — warm-run output rides
+# nREPL back to the client, and the spawn banner below is the wrapper's own
+# stderr. 0 bytes = healthy; it fills on an uncaught daemon-level throwable
+# or a JVM startup failure. One other line can appear, rarely, and it is a
+# minor sign of ill health rather than a crash: `sl daemon: reaped orphaned
+# session <id>` — a client died mid-run without closing its session (Ctrl-C,
+# a killed process, a cancelled CI job) and the daemon's orphan sweep reaped
+# it; one line per reaped id (sl-vjve W26).
 # Returns 0 once a daemon.edn exists, 1 on timeout (caller falls back to cold).
 spawn_daemon() {
     local java_cmd="$1" root="$2"
@@ -401,6 +410,10 @@ spawn_daemon() {
     edn="$sdir/daemon.edn"
     lock="$sdir/spawn.lock"
     mkdir -p "$sdir" 2>/dev/null || return 1
+    # Creation-site self-ignore (sl-7dq5 F9): the wrapper is the FIRST creator
+    # of .shiftlefter/ on a hand-copied jar's warm path — write the ignore
+    # file here (write-if-absent; the Clojure sites are the JVM-side twins).
+    [[ -e "$sdir/.gitignore" ]] || printf '*\n' > "$sdir/.gitignore"
     if mkdir "$lock" 2>/dev/null; then
         # We won the election: emit the one-line spawn breadcrumb (tty-gated, our own
         # stderr — the backgrounded daemon's System/console is nil so its own

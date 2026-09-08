@@ -1,11 +1,18 @@
 (ns shiftlefter.exit-contract-guard-test
   "sl-7c7i guard (the sl-h0oj family): the exit-code contract must agree
-   across every surface that states it. Two mechanisms over six surfaces
-   (extended sl-d3cz, Warden W25):
+   across every surface that states it. Two mechanisms over eight surfaces
+   (extended sl-d3cz, Warden W25; docs/EXIT-CODES.md added at sl-kowi;
+   the agent-doc exit-codes topic at sl-r54o):
 
    TABLE surfaces (markdown `| N |` rows vs `verdict/exit-codes`):
    - README.md § Return Codes
    - docs/CI.md's gate table
+   - the exit-codes ladder page (added at sl-kowi as docs/EXIT-CODES.md;
+     moved into the derived architecture family at sl-zzrx — ONE surface,
+     resolved at runtime: the canon notes/architecture/exit-codes.md in
+     trees that carry notes/, else the derived
+     docs/architecture/exit-codes.md in the public export)
+   - agent_docs/exit-codes.md's table (the packaged agent topic, sl-r54o)
    - docs/architecture/invocation-map.md's verdict table
    - shiftlefter.runner.verdict's OWN ns-docstring table (the
      self-consistency loop: the prose table above the def must match it)
@@ -151,6 +158,23 @@ groups, exit codes aggregate worst-wins: 2 > 1 > 0.")
 ;; The real surfaces
 ;; -----------------------------------------------------------------------------
 
+(defn- ladder-page-surface
+  "The exit-codes ladder page (sl-zzrx): the CANON when this tree carries
+   notes/ (dev repo), else the DERIVED page (the public export ships
+   docs/ and test/ but not notes/). One surface, resolved at runtime —
+   never vacuous in either tree, and no ninth surface: in the dev repo
+   the derived page is covered transitively (the derive guard proves
+   derived == derive(canon)); in the public tree this fallback is that
+   transitive coverage, executed. sl-u9z8 owns the family-wide sweep of
+   notes/-reading guards."
+  []
+  (let [canon "notes/architecture/exit-codes.md"]
+    (if (.exists (java.io.File. canon))
+      {:label "notes/architecture/exit-codes.md ladder table (canon)"
+       :path canon}
+      {:label "docs/architecture/exit-codes.md ladder table (derived fallback)"
+       :path "docs/architecture/exit-codes.md"})))
+
 (deftest exit-contract-surfaces-agree
   (let [problems (-> []
                      (into (table-problems "README.md § Return Codes"
@@ -159,6 +183,12 @@ groups, exit codes aggregate worst-wins: 2 > 1 > 0.")
                      (into (table-problems "docs/CI.md gate table"
                                            (slurp "docs/CI.md")
                                            "`sl run`'s codes:"))
+                     (into (let [{:keys [label path]} (ladder-page-surface)]
+                             (table-problems label (slurp path) "## The table")))
+                     (into (table-problems
+                            "agent_docs/exit-codes.md table (packaged agent topic)"
+                            (slurp "resources/shiftlefter/agent_docs/exit-codes.md")
+                            "## The table"))
                      (into (table-problems
                             "docs/architecture/invocation-map.md verdict table"
                             (slurp "docs/architecture/invocation-map.md")

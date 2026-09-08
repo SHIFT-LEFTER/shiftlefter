@@ -189,10 +189,12 @@
 ;; -----------------------------------------------------------------------------
 
 (def ^:private default-verbs-resources
-  "Classpath paths to framework default verb glossaries, by interface type.
-   Add a new entry here when shipping a default glossary for a new interface."
-  {:web "shiftlefter/glossaries/verbs-web.edn"
-   :sms "shiftlefter/glossaries/verbs-sms.edn"})
+  "Classpath paths to framework default verb glossaries. Each file declares
+   its own :type — the mount key (sl-67dj: the file's :type is authoritative;
+   there is no type-keyed resource map to restate it). Add a new default by
+   adding its resource path here."
+  ["shiftlefter/glossaries/verbs-web.edn"
+   "shiftlefter/glossaries/verbs-sms.edn"])
 
 ;; -----------------------------------------------------------------------------
 ;; Loading Helpers
@@ -342,49 +344,68 @@
      :message (str "Glossary file not found: " path)
      :path path}))
 
-(defn load-default-verbs
-  "Load the framework's default verb glossary for a given interface type.
-
-   Returns the parsed glossary map ({:type ... :verbs {...}}) or nil for
-   types that ship no framework default. Throws on a malformed framework
-   default — defaults must always conform to ::verb-entry (this is a
-   build-time invariant, not user input). Project glossaries are validated
-   by the load-verb-glossary* functions instead.
-
-   Add a new framework default by adding to `default-verbs-resources`."
-  [interface-type]
-  (when-let [resource-path (get default-verbs-resources interface-type)]
-    (let [result (read-edn-resource resource-path)]
-      (when (:ok result)
-        (let [data   (:ok result)
-              errors (validate-verb-entries (:verbs data)
-                                            interface-type
-                                            resource-path)]
+(defn- read-default-verb-file
+  "Read and tier-0-validate one framework default verb glossary resource.
+   Returns the parsed data ({:type ... :verbs {...}}) or nil when the
+   resource is unreadable. Throws :glossary/invalid-default-glossary on a
+   malformed default — a shipped file must declare a keyword :type (its
+   mount key, sl-67dj) and conform to ::verb-entry (build-time invariant,
+   not user input). Project glossaries are validated by the
+   load-verb-glossary* functions instead."
+  [resource-path]
+  (let [result (read-edn-resource resource-path)]
+    (when (:ok result)
+      (let [data  (:ok result)
+            ftype (:type data)]
+        (when-not (keyword? ftype)
+          (throw (ex-info (str "Framework default glossary " resource-path
+                               " declares no keyword :type — the file's :type"
+                               " is its mount key")
+                          {:type :glossary/invalid-default-glossary
+                           :resource resource-path})))
+        (let [errors (validate-verb-entries (:verbs data) ftype resource-path)]
           (when (seq errors)
-            (throw (ex-info (str "Framework default " (name interface-type)
+            (throw (ex-info (str "Framework default " (pr-str ftype)
                                  " glossary is invalid: "
                                  (count errors) " bad entries. First: "
                                  (-> errors first :message))
                             {:type :glossary/invalid-default-glossary
-                             :interface-type interface-type
+                             :interface-type ftype
                              :errors errors})))
           data)))))
+
+(defn load-default-verbs
+  "Load the framework's default verb glossary for a given interface type.
+
+   Looks the type up against each default file's own DECLARED :type
+   (sl-67dj — the file's :type is authoritative). Returns the parsed
+   glossary map ({:type ... :verbs {...}}) or nil for types no framework
+   default declares. Throws on a malformed framework default (see
+   read-default-verb-file).
+
+   Add a new framework default by adding to `default-verbs-resources`."
+  [interface-type]
+  (->> default-verbs-resources
+       (keep read-default-verb-file)
+       (some #(when (= interface-type (:type %)) %))))
 
 (defn load-default-glossaries
   "Load all framework default glossaries.
 
+   Each file mounts under the :type IT declares (sl-67dj).
+
    Returns:
    {:subjects {}  ;; no default subjects — project must define
     :verbs {:web {...}
-            :sms {...}}}  ;; one entry per shipped interface type"
+            :sms {...}}}  ;; one entry per shipped default file"
   []
   {:subjects {}
-   :verbs (reduce-kv (fn [acc interface-type _resource-path]
-                       (if-let [verbs (load-default-verbs interface-type)]
-                         (assoc acc interface-type (:verbs verbs))
-                         acc))
-                     {}
-                     default-verbs-resources)})
+   :verbs (reduce (fn [acc resource-path]
+                    (if-let [data (read-default-verb-file resource-path)]
+                      (assoc acc (:type data) (:verbs data))
+                      acc))
+                  {}
+                  default-verbs-resources)})
 
 ;; -----------------------------------------------------------------------------
 ;; Merging
@@ -438,28 +459,36 @@
         (distinct (concat (keys builtin-verbs) (keys user-verbs)))))
 
 (defn- attach-provenance
-  "Attach :provenance (per-entry markers) and :sources (resolved file paths
-   from the config) to a merged glossary. Additive keys — ::glossary is
-   req-un, so consumers that don't know about them conform unchanged."
-  [glossary defaults project config-paths]
+  "Attach :provenance (per-entry markers) and :sources (the files actually
+   mounted: the subjects path plus declared-type → path for each project
+   verb file, assembled by the load-all* loaders as they mount — actual-
+   mount provenance, sl-67dj) to a merged glossary. Additive keys —
+   ::glossary is req-un, so consumers that don't know about them conform
+   unchanged."
+  [glossary defaults project sources]
   (assoc glossary
          :provenance {:subjects (section-provenance (:subjects defaults)
                                                     (:subjects project))
                       :verbs (verbs-provenance (:verbs defaults)
                                                (:verbs project))}
-         :sources {:subjects (:subjects config-paths)
-                   :verbs (or (:verbs config-paths) {})}))
+         :sources {:subjects (:subjects sources)
+                   :verbs (or (:verbs sources) {})}))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API: Loading All
 ;; -----------------------------------------------------------------------------
 
 (defn- glossary-error?
-  "Returns true if result is a glossary error map."
+  "Returns true if result is a glossary error map. Requires :message as
+   well as the glossary-namespaced :type: a successfully parsed glossary
+   FILE also carries a :type, and type identifiers are an open namespaced
+   space (sl-67dj) — the namespace check alone would false-positive on a
+   file declaring :type :glossary/<anything>."
   [result]
   (and (map? result)
        (keyword? (:type result))
-       (= "glossary" (namespace (:type result)))))
+       (= "glossary" (namespace (:type result)))
+       (string? (:message result))))
 
 ;; -----------------------------------------------------------------------------
 ;; Persona Normalization (sl-4e91)
@@ -580,18 +609,34 @@
             (assoc glossary :instance-index {})))
       (assoc glossary :instance-index (:ok result)))))
 
-(defn- warn-on-override-flag!
+(defn- override-flag-warning
   "sl-h7c3: `:override-defaults` was removed — a glossary file still
-   carrying the key gets the truth, on the same logging channel every
-   other glossary-load warning uses (both lenient AND strict: the key's
-   presence doesn't make the glossary unusable). Called where the parsed
-   file map is in hand — the exact point the flag historically vanished."
+   carrying the key gets the truth (both lenient AND strict: the key's
+   presence doesn't make the glossary unusable). Returns the structured
+   warning map or nil; computed where the parsed file map is in hand —
+   the exact point the flag historically vanished. Strict loads thread
+   the map onto the structured lints channel (sl-67dj, Warden P3-13);
+   lenient loads log its :message on the interactive channel."
   [file-map path]
   (when (contains? file-map :override-defaults)
-    (log/warnf (str "Glossary file %s carries :override-defaults, which is"
-                    " not supported — glossaries always extend the defaults;"
-                    " restate an entry to replace it wholesale")
-               path)))
+    {:type :glossary/override-flag-ignored
+     :path path
+     :message (format (str "Glossary file %s carries :override-defaults, which is"
+                           " not supported — glossaries always extend the defaults;"
+                           " restate an entry to replace it wholesale")
+                      path)}))
+
+(defn- log-warning!
+  "Log a structured glossary warning's message (lenient/interactive channel)."
+  [warning]
+  (when warning
+    (log/warn (:message warning))))
+
+(defn- missing-type-message [path result]
+  (str "Verb glossary " path " must declare a keyword :type — the file's"
+       " :type is its mount key (e.g. :type :web)"
+       (when (contains? result :type)
+         (str "; found " (pr-str (:type result))))))
 
 (defn- load-subject-glossary
   "Load subject glossary from path. Returns {:subjects {...}} or empty on error."
@@ -602,74 +647,109 @@
       (if (glossary-error? result)
         (do (log/warnf "Could not load subject glossary: %s" (:message result))
             {:subjects {}})
-        (do (warn-on-override-flag! result path)
+        (do (log-warning! (override-flag-warning result path))
             {:subjects (:subjects result)})))))
 
 (defn- load-subject-glossary-strict
-  "Load subject glossary strictly. Returns {:ok {:subjects ...}} or {:error ...}."
+  "Load subject glossary strictly.
+   Returns {:ok {:subjects ...} :warnings [...]} or {:error ...}."
   [path]
   (if (nil? path)
-    {:ok {:subjects {}}}
+    {:ok {:subjects {}} :warnings []}
     (let [result (load-glossary path)]
       (if (glossary-error? result)
         {:error {:type :svo/glossary-file-not-found
                  :path path
                  :message (:message result)}}
-        (do (warn-on-override-flag! result path)
-            {:ok {:subjects (:subjects result)}})))))
+        {:ok {:subjects (:subjects result)}
+         :warnings (filterv some? [(override-flag-warning result path)])}))))
 
 (defn- load-verb-glossary
-  "Load verb glossary from path for an interface type.
-   Returns {:verbs {type {...}}} or empty on error.
-   Bad verb entries (per ::verb-entry spec) emit warnings but the
-   glossary still loads — lenient mode favors continuity."
-  [interface-type path]
+  "Load verb glossary from path, mounting it under the type the FILE
+   declares (sl-67dj — file-authoritative). Returns {:verbs {type {...}}}
+   or empty on error. A file without a keyword :type is skipped with a
+   warning; bad verb entries (per ::verb-entry spec) warn but the glossary
+   still loads — lenient mode favors continuity."
+  [path]
   (if (nil? path)
     {:verbs {}}
     (let [result (load-glossary path)]
       (cond
         (glossary-error? result)
-        (do (log/warnf "Could not load verb glossary for %s: %s" interface-type (:message result))
+        (do (log/warnf "Could not load verb glossary %s: %s" path (:message result))
+            {:verbs {}})
+
+        (not (keyword? (:type result)))
+        (do (log/warn (str (missing-type-message path result) " — skipped"))
             {:verbs {}})
 
         :else
-        (let [errors (validate-verb-entries (:verbs result) interface-type path)]
-          (warn-on-override-flag! result path)
+        (let [ftype  (:type result)
+              errors (validate-verb-entries (:verbs result) ftype path)]
+          (log-warning! (override-flag-warning result path))
           (doseq [e errors]
             (log/warn (:message e)))
-          {:verbs {interface-type (:verbs result)}})))))
+          {:verbs {ftype (:verbs result)}})))))
 
 (defn- load-verb-glossary-strict
-  "Load verb glossary strictly. Returns {:ok {:verbs {type ...}}} or {:error ...}.
-   Fails on file errors AND on bad verb entries — Shifted mode demands
-   a clean glossary."
-  [interface-type path]
+  "Load verb glossary strictly, mounting under the type the FILE declares
+   (sl-67dj — file-authoritative; ANY keyword is legal, namespaced types
+   like :github/web included — type identifiers are an open space, no
+   enum here). Returns {:ok {:verbs {type ...}} :warnings [...]} or
+   {:error ...}. Fails on file errors, on a missing/non-keyword :type
+   (a broken file — planning-class), AND on bad verb entries — Shifted
+   mode demands a clean glossary."
+  [path]
   (if (nil? path)
-    {:ok {:verbs {}}}
+    {:ok {:verbs {}} :warnings []}
     (let [result (load-glossary path)]
       (cond
         (glossary-error? result)
         {:error {:type :svo/glossary-file-not-found
                  :path path
-                 :interface-type interface-type
                  :message (:message result)}}
 
+        (not (keyword? (:type result)))
+        {:error {:type :glossary/missing-type
+                 :path path
+                 :message (missing-type-message path result)}}
+
         :else
-        (let [errors (validate-verb-entries (:verbs result) interface-type path)]
-          (warn-on-override-flag! result path)
+        (let [ftype  (:type result)
+              errors (validate-verb-entries (:verbs result) ftype path)]
           (if (seq errors)
             {:error (assoc (first errors) :all-errors errors)}
-            {:ok {:verbs {interface-type (:verbs result)}}}))))))
+            {:ok {:verbs {ftype (:verbs result)}}
+             :warnings (filterv some? [(override-flag-warning result path)])}))))))
+
+(defn- mount-sources
+  "Declared-type → path entries for one loaded file's mounts (actual-mount
+   provenance, sl-67dj). With same-type files the later path wins in
+   :sources — the mounted VERBS still extend (merge-with merge)."
+  [mounted-verbs path]
+  (into {} (map (fn [t] [t path])) (keys mounted-verbs)))
+
+(defn- verb-paths
+  "The :verbs path list to load, or [] when absent OR malformed. The shape
+   is config/normalize's to name (:config/invalid-glossaries, sl-a7sx); the
+   projection keeps loading past that diagnostic so orient can show it,
+   and iterating the retired type-keyed map here was the exit-3 crash."
+  [config-paths]
+  (let [paths (:verbs config-paths)]
+    (if (sequential? paths) paths [])))
 
 (defn load-all-glossaries
   "Load all glossaries per config paths, merged with defaults.
 
-   Config shape:
+   Config shape (sl-67dj — a LIST of paths; each file's own :type is its
+   mount key):
    {:subjects \"path/to/subjects.edn\"
-    :verbs {:web \"path/to/verbs-web.edn\"
-            :api \"path/to/verbs-api.edn\"}}
+    :verbs [\"path/to/verbs-web.edn\"
+            \"path/to/verbs-api.edn\"]}
 
    Missing files produce warnings but don't fail — defaults are used.
+   Files declaring the same :type EXTEND each other (always-extend
+   doctrine, sl-h7c3; restate an entry to replace it).
 
    Returns:
    {:subjects {:alice {...} :admin {...} ...}
@@ -680,20 +760,24 @@
         ;; Load subject glossary
         subject-path (:subjects config-paths)
         subject-glossary (load-subject-glossary subject-path)
-        ;; Load verb glossaries for each type
-        verb-paths (:verbs config-paths)
-        verb-glossaries (reduce-kv
-                         (fn [acc iface-type path]
-                           (let [loaded (load-verb-glossary iface-type path)]
-                             (update acc :verbs merge (:verbs loaded))))
-                         {:verbs {}}
-                         (or verb-paths {}))
+        ;; Load each verb glossary file; the file's declared :type mounts it
+        verb-mounts (reduce
+                     (fn [acc path]
+                       (let [loaded (load-verb-glossary path)]
+                         (-> acc
+                             (update :verbs #(merge-with merge % (:verbs loaded)))
+                             (update :sources merge
+                                     (mount-sources (:verbs loaded) path)))))
+                     {:verbs {} :sources {}}
+                     (verb-paths config-paths))
         ;; Combine into project glossary
         project {:subjects (:subjects subject-glossary)
-                 :verbs (:verbs verb-glossaries)}]
+                 :verbs (:verbs verb-mounts)}
+        sources {:subjects subject-path
+                 :verbs (:sources verb-mounts)}]
     (-> (merge-glossaries defaults project)
         (update :subjects normalize-subjects)
-        (attach-provenance defaults project config-paths)
+        (attach-provenance defaults project sources)
         (attach-instance-index false))))
 
 (defn load-all-glossaries-strict
@@ -702,15 +786,23 @@
    Unlike `load-all-glossaries`, this fails on missing/invalid files instead
    of warning. Use this when :svo config is present.
 
-   Config shape:
+   Config shape (sl-67dj — a LIST of paths; each file's own :type is its
+   mount key, and a file without a keyword :type is a planning-class
+   :glossary/missing-type error):
    {:subjects \"path/to/subjects.edn\"
-    :verbs {:web \"path/to/verbs-web.edn\"
-            :api \"path/to/verbs-api.edn\"}}
+    :verbs [\"path/to/verbs-web.edn\"
+            \"path/to/verbs-api.edn\"]}
 
    Returns:
-   {:ok {:subjects {...} :verbs {...}}}
+   {:ok {:subjects {...} :verbs {...}} :warnings [...]}
    or
-   {:error {:type :svo/glossary-file-not-found :path \"...\" ...}}"
+   {:error {:type :svo/glossary-file-not-found :path \"...\" ...}}
+
+   :warnings carries the structured glossary-load warnings (e.g.
+   :glossary/override-flag-ignored) from every loaded file, subjects
+   included — consumers thread them onto the lints channel (sl-67dj,
+   Warden P3-13). An error short-circuits and drops pending warnings:
+   the error is the actionable item."
   [config-paths]
   (let [defaults (load-default-glossaries)
         ;; Load subject glossary strictly
@@ -719,29 +811,37 @@
     (if (:error subject-result)
       subject-result
       ;; Subject loaded, try verb glossaries
-      (let [verb-paths (or (:verbs config-paths) {})
-            verb-results (reduce-kv
-                          (fn [acc iface-type path]
+      (let [verb-results (reduce
+                          (fn [acc path]
                             (if (:error acc)
                               acc  ; short-circuit on first error
-                              (let [result (load-verb-glossary-strict iface-type path)]
+                              (let [result (load-verb-glossary-strict path)]
                                 (if (:error result)
                                   result
-                                  (update-in acc [:ok :verbs] merge (-> result :ok :verbs))))))
-                          {:ok {:verbs {}}}
-                          verb-paths)]
+                                  (-> acc
+                                      (update-in [:ok :verbs]
+                                                 #(merge-with merge % (-> result :ok :verbs)))
+                                      (update-in [:ok :sources] merge
+                                                 (mount-sources (-> result :ok :verbs) path))
+                                      (update :warnings into (:warnings result)))))))
+                          {:ok {:verbs {} :sources {}} :warnings []}
+                          (verb-paths config-paths))]
         (if (:error verb-results)
           verb-results
           ;; All loaded successfully, merge with defaults and build index
           (let [project {:subjects (-> subject-result :ok :subjects)
                          :verbs (-> verb-results :ok :verbs)}
+                sources {:subjects subject-path
+                         :verbs (-> verb-results :ok :sources)}
+                warnings (into (vec (:warnings subject-result))
+                               (:warnings verb-results))
                 merged (-> (merge-glossaries defaults project)
                            (update :subjects normalize-subjects)
-                           (attach-provenance defaults project config-paths))
+                           (attach-provenance defaults project sources))
                 indexed (attach-instance-index merged true)]
             (if (:error indexed)
               indexed
-              {:ok indexed})))))))
+              {:ok indexed :warnings warnings})))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API: Querying

@@ -9,6 +9,7 @@
    `invoke-step` and `execute-scenario` from this ns."
   (:require [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.events :as events]
+            [shiftlefter.step :as step]
             [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.stepengine.exec.capture :as capture]
             [shiftlefter.stepengine.exec.provisioning :as prov]))
@@ -18,6 +19,15 @@
 ;; -----------------------------------------------------------------------------
 
 (declare invoke-step*)
+
+(defn- recognized-error-class
+  "The :error/class a thrown ex-info's data carries, when it is one of the
+   contract values (`shiftlefter.step/error-classes` — the one literal, sl-kowi);
+   nil otherwise (absent, or an unrecognized value — both mean today's
+   behavior; the raw ex-data still rides :data)."
+  [data]
+  (let [c (:error/class data)]
+    (when (contains? step/error-classes c) c)))
 
 (defn invoke-step
   "Invoke a single step function with appropriate dispatch.
@@ -109,13 +119,16 @@
                    :value result}}))
 
       (catch Throwable t
-        {:status :failed
-         :scenario scenario-ctx
-         :error {:type :step/exception
-                 :message (ex-message t)
-                 :exception-class (.getName (class t))
-                 :data (when (instance? clojure.lang.ExceptionInfo t)
-                         (ex-data t))}}))))
+        (let [data (when (instance? clojure.lang.ExceptionInfo t)
+                     (ex-data t))
+              error-class (recognized-error-class data)]
+          {:status :failed
+           :scenario scenario-ctx
+           :error (cond-> {:type :step/exception
+                           :message (ex-message t)
+                           :exception-class (.getName (class t))
+                           :data data}
+                    error-class (assoc :error/class error-class))})))))
 
 ;; -----------------------------------------------------------------------------
 ;; SVO Event Emission
@@ -292,6 +305,13 @@
               (seq (:failures captured))
               (assoc :capture-failures (:failures captured)))))))))
 
+(defn observation-error?
+  "True when `error` (a step/scenario error map, or nil) carries the
+   :observation class of the sl-kowi contract — the witness between spec
+   and app went dark, so the step observed nothing about the app."
+  [error]
+  (= :observation (:error/class error)))
+
 (defn- finalize-scenario-results
   "Roll up wrapper statuses and compute final scenario status.
 
@@ -302,6 +322,13 @@
    the scenario-level :error map carries the attribution, like the hook
    and capture paths.
 
+   Observation flip (sl-kowi, F15): a failing step whose error carries
+   `:error/class :observation` makes the scenario :error the same way —
+   the step's error map IS the scenario attribution (same envelope as the
+   provisioning flip; the class rides it, so counts can bucket the
+   scenario as :unobserved). :sut/:assertion classes are recorded on the
+   step and change nothing here — the scenario stays :failed.
+
    D4 (sl-3q9r): capture-infrastructure failures flip an otherwise-GREEN
    scenario to :error, capture-attributed — a green scenario whose
    promised evidence silently failed is green with missing evidence.
@@ -309,12 +336,15 @@
    the misses."
   [raw-results plan]
   (let [rolled-steps (rollup-wrapper-statuses (:steps raw-results))
-        non-wrapper-statuses (map :status (remove #(wrapper-step? %) rolled-steps))
-        final-status (rollup-status non-wrapper-statuses)
+        leaf-steps (remove wrapper-step? rolled-steps)
+        final-status (rollup-status (map :status leaf-steps))
         capture-failures (:capture-failures raw-results)
         prov-error (some #(let [e (:error %)]
                             (when (prov/provisioning-error? e) e))
-                         (remove wrapper-step? rolled-steps))]
+                         leaf-steps)
+        obs-error (some #(let [e (:error %)]
+                           (when (observation-error? e) e))
+                        leaf-steps)]
     (cond-> {:status final-status
              :plan plan
              :steps rolled-steps
@@ -322,6 +352,9 @@
       prov-error
       (-> (assoc :status :error)
           (assoc :error prov-error))
+      (and obs-error (not prov-error))
+      (-> (assoc :status :error)
+          (assoc :error obs-error))
       (and (seq capture-failures) (= :passed final-status))
       (-> (assoc :status :error)
           (assoc :error (capture/capture-error capture-failures))))))

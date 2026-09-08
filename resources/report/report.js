@@ -206,6 +206,12 @@ function scenarioStatusClass(scenario) {
     if (fs && k(k(fs, ":error"), ":exception-class")) return "st-error";
     return "st-failed";
   }
+  // An :error scenario whose attribution carries :error/class :observation
+  // (sl-kowi) is UNOBSERVED — the witness went dark — distinct from ERROR
+  // (the harness family) and from FAILED (a verdict).
+  if (status === ":error" && k(k(scenario, ":error"), ":error/class") === ":observation") {
+    return "st-unobserved";
+  }
   return "st-" + (status || ":unknown").slice(1);
 }
 
@@ -224,6 +230,7 @@ const STATUS_WORDS = {
   "st-passed": "PASSED",
   "st-failed": "FAILED",
   "st-error": "ERROR",
+  "st-unobserved": "UNOBSERVED",
   "st-pending": "PENDING",
   "st-skipped": "SKIPPED",
 };
@@ -320,6 +327,7 @@ function renderHeader(runCtx, summary, scenarios) {
     .filter(Boolean)
     .join(" · ");
   header.appendChild(el("p", "run-meta", meta));
+  appendHaltedLine(header, summary);
 
   const selection = k(runCtx, ":selection");
   if (selection) {
@@ -365,6 +373,12 @@ function renderHeader(runCtx, summary, scenarios) {
     if (errorCount > 0) {
       countsList.appendChild(el("li", "count st-error", errorCount + " error"));
     }
+    // :unobserved (sl-kowi) — the observation-class bucket, disjoint from
+    // :error; same only-when-present rule.
+    const unobservedCount = counts ? k(counts, ":unobserved") || 0 : 0;
+    if (unobservedCount > 0) {
+      countsList.appendChild(el("li", "count st-unobserved", unobservedCount + " unobserved"));
+    }
     header.appendChild(countsList);
   }
 
@@ -390,6 +404,28 @@ function renderHeader(runCtx, summary, scenarios) {
   }
 
   return header;
+}
+
+// sl-78u4 (Warden W10): the :halted record as ONE header line — the
+// console string verbatim — so halted-skipped scenarios stop reading as
+// plain SKIPPED with no reason. Absent unless the halt policy fired. Used by
+// the run header and the invocation TOC alike.
+function appendHaltedLine(header, summary) {
+  const halted = summary ? k(summary, ":halted") : null;
+  if (!halted) return;
+  const name = k(halted, ":scenario");
+  const group = k(halted, ":group/label");
+  header.appendChild(
+    el(
+      "p",
+      "run-halted",
+      "halted after scenario " +
+        k(halted, ":after-scenario") +
+        (name ? " (" + name + ")" : "") +
+        ": observation failure" +
+        (group ? " — in group " + group + "; later groups skipped" : ""),
+    ),
+  );
 }
 
 function setAllOpen(open) {
@@ -785,6 +821,8 @@ const TOC_STATUS = {
   ":planning-failed": ["PLANNING FAILED", "st-error"],
   ":degraded": ["DEGRADED", "st-error"],
   ":crashed": ["CRASHED", "st-error"],
+  // sl-78u4: a setup group the :run-scope halt never started.
+  ":skipped": ["SKIPPED", "st-skipped"],
 };
 
 function tocCountsLine(counts) {
@@ -813,6 +851,7 @@ function renderTocPage(runCtx, summary, toc) {
     .filter(Boolean)
     .join(" · ");
   header.appendChild(el("p", "run-meta", meta));
+  appendHaltedLine(header, summary);
   app.appendChild(header);
 
   const table = el("table", "toc-table");
@@ -830,7 +869,12 @@ function renderTocPage(runCtx, summary, toc) {
     const [word, cls] = TOC_STATUS[k(g, ":status")] || [String(k(g, ":status") || ""), "st-error"];
     const statusCell = el("td");
     statusCell.appendChild(el("span", "run-status " + cls, word));
-    statusCell.appendChild(el("span", "toc-exit", " exit " + k(g, ":exit-code")));
+    // A group the :run-scope halt skipped never started: no exit code to
+    // print (sl-78u4).
+    const exitCode = k(g, ":exit-code");
+    if (exitCode !== null && exitCode !== undefined) {
+      statusCell.appendChild(el("span", "toc-exit", " exit " + exitCode));
+    }
     row.appendChild(statusCell);
     row.appendChild(el("td", "toc-counts", tocCountsLine(k(g, ":counts"))));
     const pageCell = el("td", "toc-page");

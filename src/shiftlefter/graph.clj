@@ -8,7 +8,8 @@
   NOT wired into CLI or `sl compile` — this is plumbing only."
   (:require [asami.core :as d]
             [babashka.fs :as fs]
-            [clojure.spec.alpha :as s]))
+            [clojure.spec.alpha :as s]
+            [shiftlefter.project-context :as project-context]))
 
 ;; ---------------------------------------------------------------------------
 ;; Specs
@@ -49,6 +50,10 @@
   ([opts]
    (let [path (get opts :path default-db-path)
          uri  (db-uri path)]
+     ;; Default path only: an override root is the caller's dir to ignore
+     ;; or not (sl-7dq5 F9 creation-site self-ignore).
+     (when (= path default-db-path)
+       (project-context/ensure-self-ignore! (str (fs/parent path))))
      (fs/create-dirs path)
      (d/create-database uri)
      (d/connect uri))))

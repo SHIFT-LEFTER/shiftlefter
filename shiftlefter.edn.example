@@ -25,8 +25,11 @@
  ;;
  ;; :timing {:deadline-ms 30000 :interval-ms 500}
  ;;
- ;; Per-interface override — a :timing sibling on any :interfaces entry:
- ;; :interfaces {:sms {:type :sms :adapter :twilio
+ ;; Per-interface override — a :timing sibling on any :interfaces entry
+ ;; (:web :default keeps the builtin browser instance — writing :interfaces
+ ;; makes your map the COMPLETE set, see below):
+ ;; :interfaces {:web :default
+ ;;              :sms {:type :sms :adapter :twilio
  ;;                    :timing {:deadline-ms 60000}}}
 
  ;; --- Shifted mode (the advertised path) ---
@@ -40,6 +43,9 @@
  ;; are discovered automatically; an explicit :glossaries map overrides
  ;; them wholesale (:glossaries nil turns them off).
  ;;
+ ;; Writing :interfaces replaces the builtin set WHOLESALE (no :interfaces
+ ;; key = builtin defaults; :web :default = the builtin def verbatim; a full
+ ;; map is used as-is under any name and must declare its :type):
  ;; :interfaces {:web {:type :web :adapter :etaoin}}   ; bundled WebDriver backend
  ;; :svo {:unknown-subject :error
  ;;       :unknown-verb    :warn

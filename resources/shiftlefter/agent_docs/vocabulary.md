@@ -35,9 +35,10 @@ it is declared for is an error (with a did-you-mean), two targets sharing a
 `:wears` in one scenario is an error, and a worn-but-undeclared costume is
 a warning that teaches the declaration to add.
 
-Project verbs extend the built-in set per interface type in
-`glossary/verbs/<type>.edn` (a same-named project verb replaces the builtin
-entry wholesale, frames and all — `sl glossary` marks such entries
+Project verbs extend the built-in set in `glossary/verbs/*.edn` files; each
+file declares its own `:type` — the required, authoritative mount key, any
+keyword including namespaced ones (a same-named project verb replaces the
+builtin entry wholesale, frames and all — `sl glossary` marks such entries
 `config-override`); intents live under `glossary/intents/` (all under
 `sl/`, next to the config — these conventional paths are discovered
 automatically when `:glossaries` is unset). Once an intents glossary is

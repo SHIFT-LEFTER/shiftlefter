@@ -59,7 +59,9 @@
   (try
     (let [path (marker-path context)
           entries (conj (or (read-entries context) []) entry)]
-      (fs/create-dirs (fs/parent path))
+      ;; The parent is the instance root's .shiftlefter — self-ignore at
+      ;; the creation site (sl-7dq5 F9).
+      (project-context/ensure-self-ignore! (fs/parent path))
       (spit path (pr-str entries)))
     (catch Exception e
       (log/warnf e "could not write dirty-teardown marker (ignored): %s"

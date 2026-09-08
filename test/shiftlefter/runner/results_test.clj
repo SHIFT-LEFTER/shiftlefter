@@ -7,6 +7,7 @@
    :results-dir? seam create nothing; reporter output carries no trace (the
    goldens lock that suite-wide)."
   (:require [babashka.fs :as fs]
+            [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [shiftlefter.runner.core :as rc]
@@ -88,7 +89,8 @@
     (try
       (spit (str (fs/path tmp "shiftlefter.edn")) "{:runner {:step-paths []}}")
       (testing "an executing run creates exactly one stamped dir at <config-root>/results/"
-        (let [result (execute-quietly! opts)
+        (let [out (java.io.StringWriter.)
+              result (binding [*out* out] (rc/execute! opts))
               dirs (run-dirs tmp)]
           (is (= 0 (:exit-code result)))
           (is (= 1 (count dirs)))
@@ -97,7 +99,11 @@
                  (:results-dir result))
               ":results-dir rides the execute! return map (and, since
                sl-l9nj, run-ctx — reporter visibility; html_test locks the
-               island side)")))
+               island side)")
+          (is (= (str "results/" (first dirs))
+                 (:run/results-path (edn/read-string (str out))))
+              "the envelope names the created dir, config-root-relative
+               (sl-7dq5 F11b — no mtime guessing)")))
       (testing "dry-run creates nothing further"
         (execute-quietly! (assoc opts :dry-run true))
         (is (= 1 (count (run-dirs tmp)))))

@@ -19,7 +19,7 @@
    [shiftlefter.orient :as orient]
    [shiftlefter.resolution :as resolution]
    [shiftlefter.project-context :as project-context]
-   [shiftlefter.runner.config :as runner-config]
+   [shiftlefter.config :as config]
    [shiftlefter.runner.core :as runner]
    [shiftlefter.runner.tag-disposition :as tagd]
    [shiftlefter.version :as version])
@@ -68,8 +68,8 @@
     :parse-fn #(Integer/parseInt %)
     :validate [pos-int? "must be a positive integer"]]
    [nil "--capture SPEC" "Capture policy: kind=policy pairs, comma-separated (e.g. screenshot=on-failure,console=every-step; policies: never|on-failure|every-step)"
-    :parse-fn runner-config/parse-capture-spec
-    :validate [runner-config/valid-capture-spec?
+    :parse-fn config/parse-capture-spec
+    :validate [config/valid-capture-spec?
                "must be kind=policy pairs with policy one of never|on-failure|every-step"]]
    ["-s" "--seed SEED" "Random seed (run: the run seed — recorded and handed down, must be positive; fuzz: trial seed)"
     :parse-fn #(Long/parseLong %)]
@@ -107,6 +107,7 @@
    [nil "--port PORT" "nREPL port (default: auto-select)"
     :parse-fn #(Integer/parseInt %)]
    [nil "--chrome-path PATH" "Explicit Chrome binary path (sl costume init/relaunch)"]
+   [nil "--write-agents" "With `sl init`: append the agent on-ramp stanza to AGENTS.md (marker-guarded; sl-7dq5 F1 — never written without this explicit ask)"]
    [nil "--force" "Destroy a costume even if its browser is live (sl costume destroy)"]
    ;; sl-rju: low-profile, deliberately absent from --help. SL_NO_DAEMON is the
    ;; "don't daemon at all" escape, so this never needs a disable sentinel.
@@ -926,12 +927,22 @@
           (println "\nUse --help for usage."))
         2)
 
+      ;; NOTE (sl-a7sx, Warden W23 — Chair ruling 09-03 REVERSING sl-7dq5
+      ;; F8): --dry-run with --html/--junit-xml is no longer refused here.
+      ;; The refusal guarded only the CLI flags; the config mirror
+      ;; [:runner :report …] — which `sl init` scaffolds — bypassed it and
+      ;; reproduced the exact silent-no-file defect. Flag and config now
+      ;; behave the SAME: the dry run proceeds, exit 0, and the runner
+      ;; prints one stderr line naming what was not written (plus the
+      ;; additive :run/reports-not-written key under --edn). See
+      ;; runner.core/dry-run-reports-not-written.
+
       (:help options)
       (do
         (println "Usage:
   sl run <path> [<path2> ...] [--step-paths p1,p2] [-c FILE|--config FILE] [--tags t1,t2] [--skip-tags t1,t2] [--max-parallel N] [--seed N] [--capture k=v,...] [--dry-run] [--edn] [--junit-xml PATH] [--html PATH] [-v]
-        (--junit-xml writes a CI-ingestible report; no file on planning error — see ERRATA E009)
-        (--html writes a self-contained HTML run report; open it in any browser, no server needed)
+        (--junit-xml writes a CI-ingestible report; no file on planning error — see ERRATA E009; under --dry-run: noticed on stderr, not written)
+        (--html writes a self-contained HTML run report; open it in any browser, no server needed; under --dry-run: noticed on stderr, not written)
         (--max-parallel N runs up to N scenarios concurrently; @serial-tagged and auto-serialized scenarios run alone)
         (--capture kind=policy,... captures artifacts into the run's results dir; kinds screenshot/console/page-source, policies never/on-failure/every-step)
   sl fmt --check <path> [<path2> ...]   (validate files/directories)
@@ -1008,7 +1019,7 @@
       ;; release/install.sh in the breath that creates sl/; deliberately
       ;; absent from --help until system-wide distribution (sl-f1ir).
       (= (first arguments) "init")
-      (init/init-cmd)
+      (init/init-cmd options)
 
       (= (first arguments) "daemon")
       (daemon-cmd arguments options project-context)

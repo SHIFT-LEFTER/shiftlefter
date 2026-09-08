@@ -138,6 +138,22 @@
   [context & segments]
   (normalize-path (apply fs/path (:project-root context) segments)))
 
+(defn ensure-self-ignore!
+  "Create a `.shiftlefter` state dir and its self-ignoring `.gitignore`
+   (`*`), write-if-absent — creation-site self-ignore (sl-7dq5 F9): the
+   runtime litter dir must be git-silent however the jar arrived, not only
+   when the installer ran `sl init`. Mirrors
+   shiftlefter.runner.results/ensure-results-root!; an existing (possibly
+   user-customized) ignore file is never clobbered. Callers pass the
+   `.shiftlefter` dir itself — never a user-chosen override root, which is
+   the user's to ignore or not. Returns the dir."
+  [shiftlefter-dir]
+  (fs/create-dirs shiftlefter-dir)
+  (let [gi (fs/file (str shiftlefter-dir) ".gitignore")]
+    (when-not (fs/exists? gi)
+      (spit gi "*\n")))
+  shiftlefter-dir)
+
 (defn note-config-path
   "Return context with a portability warning if a config-declared source path
    escapes :project-root. Escapes remain valid."

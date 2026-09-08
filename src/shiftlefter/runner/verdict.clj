@@ -3,9 +3,20 @@
    Every surface that speaks exit codes derives from THIS ns — the daemon
    ::exit wire spec, EDN summary :run/status, the reporter ::run-summary
    status spec — and the doc surfaces (README § Return Codes, docs/CI.md,
-   docs/architecture/invocation-map.md, the lifecycle pages' prose, and
-   this docstring's own table) are held in agreement by
-   exit-contract-guard-test (six surfaces since sl-d3cz).
+   docs/architecture/exit-codes.md, docs/architecture/invocation-map.md, the lifecycle
+   pages' prose, and this docstring's own table) are held in agreement by
+   exit-contract-guard-test (eight surfaces since sl-r54o).
+
+   THE LADDER (sl-kowi, Chair-ratified 08-30): 0 and 1 are VERDICTS ABOUT
+   THE APP. 2, 3 and 4 are three ways the run failed to be a measurement,
+   located by whose side gave way — 2 = your request (pre-flight, nothing
+   ran); 3 = SL's own code (crash parity, anywhere); 4 = the observation
+   machinery between spec and app, mid-run. Exit 4 has two disjoint
+   buckets under one code: the harness's own :error family (fix the
+   harness) and steps classified :observation by their adapter — the
+   witness went dark (check the environment). Neither is an acquittal:
+   the build is red and the run must be rerun; only the INDICTMENT of the
+   product is withheld, because the evidence never reached it.
 
    | Code | Status            | Meaning                                      |
    |------|-------------------|----------------------------------------------|
@@ -14,22 +25,28 @@
    |      |                   | errored. Tolerated = pending under           |
    |      |                   | :allow-pending? (counts confess).            |
    | 1    | :failed           | >=1 scenario :failed (valid tests, app       |
-   |      |                   | wrong), or pending under strict mode.        |
+   |      |                   | wrong — the app answered and the answer      |
+   |      |                   | missed, incl. :sut-classed errors), or       |
+   |      |                   | pending under strict mode.                   |
    | 2    | :planning-failed  | Invalid before execution: config/parse/      |
    |      |                   | discovery/binding errors, un-runnable        |
    |      |                   | invocation, empty selection. Pre-execution   |
    |      |                   | exclusive — nothing ran.                     |
    | 3    | :crashed          | Runner crash. Anywhere, wins over all.       |
    | 4    | :degraded         | Run degraded: >=1 scenario :error — the      |
-   |      |                   | infrastructure-failure family (hook throw,   |
-   |      |                   | capability provisioning, capture, harness).  |
-   |      |                   | Broken harness, verdict about the app        |
-   |      |                   | unavailable.                                 |
+   |      |                   | harness family (hook throw, capability       |
+   |      |                   | provisioning, capture, harness; counted      |
+   |      |                   | :error) OR a step whose adapter classified   |
+   |      |                   | its failure :observation — no answer existed |
+   |      |                   | (counted :unobserved). Verdict about the app |
+   |      |                   | unavailable for those scenarios.             |
 
    Precedence: 3 anywhere; 2 pre-execution exclusive; execution
-   worst-wins 4 > 1 > 0. Suite aggregation across setup groups:
-   2 > 4 > 1 > 0 (a crash throws past aggregation to execute!'s
-   handler).
+   worst-wins 4 > 1 > 0 — 4's imperative (fix observation, rerun; this
+   run is not the measurement you asked for) subsumes 1's, and reporting
+   1 on a degraded run would claim a completeness the run lacks. Suite
+   aggregation across setup groups: 2 > 4 > 1 > 0 (a crash throws past
+   aggregation to execute!'s handler).
 
    The 0/1/2/3 contract was locked at 0.5.1; Chair reopened it
    STRENGTHEN-ONLY for the 0.5.5 window (sl-7c7i) — it re-locks at first

@@ -511,8 +511,7 @@
     (testing "WARN: builtin-name override dropping :impl-key AND :on-provision"
       (let [ws (setup/lossy-override-warnings
                 [{:name :sms-mock :provides [isms]}]
-                (assoc adapters/default-registry :sms-mock (override {}))
-                [:sms-mock])
+                (assoc adapters/default-registry :sms-mock (override {})))
             [w] ws]
         (is (= 1 (count ws)))
         (is (= :setup/lossy-adapter-override (:type w)))
@@ -523,28 +522,18 @@
       (is (empty? (setup/lossy-override-warnings
                    [{:name :sms-mock :provides [isms]
                      :impl-key nil :on-provision? false}]
-                   (assoc adapters/default-registry :sms-mock (override {}))
-                   [:sms-mock]))))
+                   (assoc adapters/default-registry :sms-mock (override {}))))))
     (testing "SILENT: update-dont-rebuild preserves the default keys"
       (is (empty? (setup/lossy-override-warnings
                    [{:name :sms-mock :provides [isms]}]
-                   (update adapters/default-registry :sms-mock merge (override {}))
-                   [:sms-mock]))))
-    (testing "WARN: a referenced default adapter removed entirely (W21)"
-      (let [ws (setup/lossy-override-warnings [] {} [:etaoin])
-            [w] ws]
-        (is (= 1 (count ws)))
-        (is (= :setup/default-adapter-removed (:type w)))
-        (is (= :etaoin (:adapter w)))
-        (is (str/includes? (:message w) ":adapter/unknown"))))
-    (testing "SILENT: minimal registry covering every referenced adapter"
-      (is (empty? (setup/lossy-override-warnings
-                   [] {:mock-web (override {})} [:mock-web]))))
-    (testing "SILENT: empty registry with nothing referenced (harmless)"
-      (is (empty? (setup/lossy-override-warnings [] {} []))))))
+                   (update adapters/default-registry :sms-mock merge (override {}))))))
+    (testing "SILENT: a removed default is not this fn's concern (the W21
+              removal arm was deleted caller-less at sl-k1pv — registry
+              membership is bound-adapter-errors' alone)"
+      (is (empty? (setup/lossy-override-warnings [] {}))))))
 
-;; sl-kkoh: the plan-aware EXACT check — the run seam's replacement for
-;; the removal warn above (which stays as the plans-not-in-hand fallback).
+;; sl-kkoh: the plan-aware EXACT check — registry membership's single owner
+;; on both compiling pipelines (run-group! and, since sl-k1pv, single-suite).
 
 (deftest bound-adapter-errors-cases
   (testing "ERROR: a bound default adapter removed — with the teaching tail"

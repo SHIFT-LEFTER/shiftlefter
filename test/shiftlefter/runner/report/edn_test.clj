@@ -102,6 +102,92 @@
       (is (= "Unexpected error" (-> summary :error :message))))))
 
 ;; -----------------------------------------------------------------------------
+;; Group identity + invocation aggregate (sl-pwbp)
+;; -----------------------------------------------------------------------------
+
+(deftest test-build-summary-group-identity
+  (testing "build-summary is a pure projection: identity keys land iff the
+            opts carry them (the multi-group gate lives in the runner)"
+    (let [result {:scenarios [] :counts {:passed 0 :failed 0 :pending 0 :skipped 0}}
+          stamped (report-edn/build-summary "run-g" 0 result
+                                            {:group-label "alpha" :group-index 0})
+          bare (report-edn/build-summary "run-g" 0 result {})]
+      (is (= "alpha" (:group/label stamped)))
+      (is (= 0 (:group/index stamped)) "index 0 survives (some?, not truthy)")
+      (is (not (contains? bare :group/label)))
+      (is (not (contains? bare :group/index)))))
+  (testing "the exit-2 path stamps the same way (report-planning-error! seam)"
+    (let [summary (report-edn/build-summary "run-g" 2 nil
+                                            {:diagnostics {}
+                                             :group-label "bravo" :group-index 1})]
+      (is (= "bravo" (:group/label summary)))
+      (is (= 1 (:group/index summary))))))
+
+(deftest test-invocation-summary
+  (testing "the aggregate form: :invocation/* verdict keys, rows echoing the
+            per-group summary vocabulary, and NO :run/exit-code — the
+            documented summary discriminator must not match it"
+    (let [agg (report-edn/invocation-summary
+               "run-inv" 4242 2
+               [{:group-label "alpha" :exit-code 0 :status :passed}
+                {:group-label "bravo" :exit-code 2 :status :planning-failed}])]
+      (is (= "run-inv" (:run/id agg)))
+      (is (= 4242 (:run/seed agg)))
+      (is (= 2 (:invocation/exit-code agg)))
+      (is (= :planning-failed (:invocation/status agg)))
+      (is (not (contains? agg :run/exit-code)))
+      (is (= [{:group/label "alpha" :group/index 0
+               :run/exit-code 0 :run/status :passed}
+              {:group/label "bravo" :group/index 1
+               :run/exit-code 2 :run/status :planning-failed}]
+             (:invocation/groups agg)))))
+  (testing "dry-run? (sl-a7sx, Warden W6): the aggregate says :dry-run, not
+            the exit-code-derived :passed — dry-run is invocation-wide"
+    (let [agg (report-edn/invocation-summary
+               "run-inv" 4242 0
+               [{:group-label "alpha" :exit-code 0 :status :dry-run}
+                {:group-label "bravo" :exit-code 0 :status :dry-run}]
+               {:dry-run? true})]
+      (is (= 0 (:invocation/exit-code agg)))
+      (is (= :dry-run (:invocation/status agg)))
+      (is (= [:dry-run :dry-run] (mapv :run/status (:invocation/groups agg))))
+      (is (not (contains? agg :run/exit-code)))))
+  (testing "a dry run whose group failed PLANNING keeps the exit-derived
+            status — :planning-failed beside exit 2, as the rows say; never
+            :dry-run beside a nonzero code"
+    (let [agg (report-edn/invocation-summary
+               "run-inv" 4242 2
+               [{:group-label "alpha" :exit-code 0 :status :dry-run}
+                {:group-label "bravo" :exit-code 2 :status :planning-failed}]
+               {:dry-run? true})]
+      (is (= 2 (:invocation/exit-code agg)))
+      (is (= :planning-failed (:invocation/status agg)))))
+  (testing ":halted under :run scope (sl-78u4, Warden W3): the record rides
+            the aggregate with :group/label; a skipped group's row says
+            :skipped and carries NO :run/exit-code"
+    (let [halted {:after-scenario 1 :scenario "Dark" :group/label "bravo"}
+          agg (report-edn/invocation-summary
+               "run-inv" 4242 4
+               [{:group-label "alpha" :exit-code 0 :status :passed}
+                {:group-label "bravo" :exit-code 4 :status :degraded}
+                {:group-label "charlie" :status :skipped :halted-by halted}]
+               {:halted halted})]
+      (is (= halted (:halted agg)))
+      (is (= :degraded (:invocation/status agg)))
+      (is (= {:group/label "charlie" :group/index 2 :run/status :skipped}
+             (nth (:invocation/groups agg) 2))
+          "absence of :run/exit-code = no verdict exists")))
+  (testing "no :halted key when the policy never fired"
+    (is (not (contains? (report-edn/invocation-summary "r" 1 0 [] {}) :halted))))
+  (testing ":invocation/results-path (sl-alha, Warden W32): the invocation
+            run dir, additive; absent when no results dir was made"
+    (is (= "results/20260903-1"
+           (:invocation/results-path
+            (report-edn/invocation-summary "r" 1 0 [] {:results-path "results/20260903-1"}))))
+    (is (not (contains? (report-edn/invocation-summary "r" 1 0 [] {:results-path nil})
+                        :invocation/results-path)))))
+
+;; -----------------------------------------------------------------------------
 ;; prn-summary Tests
 ;; -----------------------------------------------------------------------------
 
@@ -152,6 +238,31 @@
                    {:diagnostics {:undefined [] :ambiguous [] :invalid-arity []
                                   :counts {} :config-lints [step-paths-lint]}})]
       (is (= [step-paths-lint] (-> summary :planning :config-lints))))))
+
+(def ^:private override-flag-glossary-lint
+  ;; sl-67dj (Warden P3-13) — the structured glossary-load warning shape.
+  {:type :glossary/override-flag-ignored
+   :path "glossary/verbs-web.edn"
+   :message "Glossary file glossary/verbs-web.edn carries :override-defaults …"})
+
+(deftest test-glossary-lints-in-summaries
+  (testing "clean when absent/empty — summaries stay byte-identical"
+    (is (nil? (report-edn/execution-diagnostics {:glossary-lints []}))))
+  (testing "exit 0: :diagnostics :glossary-lints rides the summary and round-trips"
+    (let [summary (report-edn/build-summary
+                   "r" 0 {:scenarios [] :counts {:passed 0}}
+                   {:diagnostics {:glossary-lints [override-flag-glossary-lint]}})]
+      (is (= [override-flag-glossary-lint]
+             (-> summary :diagnostics :glossary-lints)))
+      (is (= summary (edn/read-string (pr-str summary))))))
+  (testing "exit 2: :planning :glossary-lints rides the summary"
+    (let [summary (report-edn/build-summary
+                   "r" 2 nil
+                   {:diagnostics {:undefined [] :ambiguous [] :invalid-arity []
+                                  :counts {}
+                                  :glossary-lints [override-flag-glossary-lint]}})]
+      (is (= [override-flag-glossary-lint]
+             (-> summary :planning :glossary-lints))))))
 
 (deftest test-prn-summary-outputs-to-stdout
   (testing "prn-summary outputs to stdout, not stderr"
@@ -802,3 +913,49 @@
     (is (s/valid? ::reporter/run-summary (assoc base :dropped-events 5)))
     (testing "zero is a spec violation — absent-when-zero IS the contract"
       (is (not (s/valid? ::reporter/run-summary (assoc base :dropped-events 0)))))))
+
+;; -----------------------------------------------------------------------------
+;; Results-path Tests (sl-7dq5 F11b)
+;; -----------------------------------------------------------------------------
+
+(deftest test-build-summary-results-path
+  (testing "Executed summaries carry :run/results-path when opts pass one"
+    (let [result {:scenarios [{:status :passed :steps [{:status :passed}]}]
+                  :counts {:passed 1 :failed 0 :pending 0 :skipped 0}}
+          summary (report-edn/build-summary
+                   "run-rp" 0 result {:results-path "results/20260825T112500Z/movie-api"})]
+      (is (= "results/20260825T112500Z/movie-api" (:run/results-path summary)))))
+  (testing "Absent-when-unknown: no key in opts -> no key in the summary
+            (dry-run/exit-2/3/:defaults runs create no dir — golden safety)"
+    (let [result {:scenarios [{:status :passed :steps [{:status :passed}]}]
+                  :counts {:passed 1 :failed 0 :pending 0 :skipped 0}}
+          summary (report-edn/build-summary "run-nodir" 0 result {})]
+      (is (not (contains? summary :run/results-path)))))
+  (testing "nil threads through as absent"
+    (let [result {:scenarios [] :counts {:passed 0 :failed 0 :pending 0 :skipped 0}}
+          summary (report-edn/build-summary "run-nilrp" 0 result {:results-path nil})]
+      (is (not (contains? summary :run/results-path))))))
+
+(deftest test-edn-reporter-threads-results-path
+  (testing "EdnReporter's printed form carries :run/results-path off the run-summary"
+    (let [r (report-edn/make-reporter)
+          out (with-out-str
+                (reporter/on-run-end r {:run-id "run-rp" :exit-code 0
+                                        :counts {:passed 1 :failed 0 :pending 0 :skipped 0}
+                                        :status :passed
+                                        :results-path "results/20260825T112500Z"}))
+          form (edn/read-string out)]
+      (is (= "results/20260825T112500Z" (:run/results-path form)))))
+  (testing "No :results-path on the run-summary -> none in the printed form"
+    (let [r (report-edn/make-reporter)
+          out (with-out-str
+                (reporter/on-run-end r {:run-id "run-norp" :exit-code 0
+                                        :counts {:passed 1 :failed 0 :pending 0 :skipped 0}
+                                        :status :passed}))
+          form (edn/read-string out)]
+      (is (not (contains? form :run/results-path))))))
+
+(deftest test-run-summary-spec-results-path
+  (let [base {:run-id "r" :exit-code 0 :status :passed :counts {:passed 1}}]
+    (is (s/valid? ::reporter/run-summary
+                  (assoc base :results-path "results/20260825T112500Z/login")))))

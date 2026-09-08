@@ -28,7 +28,7 @@
        (exec/execute-suite plans)
        (report-diagnostics diagnostics)))
    ```"
-  (:require [shiftlefter.runner.config :as config]
+  (:require [shiftlefter.config :as config]
             [shiftlefter.stepengine.annotations :as annotations]
             [shiftlefter.stepengine.bind :as bind]
             [shiftlefter.stepengine.macros :as macros]
@@ -54,7 +54,7 @@
   "Check if config indicates Shifted mode (SVO validation enabled).
    Per A1: Shifted mode is indicated by presence of :svo key.
 
-   Invariant (sl-ieie): `runner.config/load-config` includes :svo in its
+   Invariant (sl-ieie): `shiftlefter.config/load-config` includes :svo in its
    result iff the USER's config contained it — default-config's :svo block
    is only merged under an explicit user opt-in. So this check on the loaded
    config faithfully reflects user intent: no :svo key = Vanilla."
@@ -94,11 +94,26 @@
       (let [glossary-result (glossary/load-all-glossaries-strict (:glossaries config))]
         (if (:error glossary-result)
           glossary-result
+          ;; :glossary-lints (sl-67dj, Warden P3-13): structured glossary-load
+          ;; warnings ride along so compile-suite can surface them as
+          ;; diagnostics — bind-suite ignores the extra key.
           {:ok (cond-> {:glossary (:ok glossary-result)
-                        :interfaces (:interfaces config)
+                        :interfaces (config/get-interfaces config)
                         :costumes (config/get-costumes config)
-                        :svo (:svo config)}
+                        :svo (config/get-svo-settings config)
+                        :glossary-lints (vec (:warnings glossary-result))}
                  adapter-registry (assoc :adapter-registry adapter-registry))})))))
+
+(defn- attach-glossary-lints
+  "sl-67dj (Warden P3-13): thread the structured glossary-load warnings
+   (build-binding-opts' :glossary-lints) onto a compile result's
+   :diagnostics for the runner to report. Applied on the post-bind paths
+   only — the earlier fail-fast planning branches surface their error as
+   the actionable item, matching the loader's error-drops-warnings rule."
+  [result binding-opts]
+  (let [lints (:glossary-lints binding-opts)]
+    (cond-> result
+      (seq lints) (update :diagnostics assoc :glossary-lints lints))))
 
 ;; -----------------------------------------------------------------------------
 ;; Pre-bind Pass: Macro Expansion
@@ -279,35 +294,46 @@
             ;; interfaces is exempt). Issues block planning even if bind
             ;; otherwise succeeded.
             ;;
-            ;; Orphan-type lint scopes to PROJECT-DECLARED glossary types
-            ;; (`config :glossaries :verbs` keys) — framework defaults
-            ;; are loaded transparently and shouldn't trip the check.
+            ;; Orphan-type lint scopes to PROJECT-DECLARED glossary types,
+            ;; read from the LOADED glossary's actual mounts (:sources =
+            ;; declared-type → path, built by the loader — sl-67dj: config
+            ;; is a path list; the files declare their types). Framework
+            ;; defaults are loaded transparently and shouldn't trip the
+            ;; check. In VANILLA mode this is nil and the orphan check is
+            ;; SKIPPED — chosen semantics (sl-67dj plan verdict): vanilla
+            ;; never loads glossary files, so declared types are unknowable
+            ;; here without extra reads; the projection, which always
+            ;; loads (sl-hjnp), keeps the lint live in both modes.
             (if-let [iss (and (:interfaces config)
                               (seq (suite-lint/lint-suite
                                     (suite-lint/used-stepdef-infos (:plans bind-result))
-                                    (keys (get-in config [:glossaries :verbs]))
+                                    (keys (get-in binding-opts [:glossary :sources :verbs]))
                                     (:interfaces config)
                                     adapter-registry)))]
               (if (= :warn (:suite-lint-mode opts))
                 ;; Corpus-bind mode (sl-hyey): a listing is not a run —
                 ;; keep the plans, carry the issues as data. The caller
                 ;; surfaces them (warn, never silent).
-                (assoc-in bind-result [:diagnostics :suite-lint-issues] iss)
+                (attach-glossary-lints
+                 (assoc-in bind-result [:diagnostics :suite-lint-issues] iss)
+                 binding-opts)
                 (let [counts (suite-lint/issue-counts iss)
                       diag   (:diagnostics bind-result)]
-                  {:plans      []
-                   :runnable?  false
-                   :diagnostics (-> diag
-                                    (assoc :suite-lint-issues iss)
-                                    (update :errors (fnil conj [])
-                                            {:type    :suite-lint/failed
-                                             :issues  iss
-                                             :message (str "Suite-load lint found "
-                                                           (count iss)
-                                                           " issue(s)")})
-                                    (update :counts merge
-                                            (assoc counts
-                                                   :total-issues
-                                                   (+ (or (:total-issues (:counts diag)) 0)
-                                                      (:total counts)))))}))
-              bind-result)))))))
+                  (attach-glossary-lints
+                   {:plans      []
+                    :runnable?  false
+                    :diagnostics (-> diag
+                                     (assoc :suite-lint-issues iss)
+                                     (update :errors (fnil conj [])
+                                             {:type    :suite-lint/failed
+                                              :issues  iss
+                                              :message (str "Suite-load lint found "
+                                                            (count iss)
+                                                            " issue(s)")})
+                                     (update :counts merge
+                                             (assoc counts
+                                                    :total-issues
+                                                    (+ (or (:total-issues (:counts diag)) 0)
+                                                       (:total counts)))))}
+                   binding-opts)))
+              (attach-glossary-lints bind-result binding-opts))))))))

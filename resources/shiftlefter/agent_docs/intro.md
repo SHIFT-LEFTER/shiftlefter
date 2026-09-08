@@ -2,8 +2,9 @@
 
 ShiftLefter is a Gherkin/BDD test framework in Clojure: a Gherkin parser,
 formatter, and runner (Gherkin-compliant — 46/46 official Cucumber test files), plus a
-typed Subject–Verb–Object vocabulary — "Shifted" mode, the normal way to use
-ShiftLefter — that validates steps before any browser or SMS run. It
+typed Subject–Verb–Object vocabulary — "Shifted" mode, the recommended way to
+use ShiftLefter, opted into with an `:svo` block in `shiftlefter.edn` (absent
+= Vanilla) — that validates steps before any browser or SMS run. It
 drives real browser sessions (one per actor) and other interfaces from plain
 feature files, and it is built for agents to author and repair behavior against
 durable project vocabulary rather than one-shot generated scripts.

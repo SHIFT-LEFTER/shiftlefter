@@ -307,7 +307,7 @@
                                        :capture {:screenshot :every-step}}
                               :svo {}
                               :glossaries {:subjects "glossary/subjects.edn"
-                                           :verbs {:web verbs}}
+                                           :verbs [verbs]}
                               :interfaces {:web {:type :web
                                                  :adapter :mock-web}}})))
         (spit-file dir "sl/steps/steps.clj"

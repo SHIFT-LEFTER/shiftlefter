@@ -31,6 +31,8 @@
     :summary "Scenario lifecycle hooks: hooks.clj registry, @hook= tags, ordering, failure semantics."}
    {:topic "lifecycle"
     :summary "Two-phase run model: plan guarantees, the execution weave, failure semantics by stage, parallelism."}
+   {:topic "exit-codes"
+    :summary "Exit-code decision procedure: the ladder table, per-exit imperatives, the classification razor."}
    {:topic "sieve"
     :summary "Vocabulary bootstrap and proposal reconciliation workflow."}
    {:topic "examples"
