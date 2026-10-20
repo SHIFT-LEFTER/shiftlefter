@@ -29,7 +29,9 @@
    definitions, never compile/exec/registry machinery."
   (:require [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [shiftlefter.intent.loader :as loader]
+            [shiftlefter.intent.resolve :as intent-resolve])
   (:import [java.util.regex Pattern PatternSyntaxException]))
 
 ;; -----------------------------------------------------------------------------
@@ -91,6 +93,16 @@
    {binding} token. Splice into step patterns as (str \"(\" fragment \")\").
    Quoted is always literal (sl-iseq)."
   (str literal-re-fragment "|" token-re-fragment))
+
+(def matcher-re-fragment
+  "Central matcher-slot regex fragment (sl-ectw): an inline `/…/` content
+   pattern — captured WITH its slashes (grammar-markers clause 4: capture
+   with the markers, classify centrally) — or one bare non-space token, the
+   `Intent.element` reference to a declared `:shape`. Deliberately
+   permissive at bind time: every rejection lives in `resolve-matcher`, the
+   one classifier the bindings lint (plan) and the exec normalizer (run)
+   both call. Splice as (str \"(\" fragment \")\")."
+  "/.+/|[^\\s/]\\S*")
 
 (def ^:private whole-token-re
   (re-pattern "\\{([A-Za-z][A-Za-z0-9]*)((?:\\.[A-Za-z][A-Za-z0-9]*)*)\\}"))
@@ -210,6 +222,107 @@
 
 (defn- strip-quotes [s] (undouble-quotes (subs s 1 (dec (count s)))))
 
+;; -----------------------------------------------------------------------------
+;; Matcher-slot classification (sl-ectw) — the one classifier
+;; -----------------------------------------------------------------------------
+
+(def ^:private inline-matcher-re
+  "A matcher slot captured with its slashes: `/…/`."
+  #"/(.+)/")
+
+(defn inline-matcher?
+  "True when `s` is an inline `/…/` content pattern (with its slashes)."
+  [s]
+  (and (string? s) (some? (re-matches inline-matcher-re s))))
+
+(defn- shape-ref-error [type message capture extra]
+  {:error (merge {:type type :message message :ref capture} extra)})
+
+(defn resolve-matcher
+  "Classify one matcher-slot capture (captured WITH its markers, per
+   `matcher-re-fragment`) into the regex source the step runs. THE shared
+   classifier: the bindings lint calls it at plan time, the exec
+   normalizer at run time, so plan and run can never disagree.
+
+   - `/…/`            → {:ok {:pattern <inside> :inline true}}
+   - `Intent.element` → the element's declared :shape:
+                        {:ok {:pattern <effective source> :ref <capture>
+                              :shape {…} :intent :element :def-site {…}}}
+
+   `intents` is the loaded intents map (nil when none are loaded);
+   `interface-type` the step's interface TYPE (:web, :sms, …; nil skips
+   the binding check). Errors, all `:bindings/*` so the normalizer turns
+   them into a structured step failure:
+
+   - :bindings/invalid-matcher-slot          neither form
+   - :bindings/unknown-shape-ref             unknown intent/element
+   - :bindings/element-has-no-shape          the element declares no :shape
+                                             (def-site + the two exits)
+   - :bindings/shape-no-binding-for-interface the element has a :shape but
+                                             no binding on this interface"
+  [capture intents interface-type]
+  (cond
+    (not (string? capture))
+    (shape-ref-error :bindings/invalid-matcher-slot
+                     (str "matcher slot must be /…/ or an Intent.element "
+                          "reference, got: " (pr-str capture))
+                     capture {})
+
+    (inline-matcher? capture)
+    {:ok {:pattern (subs capture 1 (dec (count capture))) :inline true}}
+
+    :else
+    (let [parsed (intent-resolve/parse-intent-ref capture)]
+      (if (:error parsed)
+        (shape-ref-error :bindings/invalid-matcher-slot
+                         (str "matcher slot " (pr-str capture) " is neither an "
+                              "inline /…/ pattern nor an Intent.element "
+                              "reference to a declared :shape")
+                         capture {})
+        (let [{:keys [intent element] :as terminal}
+              (intent-resolve/terminal-element intents (:ok parsed))]
+          (if-not (and terminal (loader/known-element? intents intent element))
+            (shape-ref-error :bindings/unknown-shape-ref
+                             (str "matcher slot " capture " names no known "
+                                  "intent element")
+                             capture {:intent (:intent (:ok parsed))})
+            (let [shape-r (loader/get-shape intents intent element)
+                  def-site (loader/element-def-site intents intent element)
+                  binding-r (when interface-type
+                              (loader/get-binding intents intent element
+                                                  interface-type))]
+              (cond
+                (:error shape-r)
+                (shape-ref-error :bindings/element-has-no-shape
+                                 (str capture " declares no :shape"
+                                      (when (:line def-site)
+                                        (str " (" (:file def-site) ":"
+                                             (:line def-site) ")"))
+                                      " — add :shape \"…\" to the element, or "
+                                      "write the pattern inline: matching /…/")
+                                 capture (cond-> {:intent intent :element element}
+                                           def-site (assoc :def-site def-site)))
+
+                (:error binding-r)
+                (shape-ref-error :bindings/shape-no-binding-for-interface
+                                 (str capture " has a :shape but no "
+                                      (name interface-type) " binding — a shape "
+                                      "is read through the element's binding on "
+                                      "the interface that runs the step")
+                                 capture (cond-> {:intent intent :element element
+                                                  :interface interface-type
+                                                  :available-interfaces
+                                                  (:available-interfaces (:error binding-r))}
+                                           def-site (assoc :def-site def-site)))
+
+                :else
+                {:ok (cond-> {:pattern (:pattern (:ok shape-r))
+                              :ref capture
+                              :shape (:ok shape-r)
+                              :intent intent
+                              :element element}
+                       def-site (assoc :def-site def-site))}))))))))
+
 (defn normalize-capture
   "Normalize one capture by its bind-time slot kind, against the live
    scenario ctx. This is the ONLY place captured {binding} tokens are
@@ -222,42 +335,58 @@
                see-title text).
    :location — whole token: resolve and QUOTE-WRAP so the stepdef's
                literal/ref classifier takes its literal path unchanged.
-   :key / :matcher / nil — untouched (:key slots admit no tokens; the
-               stepdef classifies quoted-vs-ref itself. Matcher-embedded
-               tokens are interpolated inside capture!, where
-               Pattern/quote lives)."
-  [capture kind scenario-ctx]
-  (case kind
-    (:value :text) (cond
-                     (quoted-literal? capture) (strip-quotes capture)
-                     (token? capture) (str (resolve-token scenario-ctx capture))
-                     :else capture)
-    :location (if (token? capture)
-                ;; Quote-wrap with interior quotes doubled (sl-jlqz) so the
-                ;; stepdef's strip-then-undouble is the exact inverse — a
-                ;; resolved value containing ' survives the round trip.
-                (str "'" (double-quotes (str (resolve-token scenario-ctx capture))) "'")
-                capture)
-    capture))
+   :matcher  — classified by `resolve-matcher` (sl-ectw): an inline
+               `/…/` loses its slashes; an `Intent.element` ref becomes
+               the element's declared :shape pattern. The stepdef fn
+               receives bare regex source either way. `opts` carries
+               `{:intents <loaded> :interface <type>}`; without them a
+               ref cannot resolve (bare harnesses pass inline only).
+               Matcher-embedded tokens are interpolated later inside
+               capture!, where Pattern/quote lives.
+   :key / nil — untouched (:key slots admit no tokens; the stepdef
+               classifies quoted-vs-ref itself)."
+  ([capture kind scenario-ctx]
+   (normalize-capture capture kind scenario-ctx nil))
+  ([capture kind scenario-ctx opts]
+   (case kind
+     (:value :text) (cond
+                      (quoted-literal? capture) (strip-quotes capture)
+                      (token? capture) (str (resolve-token scenario-ctx capture))
+                      :else capture)
+     :location (if (token? capture)
+                 ;; Quote-wrap with interior quotes doubled (sl-jlqz) so the
+                 ;; stepdef's strip-then-undouble is the exact inverse — a
+                 ;; resolved value containing ' survives the round trip.
+                 (str "'" (double-quotes (str (resolve-token scenario-ctx capture))) "'")
+                 capture)
+     :matcher (let [r (resolve-matcher capture (:intents opts) (:interface opts))]
+                (if-let [err (:error r)]
+                  (throw (ex-info (:message err) err))
+                  (get-in r [:ok :pattern])))
+     capture)))
 
 (defn normalize-captures
   "Normalize a captures vector by slot kinds. Returns {:ok captures'} or
-   {:error <structured :bindings/* error>} on a failed token resolution —
-   the caller fails the step with that error (never a raw exception)."
-  [captures slot-kinds scenario-ctx]
-  (if (empty? slot-kinds)
-    {:ok captures}
-    (try
-      {:ok (vec (map-indexed
-                 (fn [i capture]
-                   (normalize-capture capture (get slot-kinds i) scenario-ctx))
-                 captures))}
-      (catch clojure.lang.ExceptionInfo e
-        (let [data (ex-data e)]
-          (if (and (keyword? (:type data))
-                   (= "bindings" (namespace (:type data))))
-            {:error data}
-            (throw e)))))))
+   {:error <structured :bindings/* error>} on a failed token resolution or
+   an unresolvable matcher slot — the caller fails the step with that
+   error (never a raw exception). `opts` (optional) is `{:intents <loaded>
+   :interface <type>}` for matcher-slot shape refs (sl-ectw)."
+  ([captures slot-kinds scenario-ctx]
+   (normalize-captures captures slot-kinds scenario-ctx nil))
+  ([captures slot-kinds scenario-ctx opts]
+   (if (empty? slot-kinds)
+     {:ok captures}
+     (try
+       {:ok (vec (map-indexed
+                  (fn [i capture]
+                    (normalize-capture capture (get slot-kinds i) scenario-ctx opts))
+                  captures))}
+       (catch clojure.lang.ExceptionInfo e
+         (let [data (ex-data e)]
+           (if (and (keyword? (:type data))
+                    (= "bindings" (namespace (:type data))))
+             {:error data}
+             (throw e))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Pattern compilation + named-group matching (in-repo machinery)

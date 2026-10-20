@@ -70,6 +70,7 @@
    ```"
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
+            [shiftlefter.edn-lines :as edn-lines]
             [clojure.java.io :as io]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
@@ -200,9 +201,20 @@
 ;; Loading Helpers
 ;; -----------------------------------------------------------------------------
 
+(defn- with-lines
+  "Attach the def-site line index (sl-u2r0) as metadata on a read glossary
+   value: `::lines` is the position-tracking read of the same text, or nil
+   when that pass cannot vouch for itself (shiftlefter.edn-lines/index).
+   Metadata, not a key — the value's shape is the file's, untouched."
+  [data content]
+  (if (instance? clojure.lang.IObj data)
+    (vary-meta data assoc ::lines (edn-lines/index content data))
+    data))
+
 (defn- read-edn-file
   "Read EDN from a filesystem path.
-   Returns {:ok data} or {:error {...}}."
+   Returns {:ok data} or {:error {...}}. The data carries the def-site
+   line index as `::lines` metadata (sl-u2r0)."
   [path]
   (try
     (let [content (sio/slurp-utf8 path)]
@@ -211,7 +223,7 @@
         {:error {:type :glossary/read-failed
                  :message (str "Failed to read glossary: " (:message content))
                  :path path}}
-        {:ok (edn/read-string content)}))
+        {:ok (with-lines (edn/read-string content) content)}))
     (catch Exception e
       {:error {:type :glossary/parse-failed
                :message (str "Failed to parse glossary EDN: " (ex-message e))
@@ -223,7 +235,8 @@
   [resource-path]
   (if-let [url (io/resource resource-path)]
     (try
-      {:ok (-> url slurp edn/read-string)}
+      (let [content (slurp url)]
+        {:ok (with-lines (edn/read-string content) content)})
       (catch Exception e
         {:error {:type :glossary/parse-failed
                  :message (str "Failed to parse glossary resource: " (ex-message e))
@@ -389,6 +402,8 @@
        (keep read-default-verb-file)
        (some #(when (= interface-type (:type %)) %))))
 
+(declare verb-def-sites indexed-section builtin-resource-label)
+
 (defn load-default-glossaries
   "Load all framework default glossaries.
 
@@ -399,13 +414,17 @@
     :verbs {:web {...}
             :sms {...}}}  ;; one entry per shipped default file"
   []
-  {:subjects {}
-   :verbs (reduce (fn [acc resource-path]
-                    (if-let [data (read-default-verb-file resource-path)]
-                      (assoc acc (:type data) (:verbs data))
-                      acc))
-                  {}
-                  default-verbs-resources)})
+  (reduce (fn [acc resource-path]
+            (if-let [data (read-default-verb-file resource-path)]
+              (-> acc
+                  (assoc-in [:verbs (:type data)] (:verbs data))
+                  ;; sl-u2r0: builtin def-sites, named as resources.
+                  (assoc-in [:def-sites :verbs (:type data)]
+                            (verb-def-sites (indexed-section data :verbs)
+                                            (builtin-resource-label resource-path))))
+              acc))
+          {:subjects {} :verbs {} :def-sites {:subjects {} :verbs {}}}
+          default-verbs-resources))
 
 ;; -----------------------------------------------------------------------------
 ;; Merging
@@ -459,20 +478,82 @@
         (distinct (concat (keys builtin-verbs) (keys user-verbs)))))
 
 (defn- attach-provenance
-  "Attach :provenance (per-entry markers) and :sources (the files actually
+  "Attach :provenance (per-entry markers), :sources (the files actually
    mounted: the subjects path plus declared-type → path for each project
    verb file, assembled by the load-all* loaders as they mount — actual-
-   mount provenance, sl-67dj) to a merged glossary. Additive keys —
+   mount provenance, sl-67dj) and :def-sites (sl-u2r0: per-entry
+   `{:file :line}` — `{:subjects {kw site} :verbs {type {kw site}}}`,
+   subject instances under their qualified form, :line absent where the
+   index pass could not vouch for it) to a merged glossary. Additive keys —
    ::glossary is req-un, so consumers that don't know about them conform
-   unchanged."
-  [glossary defaults project sources]
+   unchanged. `def-sites` is `{:defaults {...} :project {...}}`; a project
+   entry's site replaces a builtin's, mirroring the merge."
+  [glossary defaults project sources def-sites]
   (assoc glossary
          :provenance {:subjects (section-provenance (:subjects defaults)
                                                     (:subjects project))
                       :verbs (verbs-provenance (:verbs defaults)
                                                (:verbs project))}
          :sources {:subjects (:subjects sources)
-                   :verbs (or (:verbs sources) {})}))
+                   :verbs (or (:verbs sources) {})}
+         :def-sites {:subjects (merge (get-in def-sites [:defaults :subjects])
+                                      (get-in def-sites [:project :subjects]))
+                     :verbs (merge-with merge
+                                        (get-in def-sites [:defaults :verbs])
+                                        (get-in def-sites [:project :verbs]))}))
+
+;; -----------------------------------------------------------------------------
+;; Def-site index (sl-u2r0)
+;; -----------------------------------------------------------------------------
+
+(defn- subject-def-sites
+  "`{kw {:file :line}}` for one subjects file: every type under its
+   keyword, every instance under its QUALIFIED form (`:user/alice`) — a
+   persona map's own line, a bare instance keyword its :instances
+   vector's line. `subjects` is the file's raw :subjects map (its
+   collections carry the index metadata when the pass vouched for it).
+   Without an index every site is file-only."
+  [subjects file]
+  (let [site (fn [line] (cond-> {:file file} line (assoc :line line)))]
+    (reduce-kv
+     (fn [acc type-kw entry]
+       (let [entry-line (:line (meta entry))
+             instances (when (map? entry) (:instances entry))
+             vec-line (or (:line (meta instances)) entry-line)]
+         (as-> (assoc acc type-kw (site entry-line)) acc
+           (reduce (fn [acc inst]
+                     (let [id (if (map? inst) (:id inst) inst)
+                           line (if (map? inst) (or (:line (meta inst)) vec-line) vec-line)]
+                       (if (keyword? id)
+                         (assoc acc (keyword (name type-kw) (name id)) (site line))
+                         acc)))
+                   acc
+                   (when (sequential? instances) instances)))))
+     {}
+     (or subjects {}))))
+
+(defn- verb-def-sites
+  "`{verb-kw {:file :line}}` for one verb file's :verbs map (raw, with the
+   index metadata when the pass vouched for it)."
+  [verbs file]
+  (into {}
+        (map (fn [[verb-kw entry]]
+               [verb-kw (cond-> {:file file}
+                          (:line (meta entry)) (assoc :line (:line (meta entry))))]))
+        (or verbs {})))
+
+(defn- indexed-section
+  "The raw section map of a read glossary value with the index metadata
+   on its collections — the `::lines` read when it vouched, else the
+   plain data (file-only precision)."
+  [data section]
+  (get (or (::lines (meta data)) data) section))
+
+(defn builtin-resource-label
+  "How a framework default verb glossary names itself as a def-site file
+   (matches the sl-explain projection's wording)."
+  [resource-path]
+  (str resource-path " (builtin resource)"))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API: Loading All
@@ -648,7 +729,8 @@
         (do (log/warnf "Could not load subject glossary: %s" (:message result))
             {:subjects {}})
         (do (log-warning! (override-flag-warning result path))
-            {:subjects (:subjects result)})))))
+            {:subjects (:subjects result)
+             :def-sites (subject-def-sites (indexed-section result :subjects) path)})))))
 
 (defn- load-subject-glossary-strict
   "Load subject glossary strictly.
@@ -661,7 +743,8 @@
         {:error {:type :svo/glossary-file-not-found
                  :path path
                  :message (:message result)}}
-        {:ok {:subjects (:subjects result)}
+        {:ok {:subjects (:subjects result)
+              :def-sites (subject-def-sites (indexed-section result :subjects) path)}
          :warnings (filterv some? [(override-flag-warning result path)])}))))
 
 (defn- load-verb-glossary
@@ -689,7 +772,8 @@
           (log-warning! (override-flag-warning result path))
           (doseq [e errors]
             (log/warn (:message e)))
-          {:verbs {ftype (:verbs result)}})))))
+          {:verbs {ftype (:verbs result)}
+           :def-sites {ftype (verb-def-sites (indexed-section result :verbs) path)}})))))
 
 (defn- load-verb-glossary-strict
   "Load verb glossary strictly, mounting under the type the FILE declares
@@ -719,7 +803,8 @@
               errors (validate-verb-entries (:verbs result) ftype path)]
           (if (seq errors)
             {:error (assoc (first errors) :all-errors errors)}
-            {:ok {:verbs {ftype (:verbs result)}}
+            {:ok {:verbs {ftype (:verbs result)}
+                  :def-sites {ftype (verb-def-sites (indexed-section result :verbs) path)}}
              :warnings (filterv some? [(override-flag-warning result path)])}))))))
 
 (defn- mount-sources
@@ -767,24 +852,30 @@
                          (-> acc
                              (update :verbs #(merge-with merge % (:verbs loaded)))
                              (update :sources merge
-                                     (mount-sources (:verbs loaded) path)))))
-                     {:verbs {} :sources {}}
+                                     (mount-sources (:verbs loaded) path))
+                             (update :def-sites #(merge-with merge % (:def-sites loaded))))))
+                     {:verbs {} :sources {} :def-sites {}}
                      (verb-paths config-paths))
         ;; Combine into project glossary
         project {:subjects (:subjects subject-glossary)
                  :verbs (:verbs verb-mounts)}
         sources {:subjects subject-path
-                 :verbs (:sources verb-mounts)}]
+                 :verbs (:sources verb-mounts)}
+        def-sites {:defaults (:def-sites defaults)
+                   :project {:subjects (:def-sites subject-glossary)
+                             :verbs (:def-sites verb-mounts)}}]
     (-> (merge-glossaries defaults project)
         (update :subjects normalize-subjects)
-        (attach-provenance defaults project sources)
+        (attach-provenance defaults project sources def-sites)
         (attach-instance-index false))))
 
 (defn load-all-glossaries-strict
-  "Load all glossaries strictly for Shifted mode.
+  "Load all glossaries strictly — the run path's loader (sl-6wh9: one
+   mode, it always runs).
 
    Unlike `load-all-glossaries`, this fails on missing/invalid files instead
-   of warning. Use this when :svo config is present.
+   of warning. nil paths load as empty (absence never warns; a false claim
+   always errors).
 
    Config shape (sl-67dj — a LIST of paths; each file's own :type is its
    mount key, and a file without a keyword :type is a planning-class
@@ -823,8 +914,10 @@
                                                  #(merge-with merge % (-> result :ok :verbs)))
                                       (update-in [:ok :sources] merge
                                                  (mount-sources (-> result :ok :verbs) path))
+                                      (update-in [:ok :def-sites]
+                                                 #(merge-with merge % (-> result :ok :def-sites)))
                                       (update :warnings into (:warnings result)))))))
-                          {:ok {:verbs {} :sources {}} :warnings []}
+                          {:ok {:verbs {} :sources {} :def-sites {}} :warnings []}
                           (verb-paths config-paths))]
         (if (:error verb-results)
           verb-results
@@ -833,11 +926,14 @@
                          :verbs (-> verb-results :ok :verbs)}
                 sources {:subjects subject-path
                          :verbs (-> verb-results :ok :sources)}
+                def-sites {:defaults (:def-sites defaults)
+                           :project {:subjects (-> subject-result :ok :def-sites)
+                                     :verbs (-> verb-results :ok :def-sites)}}
                 warnings (into (vec (:warnings subject-result))
                                (:warnings verb-results))
                 merged (-> (merge-glossaries defaults project)
                            (update :subjects normalize-subjects)
-                           (attach-provenance defaults project sources))
+                           (attach-provenance defaults project sources def-sites))
                 indexed (attach-instance-index merged true)]
             (if (:error indexed)
               indexed

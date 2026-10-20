@@ -1,11 +1,11 @@
 # ShiftLefter examples — the on-ramp
 
-Nine self-contained example projects, ordered as a learning path. The arc:
-you can start in **Vanilla mode** (no vocabulary, works like any Gherkin
-runner) and be productive immediately — but the advertised path is
-**Shifted mode**, where a project glossary validates every scenario at
-planning time, before anything runs. `sl orient` always tells you which
-mode a project is in (Shifted = `:svo` present in `sl/shiftlefter.edn`).
+Nine self-contained example projects, ordered as a learning path. The arc
+follows ShiftLefter's two layers. **01 is the parser layer**: any Gherkin file,
+no config, no step definitions. **From 02 on, every step is typed** — it binds
+to a built-in or a `defstep` and is validated against the project glossary at
+planning time, before anything runs. There is no mode to pick: a suite whose
+steps bind to nothing is a planning result (exit 2), not a way of running.
 
 ## Running the examples
 
@@ -24,16 +24,16 @@ see the root README's CLI section.
 
 ## The path
 
-| # | Example | Teaches | Mode | Run | Needs |
-|---|---------|---------|------|-----|-------|
-| 01 | [`01-validate-and-format/`](01-validate-and-format/) | Parse, validate, and canonically format any Gherkin — a CI gate with zero setup | n/a (no runner) | `sl fmt --check <file>` | nothing |
-| 02 | [`02-browser-zero-code/`](02-browser-zero-code/) | A real browser test with zero custom stepdefs; `setup.clj` starts the bundled app it drives — fully offline | Vanilla | `sl run sl/features/` | ChromeDriver |
-| 02b | [`02b-browser-multi-actor/`](02b-browser-multi-actor/) | Alice and Bob in separate browser sessions; the glossary declares who exists — fully offline | **Shifted** | `sl run sl/features/` | ChromeDriver |
-| 03 | [`03-custom-steps/`](03-custom-steps/) | Your first `defstep` — patterns, captures, context flow | Vanilla | `sl run sl/features/` | nothing |
-| 04 | [`04-sms-2fa/`](04-sms-2fa/) | Cross-interface: browser + mock SMS in one scenario; `setup.clj` orchestration | Shifted | `clj -M:demo` | ChromeDriver |
-| 05 | [`05-nested-self-rooted/`](05-nested-self-rooted/) | Nested intent addressing — a self-rooted component mounted in two regions | Shifted | `clj -M:demo` | ChromeDriver |
-| 06 | [`06-nested-parent-anchored/`](06-nested-parent-anchored/) | Nested intent addressing — parent-anchored collections (the reused-card pattern) | Shifted | `clj -M:demo` | ChromeDriver |
-| 07 | [`07-custom-capture-kind/`](07-custom-capture-kind/) | Extend the framework: your adapter contributes a capture kind — evidence lands in the envelope and report | Shifted | `sl run sl/features/` | nothing |
+| # | Example | Teaches | Run | Needs |
+|---|---------|---------|-----|-------|
+| 01 | [`01-validate-and-format/`](01-validate-and-format/) | Parse, validate, and canonically format any Gherkin — a CI gate with zero setup | `sl fmt --check <file>` | nothing |
+| 02 | [`02-browser-zero-code/`](02-browser-zero-code/) | A real browser test with zero custom stepdefs; `setup.clj` starts the bundled app it drives — fully offline | `sl run sl/features/` | ChromeDriver |
+| 02b | [`02b-browser-multi-actor/`](02b-browser-multi-actor/) | Alice and Bob in separate browser sessions; the glossary declares who exists — fully offline | `sl run sl/features/` | ChromeDriver |
+| 03 | [`03-custom-steps/`](03-custom-steps/) | Your first `defstep` — patterns, captures, context flow | `sl run sl/features/` | nothing |
+| 04 | [`04-sms-2fa/`](04-sms-2fa/) | Cross-interface: browser + mock SMS in one scenario; `setup.clj` orchestration | `clj -M:demo` | ChromeDriver |
+| 05 | [`05-nested-self-rooted/`](05-nested-self-rooted/) | Nested intent addressing — a self-rooted component mounted in two regions | `clj -M:demo` | ChromeDriver |
+| 06 | [`06-nested-parent-anchored/`](06-nested-parent-anchored/) | Nested intent addressing — parent-anchored collections (the reused-card pattern) | `clj -M:demo` | ChromeDriver |
+| 07 | [`07-custom-capture-kind/`](07-custom-capture-kind/) | Extend the framework: your adapter contributes a capture kind — evidence lands in the envelope and report | `sl run sl/features/` | nothing |
 
 Suggested order: top to bottom. 01–03 need no Clojure knowledge; 04 is
 where you first write orchestration code of your own (02/02b ship a small

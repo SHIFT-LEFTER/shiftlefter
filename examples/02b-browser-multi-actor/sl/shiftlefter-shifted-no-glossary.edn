@@ -1,4 +1,4 @@
-;; Teaching config — Shifted mode WITHOUT a glossary: :unknown-subject is
+;; Teaching config — enforcement WITHOUT a glossary: :unknown-subject is
 ;; a hard error but no subjects are declared, so every step is rejected at
 ;; planning time. Demonstrates that the glossary is the source of truth.
 ;; :glossaries nil is EXPLICIT here (sl-fcjm): an absent key would pick up
@@ -9,4 +9,4 @@
 {:interfaces {:web {:type :web
                     :adapter :etaoin}}
  :glossaries nil
- :svo {:unknown-subject :error}}
+ :enforcement {:unknown-subject :error}}

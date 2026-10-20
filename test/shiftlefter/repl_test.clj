@@ -1,6 +1,7 @@
 (ns shiftlefter.repl-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.string :as str]
+            [shiftlefter.config :as config]
             [shiftlefter.repl :as repl]
             [shiftlefter.stepengine.registry :as registry :refer [defstep]]
             [shiftlefter.capabilities.ctx :as cap]
@@ -8,13 +9,13 @@
             [shiftlefter.browser.chrome :as chrome]
             [babashka.fs :as fs]))
 
-;; Clear registry, contexts, and reset to vanilla mode before each test
+;; Clear registry, contexts, and drop any loaded config before each test
 (use-fixtures :each
   (fn [f]
     (registry/clear-registry!)
     (repl/reset-ctx!)
     (repl/reset-ctxs!)
-    (repl/vanilla!)  ; Ensure vanilla mode between tests
+    (repl/reset-config!)  ; built-in defaults between tests
     (f)))
 
 ;; -----------------------------------------------------------------------------
@@ -410,61 +411,64 @@ Feature: Test
           (is (= :costume/not-found (get-in result [:error :type]))))))))
 
 ;; -----------------------------------------------------------------------------
-;; Shifted Mode Tests (WI-031.011)
+;; Config API (sl-6wh9: one mode — load-config! / reset-config!)
 ;; -----------------------------------------------------------------------------
 
-(deftest test-shifted?-defaults-to-false
-  (testing "shifted? returns false by default"
-    (is (false? (repl/shifted?)))))
+(deftest test-get-repl-config-defaults
+  (testing "with nothing loaded the REPL runs under the built-in defaults"
+    (is (= config/default-config (repl/get-repl-config)))
+    (is (map? (:enforcement (repl/get-repl-config))))))
 
-(deftest test-vanilla!-returns-vanilla
-  (testing "vanilla! returns :vanilla"
-    (is (= :vanilla (repl/vanilla!)))))
+(deftest test-reset-config!-returns-defaults
+  (testing "reset-config! returns :defaults"
+    (is (= :defaults (repl/reset-config!)))))
 
-(deftest test-shifted!-with-config-map
-  (testing "shifted! with custom config enables Shifted mode"
-    (let [cfg {:svo {:unknown-subject :warn}
+(deftest test-load-config!-with-config-map
+  (testing "load-config! with a map makes it the effective config"
+    (let [cfg {:enforcement {:unknown-subject :warn}
                :runner {:step-paths ["steps/"]}}
-          result (repl/shifted! cfg)]
+          result (repl/load-config! cfg)]
       (is (= :ok (:status result)))
-      (is (true? (repl/shifted?)))
       (is (= cfg (repl/get-repl-config))))))
 
-(deftest test-vanilla!-disables-shifted-mode
-  (testing "vanilla! disables Shifted mode"
-    (repl/shifted! {:svo {:unknown-subject :warn}})
-    (is (true? (repl/shifted?)))
-    (repl/vanilla!)
-    (is (false? (repl/shifted?)))
-    (is (nil? (repl/get-repl-config)))))
+(deftest test-reset-config!-drops-loaded-config
+  (testing "reset-config! returns the REPL to the built-in defaults"
+    (repl/load-config! {:enforcement {:unknown-subject :warn}})
+    (is (not= config/default-config (repl/get-repl-config)))
+    (repl/reset-config!)
+    (is (= config/default-config (repl/get-repl-config)))))
 
-(deftest test-run-dry-vanilla-mode
-  (testing "run-dry in vanilla mode uses bind-suite directly"
+(deftest test-run-dry-under-defaults
+  (testing "run-dry with nothing loaded compiles under the defaults: an
+            untyped stepdef binds, runs, and is reported (warn, not a gate)"
     (defstep #"I am here" [] nil)
     (let [result (repl/run-dry "Feature: Test\n  Scenario: X\n    Given I am here")]
       (is (= :ok (:status result)))
-      (is (= 1 (count (:plans result)))))))
+      (is (= 1 (count (:plans result))))
+      (is (= [:stepdef/untyped]
+             (mapv :type (-> result :diagnostics :svo-issues)))))))
 
-(deftest test-run-dry-shifted-mode
-  (testing "run-dry in Shifted mode uses compile-suite"
+(deftest test-run-dry-under-loaded-config
+  (testing "run-dry under a loaded config honors its enforcement levels"
     (defstep #"I am here" [] nil)
-    ;; Shifted mode with minimal config (no glossaries = vanilla behavior)
-    (repl/shifted! {:runner {:step-paths ["steps/"]}})
+    (repl/load-config! {:runner {:step-paths ["steps/"]}
+                        :enforcement {:untyped-stepdef :off}})
     (let [result (repl/run-dry "Feature: Test\n  Scenario: X\n    Given I am here")]
       (is (= :ok (:status result)))
-      (is (= 1 (count (:plans result)))))))
+      (is (= 1 (count (:plans result))))
+      (is (empty? (-> result :diagnostics :svo-issues))))))
 
-(deftest test-run-vanilla-mode
-  (testing "run in vanilla mode executes without SVO validation"
+(deftest test-run-under-defaults
+  (testing "run with nothing loaded executes under the defaults"
     (defstep #"I do something" [] nil)
     (let [result (repl/run "Feature: Test\n  Scenario: X\n    Given I do something")]
       (is (= :ok (:status result)))
       (is (= 1 (-> result :summary :passed))))))
 
-(deftest test-run-shifted-mode
-  (testing "run in Shifted mode includes diagnostics"
+(deftest test-run-under-loaded-config
+  (testing "run under a loaded config includes diagnostics"
     (defstep #"I do something" [] nil)
-    (repl/shifted! {:runner {:step-paths ["steps/"]}})
+    (repl/load-config! {:runner {:step-paths ["steps/"]}})
     (let [result (repl/run "Feature: Test\n  Scenario: X\n    Given I do something")]
       (is (= :ok (:status result)))
       (is (contains? result :diagnostics))
@@ -479,9 +483,9 @@ Feature: Test
       (try
         ;; Write a glossary with only :alice
         (spit subjects-file "{:subjects {:alice {:desc \"Known user\"}}}")
-        ;; Enable Shifted mode with this glossary
-        (repl/shifted! {:svo {:unknown-subject :warn}
-                        :glossaries {:subjects subjects-file}})
+        ;; Load a config carrying this glossary
+        (repl/load-config! {:enforcement {:unknown-subject :warn}
+                            :glossaries {:subjects subjects-file}})
         ;; Call as with unknown actor - should warn but succeed
         ;; repl/as prepends ":bob " so "exists" becomes ":bob exists"
         (let [stderr-out (java.io.StringWriter.)
@@ -500,10 +504,11 @@ Feature: Test
         (finally
           (fs/delete-tree temp-dir))))))
 
-(deftest test-as-no-warning-in-vanilla-mode
-  (testing "as does not warn in vanilla mode"
+(deftest test-as-no-warning-without-glossaries
+  (testing "as does not warn when the effective config declares no glossaries
+            (the built-in defaults) — a bare `as` is not a suite bind"
     (defstep #":([\w-]+) exists" [_subject] {:exists true})
-    (repl/vanilla!)
+    (repl/reset-config!)
     ;; repl/as prepends ":unknown-actor " so "exists" becomes ":unknown-actor exists"
     (let [stderr-out (java.io.StringWriter.)
           result (binding [*err* stderr-out]
@@ -511,14 +516,14 @@ Feature: Test
       (is (= :passed (:status result)))
       (is (= "" (str stderr-out))))))
 
-(deftest test-shifted!-no-args-without-config-file
-  (testing "shifted! with no args when no shiftlefter.edn exists"
+(deftest test-load-config!-no-args-without-config-file
+  (testing "load-config! with no args when no shiftlefter.edn exists"
     ;; This test runs from the project root which may or may not have shiftlefter.edn
     ;; Just verify it returns a result (either :ok or :error)
-    (let [result (repl/shifted!)]
+    (let [result (repl/load-config!)]
       (is (contains? result :status))
-      ;; Reset to vanilla for other tests
-      (repl/vanilla!))))
+      ;; Back to the defaults for other tests
+      (repl/reset-config!))))
 
 ;; -----------------------------------------------------------------------------
 ;; Exec-opts parity with the runner (sl-xjx0, Warden W8)
@@ -533,7 +538,7 @@ Feature: Test
         (reset! observed {:seed (:seed ctx)
                           :timing (cap/get-run-timing ctx)})
         nil)
-      (repl/shifted! {:timing {:deadline-ms 1234 :interval-ms 77}})
+      (repl/load-config! {:timing {:deadline-ms 1234 :interval-ms 77}})
       (let [result (repl/run "Feature: T\n  Scenario: S\n    Given I observe the ctx")]
         (is (= :ok (:status result)))
         (is (= 1 (-> result :summary :passed)))

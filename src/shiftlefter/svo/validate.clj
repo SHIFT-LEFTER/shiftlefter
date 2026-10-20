@@ -33,11 +33,13 @@
    ```clojure
    (validate-svo glossaries interfaces svo)
    ```"
-  (:require [clojure.spec.alpha :as s]
+  (:require [clojure.edn :as edn]
+            [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.svo.keys :as keys]
+            [shiftlefter.svo.locator-index :as locator-index]
             [shiftlefter.intent.resolve :as intent-resolve]
             [shiftlefter.intent.state :as intent-state]
             [shiftlefter.text :as text]))
@@ -49,6 +51,9 @@
 (s/def ::type #{:svo/missing-subject :svo/unknown-subject :svo/unknown-verb
                 :svo/unknown-interface :svo/provisioning-failed
                 :svo/unknown-object :svo/raw-locator-disallowed
+                ;; sl-6wh9: a matched user defstep with no :svo metadata —
+                ;; nothing ran through the type system for that step
+                :stepdef/untyped
                 ;; :key slots (sl-2sj6) — framework-owned closed set
                 :svo/unknown-key :svo/invalid-key-literal
                 ;; Scenario data plane (sl-yh7) — ride the same issue channel
@@ -56,6 +61,11 @@
                 :bindings/unnamed-only-groups :bindings/produced-never-consumed
                 ;; sl-gwru: producer marker in the assert-only matcher frame
                 :bindings/named-groups-in-assert-only
+                ;; sl-ectw: the declared shape in the matcher slot
+                :bindings/invalid-matcher-slot :bindings/unknown-shape-ref
+                :bindings/element-has-no-shape
+                :bindings/shape-no-binding-for-interface
+                :bindings/captures-without-shape :bindings/shape-and-inline
                 ;; Costume lints (sl-1206) — plan-time front door of the
                 ;; costume doctrine (stepengine.costume-lint); xbm runtime
                 ;; guard stays as the belt
@@ -66,12 +76,44 @@
 (s/def ::interface keyword?)
 (s/def ::interface-type keyword?)
 (s/def ::known (s/coll-of keyword?))
-(s/def ::suggestion (s/nilable keyword?))
+(s/def ::suggestion (s/nilable (s/or :keyword keyword? :string string?)))
+
+;; sl-u2r0: where the suggested thing is declared (with a :suggestion) or
+;; where the missing thing would be (without one). :line only when the
+;; loader's index pass vouched for the file; :entry = the suggested
+;; entry; :path = the config path for config-declared things.
+(s/def ::file string?)
+(s/def ::line pos-int?)
+(s/def ::def-site (s/keys :req-un [::file] :opt-un [::line]))
 
 (s/def ::svo-issue
   (s/keys :req-un [::type]
           :opt-un [::subject ::verb ::interface ::interface-type
-                   ::known ::suggestion]))
+                   ::known ::suggestion ::def-site]))
+
+;; -----------------------------------------------------------------------------
+;; Def-sites (sl-u2r0)
+;; -----------------------------------------------------------------------------
+
+(defn- entry-def-site
+  "The :def-site for a vocabulary issue: the suggested entry's recorded
+   site (`sites` = `{kw {:file :line}}`) tagged with `:entry`, else the
+   section's file alone (`fallback-file`) — where the missing thing would
+   be declared. nil when neither is known."
+  [sites suggestion fallback-file]
+  (or (when-let [site (and suggestion (get sites suggestion))]
+        (assoc site :entry suggestion))
+      (when fallback-file {:file fallback-file})))
+
+(defn- verb-fallback-file
+  "The file a verb for `interface-type` would be declared in: the mounted
+   project file when one exists, else the framework's builtin resource for
+   that type (named as the sl-explain projection names it)."
+  [glossary interface-type]
+  (or (get-in glossary [:sources :verbs interface-type])
+      (when (contains? (:verbs glossary) interface-type)
+        (glossary/builtin-resource-label
+         (str "shiftlefter/glossaries/verbs-" (name interface-type) ".edn")))))
 
 (s/def ::valid? boolean?)
 (s/def ::issues (s/coll-of map?))
@@ -95,11 +137,15 @@
      :message "SVO step resolved without a subject"}
     (when-not (glossary/known-subject? glossary subject)
       (let [all-forms (glossary/all-subject-forms glossary)
-            suggestion (text/suggest-similar subject all-forms 2)]
-        {:type :svo/unknown-subject
-         :subject subject
-         :known all-forms
-         :suggestion suggestion}))))
+            suggestion (text/suggest-similar subject all-forms 2)
+            def-site (entry-def-site (get-in glossary [:def-sites :subjects])
+                                     suggestion
+                                     (get-in glossary [:sources :subjects]))]
+        (cond-> {:type :svo/unknown-subject
+                 :subject subject
+                 :known all-forms
+                 :suggestion suggestion}
+          def-site (assoc :def-site def-site))))))
 
 (defn- validate-verb
   "Validate verb against glossary for interface type.
@@ -108,25 +154,32 @@
   (when verb
     (when-not (glossary/known-verb? glossary interface-type verb)
       (let [known (glossary/known-verbs glossary interface-type)
-            suggestion (text/suggest-similar verb known 2)]
-        {:type :svo/unknown-verb
-         :verb verb
-         :interface-type interface-type
-         :known known
-         :suggestion suggestion}))))
+            suggestion (text/suggest-similar verb known 2)
+            def-site (entry-def-site (get-in glossary [:def-sites :verbs interface-type])
+                                     suggestion
+                                     (verb-fallback-file glossary interface-type))]
+        (cond-> {:type :svo/unknown-verb
+                 :verb verb
+                 :interface-type interface-type
+                 :known known
+                 :suggestion suggestion}
+          def-site (assoc :def-site def-site))))))
 
 (defn- validate-interface
-  "Validate interface against config.
-   Returns issue map or nil if valid."
-  [interfaces interface-name]
+  "Validate interface against config. `config-path` (sl-u2r0) is where
+   interfaces are declared — the def-site of this issue, under
+   [:interfaces]. Returns issue map or nil if valid."
+  [interfaces interface-name config-path]
   (when interface-name
     (when-not (contains? interfaces interface-name)
       (let [known (vec (keys interfaces))
             suggestion (text/suggest-similar interface-name known 2)]
-        {:type :svo/unknown-interface
-         :interface interface-name
-         :known known
-         :suggestion suggestion}))))
+        (cond-> {:type :svo/unknown-interface
+                 :interface interface-name
+                 :known known
+                 :suggestion suggestion}
+          config-path (assoc :def-site (cond-> {:file config-path :path [:interfaces]}
+                                         suggestion (assoc :entry suggestion))))))))
 
 (defn raw-locator?
   "Check if the object string is a raw EDN locator (starts with {)."
@@ -235,14 +288,162 @@
           ;; If intents not loaded yet, skip the warning
           nil)))))
 
+;; -----------------------------------------------------------------------------
+;; Intent-ref did-you-mean + def-sites (sl-u2r0)
+;; -----------------------------------------------------------------------------
+
+(defn- intents-dir
+  "Where intents live, from the loaded structure: the directory the loader
+   stamped (`:intents-dir`, sl-u2r0), else the parent of any intent file,
+   else nil."
+  [intents]
+  (or (:intents-dir intents)
+      (some-> (:intent-files intents) vals first str
+              (str/replace #"/[^/]*$" ""))))
+
+(defn- intent-site
+  "`{:file :line}` of an intent, or its part (`part-name` under `:elements`
+   / `:collections`), from the loader's :def-sites; file-only when the
+   line is unknown; nil for an unknown intent."
+  ([intents intent-name] (intent-site intents intent-name nil))
+  ([intents intent-name part-name]
+   (when-let [site (get-in intents [:def-sites intent-name])]
+     (let [part-line (when part-name
+                       (or (get-in site [:elements part-name])
+                           (get-in site [:collections part-name])))]
+       (cond-> {:file (:file site)}
+         (or part-line (:line site)) (assoc :line (or part-line (:line site))))))))
+
+(defn- suggest-name
+  "Nearest of `candidates` (strings) to `target` (a string) within 2 edits,
+   as a string; nil when none."
+  [target candidates]
+  (some-> (text/suggest-similar target (vec candidates) 2) str))
+
+(defn- unresolvable-ref-issue
+  "The :svo/unknown-object issue for a ref-shaped object that the static
+   walk could not resolve (sl-u2r0, routed item 1 of the 6wh9 groom): an
+   ERROR on its own severity (the run would fail at
+   :browser/intent-resolve-error — the machine knew before the run), with
+   the did-you-mean and def-site the walk's structured error allows:
+
+   - :unknown-intent — the nearest loaded intent; def-site its file:line
+     (else the intents directory)
+   - :unknown-segment — the nearest element/collection of the intent the
+     segment was looked up in; def-site that part's line (else the intent)
+   - :no-binding-for-interface (Sol 32) — no suggestion; :known names the
+     interfaces that DO bind the element; def-site the element's line
+   - :element-has-children — def-site the intent's line"
+  [object-str interface intents {:keys [type message segment intent available-interfaces]}]
+  (let [[suggestion def-site]
+        (case type
+          :unknown-intent
+          (let [s (suggest-name intent (:intents intents))]
+            [s (or (when s (intent-site intents s))
+                   (when-let [dir (intents-dir intents)] {:file dir}))])
+          :unknown-segment
+          (let [region (get-in intents [:regions intent])
+                names (concat (:elements region) (map name (keys (:collections region))))
+                s (suggest-name segment names)]
+            [s (intent-site intents intent s)])
+          :no-binding-for-interface
+          [nil (intent-site intents intent segment)]
+          [nil (intent-site intents intent)])
+        ;; The suggestion as the author would write it: an intent alone, or
+        ;; the full dotted ref for a part.
+        full (when suggestion
+               (if (= type :unknown-intent) suggestion (str intent "." suggestion)))]
+    (cond-> {:type :svo/unknown-object
+             :object object-str
+             :interface interface
+             :severity :error
+             :message (cond-> message
+                        full (str ". Did you mean: " full "?"))}
+      full (assoc :suggestion full)
+      (seq available-interfaces) (assoc :known (vec available-interfaces))
+      def-site (assoc :def-site (cond-> def-site full (assoc :entry full))))))
+
+(defn ref-shaped?
+  "The C2 heuristic (sl-u2r0): does `s` LOOK like an intent reference —
+   an uppercase start and no whitespace — even if it does not parse? A
+   ref-shaped object that fails to resolve is a plan error by the
+   language's own rule (a frame-less object defaults to :intent); free
+   text (a space anywhere, or a lowercase start) is content that belongs
+   on a frame declaring `:object-kind :text`, and stays at the knob's
+   level with that advice."
+  [s]
+  (boolean (and (string? s)
+                (re-find #"^[A-Z]" s)
+                (not (re-find #"\s" s)))))
+
+(defn- free-text-object-issue
+  "A non-ref-shaped object on a slot that expects an intent ref: the
+   knob-level issue (no :severity — the level decides) whose message
+   names the fix, plus a did-you-mean when capitalizing the first letter
+   would resolve (`login.submit` → `Login.submit`)."
+  [object-str interface intents parse-message]
+  (let [capitalized (when (re-find #"^[a-z]" object-str)
+                      (str (str/upper-case (subs object-str 0 1)) (subs object-str 1)))
+        resolves? (fn [s]
+                    (let [p (intent-resolve/parse-intent-ref s)]
+                      (and (:ok p)
+                           (nil? (intent-resolve/validate-path-static intents (:ok p) interface)))))
+        suggestion (when (and capitalized (resolves? capitalized)) capitalized)]
+    (cond-> {:type :svo/unknown-object
+             :object object-str
+             :interface interface
+             :message (str parse-message
+                           (if suggestion
+                             (str ". Did you mean: " suggestion "?")
+                             (str ". This slot expects an intent reference"
+                                  " (Capitalized.dotted); for free text, declare"
+                                  " :object-kind :text on the verb's frame")))}
+      suggestion (assoc :suggestion suggestion
+                        :def-site (cond-> (or (intent-site intents
+                                                           (:intent (:ok (intent-resolve/parse-intent-ref suggestion))))
+                                              {})
+                                    true (assoc :entry suggestion))))))
+
+(defn- raw-locator-issue
+  "The :svo/raw-locator-disallowed issue at the :raw-locator level (sl-u2r0,
+   routed item 2 of the 6wh9 groom): no :severity — the level decides
+   (:warn or :error; :off never reaches here). Did-you-mean via the
+   locator index: when the same locator EDN is bound under an intent for
+   this interface, name that intent ref and its def-site."
+  [object-str interface intents]
+  (let [parsed (try (edn/read-string object-str) (catch Exception _ ::unparseable))
+        hit (when (and intents (not= ::unparseable parsed))
+              (->> (locator-index/lookup-locator (locator-index/build intents) parsed)
+                   (filter #(= interface (:interface %)))
+                   first))
+        suggestion (:address hit)
+        def-site (when hit
+                   (intent-site intents (:intent hit)
+                                (when (= :element (:role hit))
+                                  (subs (:address hit) (inc (count (:intent hit)))))))]
+    (cond-> {:type :svo/raw-locator-disallowed
+             :object object-str
+             :interface interface
+             :message (str "Raw locator " object-str " — reference the element by"
+                           " its intent name instead"
+                           (when suggestion (str ". Did you mean: " suggestion "?")))}
+      suggestion (assoc :suggestion suggestion)
+      def-site (assoc :def-site (cond-> def-site suggestion (assoc :entry suggestion))))))
+
 (defn- validate-object
   "Validate object (locator) against intent glossary.
 
-   Enforcement modes:
-   - :error — raw locators disallowed, unknown intents disallowed
-     (:strict is a deprecated alias, sl-femd)
-   - :warn — unknown intents warn (raw locators allowed)
+   Enforcement modes (the :unknown-object knob):
+   - :error — unknown intents disallowed (:strict is a deprecated alias,
+     sl-femd)
+   - :warn — a FREE-TEXT object on an intent slot warns with the
+     :object-kind :text advice; a REF-SHAPED object that does not resolve
+     is an error regardless (sl-u2r0 — carries :severity :error itself)
    - :off — no validation
+
+   Raw locators (sl-u2r0) ride the separate `raw-level` (the :raw-locator
+   kind): :off = allowed silently, :warn / :error = the
+   :svo/raw-locator-disallowed issue with a locator-index did-you-mean.
 
    Slots whose frame declares :object-kind :location accept literal values
    (URLs) — never an :unknown-object issue (sl-rlxa). When the frame also
@@ -259,7 +460,7 @@
    framework-owned closed set UNCONDITIONALLY — see validate-key-object.
 
    Returns issue map or nil if valid."
-  [object-str interface enforcement kind location-refs?]
+  [object-str interface enforcement kind location-refs? raw-level]
   (when (and object-str (string? object-str))
     (cond
       ;; :text — content-only slot, nothing to validate statically.
@@ -269,6 +470,13 @@
       ;; :key — framework-owned closed set, always-on (no enforcement gate).
       (= kind :key)
       (validate-key-object object-str)
+
+      ;; Raw locator on an intent slot (sl-u2r0): its own level, checked
+      ;; before the :unknown-object gate — the two knobs are independent.
+      (and (not= kind :location) (raw-locator? object-str))
+      (when (#{:warn :error :strict} raw-level)
+        (raw-locator-issue object-str interface
+                           (try (intent-state/get-intents) (catch Exception _ nil))))
 
       (= enforcement :off)
       nil
@@ -289,6 +497,9 @@
                 ;; Fires for all three static location error types (sl-s04n
                 ;; widened it from :unknown-intent only): a near-name located
                 ;; intent is the likely fix for :no-location* too.
+                ;; sl-u2r0: an unresolvable named-location ref fails at run
+                ;; (resolve-location) — an error on its own severity, with
+                ;; the suggested intent's def-site.
                 (let [suggestion (when (#{:unknown-intent :no-location
                                           :no-location-for-interface}
                                         (:type loc-error))
@@ -296,14 +507,20 @@
                                     (keyword object-str)
                                     (map keyword (intent-resolve/located-intents
                                                   intents interface))
-                                    2))]
+                                    2))
+                      def-site (or (when suggestion (intent-site intents (name suggestion)))
+                                   (intent-site intents object-str)
+                                   (when-let [dir (intents-dir intents)] {:file dir}))]
                   (cond-> {:type :svo/unknown-object
                            :object object-str
                            :interface interface
+                           :severity :error
                            :message (cond-> (:message loc-error)
                                       suggestion
                                       (str ". Did you mean: " suggestion "?"))}
-                    suggestion (assoc :suggestion suggestion)))))
+                    suggestion (assoc :suggestion suggestion)
+                    def-site (assoc :def-site (cond-> def-site
+                                                suggestion (assoc :entry suggestion)))))))
             (catch Exception _
               ;; If intents not loaded yet, skip validation
               nil))
@@ -311,38 +528,36 @@
           (quoted-capture? object-str)
           (ref-shaped-location-literal object-str interface)))
 
-      ;; Raw locator check (blocking level only — :error, or its deprecated
-      ;; alias :strict)
-      (and (#{:error :strict} enforcement) (raw-locator? object-str))
-      {:type :svo/raw-locator-disallowed
-       :object object-str
-       :message "Raw locators are not allowed when :unknown-object is :error. Use intent references instead."}
-
       ;; Intent reference check — supports flat AND nested (multi-segment) refs.
-      (not (raw-locator? object-str))
-      (let [parse-result (intent-resolve/parse-intent-ref object-str)]
-        (if (:error parse-result)
-          ;; Invalid intent reference syntax
-          {:type :svo/unknown-object
-           :object object-str
-           :message (-> parse-result :error :message)}
-          ;; Valid syntax — statically walk the path against the schema (no browser):
-          ;; intent known -> each non-last name is a collection -> last is a
-          ;; collection or an element with a binding for this interface.
-          (try
-            (let [intents (intent-state/get-intents)
-                  path-error (intent-resolve/validate-path-static
-                              intents (:ok parse-result) interface)]
-              (when path-error
-                {:type :svo/unknown-object
-                 :object object-str
-                 :interface interface
-                 :message (:message path-error)}))
-            (catch Exception _
-              ;; If intents not loaded yet, skip validation
-              nil))))
+      :else
+      (let [parse-result (intent-resolve/parse-intent-ref object-str)
+            intents (try (intent-state/get-intents) (catch Exception _ nil))]
+        (cond
+          ;; Free text on an intent slot (J-b): the knob's level + the fix.
+          (and (:error parse-result) (not (ref-shaped? object-str)))
+          (free-text-object-issue object-str interface intents
+                                  (-> parse-result :error :message))
 
-      :else nil)))
+          ;; Ref-shaped but malformed: unresolvable by construction.
+          (:error parse-result)
+          (cond-> {:type :svo/unknown-object
+                   :object object-str
+                   :interface interface
+                   :severity :error
+                   :message (-> parse-result :error :message)}
+            (intents-dir intents) (assoc :def-site {:file (intents-dir intents)}))
+
+          ;; Valid syntax — statically walk the path against the schema (no
+          ;; browser): intent known -> each non-last name is a collection ->
+          ;; last is a collection or an element with a binding for this
+          ;; interface. Intents not loaded => nothing to validate against.
+          (nil? intents)
+          nil
+
+          :else
+          (when-let [path-error (intent-resolve/validate-path-static
+                                 intents (:ok parse-result) interface)]
+            (unresolvable-ref-issue object-str interface intents path-error)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API
@@ -360,6 +575,11 @@
        for :error). The :off here is only the no-opts fallback — the
        effective default is computed by shiftlefter.config/load-config (:warn
        when an :intents glossary is configured, sl-femd).
+     - :raw-locator — :error, :warn, or :off (sl-u2r0): the raw-locator
+       kind's level, independent of :unknown-object (same conditional
+       default). :off here is the no-opts fallback.
+     - :config-path — the config file (sl-u2r0): the def-site an
+       :svo/unknown-interface issue names.
 
    Returns:
    - {:valid? true :issues []} if all checks pass
@@ -384,20 +604,21 @@
          ;; The SVO's :interface is the resolved execution INSTANCE
          ;; (sl-s2oa); its configured :type selects vocabulary and intent
          ;; artifacts. Unconfigured values read as types directly (the
-         ;; type-as-name fallback — vanilla/unconfigured paths unchanged).
+         ;; type-as-name fallback — unconfigured paths unchanged).
          interface-def (get interfaces interface)
          interface-type (:type interface-def)
          effective-type (or interface-type interface)
          ;; Object enforcement — :off is the no-opts safety net, NOT the
          ;; default: load-config owns the effective default (sl-femd).
          object-enforcement (get opts :unknown-object :off)
+         raw-level (get opts :raw-locator :off)
          ;; Collect issues
          issues (keep identity
                        [(validate-subject glossary subject)
                         ;; Only validate verb if interface is known
                         (when interface-type
                           (validate-verb glossary interface-type verb))
-                        (validate-interface interfaces interface)
+                        (validate-interface interfaces interface (:config-path opts))
                         ;; Validate object/locator (when enforcement is not :off
                         ;; and the frame's O slot expects an intent reference —
                         ;; or a named-location ref on a :location-refs? frame).
@@ -409,7 +630,8 @@
                         ;; to :intent (fit-pass condition, 2026-08-13).
                         (validate-object object effective-type object-enforcement
                                          (object-kind glossary effective-type svo)
-                                         (location-refs-frame? glossary effective-type svo))])]
+                                         (location-refs-frame? glossary effective-type svo)
+                                         raw-level)])]
      {:valid? (empty? issues)
       :issues (vec issues)})))
 
@@ -595,7 +817,28 @@
   "Format a typo suggestion if present."
   [suggestion]
   (when suggestion
-    (str "Did you mean: " (format-keyword suggestion) "?")))
+    (str "Did you mean: " (if (keyword? suggestion)
+                            (format-keyword suggestion)
+                            (str suggestion))
+         "?")))
+
+(defn- format-def-site
+  "The def-site line (sl-u2r0): `Declared in: file:line` when the issue
+   carries a suggestion (the site is the suggested entry's), else
+   `Declare it in: file` (the site is where the missing thing would be);
+   a config path adds its key path. nil without a def-site."
+  [{:keys [suggestion def-site]}]
+  (when-let [{:keys [file line path]} def-site]
+    (str (if suggestion "Declared in: " "Declare it in: ")
+         file
+         (when line (str ":" line))
+         (when path (str " under " (pr-str path))))))
+
+(defn- def-site-suffix
+  "The def-site line as a message suffix, or nil."
+  [issue]
+  (when-let [line (format-def-site issue)]
+    (str "\n       " line)))
 
 (defn format-unknown-subject
   "Format an :svo/unknown-subject issue as a human-readable error message.
@@ -614,7 +857,8 @@
          (when (seq known)
            (str "\n       Known subjects: " (format-known-list known 8)))
          (when suggestion
-           (str "\n       " (format-suggestion suggestion))))))
+           (str "\n       " (format-suggestion suggestion)))
+         (def-site-suffix issue))))
 
 (defn format-missing-subject
   "Format an :svo/missing-subject issue as a human-readable error message."
@@ -648,7 +892,8 @@
                 (when interface-type (str " for :" (name interface-type)))
                 ": " (format-known-list known 8)))
          (when suggestion
-           (str "\n       " (format-suggestion suggestion))))))
+           (str "\n       " (format-suggestion suggestion)))
+         (def-site-suffix issue))))
 
 (defn format-unknown-interface
   "Format an :svo/unknown-interface issue as a human-readable error message.
@@ -668,6 +913,7 @@
            (str "\n       Configured interfaces: " (format-known-list known 8)))
          (when suggestion
            (str "\n       " (format-suggestion suggestion)))
+         (def-site-suffix issue)
          "\n       Add to shiftlefter.edn: {:interfaces {:" (name interface)
          " {:type ... :adapter ...}}}")))
 
@@ -699,13 +945,21 @@
           at features/login.feature:15
           Intent reference could not be resolved: Element 'unknown' not found in intent 'Login'"
   [issue]
-  (let [{:keys [object interface message location]} issue
+  (let [{:keys [object interface message location known suggestion]} issue
         {:keys [step-text uri line]} location]
     (str "Unknown object '" object "'"
          (when step-text (str " in step \"" step-text "\""))
          (when (and uri line) (str "\n       at " uri ":" line))
          (when interface (str "\n       Interface: :" (name interface)))
-         (when message (str "\n       " message)))))
+         (when message (str "\n       " message))
+         ;; sl-u2r0: the two signals travel together — the suggestion as
+         ;; its own line (the message already names it), the interfaces
+         ;; that DO bind the element (Sol 32), and the def-site.
+         (when (and suggestion (not (str/includes? (str message) "Did you mean")))
+           (str "\n       " (format-suggestion suggestion)))
+         (when (seq known)
+           (str "\n       Bindings exist for: " (format-known-list known 8)))
+         (def-site-suffix issue))))
 
 (defn format-raw-locator-disallowed
   "Format an :svo/raw-locator-disallowed issue as a human-readable error message.
@@ -722,6 +976,7 @@
          (when step-text (str " in step \"" step-text "\""))
          (when (and uri line) (str "\n       at " uri ":" line))
          (when message (str "\n       " message))
+         (def-site-suffix issue)
          "\n       Example: Login.submit or Checkout.pay-button")))
 
 (defn format-consumed-without-producer
@@ -743,7 +998,10 @@
                 (str/join ", " (map #(str "{" (name %) "}") known)))
            "\n       No upstream step or hook produces any binding")
          (when suggestion
-           (str "\n       Did you mean: {" (name suggestion) "}?")))))
+           (str "\n       Did you mean: {" (name suggestion) "}?"))
+         ;; sl-u2r0: the suggested producer's own site — "Produced at".
+         (when-let [{:keys [file line]} (:def-site issue)]
+           (str "\n       Produced at: " file (when line (str ":" line)))))))
 
 (defn format-bindings-invalid-pattern
   "Format a :bindings/invalid-pattern issue (sl-yh7) — bad capture regex,
@@ -756,25 +1014,75 @@
          (when (and uri line) (str "\n       at " uri ":" line))
          (when message (str "\n       " message)))))
 
+(defn format-named-groups-in-assert-only
+  "Format a :bindings/named-groups-in-assert-only error (sl-gwru; formatter
+   added at sl-mk0t, Warden W3 — it fell through to the raw-map fallback,
+   step UUID included): the pattern and the names it would have bound, the
+   lint's own pointer at `captures`, then the step and its site in the
+   house style. The record's :pattern is the matcher slot AS WRITTEN, slashes
+   included (bindings_lint `:pattern capture`), so it is printed as carried —
+   wrapping it doubled the delimiters (sl-0qzd, Warden delta pass D1)."
+  [issue]
+  (let [{:keys [pattern names message location]} issue
+        {:keys [step-text uri line]} location]
+    (str "Pattern " pattern " names "
+         (str/join ", " (map #(str "{" (name %) "}") names))
+         " in an assert-only step — " message
+         (when step-text (str "\n       in step \"" step-text "\""))
+         (when (and uri line) (str "\n       at " uri ":" line)))))
+
 (defn format-unnamed-only-groups
   "Format a :bindings/unnamed-only-groups notice (sl-yh7) — the pattern
-   captures groups but names none, so it binds nothing."
+   captures groups but names none, so it binds nothing. :pattern is the
+   matcher slot as written (`/…/`, or an `Intent.element` shape ref since
+   sl-ectw), printed as carried (sl-0qzd — the same double-delimiting as the
+   assert-only formatter)."
   [issue]
   (let [{:keys [pattern location]} issue
         {:keys [step-text uri line]} location]
-    (str "Capture pattern /" pattern "/ has only unnamed groups — it binds nothing"
+    (str "Capture pattern " pattern " has only unnamed groups — it binds nothing"
          (when step-text (str " in step \"" step-text "\""))
          (when (and uri line) (str "\n       at " uri ":" line))
          "\n       Name a group ((?<name>...)) to produce a {name} binding.")))
 
 (defn format-produced-never-consumed
-  "Format a :bindings/produced-never-consumed notice (sl-yh7)."
+  "Format a :bindings/produced-never-consumed notice (sl-yh7). A
+   shape-sourced binding (sl-ectw) also names the glossary line that
+   declared the group."
   [issue]
   (let [{:keys [name location]} issue
         {:keys [step-text uri line]} location]
     (str "Binding {" (clojure.core/name name) "} is produced but never consumed"
          (when step-text (str " in step \"" step-text "\""))
-         (when (and uri line) (str "\n       at " uri ":" line)))))
+         (when (and uri line) (str "\n       at " uri ":" line))
+         (when-let [{:keys [file line]} (:def-site issue)]
+           (str "\n       Declared at: " file (when line (str ":" line)))))))
+
+(defn format-shape-issue
+  "Format the matcher-slot shape issues (sl-ectw): the classifier's
+   message, the step's site, and the element's def-site when the issue
+   has one."
+  [issue]
+  (let [{:keys [message location]} issue
+        {:keys [step-text uri line]} location]
+    (str message
+         (when step-text (str "\n       in step \"" step-text "\""))
+         (when (and uri line) (str "\n       at " uri ":" line))
+         (when-let [{:keys [file line]} (:def-site issue)]
+           (str "\n       Declared at: " file (when line (str ":" line)))))))
+
+(defn format-untyped-stepdef
+  "Format a :stepdef/untyped issue (sl-6wh9): the step, its file:line, and
+   the untyped stepdef that matched it. Deliberately prints no :step-id —
+   the console line must be byte-stable run to run."
+  [issue]
+  (let [{:keys [stepdef location]} issue
+        {:keys [step-text uri line]} location]
+    (str "Untyped step"
+         (when step-text (str " \"" step-text "\""))
+         (when (and uri line) (str "\n       at " uri ":" line))
+         "\n       matched stepdef " (pr-str stepdef)
+         ", which declares no :svo — no subject, verb, or object was checked")))
 
 (defn format-message-only
   "Format an issue whose detail is fully carried in :message (the key-slot
@@ -815,9 +1123,18 @@
     :bindings/consumed-without-producer (format-consumed-without-producer issue)
     :bindings/invalid-pattern (format-bindings-invalid-pattern issue)
     :bindings/unnamed-only-groups (format-unnamed-only-groups issue)
+    ;; sl-gwru: a producer marker in the assert-only frame
+    :bindings/named-groups-in-assert-only (format-named-groups-in-assert-only issue)
     :bindings/produced-never-consumed (format-produced-never-consumed issue)
+    ;; sl-ectw: the declared shape in the matcher slot
+    (:bindings/invalid-matcher-slot :bindings/unknown-shape-ref
+     :bindings/element-has-no-shape :bindings/shape-no-binding-for-interface
+     :bindings/captures-without-shape :bindings/shape-and-inline)
+    (format-shape-issue issue)
     :costume/wrong-interface (format-message-only issue)
     :costume/shared-wears (format-message-only issue)
     :costume/undeclared (format-message-only issue)
+    ;; sl-6wh9: a matched user stepdef with no :svo metadata
+    :stepdef/untyped (format-untyped-stepdef issue)
     ;; Fallback for unknown types
     (str "SVO issue: " (pr-str issue))))

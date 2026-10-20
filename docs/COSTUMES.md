@@ -89,7 +89,10 @@ formats are Chrome-internal, and the session state inside belongs to the
 system under test — interpreting it would be rebuilding the SUT's session
 layer one level down. What the framework shows you is its own metadata:
 `sl costume list` reports each costume's status and last-connected age —
-liveness truth, never contents.
+liveness truth, never contents. So for one actor's costume there is no
+inspect verb, only these: `sl costume list` shows its name, status, port, pid
+and last-connected age; `sl costume destroy <name>` (`--force` while its
+browser is live) clears exactly that one; destroy then `init` is the reset.
 
 ## Managing costumes (CLI)
 
@@ -157,7 +160,7 @@ still rejected. The persona `:desc` is surfaced by `sl explain` and
 For interactive development against a live session, the REPL functions in
 `shiftlefter.repl` (also in `shiftlefter.costume`) mirror the CLI.
 (Costumes are the *authenticated* path; for a throwaway bare browser in
-the REPL, load a config whose `:interfaces` declares `:web` — `shifted!`
+the REPL, load a config whose `:interfaces` declares `:web` — `load-config!`
 — and `as`/`run` provision one on demand, closed again by
 `reset-ctxs!`/`clear!`.)
 

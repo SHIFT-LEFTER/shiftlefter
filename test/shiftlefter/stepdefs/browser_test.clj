@@ -1196,8 +1196,11 @@
                             ":alice should see {:id \"x\"} disabled"
                             ":alice should see an alert"
                             ":alice should see an alert with 'text'"
-                            ;; Capture step (sl-zgna)
-                            ":alice captures {:id \"x\"} matching /(?<code>\\d+)/"]]
+                            ;; Capture step (sl-zgna) + the shape forms (sl-ectw)
+                            ":alice captures {:id \"x\"} matching /(?<code>\\d+)/"
+                            ":alice captures Checkout.total"
+                            ":alice captures Checkout.total matching Reset.smsCode"
+                            ":alice should see Checkout.total matching Reset.smsCode"]]
       (doseq [text subject-patterns]
         (let [stepdef (find-stepdef text)]
           (is (some? stepdef) (str "No stepdef found for: " text))
@@ -1225,7 +1228,11 @@
                  ":alice should see {:id \"x\"}"
                  ":alice should see an alert"
                  ":alice should see an alert with 'text'"
-                 ":alice captures {:id \"x\"} matching /(?<code>\\d+)/"]]
+                 ":alice captures {:id \"x\"} matching /(?<code>\\d+)/"
+                 ":alice captures Checkout.total"
+                 ":alice captures Checkout.total matching Reset.smsCode"
+                 ":alice captures Checkout.orderNumber matching /(?<n>\\d+)/"
+                 ":alice should see Checkout.total matching Reset.smsCode"]]
       (doseq [text texts]
         (let [matches (filter #(re-matches (:pattern %) text) (registry/all-stepdefs))]
           (is (= 1 (count matches))
@@ -1539,3 +1546,23 @@
                                       @#'intent-resolve/location-ref-pattern)]
       (is (= classifier-source bare-branch)
           "location-re's bare-ref branch drifted from intent.resolve/location-ref-pattern — change both together (sl-8bxt)"))))
+
+;; =============================================================================
+;; :capture frames (sl-ectw) — declared shape primary, inline the escape hatch
+;; =============================================================================
+
+(deftest test-capture-frames
+  (testing "captures O (no clause) binds :capture/:default with no args"
+    (let [sd (find-stepdef ":alice captures Checkout.total")]
+      (is (= {:verb :capture :frame :default} (select-keys (-> sd :metadata :svo) [:verb :frame])))
+      (is (= {} (-> sd :metadata :svo :args)))))
+  (testing "captures O matching … binds :capture/:matching; the slot keeps its markers"
+    (let [sd (find-stepdef ":alice captures Checkout.total matching /(?<total>\\d+)/")
+          caps (vec (rest (re-matches (:pattern sd) ":alice captures Checkout.total matching /(?<total>\\d+)/")))]
+      (is (= :matching (-> sd :metadata :svo :frame)))
+      (is (= "/(?<total>\\d+)/" (nth caps 2)) "captured WITH its slashes (clause 4)"))
+    (let [sd (find-stepdef ":alice captures Checkout.total matching Reset.smsCode")
+          caps (vec (rest (re-matches (:pattern sd) ":alice captures Checkout.total matching Reset.smsCode")))]
+      (is (= "Reset.smsCode" (nth caps 2)))))
+  (testing "lowerCamel element names read in the locator slot (tower C1)"
+    (is (some? (find-stepdef ":alice clicks Checkout.placeOrder")))))

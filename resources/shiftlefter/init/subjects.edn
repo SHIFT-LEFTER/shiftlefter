@@ -1,12 +1,36 @@
-;; Subject glossary — who can act in scenarios. In Shifted mode every
-;; scenario subject is checked against this file.
+;; Subject glossary — who can act in scenarios. Every scenario subject is
+;; checked against this file at planning time.
 ;;
 ;; Instances are personas: give each a :desc docstring so humans and agents
 ;; know who they are. A persona may also wear a costume — a persistent
 ;; logged-in browser profile (:wears; see `sl costume init`).
+;;
+;; :adversary is a standing spur, not a mechanism: misuse cases are
+;; authored AS this actor (`When :adversary …`). It ships as identity plus
+;; :desc only — no capability bag, no personas — because the framework
+;; does not know what YOUR adversaries can do; you declare that. Two
+;; flavors, both subject types rather than new machinery; name them per
+;; app (split the type, or add personas under it) when the distinction
+;; matters:
+;;
+;;   - inside job — authenticated, holding a legitimate bag, hostile
+;;     intent. Privilege escalation is probing the cells outside that bag;
+;;     revocation (laid off, access not yet pulled) is the same subject run
+;;     against their own former bag, expecting denials.
+;;   - outside job — unauthenticated. The guest row plus authored misuse
+;;     cases for attacks with novel steps.
+;;
+;; "AD authenticated them; it didn't authorize them." Delegating
+;; authentication is the most common reason authorization goes untested;
+;; the inside job is exactly the case that delegation cannot cover.
+;;
+;; Limit, stated plainly: scenarios authored as :adversary probe ROLE-level
+;; access. They do not test object-level (horizontal) access — one user
+;; reaching another user's records — which needs its own cases.
 {:subjects
  {:user {:desc "Standard application user"
          :instances [{:id :alice
                       :desc "Baseline user — exercises the ordinary path"}
                      {:id :bob
-                      :desc "Second actor — the counterparty in multi-user flows"}]}}}
+                      :desc "Second actor — the counterparty in multi-user flows"}]}
+  :adversary {:desc "Hostile actor — author misuse cases as this subject. Inside job (authenticated, legitimate bag, hostile intent) or outside job (unauthenticated). No capability bag is shipped: what an adversary can do is yours to declare. Covers role-level probing only, not object-level (horizontal) access."}}}

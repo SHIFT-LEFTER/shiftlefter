@@ -36,3 +36,6 @@ CLAUDE.md
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# cold-read runner dry runs (sl-wi69): local rehearsal only, never banked
+notes/coldread-runs/*-dry/

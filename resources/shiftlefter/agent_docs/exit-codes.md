@@ -8,10 +8,10 @@ decision procedure; the reasoning lives in `docs/architecture/exit-codes.md`.
 | Code | Status | Meaning |
 |---|---|---|
 | 0 | `:passed` | Existential pass: ≥1 scenario selected, every selected scenario ran to a tolerated outcome, none failed or errored (pending tolerated only under `:allow-pending?` — the counts still confess). |
-| 1 | `:failed` | ≥1 scenario `:failed` — the app answered and the answer missed the expectation (including `:sut`-classed errors: the app answered *with* an error). Or pending under strict mode. |
+| 1 | `:failed` | ≥1 scenario `:failed` — the app answered and the answer missed the expectation (including `:sut`-classed errors: the app answered *with* an error). Or pending under strict mode. Or a stale `@blocked` claim (XPASS: a `@blocked=REF` scenario passed — the test's claim about the app is what is wrong; still a failing corpus). |
 | 2 | `:planning-failed` | Invalid before execution: config/parse/discovery/binding errors, an un-runnable invocation, an empty selection. Pre-execution exclusive — nothing ran. |
-| 3 | `:crashed` | Runner crash — an uncaught throwable in ShiftLefter's own code. Anywhere; wins over everything. |
-| 4 | `:degraded` | ≥1 scenario `:error` — either the harness's own machinery broke (hook throw, capability provisioning, capture, harness; counted `error`) or a step's adapter classified its failure `:observation` — no answer existed (counted `unobserved`). The verdict about the app is unavailable for those scenarios. |
+| 3 | `:crashed` | Runner crash — an uncaught throwable in ShiftLefter's own code, including one that escapes a scenario's execution machinery (never a scenario verdict; the same exit at every `--max-parallel`, and the crash names the scenario). Anywhere; wins over everything. |
+| 4 | `:degraded` | ≥1 scenario `:error` — either the harness's own machinery broke (hook throw, capability provisioning, capture; counted `error`) or a step's adapter classified its failure `:observation` — no answer existed (counted `unobserved`). The verdict about the app is unavailable for those scenarios. |
 
 Precedence: 3 anywhere; 2 pre-execution exclusive per `setup.clj` group;
 during execution worst wins, 4 > 1 > 0; across groups the suite
@@ -75,6 +75,31 @@ rest are `skipped`; the exit code is 4 either way. The key is a tri-state
 groups, `:run` skips every group not yet started — its `:start` never
 runs, its aggregate row says `:run/status :skipped` — while `:group`
 halts only the group that went dark and lets the siblings run.
+
+A classified driver failure's record (`Data:` on the console, `:error :data`
+under `--edn`) carries the driver's answer only: what was asked (`:type
+:status :method :path :host :port`) and what it answered (`:response {:value
+{:error … :message …}}`), plus the classification keys — never the driver's
+process map or its native stacktrace. If you ever need the full driver data,
+file an issue saying what you needed it for. Meanwhile it is one `ex-cause`
+away at the REPL — the step runner catches a step's throw into a result map,
+so go through the browser protocol directly (on the test classpath,
+`java -cp "$(clojure -Spath -A:test)" clojure.main`):
+
+```clojure
+(require '[shiftlefter.adapters.etaoin :as eta]
+         '[shiftlefter.browser.protocol :as bp]
+         '[shiftlefter.browser.errors :as errors])
+(def cap (:ok (eta/create-browser {:headless true :page-load-timeout-ms 3000})))
+;; the raw driver exception, unclassified:
+(try (bp/open-to! (:browser cap) "http://127.0.0.1:59999/")
+     (catch clojure.lang.ExceptionInfo e (ex-data e)))
+;; or the classified record with the full data as its cause:
+(try (errors/classify-navigation #(bp/open-to! (:browser cap) "http://127.0.0.1:59999/")
+                                 "http://127.0.0.1:59999/")
+     (catch clojure.lang.ExceptionInfo e (ex-data (ex-cause e))))
+(eta/close-browser cap)
+```
 
 Related topics: `lifecycle` (failure semantics by stage, the execution
 weave), `builtins` (the pre-classified built-in step families).

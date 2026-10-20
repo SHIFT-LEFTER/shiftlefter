@@ -5,3 +5,17 @@ run seed: 42
 PASSED Basic passing scenario
 
 1 scenario(s): 1 passed
+
+SVO validation warnings:
+  WARNING: Untyped step "I have 5 items in my cart"
+         at ROOT/test/fixtures/features/basic.feature:6
+         matched stepdef "I have (\\d+) items in my cart", which declares no :svo — no subject, verb, or object was checked
+
+  WARNING: Untyped step "I add 3 more items"
+         at ROOT/test/fixtures/features/basic.feature:7
+         matched stepdef "I add (\\d+) more items", which declares no :svo — no subject, verb, or object was checked
+
+  WARNING: Untyped step "I should have 8 items total"
+         at ROOT/test/fixtures/features/basic.feature:8
+         matched stepdef "I should have (\\d+) items total", which declares no :svo — no subject, verb, or object was checked
+

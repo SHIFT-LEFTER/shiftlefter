@@ -24,6 +24,19 @@
 ;; Invariant 3 — pure, EDN-native data
 ;; -----------------------------------------------------------------------------
 
+(deftest colon-leading-names-are-not-round-trippable
+  ;; sl-74c2: a keyword/symbol whose NAME starts with ':' prints as ::x,
+  ;; which edn never re-reads (invalid token) — the sl-27uh class. The
+  ;; fast-path charset excludes ':' at the head, so the definitional
+  ;; read-back decides, and scrub stringifies. Pinned because the bead's
+  ;; first guess was that this rule had a hole; it does not.
+  (is (not (reporter/edn-safe? (keyword ":x"))))
+  (is (not (reporter/edn-safe? (symbol ":x"))))
+  (is (= "::x" (reporter/scrub (keyword ":x"))))
+  (is (= ":x" (reporter/scrub (symbol ":x"))))
+  (is (= {:subject "::user"} (reporter/scrub {:subject (keyword ":user")})))
+  (is (reporter/edn-safe? (keyword "x:y")) "a colon INSIDE a name is fine"))
+
 (deftest edn-safe?-admits-edn-native-scalars
   (testing "R4: UUIDs and symbols are EDN-native and qualify"
     (is (reporter/edn-safe? (java.util.UUID/randomUUID)))
@@ -287,6 +300,24 @@
           (is (nil? (:capability-cleanup env)))
           (is (nil? (-> env :plan :plan/steps)))
           (is (some? (-> env :plan :plan/pickle)) "reporters read the pickle"))))))
+
+(deftest envelope-carries-poll-counts-on-polled-steps
+  ;; sl-tcsq: the allowlist admits the step's poll digest — through the REAL
+  ;; runner, so the kernel → step loop → envelope chain is proven end to end.
+  (let [result (run-quiet {:paths ["test/fixtures/features/polling.feature"]})
+        [three one] (map reporter/scenario-envelope (:scenarios (:result result)))
+        digest-of (fn [env] (-> env :steps second :poll-counts))]
+    (is (= 0 (:exit-code result)) "precondition: both oracles pass")
+    (testing "the three-poll oracle's step carries the summed digest"
+      (is (= {:attempts 3 :answered 1 :threw 0 :observation-throws 0}
+             (digest-of three))))
+    (testing "the single-answer oracle carries attempts 1 (data, not rendering)"
+      (is (= 1 (:attempts (digest-of one)))))
+    (testing "steps that never polled carry no key"
+      (is (not (contains? (-> three :steps first) :poll-counts)))
+      (is (not (contains? (-> three :steps last) :poll-counts))))
+    (testing "the envelope stays EDN-native"
+      (is (reporter/edn-safe? three)))))
 
 (deftest envelope-carries-attachments-at-both-levels
   ;; sl-l9nj: refs survive the allowlist at step AND scenario level (the

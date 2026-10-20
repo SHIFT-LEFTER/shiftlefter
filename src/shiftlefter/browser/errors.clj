@@ -84,19 +84,73 @@
   [e]
   (= :etaoin/http-ex (:type (ex-data e))))
 
+;; -----------------------------------------------------------------------------
+;; The driver's answer, not a driver dump (sl-6qf6)
+;; -----------------------------------------------------------------------------
+
+(def driver-answer-keys
+  "The top-level keys of an etaoin `:etaoin/http-error` / `:etaoin/http-ex`
+   ex-data that a classified failure record keeps: what was asked of which
+   driver and what it answered. Everything else is dropped BY OMISSION —
+   `:driver` (the live driver map: chromedriver args, capabilities, the
+   process object), `:payload` (the request body — at the navigation site
+   the URL, which the record carries as `:url`; elsewhere whatever was typed),
+   `:webdriver-url`, `:process-liveness-ex`, and any key a future etaoin adds."
+  [:type :status :method :path :host :port])
+
+(defn sanitize-driver-ex-data
+  "ALLOWLIST projection of a driver exception's ex-data for a classified
+   failure record: `driver-answer-keys` plus, under `[:response :value]`,
+   the W3C `:error` code and `:message` only — never the chromedriver
+   `:stacktrace` (native frames). Pure and total: any map in (a non-etaoin
+   ex-data projects to whatever of these keys it has), a small map out.
+
+   Why here: the classification site is the one place that KNOWS the failure
+   is diagnosed (SUT unreachable / silent / transport threw), so the record
+   needs the driver's answer as evidence, not the driver. The original
+   exception stays the rethrow's cause, so the full data is one `ex-cause`
+   away at the REPL (the recipe is in the exit-codes agent-doc, § Exit-4
+   triage)."
+  [data]
+  (let [answer (select-keys (get-in data [:response :value]) [:error :message])]
+    (cond-> (select-keys data driver-answer-keys)
+      (seq answer) (assoc :response {:value answer}))))
+
+(defn transport-edge-message
+  "The message a classified transport failure carries (sl-6qf6): the edge
+   named, then the evidence from the allowlisted keys — which request to
+   which driver threw — and the cause's own message (`Connection refused`,
+   `Connection reset`, …) when there is one. Never etaoin's message: etaoin
+   throws through slingshot, whose message IS the whole ex-data pretty-printed
+   (`throw+: {:type :etaoin/http-ex, :driver {…}, :payload {…}}`), i.e. the
+   very dump the record must not carry."
+  [e]
+  (let [{:keys [method path host port]} (ex-data e)
+        cause-msg (some-> (ex-cause e) ex-message)]
+    (str "Driver unreachable: "
+         (when method (str (str/upper-case (name method)) " "))
+         (or path "(request)")
+         " to " host ":" port " threw"
+         (when (seq cause-msg) (str " — " cause-msg)))))
+
 (defn classify-observation
   "Run `f`; rethrow an `observation-error?` throw as ex-info carrying
-   `:error/class :observation` (same message, ex-data merged, original as
-   cause) so the runner's contract sees it. Every other throw passes
-   through untouched — this wrapper never diagnoses, only labels the
-   transport's no-answer edge."
+   `:error/class :observation` so the runner's contract sees it — with its
+   OWN message (`transport-edge-message`) and the ex-data PROJECTED through
+   `sanitize-driver-ex-data` (sl-6qf6), the original as cause. Until sl-6qf6
+   this rethrow kept etaoin's message; that contract changed DELIBERATELY
+   (Chair, 2026-09-21): the slingshot message is the dump itself, so the
+   `Error:` line and `:message` would otherwise carry what the record
+   removes. Every other throw passes through untouched — this wrapper never
+   diagnoses, only labels the transport's no-answer edge."
   [f]
   (try
     (f)
     (catch clojure.lang.ExceptionInfo e
       (if (observation-error? e)
-        (throw (ex-info (ex-message e)
-                        (assoc (ex-data e) :error/class :observation)
+        (throw (ex-info (transport-edge-message e)
+                        (assoc (sanitize-driver-ex-data (ex-data e))
+                               :error/class :observation)
                         e))
         (throw e)))))
 
@@ -161,8 +215,9 @@
 (defn classify-navigation
   "Run `f` (a navigation to `url`); rethrow a navigation failure whose
    driver answer says no page existed to observe, as ex-info carrying
-   `:error/class :observation` (original ex-data merged, original as
-   cause). Two arms, one site:
+   `:error/class :observation` (original ex-data PROJECTED through
+   `sanitize-driver-ex-data` — the driver's answer, not a driver dump,
+   sl-6qf6 — original as cause). Two arms, one site:
 
    - an `unreachable-net-errors` code in the answer →
      `SUT unreachable: <code> for <url>` (+ `:net-error`, `:url`);
@@ -185,7 +240,7 @@
         (unreachable-net-error e)
         (let [code (unreachable-net-error e)]
           (throw (ex-info (str "SUT unreachable: " code " for " url)
-                          (assoc (ex-data e)
+                          (assoc (sanitize-driver-ex-data (ex-data e))
                                  :error/class :observation
                                  :net-error code
                                  :url url)
@@ -193,7 +248,7 @@
 
         (navigation-timeout? e)
         (throw (ex-info (str "SUT silent: navigation timed out for " url)
-                        (assoc (ex-data e)
+                        (assoc (sanitize-driver-ex-data (ex-data e))
                                :error/class :observation
                                :w3c-error "timeout"
                                :url url)

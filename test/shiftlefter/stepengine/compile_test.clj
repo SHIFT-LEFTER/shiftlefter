@@ -1,5 +1,7 @@
 (ns shiftlefter.stepengine.compile-test
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing use-fixtures]]
+            [shiftlefter.config :as config]
             [shiftlefter.stepengine.compile :as compile]
             [shiftlefter.stepengine.bind :as bind]
             [shiftlefter.stepengine.registry :as registry]))
@@ -38,7 +40,9 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest test-compile-suite-delegates-to-bind
-  (testing "compile-suite produces same result as bind-suite in vanilla mode"
+  (testing "compile-suite binds exactly as bind-suite does; the one thing it
+            adds for untyped stepdefs is the :stepdef/untyped warning
+            (sl-6wh9 — a bare bind has no enforcement levels to judge by)"
     (registry/register! #"I have (\d+) items"
                         (fn [n] n)
                         {:ns 's :file "s.clj" :line 1})
@@ -48,13 +52,19 @@
     (let [pickles [(make-pickle "p1" ["I have 5 items"])
                    (make-pickle "p2" ["I add 3 more"])]
           stepdefs (registry/all-stepdefs)
-          config {}  ; vanilla mode (no :svo key)
+          config {}  ; no config = the built-in defaults
           compile-result (compile/compile-suite config pickles stepdefs)
           bind-result (bind/bind-suite pickles stepdefs)]
       ;; Same structure
       (is (= (:runnable? compile-result) (:runnable? bind-result)))
       (is (= (count (:plans compile-result)) (count (:plans bind-result))))
-      (is (= (:diagnostics compile-result) (:diagnostics bind-result))))))
+      (is (= [:stepdef/untyped :stepdef/untyped]
+             (mapv :type (-> compile-result :diagnostics :svo-issues))))
+      (is (= (-> (:diagnostics compile-result)
+                 (update :svo-issues empty)
+                 (assoc-in [:counts :svo-issue-count] 0)
+                 (assoc-in [:counts :total-issues] 0))
+             (:diagnostics bind-result))))))
 
 (deftest test-compile-suite-runnable-plan
   (testing "compile-suite returns runnable plan when all steps match"
@@ -74,7 +84,10 @@
       (is runnable?)
       (is (= 1 (count plans)))
       (is (:plan/runnable? (first plans)))
-      (is (zero? (-> diagnostics :counts :total-issues))))))
+      ;; sl-6wh9: the three untyped stepdefs each warn; warnings count
+      ;; toward :total-issues (sl-89ii) without blocking.
+      (is (= 3 (-> diagnostics :counts :total-issues)))
+      (is (every? #(= :stepdef/untyped (:type %)) (:svo-issues diagnostics))))))
 
 (deftest test-compile-suite-not-runnable-undefined
   (testing "compile-suite returns not runnable when step undefined"
@@ -276,54 +289,108 @@
       (is (= 1 (count (-> plans second :plan/steps)))))))
 
 ;; -----------------------------------------------------------------------------
-;; Shifted Mode Tests (WI-031.001)
+;; One mode (sl-6wh9): glossaries, enforcement, untyped stepdefs
 ;; -----------------------------------------------------------------------------
 
-(deftest test-shifted-mode-vanilla-no-svo-key
-  (testing "vanilla mode (no :svo key) preserves existing behavior"
+(deftest test-untyped-stepdef-warns-by-default
+  (testing "a matched stepdef with no :svo metadata binds and runs, and the
+            planner says so: :stepdef/untyped at :warn (the default)"
     (registry/register! #"I have (\d+) items"
                         (fn [n] n)
                         {:ns 's :file "s.clj" :line 1})
-    (let [config {}  ; no :svo key = vanilla mode
+    (let [config {}  ; no config = the built-in defaults
           pickle (make-pickle "test" ["I have 5 items"])
-          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
-      (is runnable?)
-      ;; No SVO issues in vanilla mode
-      (is (empty? (:svo-issues diagnostics))))))
+          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))
+          [issue :as issues] (:svo-issues diagnostics)]
+      (is runnable? "a warning never blocks")
+      (is (= 1 (count issues)))
+      (is (= :stepdef/untyped (:type issue)))
+      (is (= :warn (:severity issue)))
+      (is (= "I have 5 items" (get-in issue [:location :step-text])))
+      (is (str/includes? (:message issue) "s.clj:1"))
+      (is (= 1 (-> diagnostics :counts :svo-issue-count))))))
 
-(deftest test-shifted-mode-happy-path
-  (testing "shifted mode loads glossary and passes opts to bind-suite"
+(deftest test-untyped-stepdef-levels
+  (registry/register! #"I have (\d+) items"
+                      (fn [n] n)
+                      {:ns 's :file "s.clj" :line 1})
+  (let [pickle (make-pickle "test" ["I have 5 items"])
+        compile-at (fn [level]
+                     (compile/compile-suite {:enforcement {:untyped-stepdef level}}
+                                            [pickle] (registry/all-stepdefs)))]
+    (testing ":error blocks planning"
+      (let [{:keys [runnable? diagnostics]} (compile-at :error)]
+        (is (not runnable?))
+        (is (= :error (-> diagnostics :svo-issues first :severity)))))
+    (testing ":off drops the issue"
+      (let [{:keys [runnable? diagnostics]} (compile-at :off)]
+        (is runnable?)
+        (is (empty? (:svo-issues diagnostics)))))))
+
+(deftest test-builtin-steps-are-never-untyped
+  (testing "every builtin carries :svo — a builtin-only suite raises no untyped issue"
+    (registry/clear-registry!)
+    (require 'shiftlefter.stepdefs.browser :reload)
+    (let [pickle (make-pickle "test" [":user opens the browser to 'http://x'"])
+          {:keys [diagnostics]} (compile/compile-suite {} [pickle] (registry/all-stepdefs))]
+      (is (not-any? #(= :stepdef/untyped (:type %)) (:svo-issues diagnostics))))))
+
+(deftest test-enforcement-happy-path
+  (testing "a project glossary loads and the enforcement levels reach bind-suite"
     (registry/register! #"I have (\d+) items"
                         (fn [n] n)
                         {:ns 's :file "s.clj" :line 1})
-    (let [config {:svo {:unknown-subject :warn :unknown-verb :error}
+    (let [config {:enforcement {:unknown-subject :warn :unknown-verb :error
+                                :untyped-stepdef :off}
                   :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
                                :verbs ["test/fixtures/glossaries/verbs-web-project.edn"]}
                   :interfaces {:web {:type :web :adapter :etaoin}}}
           pickle (make-pickle "test" ["I have 5 items"])
           {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
       (is runnable?)
-      ;; SVO issues empty (no SVO metadata on our simple step)
+      ;; SVO issues empty (no SVO metadata on our simple step; untyped off)
       (is (= 0 (-> diagnostics :counts :svo-issue-count))))))
 
-(deftest test-shifted-mode-missing-glossaries-config
-  (testing "shifted mode + missing :glossaries key returns error"
-    (registry/register! #"a step"
-                        (fn [] nil)
-                        {:ns 's :file "s.clj" :line 1})
-    (let [config {:svo {:unknown-subject :warn}}  ; no :glossaries key
-          pickle (make-pickle "test" ["a step"])
-          {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
-      (is (not runnable?))
-      (is (seq (:errors diagnostics)))
-      (is (= :svo/missing-glossaries-config (-> diagnostics :errors first :type))))))
+(deftest test-glossaries-absent-or-nil-is-an-empty-glossary
+  ;; sl-6wh9 ruling #5 (fold-in C4): absence and explicit nil both load as
+  ;; EMPTY — never an error; the missing-glossaries error is gone. Paired
+  ;; with test-shifted-mode-glossary-file-not-found below: an explicit
+  ;; path that is missing stays a hard error.
+  (registry/clear-registry!)
+  ;; :reload — the ns is already loaded, and the fixture just emptied the
+  ;; registry; re-evaluating the defsteps re-registers the builtins.
+  (require 'shiftlefter.stepdefs.browser :reload)
+  ;; `default-config` IS the no-config-file shape load-config produces
+  ;; (interfaces + enforcement present, :glossaries nil) — a bare {} here
+  ;; would mean zero interfaces, which is a different (suite-lint) story.
+  (let [pickle (make-pickle "test" [":user opens the browser to 'http://x'"])
+        stepdefs (registry/all-stepdefs)
+        no-file config/default-config]
+    (testing "no config file at all: builtin steps bind; the unknown
+              subject is the ORDINARY warning against an empty glossary"
+      (let [{:keys [runnable? diagnostics]} (compile/compile-suite no-file [pickle] stepdefs)]
+        (is runnable?)
+        (is (empty? (:errors diagnostics)))
+        (is (= [:svo/unknown-subject] (mapv :type (:svo-issues diagnostics))))
+        (is (= :warn (-> diagnostics :svo-issues first :severity)))))
+    (testing "explicit :glossaries nil — empty on purpose — is the same"
+      (let [{:keys [runnable? diagnostics]}
+            (compile/compile-suite (assoc no-file :glossaries nil) [pickle] stepdefs)]
+        (is runnable?)
+        (is (empty? (:errors diagnostics)))
+        (is (= [:svo/unknown-subject] (mapv :type (:svo-issues diagnostics))))))
+    (testing "the empty glossary still carries the framework default verbs"
+      (let [{:keys [diagnostics]} (compile/compile-suite no-file [pickle] stepdefs)]
+        (is (not-any? #(= :svo/unknown-verb (:type %)) (:svo-issues diagnostics)))))))
 
 (deftest test-shifted-mode-glossary-file-not-found
-  (testing "shifted mode + glossary file not found returns error"
+  (testing "an explicit glossary path that is missing is a hard error (the
+            other half of the C4 pair: absence never warns, a false claim
+            always errors)"
     (registry/register! #"a step"
                         (fn [] nil)
                         {:ns 's :file "s.clj" :line 1})
-    (let [config {:svo {:unknown-subject :warn}
+    (let [config {:enforcement {:unknown-subject :warn}
                   :glossaries {:subjects "nonexistent/subjects.edn"}}
           pickle (make-pickle "test" ["a step"])
           {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
@@ -337,7 +404,7 @@
     (registry/register! #"a step"
                         (fn [] nil)
                         {:ns 's :file "s.clj" :line 1})
-    (let [config {:svo {:unknown-verb :error}
+    (let [config {:enforcement {:unknown-verb :error}
                   :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
                                :verbs ["nonexistent/verbs.edn"]}}
           pickle (make-pickle "test" ["a step"])
@@ -348,13 +415,12 @@
       (is (= "nonexistent/verbs.edn" (-> diagnostics :errors first :path))))))
 
 ;; -----------------------------------------------------------------------------
-;; Vanilla vs Shifted Twin (sl-ieie)
+;; Tier-2 stepdef/glossary cross-check runs on every compile (sl-6wh9)
 ;; -----------------------------------------------------------------------------
 
 (defn- register-mismatched-stepdef!
   "Register a stepdef whose :svo declares a frame absent from the test
-   glossary (verb :swipe only has :default). The same stepdef is compiled
-   under a vanilla and a shifted config to pin mode-dependent behavior."
+   glossary (verb :swipe only has :default)."
   []
   (registry/register! #"(\w+) swipes the (.+)"
                       (fn [ctx _subject _thing] ctx)
@@ -369,24 +435,23 @@
   {:subjects "test/fixtures/glossaries/subjects.edn"
    :verbs ["test/fixtures/glossaries/verbs-web-project.edn"]})
 
-(deftest test-vanilla-skips-stepdef-glossary-validation
-  (testing "no :svo key → Tier-2 stepdef check and SVO stage skipped; suite runs (sl-ieie)"
+(deftest test-stepdef-glossary-mismatch-caught-without-enforcement-block
+  (testing "no :enforcement block → Tier-2 still catches the bad frame; the
+            old vanilla twin (sl-ieie) that let it through is retired (sl-6wh9)"
     (register-mismatched-stepdef!)
     (let [config {:interfaces {:web {:type :web :adapter :etaoin}}
-                  ;; :glossaries present but ignored without :svo — mode is
-                  ;; keyed on :svo alone
                   :glossaries ieie-glossaries}
           pickle (make-pickle "test" ["Alice swipes the card"])
           {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
-      (is runnable?)
-      (is (empty? (:stepdef-issues diagnostics)))
-      (is (empty? (:svo-issues diagnostics)))
-      (is (empty? (:errors diagnostics))))))
+      (is (not runnable?))
+      (is (= 1 (count (:stepdef-issues diagnostics))))
+      (is (= :stepdef/unknown-frame (-> diagnostics :stepdef-issues first :type))))))
 
-(deftest test-shifted-twin-catches-stepdef-glossary-mismatch
-  (testing "same stepdef with :svo key present → Tier-2 catches the bad frame"
+(deftest test-stepdef-glossary-mismatch-caught-with-enforcement-block
+  (testing "same stepdef with an :enforcement block → identical result:
+            presence means nothing"
     (register-mismatched-stepdef!)
-    (let [config {:svo {}
+    (let [config {:enforcement {}
                   :interfaces {:web {:type :web :adapter :etaoin}}
                   :glossaries ieie-glossaries}
           pickle (make-pickle "test" ["Alice swipes the card"])
@@ -404,7 +469,7 @@
     (registry/register! #"a step"
                         (fn [] nil)
                         {:ns 's :file "s.clj" :line 1})
-    (let [config {:svo {:unknown-verb :error}
+    (let [config {:enforcement {:unknown-verb :error}
                   :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
                                :verbs ["test/fixtures/glossaries/missing-type-verbs.edn"]}}
           pickle (make-pickle "test" ["a step"])
@@ -420,7 +485,7 @@
     (registry/register! #"I have (\d+) items"
                         (fn [n] n)
                         {:ns 's :file "s.cljc" :line 1})
-    (let [config {:svo {}
+    (let [config {:enforcement {}
                   :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
                                :verbs ["test/fixtures/glossaries/override-verbs.edn"]}
                   :interfaces {:web {:type :web :adapter :etaoin}}}
@@ -438,7 +503,7 @@
     (registry/register! #"I have (\d+) items"
                         (fn [n] n)
                         {:ns 's :file "s.clj" :line 1})
-    (let [config {:svo {}
+    (let [config {:enforcement {}
                   :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
                                :verbs ["test/fixtures/glossaries/verbs-github-web.edn"]}
                   :interfaces {:web {:type :web :adapter :etaoin}}}
@@ -449,23 +514,22 @@
                 (:suite-lint-issues diagnostics))
           "the declared :github/web mount, unbacked by any interface, is the orphan"))))
 
-(deftest test-vanilla-run-path-skips-orphan-type-lint
-  (testing "vanilla mode: the orphan-type check is SKIPPED — chosen
-            semantics (sl-67dj plan verdict): vanilla never loads glossary
-            files, so declared types are unknowable on the run path; the
-            projection (which always loads, sl-hjnp) keeps the lint live"
+(deftest test-orphan-type-lint-runs-without-enforcement-block
+  (testing "the orphan-type check runs on every compile (sl-6wh9 — the
+            67dj vanilla carve-out is retired: glossaries always load, so
+            declared types are always knowable on the run path)"
     (registry/register! #"I have (\d+) items"
                         (fn [n] n)
                         {:ns 's :file "s.clj" :line 1})
-    (let [config {;; no :svo key → vanilla; glossaries present but never loaded
+    (let [config {;; no :enforcement block; glossaries load regardless
                   :glossaries {:verbs ["test/fixtures/glossaries/verbs-github-web.edn"]}
                   :interfaces {:web {:type :web :adapter :etaoin}}}
           pickle (make-pickle "test" ["I have 5 items"])
           {:keys [runnable? diagnostics]} (compile/compile-suite config [pickle] (registry/all-stepdefs))]
-      (is runnable?)
-      (is (empty? (:suite-lint-issues diagnostics))
-          "no orphan-type lint for the unloaded :github/web declaration")
-      (is (empty? (:errors diagnostics))))))
+      (is (not runnable?))
+      (is (some #(= :glossary/orphan-type (:type %))
+                (:suite-lint-issues diagnostics))
+          "the declared :github/web mount, unbacked by any interface, is the orphan"))))
 
 ;; -----------------------------------------------------------------------------
 ;; Interface Annotation Pipeline (sl-1ya)
@@ -473,7 +537,7 @@
 
 (def ^:private shifted-config-sms-web
   "Minimal Shifted config with :sms and :web interfaces configured."
-  {:svo {:unknown-subject :warn :unknown-verb :warn :unknown-interface :warn}
+  {:enforcement {:unknown-subject :warn :unknown-verb :warn :unknown-interface :warn}
    :glossaries {:subjects "test/fixtures/glossaries/subjects.edn"
                 :verbs ["test/fixtures/glossaries/verbs-web-project.edn"]}
    :interfaces {:web {:type :web :adapter :etaoin}
@@ -563,22 +627,21 @@
         (is (= :annotation/unknown-interface (-> errs first :type)))
         (is (= :whatsapp (-> errs first :declared-interface)))))))
 
-(deftest test-annotation-ignored-in-vanilla-mode
-  (testing "Vanilla mode: [:foo] is literal text; if stepdef matches literally, it runs"
-    ;; Vanilla: no :svo key, no annotation processing. Pattern literally includes the prefix.
+(deftest test-annotation-always-processed
+  (testing "there is no mode in which [:foo] is literal step text (sl-6wh9):
+            an annotation naming no configured instance is an annotation error
+            even under the built-in defaults"
     (registry/register! #"\[:foo\] hello"
                         (fn [] nil)
                         {:ns 's :file "s.clj" :line 1})
-    (let [pickle (make-pickle "vanilla" ["[:foo] hello"])
-          {:keys [runnable? plans]} (compile/compile-suite
-                                     {}  ;; vanilla
-                                     [pickle]
-                                     (registry/all-stepdefs))]
-      (is runnable?)
-      (let [step-result (-> plans first :plan/steps first)]
-        (is (= :matched (:status step-result)))
-        ;; In vanilla mode, :step/declared-interface is NOT attached
-        (is (nil? (-> step-result :step :step/declared-interface)))))))
+    (let [pickle (make-pickle "annotated" ["[:foo] hello"])
+          {:keys [runnable? diagnostics]} (compile/compile-suite
+                                           {}  ;; the defaults: only :web exists
+                                           [pickle]
+                                           (registry/all-stepdefs))]
+      (is (not runnable?))
+      (is (= :annotation/unknown-interface
+             (-> diagnostics :annotation-errors first :type))))))
 
 (deftest test-annotation-undefined-surfaces-other-interface-match
   (testing "[:sms] step with only a :web stepdef → undefined + filter-info"

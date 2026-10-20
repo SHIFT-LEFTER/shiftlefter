@@ -346,6 +346,36 @@
       (is (str/includes? output "I do step 2"))
       (is (str/includes? output "✓")))))
 
+(deftest test-print-scenario-verbose-poll-suffix
+  ;; sl-tcsq: the ` (N polls)` suffix appears ONLY when the oracle polled
+  ;; more than once; single-answer and non-polling lines are unchanged.
+  (let [line (fn [step-result]
+               (->> (with-err-str
+                      (console/print-scenario!
+                       {:status :passed
+                        :plan {:plan/pickle {:pickle/name "Test"}}
+                        :steps [step-result]}
+                       {:no-color true :verbose true}))
+                    str/split-lines
+                    (filter #(str/includes? % "the oracle"))
+                    first))
+        digest (fn [n] {:attempts n :answered 1 :threw 0 :observation-throws 0})]
+    (testing "three polls render the count after the text"
+      (is (= "  ✓ the oracle (3 polls)"
+             (line {:status :passed :step {:step/text "the oracle"}
+                    :poll-counts (digest 3)}))))
+    (testing "a single-answer poll renders like a step that never polled"
+      (is (= "  ✓ the oracle"
+             (line {:status :passed :step {:step/text "the oracle"}
+                    :poll-counts (digest 1)})))
+      (is (= "  ✓ the oracle"
+             (line {:status :passed :step {:step/text "the oracle"}}))))
+    (testing "a timed-out oracle keeps the count before its message"
+      (is (= "  ✗ the oracle (7 polls) — Timed out after 70ms"
+             (line {:status :failed :step {:step/text "the oracle"}
+                    :poll-counts (assoc (digest 7) :answered 0)
+                    :error {:type :step/exception :message "Timed out after 70ms"}}))))))
+
 ;; -----------------------------------------------------------------------------
 ;; Macro Collapse Tests
 ;; -----------------------------------------------------------------------------

@@ -9,7 +9,7 @@
  *   .scenario .scenario-name .tags .tag .duration
  *   .steps .step .step-status .step-text .macro-marker .error-detail
  *   .diagnostics .run-footer
- * Status modifiers: .st-passed .st-failed .st-error .st-unobserved .st-pending .st-skipped
+ * Status modifiers: .st-passed .st-failed .st-error .st-unobserved .st-pending .st-skipped .st-held
  * State: body.failures-only, .scenario.red, .feature.has-red
  */
 
@@ -151,8 +151,35 @@ body {
   color: var(--pending);
 }
 
-.count.st-skipped {
+.count.st-skipped,
+.count.st-held {
   color: var(--skipped);
+}
+
+/* sl-190x: the planning holds listed under the counts, and the tracker
+   link beside a @blocked row. */
+.held-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  font-size: 0.9rem;
+}
+
+.held-entry {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.15rem 0;
+}
+
+.held-reason,
+.held-where {
+  color: var(--fg-muted);
+}
+
+.ref-link {
+  font-size: 0.85rem;
+  margin-right: 0.5rem;
 }
 
 .controls {
@@ -248,7 +275,8 @@ body {
   color: var(--pending);
 }
 
-.status-word.st-skipped {
+.status-word.st-skipped,
+.status-word.st-held {
   color: var(--skipped);
 }
 

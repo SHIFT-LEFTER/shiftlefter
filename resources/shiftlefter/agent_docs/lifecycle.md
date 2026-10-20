@@ -86,6 +86,13 @@ envelope.
   runs; the invocation aggregate carries the `:halted` record and the
   skipped groups' rows say `:run/status :skipped`), `:group` halts only the
   group that went dark.
+- Ctrl-C (or `sl daemon abort`) → the run **aborts, exit 4**: nothing new
+  starts, a running scenario stops at its next step boundary, Afters +
+  cleanup + `:stop` still run, every report is written; unrun scenarios are
+  `held` (`:held {:reason :aborted}`, counted under `:held`) and the summary
+  carries `:halted {:reason :aborted :after-scenario N}`. A second Ctrl-C:
+  cold = the crash row (exit 3); warm = the client detaches (130) and the
+  daemon finishes the unwind.
 - After hook throws or its attachments claim is malformed → scenario
   `:error` even when every step passed. One failing After doesn't stop the
   unwind.

@@ -2,7 +2,9 @@
   "Scenario data plane core (sl-yh7): token grammar, capture!, resolution,
    merge semantics. Named-group detection (sl-qzhn shim, retired sl-k7gl):
    fixed edge cases through the public pattern-binding-names seam."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [babashka.fs :as fs]
+            [clojure.test :refer [deftest is testing]]
+            [shiftlefter.intent.loader :as loader]
             [shiftlefter.stepengine.bindings :as b]))
 
 ;; -----------------------------------------------------------------------------
@@ -215,3 +217,75 @@
     ;; Pre-sl-k7gl the shim reported the phantom group and Matcher.group threw
     ;; IllegalArgumentException here.
     (is (= {:n "42"} (:bindings (b/attempt-capture {} "(?x)(?<n>\\d+) # (?<phantom>y)" "num 42"))))))
+
+;; -----------------------------------------------------------------------------
+;; Matcher-slot classification (sl-ectw) — the one classifier
+;; -----------------------------------------------------------------------------
+
+(def ^:private shaped-intents
+  (delay
+    (let [dir (fs/create-temp-dir)]
+      (spit (str (fs/path dir "reset.edn"))
+            (str "{:intent \"Reset\"\n"
+                 " :elements {:smsCode {:bindings {:sms {}}\n"
+                 "                      :shape \"code is: (\\\\d{6})\"}\n"
+                 "            :note {:bindings {:sms {}}}}}"))
+      (:ok (loader/load-all-intents (str dir))))))
+
+(deftest matcher-re-fragment-admits-both-forms
+  (let [re (re-pattern (str "^(" b/matcher-re-fragment ")$"))]
+    (is (re-matches re "/code (?<c>\\d+)/"))
+    (is (re-matches re "/a b c/") "inline may contain spaces")
+    (is (re-matches re "Reset.smsCode"))
+    (is (re-matches re "Bookmarks.tweet[2].quotedAuthor"))
+    (is (nil? (re-matches re "code (\\d+)")) "a bare pattern with spaces is not a slot")
+    (is (nil? (re-matches re "/unterminated")) "slash-led must close")))
+
+(deftest resolve-matcher-inline
+  (is (= {:pattern "code (?<c>\\d+)" :inline true}
+         (:ok (b/resolve-matcher "/code (?<c>\\d+)/" nil nil))))
+  (is (= :bindings/invalid-matcher-slot
+         (-> (b/resolve-matcher "code (?<c>\\d+)" nil nil) :error :type))
+      "no markers, no classification")
+  (is (= :bindings/invalid-matcher-slot
+         (-> (b/resolve-matcher "{code}" nil nil) :error :type))))
+
+(deftest resolve-matcher-shape-ref
+  (let [r (b/resolve-matcher "Reset.smsCode" @shaped-intents :sms)]
+    (is (= "code is: (?<smsCode>\\d{6})" (-> r :ok :pattern)))
+    (is (= "Reset.smsCode" (-> r :ok :ref)))
+    (is (= #{:smsCode} (-> r :ok :shape :names)))
+    (is (re-find #"reset\.edn$" (-> r :ok :def-site :file)))
+    (is (= 2 (-> r :ok :def-site :line))))
+  (testing "interface nil skips the binding check"
+    (is (:ok (b/resolve-matcher "Reset.smsCode" @shaped-intents nil))))
+  (testing "errors"
+    (is (= :bindings/unknown-shape-ref
+           (-> (b/resolve-matcher "Reset.nope" @shaped-intents :sms) :error :type)))
+    (is (= :bindings/unknown-shape-ref
+           (-> (b/resolve-matcher "Nope.x" @shaped-intents :sms) :error :type)))
+    (is (= :bindings/unknown-shape-ref
+           (-> (b/resolve-matcher "Reset.smsCode" nil :sms) :error :type))
+        "no intents loaded")
+    (let [err (:error (b/resolve-matcher "Reset.note" @shaped-intents :sms))]
+      (is (= :bindings/element-has-no-shape (:type err)))
+      (is (= 4 (-> err :def-site :line)))
+      (is (re-find #"matching /…/" (:message err)) "both exits named"))
+    (let [err (:error (b/resolve-matcher "Reset.smsCode" @shaped-intents :web))]
+      (is (= :bindings/shape-no-binding-for-interface (:type err)))
+      (is (= [:sms] (:available-interfaces err))))))
+
+(deftest normalize-matcher-slot
+  (testing "inline loses its slashes; a ref becomes the shape's source"
+    (is (= {:ok ["p" "code (?<c>\\d+)"]}
+           (b/normalize-captures ["'p'" "/code (?<c>\\d+)/"] [:value :matcher] {})))
+    (is (= {:ok ["p" "code is: (?<smsCode>\\d{6})"]}
+           (b/normalize-captures ["'p'" "Reset.smsCode"] [:value :matcher] {}
+                                 {:intents @shaped-intents :interface :sms}))))
+  (testing "an unresolvable slot is a structured step failure, not a throw"
+    (is (= :bindings/unknown-shape-ref
+           (-> (b/normalize-captures ["Reset.nope"] [:matcher] {}
+                                     {:intents @shaped-intents :interface :sms})
+               :error :type)))
+    (is (= :bindings/invalid-matcher-slot
+           (-> (b/normalize-captures ["bare (\\d+)"] [:matcher] {}) :error :type)))))

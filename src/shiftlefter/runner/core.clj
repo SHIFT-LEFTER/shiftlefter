@@ -20,7 +20,7 @@
    - 1: Executed, >=1 scenario failed (or pending under strict mode)
    - 2: Planning/setup failure (parse/config/load/bind errors, empty
         selection) — pre-execution exclusive
-   - 3: Harness crash (uncaught exception)
+   - 3: Runner crash (uncaught throwable in ShiftLefter's own code)
    - 4: Run degraded — >=1 scenario :error (infrastructure-failure family)
 
    Canonical table + precedence: shiftlefter.runner.verdict."
@@ -52,6 +52,7 @@
             [shiftlefter.runner.verdict :as verdict]
             [shiftlefter.stepengine.compile :as compile]
             [shiftlefter.stepengine.exec :as exec]
+            [shiftlefter.stepengine.exec.abort :as abort]
             [shiftlefter.stepengine.exec.capture :as capture]
             [shiftlefter.stepengine.exec.provisioning :as prov]
             [shiftlefter.stepengine.registry :as registry]
@@ -163,18 +164,31 @@
    The ladder: 0 and 1 are verdicts about the app; 4 is the run failing to
    be a measurement mid-run (2 = pre-flight, 3 = crash — never from here).
    Two disjoint count buckets reach 4 (sl-kowi): :error (the SL-machinery
-   family — hook throw, capability provisioning, capture, harness: fix
-   the harness) and :unobserved (a step classified :observation — the
+   family — hook throw, capability provisioning, capture: fix the
+   harness) and :unobserved (a step classified :observation — the
    witness between spec and app went dark: check the environment). Either
    makes the run DEGRADED — it proves nothing about the app for those
    scenarios, so 4 subsumes 1: you must rerun regardless of the visible
    failures. Exit 1 is reserved for scenario :failed (valid tests, app
    wrong) and for pending under strict mode. See
-   shiftlefter.runner.verdict for the canonical table."
+   shiftlefter.runner.verdict for the canonical table.
+
+   An ABORTED run (sl-617t: `:halted {:reason :aborted}`) is 4 too —
+   never 130 (outside the contract), never 0 (it is not the measurement
+   asked for), not 3 (nothing crashed): the scenarios that ran keep their
+   verdicts, the rest were held, so the run as asked was not measured.
+
+   XPASS (sl-190x, Chair 09-17): a @blocked scenario that PASSED is exit
+   1 — a stale claim about the app is a wrong test, still a failing
+   corpus; the scenario is :failed (counted there) and :xpass marks it.
+   Held scenarios (a @blocked failure as claimed) are in no verdict
+   bucket and never move the code."
   [exec-result allow-pending?]
-  (let [{:keys [failed pending error unobserved]} (:counts exec-result)]
+  (let [{:keys [failed pending error unobserved xpass]} (:counts exec-result)]
     (cond
+      (= :aborted (get-in exec-result [:halted :reason])) 4
       (or (pos? (or error 0)) (pos? (or unobserved 0))) 4
+      (pos? (or xpass 0)) 1
       (pos? (or failed 0)) 1
       (and (pos? (or pending 0)) (not allow-pending?)) 1
       :else 0)))
@@ -429,6 +443,27 @@
   (binding [*out* *err*]
     (println (str "run seed: " seed))))
 
+(defn- crash-probe-reporter
+  "sl-8orx proof instrument (`--sl-internal-crash=SUBSTRING`, undocumented —
+   the sl-7wv internal-flag convention): a Reporter whose
+   on-scenario-complete THROWS for the first envelope whose printed form
+   contains `substring`. Every value crossing the reporter seam is pure EDN
+   data (invariant 3), so pr-str matching is shape-agnostic. Appended LAST
+   in the reporter list, so JUnit/HTML have already recorded the marker
+   scenario when the coordinator crashes — the exact shape of a report-plane
+   loud failure mid-group, reachable from a cold `sl run`."
+  [substring]
+  (reify reporter/Reporter
+    (on-run-start [_ _] nil)
+    (on-scenario-complete [_ scenario-result]
+      (when (str/includes? (pr-str scenario-result) substring)
+        (throw (ex-info (str "sl-internal-crash: deliberate coordinator crash"
+                             " at scenario matching " (pr-str substring))
+                        {:internal-crash-on substring})))
+      nil)
+    (on-diagnostics [_ _] nil)
+    (on-run-end [_ _] nil)))
+
 (defn- make-reporters
   "Build the reporter list for this run. Console (stderr) and EDN (stdout) are
    mutually exclusive; the JUnit (sl-40to) and HTML (sl-muq9) reporters are
@@ -446,29 +481,49 @@
                [(report-edn/make-reporter)]
                [(console/make-reporter report-opts)])
         junit-path (resolve-junit-path opts config)
-        html-path (resolve-html-path opts config)]
-    (cond-> base
-      junit-path (conj (report-junit/make-reporter
-                        ;; sl-xjx0 (Warden W7): multi-group runs share one
-                        ;; invocation-scoped state so the invocation-fixed
-                        ;; XML aggregates across groups instead of
-                        ;; last-writer-wins.
-                        (cond-> {:path junit-path}
-                          (:junit-shared-state opts)
-                          (assoc :shared-state (:junit-shared-state opts)))))
-      html-path (conj (report-html/make-reporter
-                       (let [primary (when group-root
-                                       (str (fs/path group-root "report.html")))]
+        html-path (resolve-html-path opts config)
+        junit-reporter (when junit-path
+                         (report-junit/make-reporter
+                          ;; sl-xjx0 (Warden W7): multi-group runs share one
+                          ;; invocation-scoped state so the invocation-fixed
+                          ;; XML aggregates across groups instead of
+                          ;; last-writer-wins.
+                          (cond-> {:path junit-path}
+                            (:junit-shared-state opts)
+                            (assoc :shared-state (:junit-shared-state opts)))))
+        html-primary (when (and html-path group-root)
+                       (str (fs/path group-root "report.html")))
+        html-reporter (when html-path
+                        (report-html/make-reporter
                          ;; sl-n9c6: in a multi-group run the stable path
                          ;; belongs to the invocation TOC — the per-group
                          ;; byte copy is suppressed (path = primary makes
                          ;; the copy a same-file no-op). Without a primary
                          ;; the group write still lands at the stable path;
                          ;; the TOC epilogue overwrites it last.
-                         {:path (if (and (:suppress-stable-html-copy opts) primary)
-                                  primary
+                         {:path (if (and (:suppress-stable-html-copy opts) html-primary)
+                                  html-primary
                                   html-path)
-                          :primary primary}))))))
+                          :primary html-primary}))]
+    ;; sl-o26v: record the surfaces the crash epilogue writes for THIS
+    ;; run-scope — the paths and both reporters' own state atoms (the
+    ;; records' fields; under a shared JUnit state that IS the shared
+    ;; atom). Under setup.clj each group's call overwrites the html half
+    ;; with the running group's; the multi-group path never reads it.
+    (when-let [surfaces (:crash-surfaces opts)]
+      (swap! surfaces merge
+             (cond-> {:opts opts :config config}
+               junit-reporter (assoc :junit-path junit-path
+                                     :junit-state (:state junit-reporter))
+               html-reporter (assoc :html-path html-path
+                                    :html-primary html-primary
+                                    :html-state (:state html-reporter)))))
+    (cond-> base
+      junit-reporter (conj junit-reporter)
+      html-reporter (conj html-reporter)
+      ;; sl-8orx: the internal crash probe rides last (see its docstring).
+      (:internal-crash-on opts)
+      (conj (crash-probe-reporter (:internal-crash-on opts))))))
 
 (defn- run-start-timestamp
   "ISO-8601 UTC timestamp with NO offset (e.g. 2026-07-09T03:00:00), truncated
@@ -481,7 +536,7 @@
 
 (defn- run-start-ctx
   "Enrich the run-start payload for reporters. Console/EDN ignore run-start;
-   the JUnit reporter (sl-40to) reads :version (properties), :mode (properties),
+   the JUnit reporter (sl-40to) reads :version (properties),
    :started-at (testsuite@timestamp) and :project-name (testsuites@name); the
    HTML reporter (sl-muq9) embeds the whole ctx in its data island. All
    values are EDN-native (invariant 3).
@@ -498,8 +553,6 @@
              ;; bare/defaults contexts keep their historical shape.
              :seed (:run-seed opts)
              :version (version/version)
-             ;; Presence of :svo in loaded config == Shifted mode (sl-ieie).
-             :mode (if (:svo config) :shifted :vanilla)
              :started-at started-at
              :project-root project-root
              :project-name (or (some-> project-root fs/file-name) "shiftlefter")
@@ -589,6 +642,15 @@
      :run-id run-id
      :status :planning-failed}))
 
+(defn- with-config-def-site
+  "sl-u2r0 (Fable 7): every config lint names the file it was found in —
+   `:def-site {:file config-path}` — so the warning's did-you-mean and its
+   def-site travel together (the lint itself is path-free by design)."
+  [lints config-path]
+  (if config-path
+    (mapv #(assoc % :def-site {:file config-path}) lints)
+    lints))
+
 (defn- print-config-lint-notices!
   "Config-lint warnings (sl-hlkz) — the i608 notice pattern: one stderr line
    per warning, suppressed in EDN mode (the machine contract stays
@@ -658,7 +720,8 @@
             ;; :config/invalid-interfaces was ever consumed.
             config-errs (into (vec (:errors (config/normalize config)))
                               (adapter-availability-errors config))
-            lints (config/lint-config config)]
+            lints (with-config-def-site (config/lint-config config)
+                                        (:config-path project-context))]
         (print-config-lint-notices! opts (:config-path project-context) lints)
         (if (seq config-errs)
           ;; :diagnostics {:errors ...} is what makes the EDN summary carry
@@ -680,6 +743,13 @@
                                                (project-context/resolve-cli-paths project-context))
                                       (config/get-step-paths config))
                       :allow-pending? (config/allow-pending? config)}])))))
+
+(defn- loaded-intents
+  "The intents stage 1b loaded into the registry, or nil (none configured,
+   or a load failure already reported) — what the bindings lint resolves
+   matcher-slot shape refs against (sl-ectw)."
+  []
+  (try (intent-state/get-intents) (catch Exception _ nil)))
 
 (defn- load-intents-stage
   "Stage 1b: Load the intents glossary into the global intent-state from config.
@@ -715,9 +785,16 @@
               [:exit (report-planning-error! run-id opts
                        {:error err
                         :diagnostics {:errors [err]}
+                        ;; sl-mk0t (Warden W2): every sub-error carries the
+                        ;; file it came from and, when the index pass vouched
+                        ;; for it, the element's line — render the def-site
+                        ;; in the sl-u2r0 form instead of dropping it.
                         :stderr-msg #(do (println "Intents load error:" (ex-message e))
-                                         (doseq [sub (:errors (ex-data e))]
-                                           (println " " (:message sub))))})])))))))
+                                         (doseq [{:keys [message path line]} (:errors (ex-data e))]
+                                           (println " " message)
+                                           (when path
+                                             (println "    Declared at:"
+                                                      (str path (when line (str ":" line)))))))})])))))))
 
 (defn- discover-features-stage
   "Stage 2: Discover feature files.
@@ -804,27 +881,74 @@
                         costume " costume, " shared-impl " shared-impl, "
                         hook " hook")))))))
 
+(defn- print-tag-lint-notices!
+  "One stderr line per tag lint (sl-190x): a bare @skip / @blocked, a
+   valued @serial, a malformed tag. The config-lint notice pattern —
+   suppressed under --edn (the envelope carries them as :tag-lints),
+   warnings only, never the exit code."
+  [opts lints]
+  (when (and (seq lints) (not (:edn opts)))
+    (binding [*out* *err*]
+      (doseq [{:keys [message]} lints]
+        (println (str "Tag warning: " message))))))
+
+(defn- tag-held-entry
+  "The :held record for a scenario a reserved tag held at planning
+   (sl-190x): the 6wh9 shape (:scenario :feature :uri :line :reason) with
+   the tag's own facts — `:tag`, and `:note` (@wip/@skip) or `:ref`
+   (@blocked) when the tag carried a value."
+  [{:keys [pickle hold]}]
+  (merge {:scenario (:pickle/name pickle)
+          :feature (:pickle/feature-name pickle)
+          :uri (:pickle/source-file pickle)
+          :line (get-in pickle [:pickle/location :line])}
+         (dissoc hold :location)))
+
 (defn- tag-filter-stage
   "Stage 4b (sl-i608): planning-time tag filtering through the disposition
    seam. Filtered-out pickles never reach compile-suite-stage — never bound,
-   never counted. nil :tag-filter => pass-through identical to today.
-   :filtered-count is nil when no filter is active (so dry-run output can
-   distinguish 'filter selected N' from 'project has N'), else the count.
-   Returns [:continue {:all-pickles [...] :filtered-count (nilable int)}]
-   or [:exit error-result]."
+   never counted. :filtered-count is nil when no filter is active (so
+   dry-run output can distinguish 'filter selected N' from 'project has
+   N'), else the count.
+
+   sl-190x: the seam ALWAYS runs — nil :tag-filter filters nothing, but a
+   @wip / @skip hold still deselects (unless its tag is named in --tags):
+   those pickles ride `:tag-held` as :held entries for every surface, and
+   the authored-tag lints ride `:tag-lints`. Without holds or lints the
+   output is byte-identical to before.
+
+   sl-mk0t (Warden W7, Chair-ruled 10-19): the lints walk the SELECTION,
+   not the corpus — a pickle the rules filtered OUT is not this run's
+   business, so its bare @skip no longer warns on every `--tags` run that
+   excludes it. Held pickles ARE in the selection (a hold deselects
+   inside the run's story — it is counted and recorded), so the
+   reason-required lint on a selected-but-held @skip still fires. A
+   corpus-wide authored-tag census is an orient/fmt design question
+   (0.5.8), not run output. `:tag-lints` on the EDN surface narrows to
+   match.
+   Returns [:continue {:all-pickles [...] :filtered-count (nilable int)
+   :tag-held [...] :tag-lints [...]}] or [:exit error-result]."
   [run-id opts all-pickles]
   (let [rules (:tag-filter opts)
         err (when rules (tagd/rules-error rules))]
-    (cond
-      (nil? rules) [:continue {:all-pickles all-pickles :filtered-count nil}]
-      err [:exit (report-planning-error! run-id opts
-                   {:error err
-                    :diagnostics {:errors [err]}
-                    :stderr-msg #(println "Tag filter error:" (:message err))})]
-      :else
-      (let [{:keys [selected filtered-out]} (tagd/apply-dispositions rules all-pickles)]
-        (print-tag-filter-notice! opts (count selected) (count filtered-out))
-        [:continue {:all-pickles selected :filtered-count (count filtered-out)}]))))
+    (if err
+      [:exit (report-planning-error! run-id opts
+               {:error err
+                :diagnostics {:errors [err]}
+                :stderr-msg #(println "Tag filter error:" (:message err))})]
+      (let [{:keys [selected filtered-out held]} (tagd/apply-dispositions rules all-pickles)
+            dropped (set filtered-out)
+            lints (reporter/scrub (into []
+                                        (comp (remove dropped)
+                                              (mapcat tagd/tag-lints))
+                                        all-pickles))]
+        (when rules
+          (print-tag-filter-notice! opts (count selected) (count filtered-out)))
+        (print-tag-lint-notices! opts lints)
+        [:continue {:all-pickles selected
+                    :filtered-count (when rules (count filtered-out))
+                    :tag-held (mapv tag-held-entry held)
+                    :tag-lints lints}]))))
 
 (defn- empty-selection-error
   "The vacuity witness (sl-7c7i): a selection of zero scenarios is a
@@ -834,7 +958,7 @@
    wrapper needs to make its own choice upstream (sl-78md item 12,
    our-data-your-choices): what was searched, the active filter, the CLI
    narrowing, and how many scenarios existed before narrowing."
-  [{:keys [total searched tag-filter groups cli-paths]}]
+  [{:keys [total searched tag-filter groups cli-paths held]}]
   (let [total (or total 0)]
     {:type :selection/empty
      :message (str "Empty selection: 0 of " total " scenario(s) selected"
@@ -842,6 +966,11 @@
                      (str " (searched: " (str/join ", " searched) ")"))
                    (when tag-filter
                      (str " (tag filter: " (pr-str tag-filter) ")"))
+                   ;; sl-190x: holds are part of the selection story —
+                   ;; every-scenario-held is this same exit 2 (exit 0 is
+                   ;; existential), and the count says so.
+                   (when (pos? (or held 0))
+                     (str " (" held " held by @wip/@skip tags)"))
                    (when (seq cli-paths)
                      (str " (CLI paths: " (str/join ", " cli-paths) ")"))
                    (when (seq groups)
@@ -850,6 +979,7 @@
      :data (cond-> {:selected 0 :total total}
              (seq searched) (assoc :searched (vec searched))
              tag-filter     (assoc :tag-filter tag-filter)
+             (pos? (or held 0)) (assoc :held held)
              (seq cli-paths) (assoc :cli-paths (vec cli-paths))
              (seq groups)   (assoc :groups (vec groups)))}))
 
@@ -896,21 +1026,24 @@
         (load-built-in-steps!)
         [:continue nil]))))
 
-(defn- compile-suite-stage
-  "Stage 6: Compile suite (bind all pickles to stepdefs).
-   Returns [:continue {:plans [...] :diagnostics {...}}] or [:exit error-result].
+(defn- bind-pass
+  "One binding pass over `pickles` (sl-6wh9 — the compile half of
+   compile-suite-stage, factored so `--hold-unplannable` can run it twice:
+   once to classify, once over the kept selection). Returns compile-suite's
+   {:plans :runnable? :diagnostics} with the config/glossary lints attached.
 
    `opts` may carry `:adapter-registry`; it's forwarded to the binder so
-   capability gating (sl-ewn) honors a setup.clj-supplied custom registry.
-   `opts` may carry `:hooks-registry` ({:registry [...] :path ...} from
-   load-hooks-stage, sl-esq); hook applicability resolves here, riding the
-   plan as the additive :plan/hooks key."
-  [run-id opts config all-pickles report-opts]
+   capability gating (sl-ewn) honors a setup.clj-supplied custom registry."
+  [opts config pickles]
   (let [stepdefs (registry/all-stepdefs)
-        compile-opts (when-let [r (:adapter-registry opts)]
-                       {:adapter-registry r})
+        config-path (:config-path (:project-context opts))
+        compile-opts (cond-> {}
+                       (:adapter-registry opts) (assoc :adapter-registry (:adapter-registry opts))
+                       ;; sl-u2r0: the def-site an unknown-interface issue
+                       ;; names, and the file every config lint names.
+                       config-path (assoc :config-path config-path))
         {:keys [plans runnable? diagnostics]}
-        (compile/compile-suite config all-pickles stepdefs compile-opts)
+        (compile/compile-suite config pickles stepdefs (not-empty compile-opts))
         ;; sl-lnj1: config-lint warnings join the diagnostics map here — the
         ;; one point both pipelines share — so every downstream output (EDN
         ;; summary 0/1/2, dry-run, reporter on-diagnostics channel) carries
@@ -920,14 +1053,221 @@
         ;; non-round-tripping (sl-27uh class), and the exit-2 path prints
         ;; diagnostics without the reporter-envelope scrub. Absent key when
         ;; clean — all existing output stays byte-identical.
-        diagnostics (let [lints (config/lint-config config)]
+        diagnostics (let [lints (with-config-def-site (config/lint-config config) config-path)]
                       (cond-> diagnostics
                         (seq lints) (assoc :config-lints (reporter/scrub lints))
                         ;; sl-67dj (Warden P3-13): glossary-load warnings
                         ;; arrive from compile-suite already in the map;
                         ;; scrub at attach like the config-lints twin.
                         (seq (:glossary-lints diagnostics))
-                        (update :glossary-lints reporter/scrub)))]
+                        (update :glossary-lints reporter/scrub)))
+        ;; sl-74c2: the WHOLE map, once, for the same reason the two lint
+        ;; keys were — the exit-2 planning block and the dry-run summary
+        ;; read these diagnostics raw (no reporter envelope), and an
+        ;; :svo-issues :subject was a user capture keywordized verbatim
+        ;; ((keyword ":user"), printed ::user, never re-readable). Now every
+        ;; downstream reader gets pure data; the executed path's envelope
+        ;; scrub then takes the identity fast path — byte-identical.
+        diagnostics (reporter/scrub diagnostics)]
+    {:plans plans :runnable? runnable? :diagnostics diagnostics}))
+
+(defn- real-steps
+  "A plan's bound steps minus macro wrappers (synthetic steps bind to
+   nothing and must not count as undefined-or-not)."
+  [plan]
+  (remove #(= :synthetic (:status %)) (:plan/steps plan)))
+
+(defn- classify-plans
+  "Per-scenario plannability (sl-6wh9), computed from the FIRST bind pass:
+   a scenario would exit 2 for a scenario-level reason when its plan is
+   not `:plan/runnable?` (an undefined / ambiguous / invalid-arity step or
+   an unresolved instance) or the data-plane static check finds a
+   blocking issue in it (consumed-without-producer) — hooks are attached
+   first because hook :provides declarations count as producers. Warn-
+   or error-level enforcement issues (unknown vocabulary) are NOT here:
+   those are the vocabulary-contract class, the typo the machine must
+   never silence. Returns one map per plan:
+   {:plan p :plannable? bool :undefined n :ambiguous n :binding-issues [...]}
+   — :binding-issues is the plan's data-plane lint result, kept rather than
+   discarded (sl-8ezu, Warden W1): the first planning exit reports it beside
+   the undefined/SVO issues, and a --hold-unplannable held entry names it."
+  [plans hooks-info]
+  (let [hooked (or (:ok (hooks/attach-hooks plans (:registry hooks-info)
+                                            (:path hooks-info)))
+                   plans)
+        intents (loaded-intents)]
+    (mapv (fn [plan]
+            (let [steps (real-steps plan)
+                  status-count (fn [s] (count (filter #(= s (:status %)) steps)))
+                  issues (bindings-lint/check-plans [plan] intents)]
+              {:plan plan
+               :plannable? (and (:plan/runnable? plan)
+                                (not (bindings-lint/blocking? issues)))
+               :undefined (status-count :undefined)
+               :ambiguous (status-count :ambiguous)
+               :binding-issues issues}))
+          hooked)))
+
+(defn ref-url
+  "Render the tracker link for a @blocked ref (sl-190x) from the config's
+   `[:runner :ref-url]` template — `{ref}` substituted, nothing fetched.
+   nil when no template is configured or the hold carries no ref."
+  [config ref]
+  (when-let [template (and ref (get-in config [:runner :ref-url]))]
+    (str/replace template "{ref}" ref)))
+
+(defn- attach-holds
+  "Assoc :plan/hold onto each plan whose pickle carries a hold that RUNS
+   (@blocked, sl-190x) — the never-run holds were deselected at stage 4b
+   and have no plan. The facet gains :ref-url when the config renders one.
+   Plans without a running hold are returned untouched (no nil key)."
+  [plans config]
+  (mapv (fn [plan]
+          (let [hold (:hold (tagd/disposition nil (:plan/pickle plan)))]
+            (if (and hold (not (tagd/never-run-hold? hold)))
+              (assoc plan :plan/hold
+                     (cond-> (dissoc hold :location)
+                       (ref-url config (:ref hold))
+                       (assoc :ref-url (ref-url config (:ref hold)))))
+              plan)))
+        plans))
+
+(defn- held-entry
+  "The :held record for one scenario --hold-unplannable deselected
+   (sl-6wh9). sl-190x's tag holds (`tag-held-entry`) and the engine's
+   holds (`engine-held-entry`) share the shape: :scenario :feature :uri
+   :line :reason, plus the kind's own facts. :binding-errors (sl-8ezu) names
+   the data-plane lint errors that held the scenario — `[{:type :def-site}]`
+   in step order, :def-site when the issue carries one — because under the
+   flag those issues never reach :svo-issues, so the entry is the only EDN
+   surface that can carry their site. Absent when none held it."
+  [{:keys [plan undefined ambiguous binding-issues]}]
+  (let [pickle (:plan/pickle plan)
+        errors (into [] (comp (filter #(= :error (:severity %)))
+                              (map #(select-keys % [:type :def-site])))
+                     binding-issues)]
+    (cond-> {:scenario (:pickle/name pickle)
+             :feature (:pickle/feature-name pickle)
+             :uri (:pickle/source-file pickle)
+             :line (get-in pickle [:pickle/location :line])
+             :reason :unplannable
+             :undefined undefined
+             :ambiguous ambiguous}
+      (seq errors) (assoc :binding-errors errors))))
+
+(defn- unshifted-suite-facts
+  "sl-6wh9: the degenerate planning result. When EVERY selected step is
+   undefined the suite reads as unshifted (nobody writes Cucumber stepdefs
+   in Clojure, so a vanilla corpus binds to nothing) — return the
+   inventory {:features N :scenarios M :distinct-steps K}; nil otherwise.
+   The trigger is exactly all-undefined (Chair ruling 09-11): a glossary's
+   existence says nothing about the suite."
+  [plans]
+  (let [steps (mapcat real-steps plans)]
+    (when (and (seq steps) (every? #(= :undefined (:status %)) steps))
+      {:features (count (distinct (map #(get-in % [:plan/pickle :pickle/source-file]) plans)))
+       :scenarios (count plans)
+       :distinct-steps (count (distinct (map #(get-in % [:step :step/text]) steps)))})))
+
+(defn- plannability-facts
+  "sl-6wh9: the mixed-state fact for the exit-2 hint —
+   {:plannable N :unplannable M :total T} when SOME scenarios plan and
+   some do not; nil when all or none do (the all case is a run, the none
+   case is the summary line / an ordinary exit 2)."
+  [classified]
+  (let [plannable (count (filter :plannable? classified))
+        total (count classified)]
+    (when (< 0 plannable total)
+      {:plannable plannable :unplannable (- total plannable) :total total})))
+
+(defn- merge-bindings-issues
+  "Join data-plane lint issues onto the diagnostics map (sl-yh7): they ride
+   :svo-issues (same shape, severity, reporting) and bump the issue counts.
+   Identity on an empty seq, so a clean suite's diagnostics are untouched."
+  [diagnostics bindings-issues]
+  (cond-> diagnostics
+    (seq bindings-issues)
+    (-> (update :svo-issues (fnil into []) bindings-issues)
+        (update-in [:counts :svo-issue-count] (fnil + 0) (count bindings-issues))
+        (update-in [:counts :total-issues] (fnil + 0) (count bindings-issues)))))
+
+(defn- planning-failed-exit!
+  "The stage-6 exit-2 envelope (sl-6hsd HTML, console diagnostics + the
+   sl-6wh9 summary line / hint, EDN summary) — shared by the binding gate
+   and the bindings-lint gate."
+  [run-id opts config all-pickles diagnostics report-opts]
+  (let [exit-code 2]
+    (write-planning-failure-html! run-id opts config all-pickles diagnostics)
+    (when-not (:edn opts)
+      (console/print-diagnostics! diagnostics report-opts)
+      (console/print-unshifted-suite! diagnostics report-opts)
+      (console/print-plannability-hint! diagnostics report-opts))
+    (when (:edn opts)
+      (report-edn/prn-summary
+       (report-edn/build-summary run-id exit-code nil
+                                 {:diagnostics diagnostics
+                                  :seed (:run-seed opts)})))
+    [:exit {:exit-code exit-code
+            :run-id run-id
+            :status :planning-failed
+            :diagnostics diagnostics}]))
+
+(defn- compile-suite-stage
+  "Stage 6: Compile suite (bind all pickles to stepdefs).
+   Returns [:continue {:plans [...] :diagnostics {...}}] or [:exit error-result].
+
+   `opts` may carry `:adapter-registry` (see `bind-pass`) and
+   `:hooks-registry` ({:registry [...] :path ...} from load-hooks-stage,
+   sl-esq); hook applicability resolves here, riding the plan as the
+   additive :plan/hooks key.
+
+   sl-6wh9 — one mode, and the planning RESULT tells the migration story:
+   the first bind pass classifies every scenario (`classify-plans`). Then
+   - every step undefined → the :unshifted-suite inventory rides the
+     diagnostics (the summary line on console, a top-level EDN key);
+   - some scenarios plan, some do not → :plannability rides the exit-2
+     diagnostics (the console hint naming --hold-unplannable); never on a
+     structural exit 2 (config/glossary/hooks/suite-lint errors yield no
+     plans, so nothing is classified);
+   - `:hold-unplannable` (CLI only, per run) with a mixed selection →
+     the plannable pickles are bound AGAIN as the selection (deselected
+     at planning like tag narrowing: never run) and the held scenarios
+     ride `:held` on the diagnostics for every surface; when nothing
+     plans the first pass exits 2 as if the flag were absent.
+
+   sl-8ezu (Warden W1): the first pass's data-plane lint result (computed in
+   `classify-plans`, hook-attached) joins the diagnostics on the runnable?
+   exit, so an undefined step or an SVO :error no longer hides every
+   :bindings/* error behind it. On the runnable path the post-hook lint
+   below is still the one that merges (it sees the plans that will run);
+   under the flag the held scenarios' errors ride their held entries, never
+   the kept run's :svo-issues."
+  [run-id opts config all-pickles report-opts {:keys [tag-held tag-lints]}]
+  (let [first-pass (bind-pass opts config all-pickles)
+        classified (when (seq (:plans first-pass))
+                     (classify-plans (:plans first-pass) (:hooks-registry opts)))
+        held (filterv (complement :plannable?) classified)
+        kept (filterv :plannable? classified)
+        hold? (boolean (and (:hold-unplannable opts) (seq held) (seq kept)))
+        {:keys [plans runnable? diagnostics]}
+        (if hold?
+          (bind-pass opts config (mapv (comp :plan/pickle :plan) kept))
+          first-pass)
+        diagnostics (cond-> diagnostics
+                      ;; sl-190x: the tag holds (never bound, held at
+                      ;; stage 4b) lead the ONE :held record; the flag's
+                      ;; unplannable holds follow; the authored-tag lints
+                      ;; ride beside the config lints.
+                      (seq tag-held) (assoc :held tag-held)
+                      (seq tag-lints) (assoc :tag-lints tag-lints)
+                      hold? (update :held (fnil into []) (mapv held-entry held))
+                      (not hold?)
+                      (as-> d
+                            (let [unshifted (unshifted-suite-facts (:plans first-pass))
+                                  mixed (plannability-facts classified)]
+                              (cond-> d
+                                unshifted (assoc :unshifted-suite unshifted)
+                                mixed (assoc :plannability mixed)))))]
     ;; Glossary-lint stderr notices (sl-67dj) — the print-config-lint-notices!
     ;; pattern: one line per warning, suppressed under :edn (the EDN envelope
     ;; carries them as :glossary-lints), warnings only, never the exit code.
@@ -936,20 +1276,11 @@
         (doseq [{:keys [message]} (:glossary-lints diagnostics)]
           (println (str "Glossary warning: " message)))))
     (if-not runnable?
-      (let [exit-code 2]
-        (write-planning-failure-html! run-id opts config all-pickles
-                                      diagnostics)
-        (when-not (:edn opts)
-          (console/print-diagnostics! diagnostics report-opts))
-        (when (:edn opts)
-          (report-edn/prn-summary
-           (report-edn/build-summary run-id exit-code nil
-                                     {:diagnostics diagnostics
-                                      :seed (:run-seed opts)})))
-        [:exit {:exit-code exit-code
-                :run-id run-id
-                :status :planning-failed
-                :diagnostics diagnostics}])
+      (planning-failed-exit! run-id opts config all-pickles
+                             (merge-bindings-issues
+                              diagnostics
+                              (into [] (mapcat :binding-issues) classified))
+                             report-opts)
       ;; sl-esq: resolve @hook= names against the loaded registry; an
       ;; unknown name is a planning error naming the tag and its file:line.
       ;; Runs even with no hooks.clj (nil registry) — a dangling @hook=
@@ -978,33 +1309,18 @@
           ;; :svo-issues (same shape, severity, reporting); any :error
           ;; (consumed-without-producer, invalid capture pattern) is a
           ;; planning failure, exit 2 like every other blocking issue.
-          (let [bindings-issues (bindings-lint/check-plans plans')
-                diagnostics (cond-> diagnostics
-                              (seq bindings-issues)
-                              (-> (update :svo-issues (fnil into []) bindings-issues)
-                                  (update-in [:counts :svo-issue-count]
-                                             (fnil + 0) (count bindings-issues))
-                                  (update-in [:counts :total-issues]
-                                             (fnil + 0) (count bindings-issues))))]
+          (let [bindings-issues (bindings-lint/check-plans plans' (loaded-intents))
+                diagnostics (merge-bindings-issues diagnostics bindings-issues)]
             (if (bindings-lint/blocking? bindings-issues)
-              (let [exit-code 2]
-                (write-planning-failure-html! run-id opts config all-pickles
-                                              diagnostics)
-                (when-not (:edn opts)
-                  (console/print-diagnostics! diagnostics report-opts))
-                (when (:edn opts)
-                  (report-edn/prn-summary
-                   (report-edn/build-summary run-id exit-code nil
-                                             {:diagnostics diagnostics
-                                              :seed (:run-seed opts)})))
-                [:exit {:exit-code exit-code
-                        :run-id run-id
-                        :status :planning-failed
-                        :diagnostics diagnostics}])
+              (planning-failed-exit! run-id opts config all-pickles diagnostics report-opts)
               ;; sl-q9wp: the scheduling facet rides the compiled plan
               ;; (additive :plan/schedule key). Inert at :max-parallel 1 —
-              ;; the sequential execution path never reads it.
-              [:continue {:plans (schedule/attach-schedules plans' (:interfaces config))
+              ;; the scheduler runs every plan inline and never reads it.
+              ;; sl-190x: the @blocked hold rides the same way
+              ;; (additive :plan/hold key) for the engine's inversion.
+              [:continue {:plans (-> plans'
+                                     (schedule/attach-schedules (:interfaces config))
+                                     (attach-holds config))
                           :diagnostics diagnostics}])))))))
 
 (declare dry-run-hooks-entries)
@@ -1027,8 +1343,12 @@
            :run/seed seed
            :run/exit-code 0
            :run/status :dry-run
-           :counts {:scenarios (count plans)
-                    :steps (reduce + (map #(count (:plan/steps %)) plans))}}
+           :counts (cond-> {:scenarios (count plans)
+                            :steps (reduce + (map #(count (:plan/steps %)) plans))}
+                     ;; sl-6wh9: --hold-unplannable's held scenarios
+                     (seq (:held diagnostics))
+                     (assoc :held (count (:held diagnostics))))}
+    (seq (:held diagnostics)) (assoc :held (:held diagnostics))
     group-label (assoc :group group-label)
     filtered-count (assoc :filtered-out filtered-count)
     (seq reports-not-written)
@@ -1038,7 +1358,11 @@
     (dry-run-hooks-entries plans)
     (assoc :hooks (dry-run-hooks-entries plans))
     (report-edn/execution-diagnostics diagnostics)
-    (assoc :diagnostics (report-edn/execution-diagnostics diagnostics))))
+    (assoc :diagnostics (report-edn/execution-diagnostics diagnostics))
+    ;; sl-xvae: the machine plan — scenario → step → :step/resolved. Always
+    ;; present on a dry-run summary (last, so earlier keys keep their order).
+    true
+    (assoc :plan (report-edn/dry-run-plan plans))))
 
 (defn- dry-run-hooks-entries
   "Per-scenario hook firing lists for the dry-run preview (sl-esq AC9):
@@ -1105,6 +1429,22 @@
                     (str/join ", " (map (fn [[kind path]]
                                           (str (name kind) " " path))
                                         reports-not-written)))))))
+
+(defn- engine-held-entries
+  "Run-level :held entries for the scenarios the ENGINE held (sl-617t's
+   abort, sl-190x's @blocked-failed-as-claimed): the scenario's own :held
+   record with the 6wh9 locator keys, in plan order. Empty when none."
+  [scenarios]
+  (into []
+        (keep (fn [{:keys [held plan]}]
+                (when held
+                  (let [pickle (:plan/pickle plan)]
+                    (merge {:scenario (:pickle/name pickle)
+                            :feature (:pickle/feature-name pickle)
+                            :uri (:pickle/source-file pickle)
+                            :line (get-in pickle [:pickle/location :line])}
+                           held)))))
+        scenarios))
 
 (defn- make-scenario-release
   "The SINGLE release point through which per-scenario REPORT-plane dispatch
@@ -1226,6 +1566,8 @@
                        (results/ensure-group-dir! results-dir label
                                                   (:group-index opts 0))
                        results-dir))
+        ;; sl-617t: the abort's immediate line names where reports land.
+        _ (when results-dir (abort/register-results-dir! results-dir))
         ;; sl-3q9r: capture resolution + the warn channel (per group, so
         ;; the unknown-kind check sees the group's LIVE registry — custom
         ;; adapters from setup :start included).
@@ -1307,16 +1649,29 @@
                              ;; sl-aa5: scoped-eager provisioning is the default;
                              ;; opt-out via {:runner {:provisioning :lazy}}.
                              :provisioning (config/provisioning-mode config)
-                             ;; sl-q9wp: scenario parallelism bound (1 = today's
-                             ;; sequential path).
+                             ;; sl-q9wp: scenario parallelism bound (1 = every
+                             ;; scenario in plan order on this thread, no pool).
                              :max-parallel max-parallel
                              ;; sl-kowi (Ruling 4): run-level halt policy,
                              ;; config-only, default off.
                              :halt-on-observation-failure
                              (config/halt-on-observation-failure? config)
                              ;; sl-dgk: report + observe planes fed per-completion.
-                             :on-scenario-complete (on-scenario-complete-callback bus run-id release!)}
+                             :on-scenario-complete (on-scenario-complete-callback bus run-id release!)
+                             ;; sl-io05: a throw escaping the per-scenario
+                             ;; machinery is a runner crash — the engine
+                             ;; names the scenario here first, and the one
+                             ;; crash epilogue (sl-o26v) reads it back so
+                             ;; the crash report can say WHERE.
+                             :on-scenario-crash
+                             (fn [scenario]
+                               (when-let [surfaces (:crash-surfaces opts)]
+                                 (swap! surfaces assoc :crashed-scenario scenario)))}
                       (:adapter-registry opts) (assoc :adapter-registry (:adapter-registry opts))
+                      ;; sl-io05 proof instrument: the per-scenario escape
+                      ;; probe (stepengine/exec/cleanup throws on a match).
+                      (:internal-scenario-crash-on opts)
+                      (assoc :internal-scenario-crash-on (:internal-scenario-crash-on opts))
                       ;; sl-78u4 (Warden W3): the invocation-wide halt gate,
                       ;; present only under :run scope in a setup.clj run.
                       (:halt-gate opts) (assoc :halt-gate (:halt-gate opts))
@@ -1330,6 +1685,14 @@
           ;; Reporters have already seen every scenario (live, via the callback)
           ;; by the time this returns.
           exec-result (exec/execute-suite plans exec-opts)
+          ;; sl-617t (fold-in C1, P1): in a SINGLE-SCOPE run (no setup.clj)
+          ;; the suite's return is where the final writes begin — a cold
+          ;; second strike from here on is a no-op. Under setup.clj the
+          ;; invocation surfaces are still live (the JUnit re-materializes
+          ;; per group end; the TOC is written after the group loop), so
+          ;; run-with-setups! raises the flag before ITS final writes.
+          _ (when (and (abort/requested?) (nil? (:group-label opts)))
+              (abort/finalizing!))
           ;; Invariant 4: the exit code is a pure function of the execution
           ;; result; reporting (which already ran) cannot change it.
           exit-code (compute-exit-code exec-result allow-pending?)
@@ -1365,17 +1728,31 @@
                            (attachments/relativize-under
                             (:config-root (:project-context opts))
                             (str group-root)))
+            ;; The ONE :held record (sl-6wh9, sl-617t, sl-190x): scenarios
+            ;; held at planning (a @wip/@skip tag, --hold-unplannable —
+            ;; never run) lead, then the scenarios the engine held (the
+            ;; abort, a @blocked scenario that failed as claimed) in plan
+            ;; order. Absent when nothing was held.
+            planning-held (:held diagnostics)
+            held (not-empty (into (vec planning-held)
+                                  (engine-held-entries (:scenarios exec-result))))
+            ;; `update`, not `assoc`: the engine already counts ITS held
+            ;; scenarios (sl-617t, sl-190x) — one :held bucket.
+            counts (cond-> (:counts exec-result)
+                     (seq planning-held)
+                     (update :held (fnil + 0) (count planning-held)))
             run-summary (cond-> {:run-id run-id
                                  ;; sl-08f7: core-record family — every
                                  ;; run-scope's summary carries the one
                                  ;; invocation seed.
                                  :seed (:run-seed opts)
                                  :exit-code exit-code
-                                 :counts (:counts exec-result)
+                                 :counts counts
                                  :status (verdict/exit-code->status exit-code)}
                           ;; Absent-when-zero (anomaly-marker convention,
                           ;; Chair re-ratified 08-10): presence IS the signal.
                           (pos? dropped) (assoc :dropped-events dropped)
+                          (seq held) (assoc :held held)
                           results-path (assoc :results-path results-path)
                           ;; sl-kowi: the halt record — present only when
                           ;; :halt-on-observation-failure fired.
@@ -1392,12 +1769,13 @@
         (cond-> {:exit-code exit-code
                  :run-id run-id
                  :status (verdict/exit-code->status exit-code)
-                 :counts (:counts exec-result)
+                 :counts counts
                  ;; The RAW exec-result, deliberately: envelopes are a projection
                  ;; for the report/observe planes only; programmatic callers keep
                  ;; full fidelity.
                  :result exec-result}
           (pos? dropped) (assoc :dropped-events dropped)
+          (seq held) (assoc :held held)
           ;; sl-y3wd: where this run's outputs live (also in run-ctx since
           ;; sl-l9nj — reporters see it; goldens stay byte-identical because
           ;; console/EDN ignore run-start and the key is absent without a dir).
@@ -1452,15 +1830,40 @@
 
 (defn- skipped-group-result
   "The result for a setup group that never STARTED because the invocation
-   halted under `:halt-on-observation-failure :run` (sl-78u4, Warden W3):
-   `:status :skipped` — the same word with the same meaning as a skipped
-   scenario or step (did not run) — no `:exit-code` (no verdict exists),
-   and the gate's record as `:halted-by`. Its `:start` never ran: a dark
-   environment gets no more setups."
+   halted under `:halt-on-observation-failure :run` (sl-78u4, Warden W3)
+   or was aborted (sl-617t, `{:reason :aborted ...}`): `:status :skipped`
+   — the same word with the same meaning as a skipped scenario or step
+   (did not run) — no `:exit-code` (no verdict exists), and the gate's
+   record as `:halted-by`. Its `:start` never ran: a dark environment
+   gets no more setups, and neither does an aborted run."
   [group halt-record]
   {:group-label (or (:label group) "<unlabeled>")
    :status :skipped
    :halted-by halt-record})
+
+(defn- ran-count
+  "How many of a group's scenarios reached a verdict."
+  [counts]
+  (reduce + (map #(get counts % 0) [:passed :failed :pending :error])))
+
+(defn- invocation-abort-record
+  "sl-617t: the invocation-level `:halted` record while an abort is
+   requested, from the group results landed so far — the aborted group's
+   own record plus its label when a suite was cut mid-way; otherwise (the
+   abort landed between groups: during a `:stop`, a `:start`, or before
+   any group ran) `{:reason :aborted :after-scenario N}` with N = the
+   last-ran group's verdict count and that group's label. nil when no
+   abort is requested."
+  [results]
+  (when (abort/requested?)
+    (or (some (fn [r]
+                (let [h (-> r :result :halted)]
+                  (when (= :aborted (:reason h))
+                    (assoc h :group/label (:group-label r)))))
+              results)
+        (let [last-ran (last (filter :counts results))]
+          (cond-> (abort/halt-record (ran-count (:counts last-ran)))
+            last-ran (assoc :group/label (:group-label last-ran)))))))
 
 (defn- compute-suite-exit-code
   "Aggregate per-group exit codes into a suite exit code.
@@ -1764,7 +2167,8 @@
                       (assoc d-filter :group-label label)
                       (let [{:keys [all-pickles filtered-count]} d-filter
                             [s-compile d-compile]
-                            (compile-suite-stage run-id inner-opts config all-pickles report-opts)]
+                            (compile-suite-stage run-id inner-opts config all-pickles
+                                                 report-opts (select-keys d-filter [:tag-held :tag-lints]))]
                         (if (= :exit s-compile)
                           (assoc d-compile :group-label label)
                           (let [{:keys [plans diagnostics]} d-compile
@@ -1817,6 +2221,8 @@
                                   (binding [*out* *err*]
                                     (println (str "[" label "] "
                                                   (dry-run-console-line (count plans) filtered-count))))
+                                  (console/print-held-notice! diagnostics report-opts)
+                                  (console/print-dry-run-plan! plans report-opts)
                                   (print-dry-run-hooks! (dry-run-hooks-entries plans)))
                                 (when (:edn opts)
                                   (report-edn/prn-summary
@@ -1899,55 +2305,84 @@
 
    No run dir at all (every group planning-failed — sl-y3wd creates none):
    stable TOC only, group pages skipped; verdicts stay visible, which is
-   the honesty that matters."
-  [run-id opts config results exit-code halted]
-  (when-let [html-path (resolve-html-path opts config)]
-    (let [run-dir (some :results-dir results)
-          failures (some-> (:html-failure-stash opts) deref)
-          failure-pages
-          (when run-dir
-            (into {}
-                  (for [{:keys [group-label group-index run-ctx diagnostics summary]} failures]
-                    (let [group-root (results/ensure-group-dir! run-dir group-label group-index)]
-                      (report-html/write-planning-failure!
-                       (str (fs/path group-root "report.html")) run-ctx diagnostics summary)
-                      [group-index (str (fs/file-name group-root) "/report.html")]))))
-          rows (vec (map-indexed
-                     (fn [position {:keys [group-label status counts group-root] :as result}]
-                       ;; sl-baup: the declared index names the group (and
-                       ;; keys the stashed planning-failure page).
-                       (cond-> {:label group-label
-                                :index (:group-index result position)
-                                :status status}
-                         ;; sl-78u4: a :run-scope-halt-skipped group never
-                         ;; started — no exit code to show.
-                         (contains? result :exit-code)
-                         (assoc :exit-code (:exit-code result))
-                         counts (assoc :counts counts)
-                         group-root
-                         (assoc :path (str (fs/file-name group-root) "/report.html"))
-                         (and (nil? group-root)
-                              (get failure-pages (:group-index result position)))
-                         (assoc :path (get failure-pages (:group-index result position)))))
-                     results))
-          island {:run-ctx (run-start-ctx run-id opts config 0 nil (run-start-timestamp))
-                  :toc {:groups rows}
-                  :summary (cond-> {:run-id run-id
-                                    :exit-code exit-code
-                                    :status (verdict/exit-code->status exit-code)}
-                             ;; sl-78u4 / W10: the TOC header renders the
-                             ;; invocation-level halt line too.
-                             halted (assoc :halted halted))}]
-      (report-html/write-invocation-toc!
-       (when run-dir (str (fs/path run-dir "report.html")))
-       html-path island))))
+   the honesty that matters.
+
+   `crash-info` (sl-8orx, optional) turns the epilogue into the CRASHED
+   TOC: `{:record {:exception-class :message :run-id}
+   :crashed-group {:label :index} | nil :never-started [{:label :index}]}`.
+   `results` are then the groups that COMPLETED before the crash; the
+   crashing group renders one `:crashed` row (exit 3), every declared group
+   after it a `:skipped` row (the sl-78u4 did-not-run word) carrying
+   `:crashed-by`, and the summary is `:status :crashed` with the `:crash`
+   record — the same three fields the JUnit sl-crash body carries (plus
+   `:scenario`, which both markers render since sl-n6io)."
+  ([run-id opts config results exit-code halted]
+   (write-invocation-report! run-id opts config results exit-code halted nil))
+  ([run-id opts config results exit-code halted crash-info]
+   (when-let [html-path (resolve-html-path opts config)]
+     (let [run-dir (some :results-dir results)
+           {:keys [record crashed-group never-started]} crash-info
+           failures (some-> (:html-failure-stash opts) deref)
+           failure-pages
+           (when run-dir
+             (into {}
+                   (for [{:keys [group-label group-index run-ctx diagnostics summary]} failures]
+                     (let [group-root (results/ensure-group-dir! run-dir group-label group-index)]
+                       (report-html/write-planning-failure!
+                        (str (fs/path group-root "report.html")) run-ctx diagnostics summary)
+                       [group-index (str (fs/file-name group-root) "/report.html")]))))
+           rows (vec (map-indexed
+                      (fn [position {:keys [group-label status counts group-root] :as result}]
+                        ;; sl-baup: the declared index names the group (and
+                        ;; keys the stashed planning-failure page).
+                        (cond-> {:label group-label
+                                 :index (:group-index result position)
+                                 :status status}
+                          ;; sl-78u4: a :run-scope-halt-skipped group never
+                          ;; started — no exit code to show.
+                          (contains? result :exit-code)
+                          (assoc :exit-code (:exit-code result))
+                          counts (assoc :counts counts)
+                          group-root
+                          (assoc :path (str (fs/file-name group-root) "/report.html"))
+                          (and (nil? group-root)
+                               (get failure-pages (:group-index result position)))
+                          (assoc :path (get failure-pages (:group-index result position)))))
+                      results))
+           ;; sl-8orx: the crash rows — the group in flight, then the ones
+           ;; whose :start never ran.
+           rows (cond-> rows
+                  crashed-group
+                  (conj (assoc crashed-group :status :crashed :exit-code 3))
+                  (seq never-started)
+                  (into (map #(assoc % :status :skipped :crashed-by record)
+                             never-started)))
+           island {:run-ctx (run-start-ctx run-id opts config 0 nil (run-start-timestamp))
+                   :toc {:groups rows}
+                   :summary (cond-> {:run-id run-id
+                                     :exit-code exit-code
+                                     :status (verdict/exit-code->status exit-code)}
+                              ;; sl-78u4 / W10: the TOC header renders the
+                              ;; invocation-level halt line too.
+                              halted (assoc :halted halted)
+                              ;; sl-8orx: the crash line, same idiom.
+                              record (assoc :crash record))}]
+       (report-html/write-invocation-toc!
+        (when run-dir (str (fs/path run-dir "report.html")))
+        html-path island)))))
 
 (defn- run-with-setups!
   "Drive the suite through all setup groups in declared order.
    Aggregates per-group exit codes into a single suite result.
 
    `setup-base-dir`: directory containing setup.clj — relative paths in
-   each group's :features resolve against it."
+   each group's :features resolve against it.
+
+   Crash context (sl-8orx, one seam since sl-o26v): the invocation's
+   `:crash-surfaces` atom (on opts, created by execute!) receives the
+   context the crash epilogue needs — the rebound opts with the shared
+   JUnit state, the filtered groups and the multi? gate once they exist,
+   and every group result as it lands (`:completed`)."
   [run-id opts config setups setup-base-dir bus report-opts allow-pending?]
   (let [;; Plan-shape lints (sl-lkla): static over the FULL declared plan,
         ;; before CLI narrowing — dry-run and filtered runs see the same
@@ -2041,6 +2476,11 @@
                                      (not (:dry-run opts)))
                             (atom nil))
                 opts (cond-> opts halt-gate (assoc :halt-gate halt-gate))
+                ;; sl-8orx: from here on a crash has invocation context to
+                ;; write its markers with (the one seam, sl-o26v).
+                _ (when-let [surfaces (:crash-surfaces opts)]
+                    (swap! surfaces merge {:opts opts :filtered filtered
+                                           :multi? multi? :completed []}))
                 results  (vec (map-indexed
                                (fn [position group]
                                  ;; sl-baup (Warden W5): the index is the
@@ -2050,15 +2490,24 @@
                                  ;; index-name with gaps under narrowing,
                                  ;; never the survivors' list position.
                                  (let [idx (setup/declared-index group position)
-                                       r (if-let [record (some-> halt-gate deref)]
-                                           ;; An earlier group went dark: a
-                                           ;; dark environment gets no more
+                                       ;; sl-617t: the abort is read HERE
+                                       ;; beside the gate — the same check
+                                       ;; site — and wins over its record.
+                                       abort-record (invocation-abort-record
+                                                     (:completed @(:crash-surfaces opts)))
+                                       r (if-let [record (or abort-record
+                                                             (some-> halt-gate deref))]
+                                           ;; An earlier group went dark (or
+                                           ;; the run was aborted): no more
                                            ;; setups — this group's :start
                                            ;; never runs.
                                            (skipped-group-result group record)
                                            (run-group! run-id opts config group idx
                                                        bus report-opts allow-pending?))
-                                       r (assoc r :group-index idx)]
+                                       r (assoc r :group-index idx)
+                                       ;; sl-8orx: landed = pre-crash evidence.
+                                       _ (when-let [surfaces (:crash-surfaces opts)]
+                                           (swap! surfaces update :completed (fnil conj []) r))]
                                    ;; sl-kvn6 (rides sl-pwbp): per-group
                                    ;; verdict line — the console analog of
                                    ;; the HTML TOC row; this loop is the one
@@ -2074,15 +2523,29 @@
                                filtered))
                 ;; Skipped groups carry no :exit-code — worst-wins over the
                 ;; groups that ran; the halted group's 4 is the verdict.
-                exit-code (compute-suite-exit-code (keep :exit-code results))
+                ;; sl-617t: an abort is 4 wherever it landed — a group's
+                ;; own 4 when its suite was cut, and this conj when it
+                ;; landed between groups (a :stop, a :start), where no
+                ;; group's counts can carry it. 2 still outranks it.
+                exit-code (compute-suite-exit-code
+                           (cond-> (keep :exit-code results)
+                             (abort/requested?) (conj 4)))
                 dry-run? (boolean (:dry-run opts))
-                ;; The aggregate's :halted record: the gate's record plus
-                ;; WHICH group went dark (the group whose own summary
-                ;; carries the record).
-                halted (when-let [record (some-> halt-gate deref)]
-                         (assoc record :group/label
-                                (some #(when (-> % :result :halted) (:group-label %))
-                                      results)))]
+                ;; The aggregate's :halted record: the abort's (sl-617t,
+                ;; wins) or the gate's record plus WHICH group went dark
+                ;; (the group whose own summary carries the record).
+                halted (or (invocation-abort-record results)
+                           (when-let [record (some-> halt-gate deref)]
+                             (assoc record :group/label
+                                    (some #(when (-> % :result :halted) (:group-label %))
+                                          results))))]
+            ;; sl-617t (fold-in C1, fit-pass P1): the FINAL invocation-level
+            ;; writes begin here — every group has returned and its own
+            ;; reports (and the per-group-end JUnit re-materialization) are
+            ;; done. From this point a cold second strike is a no-op: a
+            ;; crash marker written now would race these writers and leave
+            ;; the 8orx shape (a current, partial file beside exit 3).
+            (when (abort/requested?) (abort/finalizing!))
             (when (and multi? (not dry-run?))
               (write-invocation-report! run-id opts config results exit-code halted))
             ;; sl-a7sx W23: the setup path is one invocation = one notice,
@@ -2127,6 +2590,158 @@
               (some :results-dir results)
               (assoc :results-dir (some :results-dir results)))))))))
 
+(defn- crash-record
+  "sl-8orx: the three fields both crash markers carry (JUnit sl-crash body,
+   HTML TOC :crash record) so a reader can match the artifacts; the EDN
+   crash form carries the same run-id. sl-io05: plus `:scenario`
+   `{:name :source-file :line}` when the crash was a throw escaping ONE
+   scenario's execution — absent for every other crash (a reporter
+   callback, a stage, the epilogue), which has no scenario to name. Both
+   markers render it (sl-n6io): the JUnit body's `scenario:` line and the
+   HTML crash line's 'in scenario' clause."
+  [run-id ^Throwable t scenario]
+  (cond-> {:exception-class (.getName (class t))
+           :message (ex-message t)
+           :run-id run-id}
+    scenario (assoc :scenario scenario)))
+
+(defn- guarded-marker-write!
+  "Run one crash-marker write. A marker write can itself fail (reporter
+   invariant 4: a write failure throws) — it is reported on stderr and
+   swallowed HERE so the ORIGINAL crash keeps its exit 3 and its 'Runner
+   crash:' line; never recursed into, never masking."
+  [surface write-fn]
+  (try
+    (write-fn)
+    (catch Throwable t
+      (binding [*out* *err*]
+        (println (str "Crash marker not written (" surface "): "
+                      (.getName (class t)) ": " (ex-message t)))))))
+
+(defn- write-crash-artifacts!
+  "sl-8orx: on the crash path of a multi-group run, make both invocation
+   report surfaces tell the truth beside exit 3 — the JUnit gets the
+   `sl-crash` suite appended to the shared state and re-materialized (it
+   was a CURRENT, all-green, partial file), the stable --html path gets a
+   CRASHED TOC over the groups that completed (it was the previous run's
+   stale bytes). `completed` = the group results that landed before the
+   throw; the crashing group is the next filtered group in declared order
+   (nil when the throw came from the epilogue after every group ran), and
+   every group after it never started. Single-scope runs (one filtered
+   group, or no setup.clj) have no invocation surfaces — their markers
+   are write-crash-markers!'s other branch (sl-o26v)."
+  [run-id config {:keys [opts filtered multi? crashed-scenario]} completed t]
+  (when (and multi? (not (:dry-run opts)))
+    (let [record (crash-record run-id t crashed-scenario)
+          position (count completed)
+          crashing (nth filtered position nil)
+          group-row (fn [group pos]
+                      {:label (or (:label group) "<unlabeled>")
+                       :index (setup/declared-index group pos)})
+          crashed-group (when crashing (group-row crashing position))
+          never-started (vec (map-indexed
+                              (fn [i group] (group-row group (+ position 1 i)))
+                              (drop (inc position) filtered)))
+          fallback-ctx (run-start-ctx run-id opts config 0 nil (run-start-timestamp))
+          toc-record (cond-> record
+                       crashed-group (assoc :group/label (:label crashed-group)
+                                            :group/index (:index crashed-group)))]
+      (when-let [junit-path (resolve-junit-path opts config)]
+        (when-let [state (:junit-shared-state opts)]
+          (guarded-marker-write!
+           "junit"
+           #(report-junit/write-crash-marker! junit-path state record fallback-ctx))))
+      (guarded-marker-write!
+       "html"
+       #(write-invocation-report! run-id opts config completed 3 nil
+                                  {:record toc-record
+                                   :crashed-group crashed-group
+                                   :never-started never-started})))))
+
+(defn- write-crash-markers!
+  "sl-o26v: the ONE crash seam's marker writer — make the report surfaces
+   of WHATEVER pipeline ran tell the truth beside exit 3. `surfaces` is
+   the invocation's :crash-surfaces value:
+
+   - nil (the throw came before any reporter existed — a preflight, config
+     or planning stage) or a dry run (nothing executes, D3): nothing.
+   - multi-group (`:multi?`): write-crash-artifacts! exactly as sl-8orx
+     built it — the sl-crash suite appended to the shared JUnit state and
+     the CRASHED invocation TOC — byte-identical.
+   - single-scope (the classic pipeline, or one filtered setup.clj group):
+     the SAME junit/write-crash-marker! over the JUnit reporter's private
+     state (it holds every scenario it saw and its :run-ctx), and the
+     CRASHED run page over the HtmlReporter's private state at the stable
+     --html path and the run-dir primary when one exists (D2; the crash
+     record names the group under setup.clj). Only configured surfaces
+     are written. Each write rides guarded-marker-write!: a marker failure
+     is one stderr line, never masking exit 3."
+  [run-id {:keys [opts config multi? filtered completed crashed-scenario
+                  junit-path junit-state html-path html-primary html-state]
+           :as surfaces}
+   ^Throwable t]
+  (when (and surfaces (not (:dry-run opts)))
+    (if multi?
+      (write-crash-artifacts! run-id config {:opts opts :filtered filtered :multi? true
+                                             :crashed-scenario crashed-scenario}
+                              (or completed []) t)
+      (let [record (cond-> (crash-record run-id t crashed-scenario)
+                     (:group-label opts) (assoc :group/label (:group-label opts)))
+            fallback-ctx (run-start-ctx run-id opts config 0 nil (run-start-timestamp))]
+        (when (and junit-path junit-state)
+          (guarded-marker-write!
+           "junit"
+           #(report-junit/write-crash-marker! junit-path junit-state record fallback-ctx)))
+        (when (and html-path html-state)
+          (guarded-marker-write!
+           "html"
+           #(let [state @html-state
+                  scenarios (:scenarios state)
+                  counts (frequencies (map :status scenarios))]
+              (report-html/write-crash-page!
+               html-primary html-path
+               (update state :run-ctx (fn [ctx] (or ctx fallback-ctx)))
+               {:run-id run-id
+                :exit-code 3
+                :status :crashed
+                :crash record
+                :counts (merge {:passed 0 :failed 0 :pending 0 :skipped 0}
+                               (select-keys counts [:passed :failed :pending :skipped :error]))}))))))))
+
+(defn- report-crash!
+  "execute!'s crash surface: the EDN crash form (under --edn) or the
+   'Runner crash:' stderr line (stack under :verbose), and the in-process
+   `{:exit-code 3 :status :crashed}` result. Also the base of the cold
+   second-strike epilogue (sl-617t), which runs it from the SIGINT handler
+   thread before `System/exit 3`. sl-io05: when the crash was a throw
+   escaping one scenario's execution, the crash says WHERE — `:scenario`
+   on the error (in-process result and EDN crash form alike) and one added
+   stderr line under 'Runner crash:'."
+  [run-id opts run-seed ^Throwable t]
+  (let [exit-code 3
+        scenario (some-> opts :crash-surfaces deref :crashed-scenario)
+        error (cond-> {:type :runner/crash
+                       :message (ex-message t)
+                       :exception-class (.getName (class t))}
+                scenario (assoc :scenario scenario))]
+    (when (:edn opts)
+      (report-edn/prn-summary
+       (report-edn/build-summary run-id exit-code nil
+                                 {:error error
+                                  :seed run-seed})))
+    (when-not (:edn opts)
+      (binding [*out* *err*]
+        (println "Runner crash:" (ex-message t))
+        (when scenario
+          (println (str "  in scenario: " (:name scenario)
+                        " (" (:source-file scenario) ":" (:line scenario) ")")))
+        (when (:verbose opts)
+          (.printStackTrace t *err*))))
+    {:exit-code exit-code
+     :run-id run-id
+     :status :crashed
+     :error error}))
+
 ;; -----------------------------------------------------------------------------
 ;; Main Pipeline
 ;; -----------------------------------------------------------------------------
@@ -2154,6 +2769,11 @@
    - :html - HTML report output path (sl-muq9); wins over the config
      mirror [:runner :report :html]
    - :dry-run - stop after binding, don't execute
+   - :hold-unplannable - (sl-6wh9, CLI ONLY — never a config mirror)
+     deselect at planning every scenario that would exit 2 for a
+     scenario-level reason (undefined/ambiguous step, consumed-without-
+     producer); the rest runs with its ordinary verdict; held scenarios
+     ride :held + :counts :held on every surface
    - :edn - output EDN summary to stdout
    - :verbose - verbose console output
    - :no-color - disable ANSI colors
@@ -2177,7 +2797,12 @@
                (nil? (:results-state opts)) (assoc :results-state (atom nil))
                ;; sl-3q9r: capture warns dedup ONCE PER RUN across groups.
                (nil? (:capture-warn-state opts))
-               (assoc :capture-warn-state (atom #{})))
+               (assoc :capture-warn-state (atom #{}))
+               ;; sl-o26v: the ONE crash seam's context — filled by
+               ;; make-reporters (paths + both reporters' state) and the
+               ;; group driver (filtered groups, landed results, multi?);
+               ;; read by the crash epilogue, whichever pipeline ran.
+               :always (assoc :crash-surfaces (atom nil)))
         run-id (str (java.util.UUID/randomUUID))
         ;; sl-08f7: candidate seed = CLI or generated, resolved BESIDE run-id
         ;; so even pre-config planning failures record one (core-record
@@ -2191,9 +2816,28 @@
                                  (generate-run-seed)))
         opts (assoc opts :run-seed @run-seed-state)
         bus (events/make-memory-bus)
-        report-opts (select-keys opts [:verbose :no-color])]
+        report-opts (select-keys opts [:verbose :no-color])
+        ;; sl-o26v: the one crash epilogue (see its registration below).
+        markers-written (atom false)
+        crash-epilogue! (fn [^Throwable t]
+                          (when (compare-and-set! markers-written false true)
+                            (write-crash-markers! run-id @(:crash-surfaces opts) t))
+                          (report-crash! run-id opts @run-seed-state t))]
     (binding [wardrobe/*project-context* project-context]
       (try
+        ;; sl-617t: register the run for the abort paths (cold SIGINT, the
+        ;; daemon's abort op) — an abort landing anywhere from here to the
+        ;; finally is honored at the next gate check / step boundary. The
+        ;; base crash epilogue is what a cold SECOND strike prints before
+        ;; exit 3 (the invocation wrapper layers the 8orx markers on it).
+        (abort/begin-run!)
+        ;; sl-o26v: ONE crash epilogue for every pipeline and every crash
+        ;; entry — the outer catch below and 617t's cold second strike
+        ;; both run it. The markers are written once (a strike two that
+        ;; is then followed by a throw must not write twice); the crash
+        ;; report itself runs on every call because the outer catch must
+        ;; return its exit-3 map (D5).
+        (abort/register-crash-epilogue! crash-epilogue!)
         ;; sl-yvaz: announce (and, on real runs, clear) a prior run's dirty
         ;; teardown marker before anything else happens.
         (announce-prior-teardown! run-id opts)
@@ -2290,12 +2934,14 @@
                                   (report-empty-selection! run-id opts
                                                            {:total pre-filter-total
                                                             :searched feature-paths
-                                                            :tag-filter (:tag-filter opts)})
+                                                            :tag-filter (:tag-filter opts)
+                                                            :held (count (:tag-held df))})
                                   (let [{:keys [all-pickles filtered-count]} df
                                         [s4 d4] (load-steps-stage run-id opts step-paths)]
                                     (if (= :exit s4)
                                       d4
-                                      (let [[s5 d5] (compile-suite-stage run-id opts config all-pickles report-opts)]
+                                      (let [[s5 d5] (compile-suite-stage run-id opts config all-pickles
+                                                                         report-opts (select-keys df [:tag-held :tag-lints]))]
                                         (if (= :exit s5)
                                           d5
                                           (let [{:keys [plans diagnostics]} d5
@@ -2348,6 +2994,8 @@
                                                   (console/print-warnings! diagnostics report-opts)
                                                   (binding [*out* *err*]
                                                     (println (dry-run-console-line (count plans) filtered-count)))
+                                                  (console/print-held-notice! diagnostics report-opts)
+                                                  (console/print-dry-run-plan! plans report-opts)
                                                   (print-dry-run-hooks! (dry-run-hooks-entries plans))
                                                   ;; sl-a7sx W23: the classic pipeline
                                                   ;; is one invocation = one notice.
@@ -2367,30 +3015,14 @@
                                               (execute-and-report-stage run-id opts bus config features
                                                                         all-pickles filtered-count plans diagnostics
                                                                         allow-pending? report-opts))))))))))))))))))))
-        ;; Catch any uncaught exceptions → exit 3
+        ;; Catch any uncaught exceptions → exit 3, through the one seam.
         (catch Throwable t
-          (let [exit-code 3
-                error {:type :runner/crash
-                       :message (ex-message t)
-                       :exception-class (.getName (class t))}]
-            (when (:edn opts)
-              (report-edn/prn-summary
-               (report-edn/build-summary run-id exit-code nil
-                                         {:error error
-                                          :seed @run-seed-state})))
-            (when-not (:edn opts)
-              (binding [*out* *err*]
-                (println "Runner crash:" (ex-message t))
-                (when (:verbose opts)
-                  (.printStackTrace t *err*))))
-            {:exit-code exit-code
-             :run-id run-id
-             :status :crashed
-             :error error}))
+          (crash-epilogue! t))
         ;; sl-4tsi lifecycle half: the bus lives for the whole invocation and
         ;; is closed HERE, once, on every exit path — normal, dry-run, every
         ;; planning-failure early return, setup-branch exits, and crash. A
         ;; finally (not per-path closes) so unenumerated future exits are
         ;; covered too. bus-close! drains subscribers before returning (q9wp).
         (finally
+          (abort/end-run!)
           (events/bus-close! bus))))))

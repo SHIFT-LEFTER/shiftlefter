@@ -254,8 +254,12 @@
                     :bindings (->> (:lookup intents)
                                    (keep (fn [[[i element] entry]]
                                            (when (= i intent-name)
-                                             {:element element
-                                              :bindings (:bindings entry)})))
+                                             (cond-> {:element element
+                                                      :bindings (:bindings entry)}
+                                               ;; sl-ectw: the declared content
+                                               ;; pattern, as authored.
+                                               (:shape entry)
+                                               (assoc :shape (get-in entry [:shape :source]))))))
                                    vec)
                     :representative-addresses addresses
                     :address-diagnostics (vec (keep #(validate-representative-address
@@ -422,15 +426,12 @@
           :config-source (:config-source project-context)}
          (git-state (:project-root project-context))))
 
-(defn- svo-effective
-  "The EFFECTIVE :svo strictness levels from a LOADED config (post
-   `shiftlefter.config/apply-conditional-object-default`, so the conditional
-   :unknown-object flip is already applied), display-normalized the way the
-   binder reads them (:strict -> :error, stepengine/bind.clj). Nil in
-   Vanilla mode (no :svo key)."
+(defn- enforcement-effective
+  "The EFFECTIVE :enforcement levels from a LOADED config — one level per
+   kind, the :all umbrella and the conditional defaults already folded in
+   by `shiftlefter.config/load-config` (sl-6wh9). Always a map."
   [cfg]
-  (when (contains? cfg :svo)
-    (update-vals (:svo cfg) #(if (= :strict %) :error %))))
+  (config/get-enforcement cfg))
 
 (defn- fingerprint [projection-without-fingerprint]
   (digest-string (pr-str (select-keys projection-without-fingerprint
@@ -451,12 +452,24 @@
 (defn- diagnostic [stage severity issue]
   (assoc issue :stage stage :severity severity))
 
-(defn- config-mode
-  "Mode of a loaded config: :shifted iff :svo is present, else :vanilla.
-   Post sl-ieie, `shiftlefter.config/load-config` includes :svo iff the user's
-   config had it, so this reflects user intent."
+(defn- zero-interfaces-diagnostics
+  "sl-a55s: the ONE interface fact that is true without reading a feature —
+   zero interface instances are configured (an explicit `:interfaces` nil
+   or {}; an ABSENT key gets the builtin set in config, and a non-map is
+   already `:config/invalid-interfaces`), so no interface-typed step can
+   plan. :warn, in the config-lints pattern: a project being set up sits
+   here legitimately, so it never flips :status or orient's exit code."
   [cfg]
-  (if (contains? cfg :svo) :shifted :vanilla))
+  (let [interfaces (:interfaces cfg)]
+    (when (or (nil? interfaces)
+              (and (map? interfaces) (empty? interfaces)))
+      [(diagnostic
+        :config :warn
+        {:type :config/zero-interfaces
+         :message (str ":interfaces is empty: zero interface instances are"
+                       " configured, so no interface-typed step can plan."
+                       " Add one (e.g. {:interfaces {:web :default}}) before"
+                       " running features.")})])))
 
 (defn- load-setup-declarations
   "Load setup.clj's e0ml :adapters declarations for plan-time adapter
@@ -497,36 +510,34 @@
         ;; adapter-metadata can read the W20 runtime-field declarations.
         ;; Last-wins across groups, matching the overlay's flattening.
         decl-by-name (into {} (map (juxt :name identity)) decls)
-        mode (config-mode cfg)
         stepdefs (:stepdefs step-load)
         ;; sl-a7sx (Warden W-B2): a non-map :interfaces is already a
         ;; :config/invalid-interfaces diagnostic in `blocking` (the
         ;; projection continues past config errors so orient can show
         ;; them); render the rest against zero interfaces instead of
-        ;; crashing in configured-types / interface-projection.
+        ;; crashing in interface-projection.
         interfaces (let [i (:interfaces cfg)] (if (map? i) i {}))
-        ;; sl-s2oa: stepdef :interface metadata is a TYPE — lint only
-        ;; stepdefs whose type some configured instance provides
-        configured-iface-types (suite-lint/configured-types interfaces)
-        lintable-stepdefs (filter #(let [iface (get-in % [:metadata :interface])]
-                                     (or (nil? iface)
-                                         (contains? configured-iface-types iface)))
-                                  stepdefs)
-        ;; Suite-lint is runner-real in BOTH modes (compile-suite gates it
-        ;; only on :interfaces), so it stays unconditional here.
+        ;; sl-a55s (Chair 2026-09-21): the projection describes the project
+        ;; WITHOUT the features, so it runs only the corpus-free part of
+        ;; suite-lint (:glossary/orphan-type). :stepdef/undefined-interface
+        ;; and :stepdef/missing-capability are defined over a MATCHED
+        ;; stepdef — facts about the features, computed by the run path
+        ;; alone (compile-suite over used-stepdef-infos). Running them here
+        ;; over every REGISTERED stepdef raised false alarms for unused
+        ;; builtins, and the filter that hid those hid everything in the one
+        ;; case that mattered (zero interfaces). `sl run --dry-run` is the
+        ;; gate for features; this is not a second one.
         ;; sl-67dj: project-declared glossary types come from the LOADED
         ;; glossary's actual mounts (:sources = declared-type → path, built
         ;; by the loader), not from config keys — config is a path list now.
-        suite-lint (suite-lint/lint-suite lintable-stepdefs
-                                          (keys (get-in glossary-map [:sources :verbs]))
-                                          interfaces
-                                          adapter-registry)
-        ;; Tier-2 stepdef/glossary validation is Shifted-only in the runner
-        ;; (compile-suite runs it only when binding opts exist) — the
-        ;; projection must not surface diagnostics the runner won't (sl-hjnp).
-        stepdef-issues (when (= :shifted mode)
-                         (svo-validate/validate-stepdefs-against-glossary
-                          stepdefs glossary-map interfaces))
+        suite-lint (suite-lint/lint-project
+                    (keys (get-in glossary-map [:sources :verbs]))
+                    interfaces)
+        ;; Tier-2 stepdef/glossary validation needs no features either: it
+        ;; judges every loaded stepdef against the glossary, as the runner
+        ;; does on every compile (sl-6wh9, sl-hjnp).
+        stepdef-issues (svo-validate/validate-stepdefs-against-glossary
+                        stepdefs glossary-map interfaces)
         all-diagnostics (vec (concat diagnostics
                                      (when-let [e (:error setup-decls)]
                                        [(diagnostic :setup :error e)])
@@ -542,10 +553,9 @@
               :status (if (some #(= :error (:severity %)) all-diagnostics)
                         :error
                         :ok)
-              :mode mode
               :config cfg
               :substrate (substrate project-context)
-              :svo-effective (svo-effective cfg)
+              :enforcement-effective (enforcement-effective cfg)
               :subjects (subjects-projection glossary-map)
               :instances (instances-projection glossary-map)
               :interfaces (mapv #(interface-projection adapter-registry decl-by-name %) interfaces)
@@ -592,7 +602,6 @@
             :status :error
             :diagnostics [(diagnostic :config :error (:error config-result))]}
            (let [cfg (-> config-result :ok :config)
-                 mode (config-mode cfg)
                  config-diagnostics (concat
                                      (map #(diagnostic :config :error %)
                                           (-> config-result :ok :diagnostics))
@@ -600,21 +609,12 @@
                                      ;; rides like glossary-warnings, never
                                      ;; flips projection :status.
                                      (map #(diagnostic :config :warn %)
-                                          (-> config-result :ok :lints)))
+                                          (-> config-result :ok :lints))
+                                     (zero-interfaces-diagnostics cfg))
+                 ;; The runner loads project glossaries on every run
+                 ;; (sl-6wh9), so a broken :glossaries config fails the
+                 ;; projection exactly as it fails the run (sl-hjnp honesty).
                  glossary-result (load-glossary-projection cfg)
-                 ;; Vanilla honesty (sl-hjnp): the runner never loads project
-                 ;; glossaries in Vanilla mode, so a broken :glossaries config
-                 ;; must not fail orientation there. Fall back to framework
-                 ;; defaults and demote the failure to a :warn diagnostic.
-                 [glossary-result glossary-warnings]
-                 (if (and (= :vanilla mode) (:error glossary-result))
-                   [(load-glossary-projection (dissoc cfg :glossaries))
-                    [(diagnostic :glossary :warn
-                                 (update (:error glossary-result) :message str
-                                         " (ignored in Vanilla mode — the runner loads"
-                                         " glossaries only in Shifted mode; showing"
-                                         " framework defaults)"))]]
-                   [glossary-result nil])
                  ;; sl-67dj (Warden P3-13): structured glossary-load warnings
                  ;; (e.g. :glossary/override-flag-ignored) ride as :warn
                  ;; diagnostics — the config-lints pattern; never flip :status.
@@ -625,7 +625,6 @@
                  macro-load (load-macros-projection cfg)
                  setup-decls (load-setup-declarations project-context cfg)
                  blocking (vec (concat config-diagnostics
-                                       glossary-warnings
                                        glossary-lints
                                        (when (:error glossary-result)
                                          [(diagnostic :glossary :error (:error glossary-result))])
@@ -636,7 +635,6 @@
                 :project-context project-context
                 :source source
                 :status :error
-                :mode mode
                 :config cfg
                 :stepdefs (:stepdefs step-load)
                 :macros (:macros macro-load)
@@ -730,7 +728,6 @@
              :fingerprint (:fingerprint projection)
              :source (:source projection)
              :status (:status projection)
-             :mode (:mode projection)
              :counts {:subjects (count (:subjects projection))
                       :instances (count (:instances projection))
                       :interfaces (count interface-items)

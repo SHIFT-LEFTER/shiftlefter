@@ -38,15 +38,66 @@
     :halted {:after-scenario N :scenario \"name\"}
                         ;; only when :halt-on-observation-failure fired
                         ;; (sl-kowi): unstarted scenarios are :skipped
+    :held [{:scenario \"name\" :feature \"..\" :uri \"..\" :line N
+            :reason :unplannable :undefined N :ambiguous N}
+           {... :reason :wip|:skip :tag \"@skip=flaky\" :note \"flaky\"}
+           {... :reason :blocked :tag \"@blocked=REF\" :ref \"REF\"
+            :ref-url \"https://…/REF\"
+            :outcome {:status :failed|:unobserved :at-step k :message \"..\"}}
+           {... :reason :aborted :after-step k}]
+                        ;; THE ONE HOLD RECORD — every scenario the run did
+                        ;; not give an unexcused verdict, with its reason:
+                        ;; --hold-unplannable's (sl-6wh9) and the @wip/@skip
+                        ;; tags' (sl-190x) never ran; a @blocked scenario
+                        ;; (sl-190x) RAN and failed as its tag claims —
+                        ;; :outcome says what was measured; the abort's
+                        ;; (sl-617t) stopped it. :note/:ref absent when the
+                        ;; tag was bare; :ref-url only when [:runner
+                        ;; :ref-url] renders one. :counts also carries
+                        ;; :held N (and :xpass N — @blocked scenarios that
+                        ;; PASSED: :failed, exit 1, a :failures entry of
+                        ;; :type :xpass with the imperative). Absent unless
+                        ;; something was held.
+    :unshifted-suite {:features N :scenarios M :distinct-steps K}
+                        ;; sl-6wh9, exit 2 only, ADDITIVE-WHEN-TRIGGERED:
+                        ;; present iff EVERY selected step was undefined —
+                        ;; the suite reads as unshifted; the inventory is
+                        ;; the migration work list. Absent on every other
+                        ;; exit 2 (the :planning block still says why).
     :dropped-events N   ;; observe-plane events the bus refused at admission
                         ;; during THIS run-scope (sl-d7ks); absent when zero.
                         ;; Results are never affected — the report plane
                         ;; doesn't ride the bus; observations may be gapped.
+    :plan [{:scenario/name \"..\" :uri \"..\" :line N
+            :steps [{:step/text \"..\" :line N :column N
+                     :step/resolved {:pattern-src \"..\"
+                                     :stepdef-source {:ns .. :file .. :line N}
+                                     :subject :alice :verb :fill :frame :with
+                                     :object \"username\"
+                                     :interface :web        ;; resolved INSTANCE
+                                     :interface-type :web}  ;; stepdef TYPE —
+                                                            ;; joins sl explain
+                     :step/macro {:key \"..\" :role :call|:expanded
+                                  :call-site {:file :line :column}
+                                  :step-count N        ;; :call only
+                                  :definition {:file}  ;; :call only (sl-mk0t)
+                                  :index N             ;; :expanded only
+                                  :definition-step {..}}}]}]
+                        ;; sl-xvae — DRY-RUN summaries only, always present
+                        ;; there: the machine plan, scenario → step → what it
+                        ;; bound to, computed once at bind time. :step/resolved
+                        ;; on every step that bound (an untyped stepdef yields
+                        ;; the stepdef half only; SVO keys absent, never nil),
+                        ;; none on macro wrappers or unbound steps;
+                        ;; :step/macro only on wrappers/expanded steps.
     :planning {...}     ;; present when exit-code 2 (may carry :config-lints
                         ;; and :glossary-lints)
     :failures [{...}]   ;; present when exit-code 1 or 4; entries may carry
                         ;; :attachments — the failing step's/scenario's own
-                        ;; refs, inline for join-free triage
+                        ;; refs, inline for join-free triage — and
+                        ;; :poll-counts {:attempts :answered :threw
+                        ;; :observation-throws} when the failing step's
+                        ;; oracle polled (sl-tcsq); absent otherwise
     :attachments [{:scenario/name \"..\" :scenario/id #uuid \"..\"
                    :attachments [ref ...]     ;; scenario-level claims
                    :steps [{:step/id #uuid \"..\" :step/text \"..\"
@@ -161,6 +212,9 @@
     (cond-> {:type (:type error)
              :message (:message error)}
       (:exception-class error) (assoc :exception-class (:exception-class error))
+      ;; sl-io05: the scenario a runner crash escaped from — plain data
+      ;; {:name :source-file :line}, present only on that crash shape.
+      (:scenario error) (assoc :scenario (:scenario error))
       (:data error) (assoc :data (:data error))
       (:value error) (assoc :value (:value error))
       ;; sl-kowi: the step/adapter error class, already EDN-native.
@@ -195,15 +249,66 @@
     (let [role (:role macro)
           call-site (:call-site macro)
           def-step (:definition-step macro)]
-      (cond-> {:key (:key macro)}
+      (cond-> {:key (:key macro)
+               ;; sl-xvae: :role (:call | :expanded) and, on expanded steps,
+               ;; :index — so the dry-run plan's consumers (the 0.6
+               ;; macro-expansion audit) tell a wrapper from its children
+               ;; without inferring it from key presence. Additive on the
+               ;; failure path too.
+               :role role}
         ;; Call-site with assembled file path
         call-site
         (assoc :call-site {:file source-file
                            :line (:line call-site)
                            :column (:column call-site)})
+        (some? (:index macro))
+        (assoc :index (:index macro))
+        ;; Wrapper: how many steps the call expands to
+        (some? (:step-count macro))
+        (assoc :step-count (:step-count macro))
+        ;; Wrapper: the macro's definition file (sl-mk0t, Warden W5) — the
+        ;; same fact console -v prints beside the wrapper line, so the two
+        ;; plan renderings agree. Additive; the expanded children carry it
+        ;; inside :definition-step already.
+        (and (= :call role) (get-in macro [:definition :file]))
+        (assoc :definition {:file (get-in macro [:definition :file])})
         ;; Definition-step (expanded steps only)
         (and (= :expanded role) def-step)
         (assoc :definition-step def-step)))))
+
+;; -----------------------------------------------------------------------------
+;; Dry-run plan (sl-xvae) — the machine plan: scenario → step → what it bound to
+;; -----------------------------------------------------------------------------
+
+(defn- plan-step-entry
+  "One dry-run plan step: text + location, the bind-time :step/resolved record
+   when the step bound (bind/resolved-record — absent on wrappers and unbound
+   steps), and :step/macro provenance when the step came from a macro."
+  [bound-step source-file]
+  (let [step (:step bound-step)
+        loc (:step/location step)]
+    (cond-> {:step/text (:step/text step)
+             :line (:line loc)
+             :column (:column loc)}
+      (:resolved bound-step)
+      (assoc :step/resolved (:resolved bound-step))
+      (:step/macro step)
+      (assoc :step/macro (extract-macro-provenance step source-file)))))
+
+(defn dry-run-plan
+  "The dry-run summary's :plan (sl-xvae): one entry per selected scenario in
+   plan order, each with its steps in execution order (macro wrappers
+   followed by their expanded steps, as bound). Always present on a dry-run
+   summary — a dry run always has a plan."
+  [plans]
+  (mapv (fn [plan]
+          (let [pickle (:plan/pickle plan)
+                uri (:pickle/source-file pickle)]
+            {:scenario/name (:pickle/name pickle)
+             :uri uri
+             :line (get-in pickle [:pickle/location :line])
+             :steps (mapv #(plan-step-entry % uri) (:plan/steps plan))}))
+        plans))
 
 (defn- extract-step-failure
   "Extract failure info from a failed step result."
@@ -224,7 +329,13 @@
       ;; explains, join-free; the same refs also appear in the summary's
       ;; top-level :attachments index (the complete evidence walk).
       (seq (:attachments step-result))
-      (assoc :attachments (vec (:attachments step-result))))))
+      (assoc :attachments (vec (:attachments step-result)))
+      ;; Poll digest (sl-tcsq): the failing step's own summed counts,
+      ;; top-level beside :error (a timeout's :error :data carries the
+      ;; last poll's digest too — same convention as attachments, the
+      ;; duplication is deliberate). Absent when the step never polled.
+      (:poll-counts step-result)
+      (assoc :poll-counts (:poll-counts step-result)))))
 
 (defn- extract-scenario-error
   "Extract a scenario-level hook failure (sl-esq) — the scenario carries
@@ -241,22 +352,42 @@
       (seq (:attachments scenario))
       (assoc :attachments (vec (:attachments scenario))))))
 
+(defn- extract-xpass
+  "The XPASS entry (sl-190x): a @blocked scenario that passed — no step
+   failed, so the entry is the tag, the ref (and link) and the imperative."
+  [scenario]
+  (let [pickle (-> scenario :plan :plan/pickle)
+        {:keys [tag ref ref-url message]} (:xpass scenario)]
+    (cond-> {:scenario/name (:pickle/name pickle)
+             :scenario/id (:pickle/id pickle)
+             :type :xpass
+             :tag tag
+             :message message}
+      ref (assoc :ref ref)
+      ref-url (assoc :ref-url ref-url))))
+
 (defn- extract-failures
   "Extract all failures from scenario results. :failed scenarios contribute
    their failed steps; :error scenarios (infrastructure-failure family,
    sl-esq/sl-7c7i) contribute a scenario-level entry plus any failed steps
    (the after-throw case, and the provisioning flip where the failing step
-   stays :failed)."
+   stays :failed); an XPASS (sl-190x) contributes its own entry. A
+   @blocked scenario held as claimed contributes nothing — it is not a
+   failure of this run; the :held record carries what was measured."
   [scenarios]
-  (concat
-   (for [scenario scenarios
-         :when (= :error (:status scenario))]
-     (extract-scenario-error scenario))
-   (for [scenario scenarios
-         :when (#{:failed :error} (:status scenario))
-         step (:steps scenario)
-         :when (= :failed (:status step))]
-     (extract-step-failure step scenario))))
+  (let [scenarios (remove :held scenarios)]
+    (concat
+     (for [scenario scenarios
+           :when (:xpass scenario)]
+       (extract-xpass scenario))
+     (for [scenario scenarios
+           :when (= :error (:status scenario))]
+       (extract-scenario-error scenario))
+     (for [scenario scenarios
+           :when (#{:failed :error} (:status scenario))
+           step (:steps scenario)
+           :when (= :failed (:status step))]
+       (extract-step-failure step scenario)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Attachment Index
@@ -318,6 +449,10 @@
       (:hint bound-step)
       (assoc :hint (:hint bound-step))
 
+      ;; sl-u2r0 (Fable 5): the step-text did-you-mean + def-site.
+      (:verb-suggestion bound-step)
+      (assoc :verb-suggestion (:verb-suggestion bound-step))
+
       (:filter-info bound-step)
       (assoc :filter-info (:filter-info bound-step))
 
@@ -371,7 +506,14 @@
         (assoc :config-lints (vec (:config-lints diagnostics)))
         ;; sl-67dj (Warden P3-13): glossary-load warnings likewise.
         (seq (:glossary-lints diagnostics))
-        (assoc :glossary-lints (vec (:glossary-lints diagnostics)))))))
+        (assoc :glossary-lints (vec (:glossary-lints diagnostics)))
+        ;; sl-190x: tag lints likewise.
+        (seq (:tag-lints diagnostics))
+        (assoc :tag-lints (vec (:tag-lints diagnostics)))
+        ;; sl-6wh9: the mixed-state fact behind the --hold-unplannable
+        ;; hint — present only when some scenarios plan and some do not.
+        (:plannability diagnostics)
+        (assoc :plannability (:plannability diagnostics))))))
 
 (defn execution-diagnostics
   "Extract diagnostics for EDN output on non-blocked runs (exit code 0/1
@@ -383,12 +525,18 @@
    byte-identical)."
   [diagnostics]
   (when diagnostics
-    (let [{:keys [svo-issues config-lints glossary-lints cleanup-failures
-                  capture-lints counts]} diagnostics]
+    (let [{:keys [svo-issues stepdef-issues config-lints glossary-lints
+                  cleanup-failures capture-lints tag-lints counts]} diagnostics]
       (not-empty
        (cond-> {}
          (seq svo-issues)   (assoc :svo-issues svo-issues
                                    :counts (select-keys counts [:svo-issue-count]))
+         ;; Tag lints (sl-190x): a bare @skip / @blocked, a valued @serial,
+         ;; a malformed tag — warn-level, stderr suppressed under --edn.
+         (seq tag-lints)    (assoc :tag-lints (vec tag-lints))
+         ;; sl-6wh9: warn-level Tier-2 stepdef issues (:stepdef/unknown-verb
+         ;; at :warn) — reported, never blocking.
+         (seq stepdef-issues) (assoc :stepdef-issues (vec stepdef-issues))
          (seq config-lints) (assoc :config-lints (vec config-lints))
          ;; Glossary-load warnings (sl-67dj, Warden P3-13): warn-level truth
          ;; from the strict loaders (e.g. :glossary/override-flag-ignored) —
@@ -459,6 +607,11 @@
                   (:halted opts)
                   (assoc :halted (:halted opts))
 
+                  ;; sl-6wh9: the held record — absent unless
+                  ;; --hold-unplannable held something (golden-safe).
+                  (seq (:held opts))
+                  (assoc :held (vec (:held opts)))
+
                   ;; Attachment index (sl-oxiz): absent when no scenario
                   ;; carries a ref — attachment-less summaries stay
                   ;; byte-identical (default capture policy is :never).
@@ -481,9 +634,14 @@
       ;; :counts off any summary without branching on the exit code. The
       ;; empty-selection record's searched/filter facts ride its planning
       ;; error's :data.
-      2 (assoc base
-               :counts zero-counts
-               :planning (extract-planning-diagnostics (:diagnostics opts)))
+      2 (cond-> (assoc base
+                       :counts zero-counts
+                       :planning (extract-planning-diagnostics (:diagnostics opts)))
+          ;; sl-6wh9: the unshifted-suite inventory, top-level beside
+          ;; :planning (the :halted precedent for machine-decided facts).
+          ;; Additive-when-triggered: absent on every other exit 2.
+          (:unshifted-suite (:diagnostics opts))
+          (assoc :unshifted-suite (:unshifted-suite (:diagnostics opts))))
 
       ;; Crash - include error. Zero counts (sl-7c7i): no completed verdict
       ;; exists; per-scenario truth for a mid-run crash is unknowable here.
@@ -612,6 +770,8 @@
                      :results-path (:results-path run-summary)
                      ;; sl-kowi: the halt record, same discipline.
                      :halted (:halted run-summary)
+                     ;; sl-6wh9: the held record, same discipline.
+                     :held (:held run-summary)
                      ;; sl-pwbp: group identity rides the :run-end payload
                      ;; only in multi-group invocations — nil threads as
                      ;; absent, same discipline.

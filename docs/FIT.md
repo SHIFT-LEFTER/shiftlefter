@@ -81,8 +81,10 @@ built on. The discipline you put in early is what you'd be glad you have when it
   tags so the feature file states what runs around it. Tag filtering
   (`--tags` / `--skip-tags`) *is* built.
 - **To migrate an existing suite as-is** — your `.feature` files parse unchanged, but
-  an existing Java/JavaScript/Ruby step library doesn't transfer. See
-  [Bring Existing Gherkin (Preview)](adoption.md).
+  an existing Java/JavaScript/Ruby step library doesn't transfer, and there is no
+  compatibility mode that runs untyped steps: an unported suite is a planning
+  result (exit 2), not a degraded run. See
+  [Bring Existing Gherkin](adoption.md).
 - **To drive something other than a web browser or SMS** — no adapter for native
   desktop, mobile apps, or API-only testing yet.
 
@@ -97,7 +99,7 @@ the upside and the gaps.
 | # | About the project | Strong signal | Where you'll feel an edge |
 |---|---|---|---|
 | 1 | **Interface** | Web UI (Chrome, or Firefox via the Playwright backend) or SMS. | Native desktop, mobile app, or API-only with no web/SMS surface → not yet. |
-| 2 | **New vs. existing** | Authoring new behavior. | Porting a production Cucumber/Selenium suite as-is → step code won't transfer. |
+| 2 | **New vs. existing** | Authoring new behavior. | Porting a production Cucumber/Selenium suite as-is → step code won't transfer; until its steps are typed the suite plans as unshifted (exit 2). |
 | 3 | **Who maintains tests** | Agents (esp. multiple models) + humans sharing one vocabulary. | A team that needs everything in their host language with zero Clojure. |
 | 4 | **Scenario shape** | Multiple actors, or web + SMS together. | Single linear single-actor flows (works, just less upside). |
 | 5 | **Reporting** | Console, machine-readable EDN, CI-ingestible JUnit XML (`--junit-xml`), or a self-contained HTML report (`--html`). | Need JSON or a custom report format today. |

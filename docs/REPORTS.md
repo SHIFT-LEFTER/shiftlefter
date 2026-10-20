@@ -101,6 +101,62 @@ whenever a report is declared by flag or by the `[:runner :report …]` config
 mirror: the dry run proceeds and writes nothing, and this key (plus one
 stderr line in console mode) says so. Absent when no report is declared.
 
+**The dry-run plan.** Every dry-run summary carries **`:plan`** — the
+machine plan: a vector, in plan order, of
+`{:scenario/name … :uri … :line N :steps [step …]}`, each step
+`{:step/text … :line N :column N}` plus, when the step bound,
+**`:step/resolved`** — what it resolved to, computed once at bind time:
+`{:pattern-src "regex" :stepdef-source {:ns … :file … :line N}}` (the
+matched stepdef, as `sl explain` renders it) and, for a typed stepdef,
+`:subject :verb :frame :object :interface` (the resolved execution
+instance) and `:interface-type` (the stepdef's type — the key that joins
+the step to `sl explain`'s vocabulary without a second call). A step bound
+to an untyped stepdef carries the stepdef half only; the SVO keys are
+absent, never `nil`. A macro wrapper carries no `:step/resolved` and a
+**`:step/macro`** `{:key … :role :call :call-site {:file :line :column}
+:step-count N :definition {:file …}}` (the macro's definition file — the
+same fact `-v` prints beside the wrapper line); each expanded step that
+follows it carries its own
+`:step/resolved` and `:step/macro {:role :expanded :index N :call-site …
+:definition-step …}`. Unbound steps (only reachable under holds) carry no
+record — their issue under `:diagnostics` is the record. The console
+renders the same record as a `plan:` block under `-v` only — each step's
+resolved triple and the stepdef's `(file:line)`, with `:pattern-src` shown
+only under `-vv` as a `pattern:` sub-line; without the flag the console
+dry-run output is unchanged.
+
+**Poll counts.** A step whose oracle polled (any `poll-until` — the
+builtin browser and SMS oracles, or your own) carries a **`:poll-counts`**
+digest, `{:attempts N :answered N :threw N :observation-throws N}`, summed
+across every poll the step ran. It is absent when the step never polled.
+On the `--edn` stream it appears on `:failures` entries (a green run
+publishes no step records there); the HTML report's data island carries it
+on every step row, and the console's `--verbose` step line renders
+`(N polls)` after the step text only when `N` is greater than one. A poll
+timeout's error data still carries its own digest as before — the failure
+entry's top-level key is the same four counters for the join-free read.
+
+**Holds.** A scenario the run did not give an unexcused verdict rides
+the **`:held`** vector — one record for every kind, each entry with the
+scenario's name, feature, file and line plus its **`:reason`**:
+`:unplannable` (`--hold-unplannable`; carries `:undefined`/`:ambiguous`
+and, when a binding error held it, `:binding-errors [{:type … :def-site …}]`),
+`:wip` and `:skip` (the reserved tags; carry `:tag` and, when the tag had
+a value, `:note`), `:blocked` (a `@blocked=REF` scenario that ran and
+failed as its tag claims; carries `:tag`, `:ref`, `:ref-url` when
+`[:runner :ref-url]` renders one, and `:outcome {:status :failed|:unobserved
+:at-step k :message …}` — what was actually measured), and `:aborted`
+(the run abort; carries `:after-step` on the one it cut mid-way).
+`:counts :held` is the sum; held scenarios sit in no verdict bucket. A
+`@blocked` scenario that **passed** is XPASS: the run is exit 1, the
+scenario is `:failed`, `:counts :xpass` marks it, and its `:failures`
+entry has `:type :xpass` with the imperative (`blocked scenario passed:
+remove @blocked=REF or reopen REF`). Authored-tag warnings (a bare
+`@skip`, a bare `@blocked`, a malformed tag) ride `:diagnostics
+:tag-lints`, computed over the run's selection — a scenario a `--tags`
+filter deselects is not linted; a held one is. A CI script that wants the tracker's word reads `:ref` off
+the record and asks the tracker itself — ShiftLefter never does.
+
 ## The evidence walk
 
 When capture is enabled (`:capture` config or `--capture`) or an After hook

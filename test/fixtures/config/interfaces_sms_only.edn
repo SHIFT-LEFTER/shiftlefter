@@ -6,5 +6,5 @@
  :interfaces {:sms {:type :sms
                     :adapter :sms-mock
                     :config {:sender "+15550100"}}}
- :svo {:unknown-subject :warn
+ :enforcement {:unknown-subject :warn
        :unknown-interface :error}}

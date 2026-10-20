@@ -5,7 +5,8 @@
    structured timeout record, retry-error classification, sanitization)."
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
-            [shiftlefter.step :as step]))
+            [shiftlefter.step :as step]
+            [shiftlefter.stepengine.exec :as exec]))
 
 ;; -----------------------------------------------------------------------------
 ;; Fixtures
@@ -309,3 +310,67 @@
       (is (= 0 (get-in data [:poll-counts :threw])))
       (is (pos? (get-in data [:poll-counts :attempts])))
       (is (not (contains? data :last-error))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-tcsq: passing oracles carry :poll-counts — the per-step accumulator
+;; -----------------------------------------------------------------------------
+
+(defn- answers-on
+  "A predicate that returns nil until its Nth call, then the call number."
+  [n]
+  (let [calls (atom 0)]
+    (fn [] (let [c (swap! calls inc)] (when (>= c n) c)))))
+
+(deftest poll-until-folds-its-digest-into-the-bound-accumulator
+  (testing "a passing poll records the digest the timeout record would have"
+    (let [polls (atom nil)
+          v (binding [step/*poll-counts* polls]
+              (step/poll-until {} (answers-on 3) (fast-opts {})))]
+      (is (= 3 v))
+      (is (= {:attempts 3 :answered 1 :threw 0 :observation-throws 0} @polls))))
+  (testing "two polls in one binding SUM — the step's total, not the last poll"
+    (let [polls (atom nil)]
+      (binding [step/*poll-counts* polls]
+        (step/poll-until {} (answers-on 2) (fast-opts {}))
+        (step/poll-until {} (answers-on 1) (fast-opts {})))
+      (is (= {:attempts 3 :answered 2 :threw 0 :observation-throws 0} @polls))))
+  (testing "a timeout records too — the step record says how long it tried"
+    (let [polls (atom nil)]
+      (binding [step/*poll-counts* polls]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (step/poll-until {} (constantly nil)
+                                      (fast-opts {:deadline-ms 20 :interval-ms 5})))))
+      (is (pos? (:attempts @polls)))
+      (is (= 0 (:answered @polls)))))
+  (testing "retry-classified throws count into the summed digest"
+    (let [polls (atom nil)]
+      (binding [step/*poll-counts* polls]
+        (step/poll-until {} (scripted [dark {:ok true}])
+                         (merge retry-refused (fast-opts {}))))
+      (is (= {:attempts 2 :answered 1 :threw 1 :observation-throws 1} @polls))))
+  (testing "unbound (bare REPL poll): nothing recorded, nothing thrown"
+    (is (nil? step/*poll-counts*))
+    (is (= 2 (step/poll-until {} (answers-on 2) (fast-opts {}))))))
+
+(deftest invoke-step-lifts-poll-counts-onto-the-result
+  (let [ctx {:step {:step/text "an oracle"} :scenario {}}
+        polling {:arity 1
+                 :fn (fn [c] (step/poll-until c (answers-on 3) (fast-opts {})) c)}
+        plain {:arity 1 :fn (fn [c] c)}
+        timing-out {:arity 1
+                    :fn (fn [c] (step/poll-until c (constantly nil)
+                                                (fast-opts {:deadline-ms 20 :interval-ms 5})))}]
+    (testing "a passing oracle's result carries the summed digest"
+      (let [r (exec/invoke-step polling [] ctx)]
+        (is (= :passed (:status r)))
+        (is (= {:attempts 3 :answered 1 :threw 0 :observation-throws 0}
+               (:poll-counts r)))))
+    (testing "a step that never polled carries no key at all"
+      (is (not (contains? (exec/invoke-step plain [] ctx) :poll-counts))))
+    (testing "a timed-out oracle carries it beside its error"
+      (let [r (exec/invoke-step timing-out [] ctx)]
+        (is (= :failed (:status r)))
+        (is (= :step/poll-timeout (-> r :error :data :type)))
+        (is (pos? (-> r :poll-counts :attempts)))
+        (is (= (-> r :error :data :poll-counts) (:poll-counts r))
+            "one poll: the record's digest and the step's digest agree")))))

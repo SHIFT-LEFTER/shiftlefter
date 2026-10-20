@@ -212,14 +212,68 @@ function scenarioStatusClass(scenario) {
   if (status === ":error" && k(k(scenario, ":error"), ":error/class") === ":observation") {
     return "st-unobserved";
   }
+  // A scenario carrying a :held record is HELD — the run abort's (sl-617t,
+  // :skipped) or a @blocked scenario that failed as its tag claims
+  // (sl-190x, status as measured): not a verdict of this run, and not the
+  // plain SKIPPED of a non-runnable plan.
+  if (k(scenario, ":held")) {
+    return "st-held";
+  }
   return "st-" + (status || ":unknown").slice(1);
+}
+
+// sl-190x (C2): the one phrase every surface uses for a @blocked scenario
+// held as claimed — "blocked by REF — unobserved at step 2: connection
+// refused" (the console/JUnit/EDN wording verbatim).
+function blockedHeldPhrase(held) {
+  const outcome = k(held, ":outcome") || {};
+  const ref = k(held, ":ref");
+  const status = k(outcome, ":status");
+  const atStep = k(outcome, ":at-step");
+  const message = k(outcome, ":message");
+  return (
+    "blocked" +
+    (ref ? " by " + ref : "") +
+    " — " +
+    (status ? status.slice(1) : "") +
+    (atStep !== null && atStep !== undefined ? " at step " + atStep : "") +
+    (message ? ": " + message : "")
+  );
+}
+
+// The parenthetical after HELD: where the abort caught the scenario
+// (sl-617t — before it ran, or after step k), or what a @blocked scenario
+// measured (sl-190x). XPASS rows are FAILED with their own parenthetical.
+function heldSuffix(scenario) {
+  if (k(scenario, ":xpass")) return " (blocked scenario passed)";
+  const held = k(scenario, ":held");
+  if (!held) return "";
+  if (k(held, ":reason") === ":blocked") return " (" + blockedHeldPhrase(held) + ")";
+  if (k(held, ":reason") !== ":aborted") return "";
+  const k2 = k(held, ":after-step");
+  return k2 === null || k2 === undefined ? " (aborted)" : " (aborted after step " + k2 + ")";
+}
+
+// sl-190x: the tracker link for a @blocked ref — rendered from the
+// record's :ref-url (the config template, already substituted); nothing
+// is fetched. null when no url was rendered.
+function refLink(record) {
+  const url = record ? k(record, ":ref-url") : null;
+  if (!url) return null;
+  const a = el("a", "ref-link", k(record, ":ref") || url);
+  a.href = url;
+  a.target = "_blank";
+  a.rel = "noopener";
+  return a;
 }
 
 // "Red" mirrors exit-code semantics: failed always; :error (a lifecycle
 // hook threw, sl-esq) always; pending only when the run was strict
-// (allow-pending? false). Red scenarios render default-open.
+// (allow-pending? false). Red scenarios render default-open. A held
+// scenario (sl-190x) is never red — its measured status is excused.
 function isRed(scenario, allowPending) {
   const status = k(scenario, ":status");
+  if (k(scenario, ":held")) return false;
   if (status === ":failed") return true;
   if (status === ":error") return true;
   if (status === ":pending" && !allowPending) return true;
@@ -233,6 +287,7 @@ const STATUS_WORDS = {
   "st-unobserved": "UNOBSERVED",
   "st-pending": "PENDING",
   "st-skipped": "SKIPPED",
+  "st-held": "HELD",
 };
 
 // ---------------------------------------------------------------------------
@@ -328,6 +383,7 @@ function renderHeader(runCtx, summary, scenarios) {
     .join(" · ");
   header.appendChild(el("p", "run-meta", meta));
   appendHaltedLine(header, summary);
+  appendCrashLine(header, runCtx, summary);
 
   const selection = k(runCtx, ":selection");
   if (selection) {
@@ -379,7 +435,20 @@ function renderHeader(runCtx, summary, scenarios) {
     if (unobservedCount > 0) {
       countsList.appendChild(el("li", "count st-unobserved", unobservedCount + " unobserved"));
     }
+    // :held (sl-6wh9 planning holds + sl-617t abort holds) — carved out of
+    // :skipped; same only-when-present rule.
+    const heldCount = counts ? k(counts, ":held") || 0 : 0;
+    if (heldCount > 0) {
+      countsList.appendChild(el("li", "count st-held", heldCount + " held"));
+    }
+    // :xpass (sl-190x) — @blocked scenarios that passed (also counted
+    // failed); same only-when-present rule.
+    const xpassCount = counts ? k(counts, ":xpass") || 0 : 0;
+    if (xpassCount > 0) {
+      countsList.appendChild(el("li", "count st-failed", xpassCount + " xpass"));
+    }
     header.appendChild(countsList);
+    appendHeldList(header, summary);
   }
 
   // Scenario controls have nothing to operate on when planning failed.
@@ -406,6 +475,43 @@ function renderHeader(runCtx, summary, scenarios) {
   return header;
 }
 
+// sl-190x: the reason phrase for a run-level :held entry that never ran
+// (the console notice's wording): "not plannable (2 undefined, 0
+// ambiguous)", "@wip", "@skip=flaky-on-ci".
+function heldReasonPhrase(entry) {
+  if (k(entry, ":reason") === ":unplannable") {
+    return (
+      "not plannable (" +
+      k(entry, ":undefined") +
+      " undefined, " +
+      k(entry, ":ambiguous") +
+      " ambiguous)"
+    );
+  }
+  return k(entry, ":tag") || "";
+}
+
+// sl-190x: the scenarios held at PLANNING — --hold-unplannable's (sl-6wh9)
+// and the @wip/@skip tags' — rendered as HELD rows under the counts, so a
+// hold is visible on this surface, never just a number. The engine's holds
+// (:aborted, :blocked) are scenario rows of their own and are skipped here.
+function appendHeldList(header, summary) {
+  const held = (summary ? k(summary, ":held") : null) || [];
+  const planningHeld = held.filter((e) => e && ![":aborted", ":blocked"].includes(k(e, ":reason")));
+  if (!planningHeld.length) return;
+  const list = el("ul", "held-list");
+  for (const entry of planningHeld) {
+    const li = el("li", "held-entry");
+    li.appendChild(el("span", "status-word st-held", "HELD"));
+    li.appendChild(el("span", "scenario-name", k(entry, ":scenario") || "(unnamed)"));
+    li.appendChild(el("span", "held-reason", heldReasonPhrase(entry)));
+    const where = k(entry, ":uri");
+    if (where) li.appendChild(el("span", "held-where", where + ":" + k(entry, ":line")));
+    list.appendChild(li);
+  }
+  header.appendChild(list);
+}
+
 // sl-78u4 (Warden W10): the :halted record as ONE header line — the
 // console string verbatim — so halted-skipped scenarios stop reading as
 // plain SKIPPED with no reason. Absent unless the halt policy fired. Used by
@@ -415,6 +521,25 @@ function appendHaltedLine(header, summary) {
   if (!halted) return;
   const name = k(halted, ":scenario");
   const group = k(halted, ":group/label");
+  // sl-617t: the same slot carries a run abort — the console string
+  // verbatim again, with the held count in place of the trigger.
+  if (k(halted, ":reason") === ":aborted") {
+    const counts = summary ? k(summary, ":counts") : null;
+    const held = counts ? k(counts, ":held") || 0 : 0;
+    header.appendChild(
+      el(
+        "p",
+        "run-halted",
+        "aborted after scenario " +
+          k(halted, ":after-scenario") +
+          ": " +
+          held +
+          " scenario(s) held" +
+          (group ? " — in group " + group + "; later groups skipped" : ""),
+      ),
+    );
+    return;
+  }
   header.appendChild(
     el(
       "p",
@@ -424,6 +549,43 @@ function appendHaltedLine(header, summary) {
         (name ? " (" + name + ")" : "") +
         ": observation failure" +
         (group ? " — in group " + group + "; later groups skipped" : ""),
+    ),
+  );
+}
+
+// sl-8orx: the :crash record as ONE header line — a runner crash (exit 3)
+// beside the report. Present only on the crash path; the same three fields
+// (class, message, run-id) sit in the JUnit sl-crash suite. Used by the run
+// header and the invocation TOC alike. sl-n6io: when the record carries
+// :scenario (the crash escaped one scenario's machinery), the line names it
+// — project-relative file:line, like every other path on the page; a crash
+// with no scenario to name renders exactly as before.
+function appendCrashLine(header, runCtx, summary) {
+  const crash = summary ? k(summary, ":crash") : null;
+  if (!crash) return;
+  const group = k(crash, ":group/label");
+  const scenario = k(crash, ":scenario");
+  const where = scenario
+    ? " — in scenario " +
+      k(scenario, ":name") +
+      " (" +
+      relativePath(k(runCtx, ":project-root"), k(scenario, ":source-file")) +
+      ":" +
+      k(scenario, ":line") +
+      ")"
+    : "";
+  header.appendChild(
+    el(
+      "p",
+      "run-crashed",
+      "runner crashed" +
+        (group ? " in group " + group : "") +
+        ": " +
+        k(crash, ":exception-class") +
+        ": " +
+        (k(crash, ":message") || "") +
+        where +
+        " — every later scenario and group never started; trust nothing below as a verdict",
     ),
   );
 }
@@ -455,6 +617,10 @@ function renderStep(step, counts) {
   );
   li.appendChild(text);
   li.appendChild(el("span", "duration", fmtMs(k(step, ":duration-ms"))));
+  // sl-tcsq: an oracle that polled more than once says so beside its
+  // duration; single-answer and non-polling steps render exactly as before.
+  const polls = kIn(step, [":poll-counts", ":attempts"]);
+  if (polls > 1) li.appendChild(el("span", "duration polls", polls + " polls"));
 
   if (error) {
     const detail = el("div", "error-detail");
@@ -590,7 +756,18 @@ function renderScenario(scenario, allowPending) {
 
   const pickle = kIn(scenario, [":plan", ":plan/pickle"]);
   const summary = el("summary");
-  summary.appendChild(el("span", "status-word " + statusClass, STATUS_WORDS[statusClass] || ""));
+  summary.appendChild(
+    el(
+      "span",
+      "status-word " + statusClass,
+      (STATUS_WORDS[statusClass] || "") + heldSuffix(scenario),
+    ),
+  );
+  // sl-190x: the tracker link beside a @blocked row (held or XPASS) when
+  // the config rendered one.
+  const holdRecord = k(scenario, ":held") || k(scenario, ":xpass");
+  const link = refLink(holdRecord);
+  if (link) summary.appendChild(link);
   summary.appendChild(el("span", "scenario-name", k(pickle, ":pickle/name") || "(unnamed)"));
   const tags = k(pickle, ":pickle/tags") || [];
   if (tags.length) {
@@ -627,6 +804,16 @@ function renderScenario(scenario, allowPending) {
   const scenarioDesc = k(pickle, ":pickle/description");
   if (scenarioDesc) {
     details.appendChild(el("p", "scenario-description", scenarioDesc));
+  }
+
+  // XPASS (sl-190x): no step failed — the detail block is the imperative
+  // ("blocked scenario passed: remove @blocked=REF or reopen REF").
+  const xpass = k(scenario, ":xpass");
+  if (xpass) {
+    const detail = el("div", "error-detail xpass");
+    detail.appendChild(el("div", "error-type", "xpass"));
+    detail.appendChild(el("pre", null, k(xpass, ":message") || ""));
+    details.appendChild(detail);
   }
 
   // Scenario-level hook failure (sl-esq): the :error lives on the scenario,
@@ -852,6 +1039,7 @@ function renderTocPage(runCtx, summary, toc) {
     .join(" · ");
   header.appendChild(el("p", "run-meta", meta));
   appendHaltedLine(header, summary);
+  appendCrashLine(header, runCtx, summary);
   app.appendChild(header);
 
   const table = el("table", "toc-table");

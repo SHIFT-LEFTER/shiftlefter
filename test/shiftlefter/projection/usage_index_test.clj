@@ -76,7 +76,7 @@
                             :verbs ["glossary/verbs-web.edn"]
                             :intents "glossary/intents"}
                :interfaces {:web {:type :web :adapter :etaoin :config {:headless true}}}
-               :svo {:unknown-subject :error}}))
+               :enforcement {:unknown-subject :error}}))
 
 (defn- bound-corpus
   "build-projection (loads stepdefs into the registry — the parity path),

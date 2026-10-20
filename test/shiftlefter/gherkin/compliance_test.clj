@@ -2,9 +2,12 @@
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
             [shiftlefter.gherkin.compliance :as compliance]
+            [shiftlefter.gherkin.lexer :as lexer]
             [shiftlefter.gherkin.location :as loc]
             [shiftlefter.gherkin.parser :as parser]
+            [shiftlefter.gherkin.pickler :as pickler]
             [shiftlefter.gherkin.tokens :as tokens]
+            [shiftlefter.test-helpers :as th]
             [cheshire.core :as json]))
 
 (deftest loc->json-test
@@ -28,7 +31,7 @@
 (deftest tokens->ndjson-multi-tag-test
   ;; New format: tags on one line with column positions, calculated from raw
   (let [tokens [(tokens/->Token :tag-line {:tags ["slow" "ui"] :positions [3 9]} (loc/->Location 2 3) "  " 0 "  @slow @ui\n" nil)
-                (tokens/->Token :eof nil (loc/->Location 3 0) "" 1 "" nil)]]
+                (tokens/->Token :eof [] (loc/->Location 3 0) "" 1 "" nil)]]
     (is (= "(2:3)TagLine://3:@slow,9:@ui\nEOF\n"
            (compliance/tokens->ndjson tokens)))))
 
@@ -36,9 +39,9 @@
   (testing "Blank lines within description areas should be Other, not Empty"
     (let [tokens [(tokens/->Token :feature-line "Test" (loc/->Location 1 1) "" 0 "Feature: Test\n" "Feature")
                   (tokens/->Token :unknown-line "Description line" (loc/->Location 2 1) "" 1 "Description line\n" nil)
-                  (tokens/->Token :blank nil (loc/->Location 3 1) "" 2 "\n" nil)  ; blank in description
+                  (tokens/->Token :blank [] (loc/->Location 3 1) "" 2 "\n" nil)  ; blank in description
                   (tokens/->Token :scenario-line "Foo" (loc/->Location 4 1) "" 3 "Scenario: Foo\n" "Scenario")
-                  (tokens/->Token :eof nil (loc/->Location 5 0) "" 4 "" nil)]
+                  (tokens/->Token :eof [] (loc/->Location 5 0) "" 4 "" nil)]
           result (compliance/tokens->ndjson tokens)]
       (is (str/includes? result "(3:1)Other://")
           "Blank in description should be Other"))))
@@ -46,9 +49,9 @@
 (deftest tokens->ndjson-blank-before-description-is-empty
   (testing "Blank lines before description text should be Empty"
     (let [tokens [(tokens/->Token :feature-line "Test" (loc/->Location 1 1) "" 0 "Feature: Test\n" "Feature")
-                  (tokens/->Token :blank nil (loc/->Location 2 1) "" 1 "\n" nil)  ; blank before description
+                  (tokens/->Token :blank [] (loc/->Location 2 1) "" 1 "\n" nil)  ; blank before description
                   (tokens/->Token :scenario-line "Foo" (loc/->Location 3 1) "" 2 "Scenario: Foo\n" "Scenario")
-                  (tokens/->Token :eof nil (loc/->Location 4 0) "" 3 "" nil)]
+                  (tokens/->Token :eof [] (loc/->Location 4 0) "" 3 "" nil)]
           result (compliance/tokens->ndjson tokens)]
       (is (str/includes? result "(2:1)Empty://")
           "Blank before description should be Empty"))))
@@ -57,37 +60,55 @@
   (testing "Comments enable description mode, so following blanks are Other"
     (let [tokens [(tokens/->Token :scenario-line "Test" (loc/->Location 1 1) "" 0 "Scenario: Test\n" "Scenario")
                   (tokens/->Token :comment "# a comment" (loc/->Location 2 1) "" 1 "# a comment\n" nil)
-                  (tokens/->Token :blank nil (loc/->Location 3 1) "" 2 "\n" nil)  ; blank after comment
+                  (tokens/->Token :blank [] (loc/->Location 3 1) "" 2 "\n" nil)  ; blank after comment
                   (tokens/->Token :step-line {:keyword :given :text "x"} (loc/->Location 4 1) "" 3 "Given x\n" "Given ")
-                  (tokens/->Token :eof nil (loc/->Location 5 0) "" 4 "" nil)]
+                  (tokens/->Token :eof [] (loc/->Location 5 0) "" 4 "" nil)]
           result (compliance/tokens->ndjson tokens)]
       (is (str/includes? result "(3:1)Other://")
           "Blank after comment should be Other"))))
 
+(defn- corpus-at-snapshot-prerequisite
+  "sl-8nku: the corpus must sit at `compliance/corpus-snapshot`, the commit the
+   counts below were verified against. A clone at any other commit reads as a
+   visible pending naming the fetch (never red by count): the fetch is pinned,
+   so `bin/compliance` moves it. A hand-copied tree (no .git) is trusted."
+  []
+  (let [{:keys [head pinned?] :as status} (compliance/corpus-status)]
+    {:present? (fn [] (or (nil? status) pinned?))
+     :reason (str "Cucumber compliance corpus at " head " but the pin is "
+                  compliance/corpus-snapshot " — re-run bin/compliance")}))
+
 (deftest run-compliance-test
-  (testing "Full Cucumber compliance suite - 46 good files, 11 bad files"
-    (let [report (compliance/run-compliance "compliance/gherkin/testdata")
-          good (:good report)
-          bad (:bad report)]
-      ;; Report structure
-      (is (map? report))
-      (is (contains? report :good))
-      (is (contains? report :bad))
+  ;; sl-v6x3: the corpus is not shipped in the public tree — a cold clone
+  ;; skips this loudly (pending, naming bin/compliance) instead of running red.
+  ;; sl-8nku: and a clone at the wrong snapshot skips the same way.
+  (th/with-prerequisite th/corpus-prerequisite
+    (fn []
+      (th/with-prerequisite (corpus-at-snapshot-prerequisite)
+        (fn []
+          (testing "Full Cucumber compliance suite - 50 good files, 12 bad files (cucumber/gherkin v42.0.1)"
+            (let [report (compliance/run-compliance "compliance/gherkin/testdata")
+                  good (:good report)
+                  bad (:bad report)]
+              ;; Report structure
+              (is (map? report))
+              (is (contains? report :good))
+              (is (contains? report :bad))
 
-      ;; Good files: all should pass tokens, AST, and pickles
-      (is (= 46 (:total good)) "Expected 46 good feature files")
-      (is (= 46 (:full-pass good))
-          (str "All good files should fully pass. Failures: "
-               (pr-str {:parse-errors (:parse-errors good)
-                        :token-fails (mapv :file (:token-fails good))
-                        :ast-fails (mapv :file (:ast-fails good))
-                        :pickle-fails (mapv :file (:pickle-fails good))})))
+              ;; Good files: all should pass tokens, AST, and pickles
+              (is (= 50 (:total good)) "Expected 50 good feature files")
+              (is (= 50 (:full-pass good))
+                  (str "All good files should fully pass. Failures: "
+                       (pr-str {:parse-errors (:parse-errors good)
+                                :token-fails (mapv :file (:token-fails good))
+                                :ast-fails (mapv :file (:ast-fails good))
+                                :pickle-fails (mapv :file (:pickle-fails good))})))
 
-      ;; Bad files: all should fail to parse
-      (is (= 11 (:total bad)) "Expected 11 bad feature files")
-      (is (= 11 (:passes bad))
-          (str "All bad files should be rejected. Unexpected passes: "
-               (pr-str (:fails bad)))))))
+              ;; Bad files: all should fail to parse
+              (is (= 12 (:total bad)) "Expected 12 bad feature files")
+              (is (= 12 (:passes bad))
+                  (str "All bad files should be rejected. Unexpected passes: "
+                       (pr-str (:fails bad)))))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Snapshot Tests - Known-good AST → Expected JSON
@@ -110,7 +131,7 @@
                      "minimalistic"
                      ""  ;; description
                      []
-                     [(parser/->Step :step "Given" "Given " "the minimalism" nil
+                     [(parser/->Step :step "Given" "Given " "the minimalism" []
                                      (loc/->Location 4 5) "Given the minimalism" "    " nil)]
                      nil
                      "Scenario"
@@ -157,11 +178,11 @@
                      "User logs in"
                      ""  ;; description
                      []
-                     [(parser/->Step :step "Given" "Given " "I am on the login page" nil
+                     [(parser/->Step :step "Given" "Given " "I am on the login page" []
                                      (loc/->Location 3 5) "Given I am on the login page" "    " nil)
-                      (parser/->Step :step "When" "When " "I enter credentials" nil
+                      (parser/->Step :step "When" "When " "I enter credentials" []
                                      (loc/->Location 4 5) "When I enter credentials" "    " nil)
-                      (parser/->Step :step "Then" "Then " "I see dashboard" nil
+                      (parser/->Step :step "Then" "Then " "I see dashboard" []
                                      (loc/->Location 5 5) "Then I see dashboard" "    " nil)]
                      nil
                      "Scenario"
@@ -229,7 +250,7 @@
                      "minimalistic"
                      ""  ;; description
                      []
-                     [(parser/->Step :step "Given" "Given " "the minimalism" nil
+                     [(parser/->Step :step "Given" "Given " "the minimalism" []
                                      (loc/->Location 4 5) "Given the minimalism" "    " nil)]
                      nil
                      "Scenario"
@@ -287,7 +308,7 @@
                      "test"
                      ""  ;; description
                      []
-                     [(parser/->Step :step "Given" "Given " "a step" nil
+                     [(parser/->Step :step "Given" "Given " "a step" []
                                      (loc/->Location 3 5) "Given a step" "    " nil)]
                      nil
                      "Scenario"
@@ -332,10 +353,10 @@
                      "test"
                      ""  ;; description
                      []
-                     [(parser/->Step :step "Given" "Given " "context" nil (loc/->Location 3 5) "" "" nil)
-                      (parser/->Step :step "When" "When " "action" nil (loc/->Location 4 5) "" "" nil)
-                      (parser/->Step :step "Then" "Then " "outcome" nil (loc/->Location 5 5) "" "" nil)
-                      (parser/->Step :step "And" "And " "conjunction" nil (loc/->Location 6 5) "" "" nil)]
+                     [(parser/->Step :step "Given" "Given " "context" [] (loc/->Location 3 5) "" "" nil)
+                      (parser/->Step :step "When" "When " "action" [] (loc/->Location 4 5) "" "" nil)
+                      (parser/->Step :step "Then" "Then " "outcome" [] (loc/->Location 5 5) "" "" nil)
+                      (parser/->Step :step "And" "And " "conjunction" [] (loc/->Location 6 5) "" "" nil)]
                      nil
                      "Scenario"
                      (loc/->Location 2 3)
@@ -382,7 +403,7 @@
                      :background
                      "setup"
                      ""
-                     [(parser/->Step :step "Given" "Given " "bg step" nil (loc/->Location 4 5) "Given bg step" "    " nil)]
+                     [(parser/->Step :step "Given" "Given " "bg step" [] (loc/->Location 4 5) "Given bg step" "    " nil)]
                      []
                      "Background"
                      (loc/->Location 3 3)
@@ -394,7 +415,7 @@
                      "test scenario"
                      ""
                      []
-                     [(parser/->Step :step "When" "When " "scenario step" nil (loc/->Location 7 5) "When scenario step" "    " nil)]
+                     [(parser/->Step :step "When" "When " "scenario step" [] (loc/->Location 7 5) "When scenario step" "    " nil)]
                      nil
                      "Scenario"
                      (loc/->Location 6 3)
@@ -449,7 +470,7 @@
                        :background
                        "rule setup"
                        ""
-                       [(parser/->Step :step "Given" "Given " "rule bg step" nil (loc/->Location 6 7) "Given rule bg step" "      " nil)]
+                       [(parser/->Step :step "Given" "Given " "rule bg step" [] (loc/->Location 6 7) "Given rule bg step" "      " nil)]
                        []
                        "Background"
                        (loc/->Location 5 5)
@@ -461,7 +482,7 @@
                        "rule scenario"
                        ""
                        []
-                       [(parser/->Step :step "When" "When " "rule scenario step" nil (loc/->Location 9 7) "When rule scenario step" "      " nil)]
+                       [(parser/->Step :step "When" "When " "rule scenario step" [] (loc/->Location 9 7) "When rule scenario step" "      " nil)]
                        nil
                        "Scenario"
                        (loc/->Location 8 5)
@@ -514,7 +535,7 @@
                      "plain scenario"
                      ""
                      []
-                     [(parser/->Step :step "Given" "Given " "only step" nil (loc/->Location 4 5) "Given only step" "    " nil)]
+                     [(parser/->Step :step "Given" "Given " "only step" [] (loc/->Location 4 5) "Given only step" "    " nil)]
                      nil
                      "Scenario"
                      (loc/->Location 3 3)
@@ -542,3 +563,44 @@
       ;; Should have only 1 step
       (is (= 1 (count (:steps p))) "Pickle should have only scenario step")
       (is (= "only step" (:text (first (:steps p))))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-8nku — Gherkin 42: both arguments on one step (cucumber/gherkin #599/#643)
+;; -----------------------------------------------------------------------------
+
+(defn- project-both
+  "Lex+parse `input`, run the ID-aware AST and pickle projections, and return
+   [step-ast-json first-pickle-step-argument-json]."
+  [input]
+  (let [tokens (lexer/lex input)
+        ast (:ast (parser/parse tokens))
+        ast-result (compliance/ast->ndjson-with-ids ast "both.feature" tokens)
+        pickles (pickler/pre-pickles ast {} "both.feature")
+        pickles-nd (compliance/pickles->ndjson-with-ids
+                    pickles (:id-map ast-result) (:next-id ast-result) "both.feature" ast "en")
+        step-ast (-> (json/parse-string (:ndjson ast-result) true)
+                     :gherkinDocument :feature :children first :scenario :steps first)
+        step-arg (-> (json/parse-string (first (str/split-lines pickles-nd)) true)
+                     :pickle :steps first :argument)]
+    [step-ast step-arg]))
+
+(deftest both-arguments-project-with-argument-index
+  (let [table-first "Feature: b\nScenario: s\nGiven both\n| id | name |\n| 1 | bob |\n\"\"\"\nhello\n\"\"\"\n"
+        doc-first "Feature: b\nScenario: s\nGiven both\n\"\"\"\nhello\n\"\"\"\n| id | name |\n| 1 | bob |\n"]
+    (testing "AST step JSON carries dataTable AND docString; rows get ids before the step in both orders"
+      (doseq [input [table-first doc-first]]
+        (let [[step-ast _] (project-both input)]
+          (is (= "2" (:id step-ast)) "table rows take ids 0 and 1, the step takes 2")
+          (is (= ["0" "1"] (mapv :id (-> step-ast :dataTable :rows))))
+          (is (= "hello" (-> step-ast :docString :content))))))
+    (testing "pickle argument: argumentIndex 1/2 by source order (#643)"
+      (let [[_ arg] (project-both table-first)]
+        (is (= {:dataTable 1 :docString 2} (into {} (map (fn [[k v]] [k (:argumentIndex v)])) arg)))
+        (is (= [["id" "name"] ["1" "bob"]] (mapv #(mapv :value (:cells %)) (-> arg :dataTable :rows))))
+        (is (= "hello" (-> arg :docString :content))))
+      (let [[_ arg] (project-both doc-first)]
+        (is (= {:dataTable 2 :docString 1} (into {} (map (fn [[k v]] [k (:argumentIndex v)])) arg)))))
+    (testing "a single argument carries no argumentIndex (existing fixtures unchanged)"
+      (let [[_ arg] (project-both "Feature: b\nScenario: s\nGiven one\n\"\"\"\nhello\n\"\"\"\n")]
+        (is (= [:docString] (keys arg)))
+        (is (not (contains? (:docString arg) :argumentIndex)))))))

@@ -10,8 +10,14 @@
    produce false positives for built-in stepdefs (e.g. SMS) when a
    project's scenarios don't touch those interfaces.
 
-   Three checks; all gate on the `:interfaces` config being present
-   (vanilla mode is exempt).
+   Three checks, always on (sl-6wh9): an absent `:interfaces` config reads
+   as the empty set. The first two are facts ABOUT THE FEATURES — each is
+   defined over a MATCHED stepdef — so they need a bound suite and belong to
+   the run path alone (`lint-suite`, fed `used-stepdef-infos`). The third
+   needs no features: `lint-project` is its corpus-free entry point, which
+   the project projection (`sl orient`) calls and `lint-suite` itself runs
+   (sl-a55s — orient does not read features, so it cannot compute the
+   first two and does not try).
 
    - `:stepdef/undefined-interface`
      A matched stepdef declares `:interface :foo` — an interface TYPE
@@ -265,6 +271,18 @@
                      :used-instances
                      (into #{} (mapcat :used-instances) infos))))))
 
+(defn lint-project
+  "The corpus-free part of the lint pass (sl-a55s): the checks that are
+   true of the PROJECT without reading a feature — today
+   `:glossary/orphan-type` alone. The project projection calls this;
+   `lint-suite` runs it as its third check, so there is one implementation.
+
+   Parameters as in `lint-suite`. A nil `interfaces` reads as the empty
+   set. Returns a vector of issues; empty when clean."
+  [project-glossary-types interfaces]
+  (vec (check-glossary-orphan-types project-glossary-types
+                                    (or interfaces {}))))
+
 (defn lint-suite
   "Run the suite-load lint pass over a collection of stepdef-info maps.
 
@@ -281,10 +299,8 @@
                                  project's own verb glossary files
                                  declare (sl-67dj — typically `(keys
                                  (get-in loaded-glossary [:sources :verbs]))`,
-                                 the loader's actual mounts; nil in the
-                                 vanilla run path, where no glossary
-                                 loads and the orphan check is skipped
-                                 by choice).
+                                 the loader's actual mounts; nil/empty
+                                 when the project declares no verb file).
                                  Framework defaults are NOT included —
                                  a project shouldn't be flagged for
                                  default `:sms` glossary loading just
@@ -293,21 +309,18 @@
    - `adapter-registry`        — adapter registry (defaults to
                                  `adapters/default-registry` when nil)
 
-   Returns a vector of issues; empty when clean. When `interfaces` is
-   nil (vanilla mode without explicit interface config), all checks are
-   skipped and an empty vector is returned."
+   Returns a vector of issues; empty when clean. A nil `interfaces` reads
+   as the empty set (sl-6wh9 — no exempt mode)."
   [stepdef-infos project-glossary-types interfaces adapter-registry]
-  (if (nil? interfaces)
-    []
-    (let [registry   (or adapter-registry adapters/default-registry)
-          type-set   (configured-types interfaces)
-          undefined  (keep #(check-undefined-interface % type-set)
+  (let [interfaces (or interfaces {})
+        registry   (or adapter-registry adapters/default-registry)
+        type-set   (configured-types interfaces)
+        undefined  (keep #(check-undefined-interface % type-set)
+                         stepdef-infos)
+        missing    (mapcat #(check-missing-capability % interfaces registry)
                            stepdef-infos)
-          missing    (mapcat #(check-missing-capability % interfaces registry)
-                             stepdef-infos)
-          orphans    (check-glossary-orphan-types project-glossary-types
-                                                  interfaces)]
-      (vec (concat undefined missing orphans)))))
+        orphans    (lint-project project-glossary-types interfaces)]
+    (vec (concat undefined missing orphans))))
 
 (defn issue-counts
   "Bucket counts for `lint-suite` output, suitable for diagnostics."

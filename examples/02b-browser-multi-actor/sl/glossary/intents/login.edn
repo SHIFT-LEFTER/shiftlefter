@@ -1,0 +1,7 @@
+;; Login — the fixture's login form as a named intent: the three elements
+;; the scenario touches, each bound to its locator once. The feature file
+;; says Login.username, never {:id "username"} (sl-4l16).
+{:intent "Login"
+ :elements {:username {:bindings {:web {:id "username"}}}
+            :password {:bindings {:web {:id "password"}}}
+            :submit   {:bindings {:web {:css "button[type=\"submit\"]"}}}}}

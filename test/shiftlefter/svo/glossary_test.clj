@@ -1,5 +1,7 @@
 (ns shiftlefter.svo.glossary-test
-  (:require [clojure.spec.alpha :as s]
+  (:require [babashka.fs]
+            [clojure.spec.alpha :as s]
+            [shiftlefter.edn-lines]
             [clojure.test :refer [deftest is testing]]
             [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.test-helpers.log-capture :as log-capture]))
@@ -1033,3 +1035,38 @@
       (let [gl (glossary/load-all-glossaries
                 {:subjects (fixture-path "subjects-personas.edn")})]
         (is (= (get-in g [:subjects :user]) (get-in gl [:subjects :user])))))))
+
+;; -----------------------------------------------------------------------------
+;; Def-site line index (sl-u2r0, fold-in C1 as ruled 2026-09-16): clojure.edn
+;; stays the one data reader; the index pass (the full reader, eval off,
+;; every tag read as data) is used only when it agrees with the data —
+;; happy path, and both guard branches (unreadable; mismatch), pinned here.
+;; -----------------------------------------------------------------------------
+
+(deftest def-site-index-happy-path-and-both-guard-branches
+  (let [dir (babashka.fs/create-temp-dir {:prefix "sl-glossary-index-"})
+        path (str (babashka.fs/path dir "subjects.edn"))]
+    (try
+      (spit path ";; leading comment\n{:subjects\n {:user {:desc \"u\"\n         :instances [:alice]}\n  :admin {:desc \"a\"}}}\n")
+      (testing "happy path: the index agrees with the data, every entry gets its line"
+        (let [gl (:ok (glossary/load-all-glossaries-strict {:subjects path}))]
+          (is (= {:file path :line 3} (get-in gl [:def-sites :subjects :user])))
+          (is (= {:file path :line 4} (get-in gl [:def-sites :subjects :user/alice])))
+          (is (= {:file path :line 5} (get-in gl [:def-sites :subjects :admin])))
+          (is (= (glossary/load-all-glossaries {:subjects path})
+                 (-> gl (dissoc :def-sites) (assoc :def-sites (:def-sites gl))))
+              "the data itself is untouched: the lenient loader agrees")))
+      (testing "guard branch 1 — an unreadable index pass: nil, never a throw"
+        (is (nil? (shiftlefter.edn-lines/index "{:subjects {" {:subjects {}}))))
+      (testing "guard branch 2 — an index value that disagrees with the EDN read: nil"
+        (is (nil? (shiftlefter.edn-lines/index "{:subjects {:user 1}}" {:subjects {:user 2}}))))
+      (testing "either degrade => the loader records file-only def-sites (no :line), no error"
+        (with-redefs [shiftlefter.edn-lines/index (constantly nil)]
+          (let [gl (:ok (glossary/load-all-glossaries-strict {:subjects path}))]
+            (is (= {:file path} (get-in gl [:def-sites :subjects :user])))
+            (is (= {:file path} (get-in gl [:def-sites :subjects :user/alice])))
+            (is (= (:subjects gl)
+                   (:subjects (:ok (glossary/load-all-glossaries-strict {:subjects path}))))
+                "the data is identical with or without the index"))))
+      (finally
+        (babashka.fs/delete-tree dir)))))

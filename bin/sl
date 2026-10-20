@@ -457,7 +457,7 @@ is_bare_help() {
 is_cold_command() {
     case "${1:-}" in
         repl)   return 0 ;;
-        daemon) return 0 ;;  # serve/status/stop/bare — status+stop intercepted earlier
+        daemon) return 0 ;;  # serve/status/stop/abort/bare — status+stop+abort intercepted earlier
         init)   return 0 ;;  # scaffolds sl/shiftlefter.edn — the very anchor the
                              # daemon keys on; never spawn a JVM daemon just to
                              # scaffold a project that doesn't exist yet (sl-cn7)
@@ -579,6 +579,37 @@ do_daemon_stop() {
     return 0
 }
 
+# `sl daemon abort` — wrapper-owned (sl-617t). Ask the daemon to abort the run
+# in flight WITHOUT stopping it: one client round-trip evaluates daemon/abort!
+# (the --sl-internal-abort sentinel). The daemon prints the immediate line —
+# naming the results dir — on our stderr; the ORIGINAL terminal (the attached
+# client) waits for the wind-down and prints the verdict, exit 4. This command
+# returns as soon as the request is accepted. Exit 0 = abort requested (or
+# already under way); 1 = no run in flight, no daemon, or daemon unreachable.
+do_daemon_abort() {
+    local java_cmd="$1" root edn pid port rc
+    root="$(find_instance_root "$USER_CWD")" \
+        || { echo "sl daemon: no instance root above $USER_CWD"; return 1; }
+    edn="$root/.shiftlefter/daemon.edn"
+    if [[ ! -f "$edn" ]]; then
+        echo "sl daemon: no daemon running for $root — nothing to abort"
+        return 1
+    fi
+    pid="$(edn_num "$edn" pid)"
+    port="$(edn_num "$edn" port)"
+    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+        echo "sl daemon: daemon pid ${pid:-?} is not running (stale daemon.edn) — nothing to abort"
+        return 1
+    fi
+    "$java_cmd" -cp "$JAR_FILE" shiftlefter.client.NreplClient "$port" "$root" --sl-internal-abort
+    rc=$?
+    if [[ $rc == 69 ]]; then
+        echo "sl daemon: daemon unreachable on port $port — nothing aborted" >&2
+        return 1
+    fi
+    return $rc
+}
+
 # Always-jar dispatch (sl-72e). No source fallback: a missing jar or Java is a
 # hard error pointing at the build / bin/sl-dev, never a silent switch to source.
 if [[ -z "$JAR_FILE" || ! -f "$JAR_FILE" ]]; then
@@ -613,13 +644,14 @@ if [[ -n "$INSTANCE_ROOT" ]]; then
     [[ -f "${_sl_libs[0]}" ]] && LIB_CP="$JAR_FILE:$LIB_DIR/*"
 fi
 
-# Wrapper-owned daemon controls (status/stop are not wired in the jar), then
+# Wrapper-owned daemon controls (status/stop/abort are not wired in the jar), then
 # warm routing. maybe_route_warm execs/exits on the warm path; it returns
 # only when routing declines, falling through to the cold floor below.
 if [[ "${1:-}" == "daemon" ]]; then
     case "${2:-}" in
         status) do_daemon_status; exit $? ;;
         stop)   do_daemon_stop "$JAVA_CMD"; exit $? ;;
+        abort)  do_daemon_abort "$JAVA_CMD"; exit $? ;;
     esac
 fi
 maybe_route_warm "$JAVA_CMD" "$@"

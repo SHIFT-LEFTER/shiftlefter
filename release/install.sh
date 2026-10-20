@@ -31,7 +31,7 @@
 set -euo pipefail
 
 # Pinned default release version. Tracks build.clj's `version` at release time.
-DEFAULT_VERSION="0.5.6"
+DEFAULT_VERSION="0.5.7"
 REPO_SLUG="SHIFT-LEFTER/shiftlefter"
 
 ZIP_PATH=""

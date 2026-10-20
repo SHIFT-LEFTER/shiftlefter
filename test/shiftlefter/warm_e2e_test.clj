@@ -31,7 +31,9 @@
             [clojure.edn :as edn]
             [clojure.string :as str]
             [babashka.fs :as fs]
-            [nrepl.core :as nrepl]))
+            [nrepl.core :as nrepl]
+            [shiftlefter.test-helpers :as helpers])
+  (:import (java.lang ProcessHandle)))
 
 ;; -----------------------------------------------------------------------------
 ;; Paths / gating
@@ -953,3 +955,446 @@
            (is (str/includes? (:out r) "alive"))
            (is (str/includes? (:out r) "live costumes: none")
                "the custody query reached the daemon JVM and reported")))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-617t — first-class run abort at the shell layer. The two ruled pins
+;; (the 09-15 15:25 comment) plus the proof set (a)–(e): the warm client's
+;; Ctrl-C trap, the second-Ctrl-C detach, `sl daemon abort` from a second
+;; shell, the cold SIGINT handler and its two-strike crash row, and the
+;; "abort undeliverable" fallback (the client killed outright).
+;;
+;; One fixture: a setup.clj project whose first scenario BLOCKS on a file
+;; marker (so the abort always lands mid-step) and whose lifecycle writes
+;; marker files — AFTER (a global After hook) and STOP (the group's :stop) —
+;; so "every teardown ran" is asserted from the filesystem, never parsed.
+;; Marker paths are ABSOLUTE: the steps execute in the daemon JVM.
+;; -----------------------------------------------------------------------------
+
+(defn- abort-project!
+  "Write the abort fixture under `root`/sl (sibling-of-config layout):
+   two groups — `first` (a two-step blocking scenario + a quiet one) and
+   `second` (one quiet scenario) — hooks.clj with a global After, steps."
+  [root]
+  (let [sl (str (fs/path root "sl"))
+        started (str (fs/path root "STARTED"))
+        release (str (fs/path root "RELEASE"))
+        after   (str (fs/path root "AFTER"))
+        stop    (str (fs/path root "STOP"))
+        junit   (str (fs/path root "junit.xml"))
+        html    (str (fs/path root "report.html"))]
+    (fs/create-dirs (str (fs/path sl "features")))
+    (fs/create-dirs (str (fs/path sl "steps")))
+    (spit (str (fs/path sl "shiftlefter.edn"))
+          (pr-str {:runner {:step-paths ["steps"]
+                            :report {:junit-xml junit :html html}}}))
+    (spit (str (fs/path sl "steps" "abort.clj"))
+          (str "(ns abortsteps (:require [shiftlefter.stepengine.registry :refer [defstep]]))\n"
+               "(defstep #\"a blocking thing\" []\n"
+               "  (spit \"" started "\" \"x\")\n"
+               "  (loop [i 0]\n"
+               "    (when (and (< i 600)\n"
+               "               (not (.exists (java.io.File. \"" release "\"))))\n"
+               "      (Thread/sleep 100)\n"
+               "      (recur (inc i)))))\n"
+               "(defstep #\"a quiet thing\" [] nil)\n"))
+    (spit (str (fs/path sl "hooks.clj"))
+          (str "(ns hooks)\n"
+               "(def hooks [{:name \"trace\" :global? true\n"
+               "             :after (fn [_] (spit \"" after "\" \"x\") nil)}])\n"))
+    (spit (str (fs/path sl "setup.clj"))
+          (str "(ns setup)\n"
+               "(def setups\n"
+               "  [{:label \"first\"\n"
+               "    :start (fn [_] {:stop (fn [] (spit \"" stop "\" \"x\"))})\n"
+               "    :features [\"features/first.feature\"]}\n"
+               "   {:label \"second\"\n"
+               "    :start (fn [_] {})\n"
+               "    :features [\"features/second.feature\"]}])\n"))
+    (spit (str (fs/path sl "features" "first.feature"))
+          (str "Feature: First\n\n"
+               "  Scenario: blocks then continues\n"
+               "    Given a blocking thing\n    And a quiet thing\n\n"
+               "  Scenario: never runs\n    Given a quiet thing\n"))
+    (spit (str (fs/path sl "features" "second.feature"))
+          "Feature: Second\n\n  Scenario: never starts\n    Given a quiet thing\n")
+    {:started started :release release :after after :stop stop :junit junit :html html}))
+
+(defn- start-sl
+  "Spawn bin/sl from `dir` and collect its MERGED output on a future;
+   returns {:proc p :out (future [lines])} so the test can act mid-run.
+   `finish` waits (bounded) and returns {:exit n :lines [...]}."
+  [dir args]
+  (let [pb (doto (ProcessBuilder. ^java.util.List (into [] (cons sl-bin args)))
+             (.directory (io/file dir))
+             (.redirectErrorStream true))
+        proc (.start pb)
+        out (future (with-open [rdr (io/reader (.getInputStream proc))]
+                      (into [] (line-seq rdr))))]
+    {:proc proc :out out}))
+
+(defn- finish [{:keys [^Process proc out]} timeout-ms]
+  (if (.waitFor proc timeout-ms java.util.concurrent.TimeUnit/MILLISECONDS)
+    {:exit (.exitValue proc) :lines (deref out 5000 [])}
+    (do (.destroyForcibly proc) {:exit :timeout :lines (deref out 5000 [])})))
+
+(defn- strip-ansi [^String s] (str/replace s #"\[[0-9;]*m" ""))
+
+(defn- has-line?
+  "True when some output line contains `s` — ANSI colors stripped: the
+   daemon colors the client's stream, and the words are what is pinned."
+  [lines s]
+  (boolean (some #(str/includes? (strip-ansi %) s) lines)))
+
+(defn- client-jvm-pid
+  "The pid of the NreplClient JVM under the wrapper process — the process
+   a terminal's Ctrl-C would reach beside bash."
+  [{:keys [^Process proc]}]
+  (some (fn [^ProcessHandle h]
+          (let [cmd (.orElse (.commandLine (.info h)) "")]
+            (when (str/includes? cmd "NreplClient") (.pid h))))
+        (iterator-seq (.iterator (.descendants (.toHandle proc))))))
+
+(defn- signal! [sig & pids]
+  (apply sh "kill" (str "-" sig) (map str pids)))
+
+;; sl-cotp (Warden W6) — the SIGINT pins below only mean something when a
+;; SIGINT can land. A job a NON-INTERACTIVE shell starts with `&` has SIGINT
+;; set to SIG_IGN (POSIX; the trap docs/CI.md documents for users), this
+;; JVM inherits it, and every child it spawns — bin/sl, the cold JVM, the
+;; NreplClient — inherits it in turn: `kill -INT` is then a no-op, the run
+;; completes green, and four abort pins pass without the abort path ever
+;; running. The inverse is the failure that matters: a launcher that
+;; ignores SIGINT can make a BROKEN abort path look green. So the pins
+;; read the disposition first and refuse to vouch when it is ignored — a
+;; visible kaocha pending (sl-v6x3), never a silent green.
+;;
+;; The probe is a child, not JVM signal introspection: a throwaway `sh`
+;; sends itself SIGINT. Default disposition → the shell dies of it (exit
+;; 130, nothing printed); inherited SIG_IGN → it survives and prints. That
+;; is exactly the inheritance the pins depend on, measured where it bites.
+
+(defn- sigint-deliverable?
+  "True when a child process of this JVM can be killed by SIGINT — i.e. the
+   disposition this JVM passes to the processes the SIGINT pins signal."
+  []
+  (let [{:keys [exit out]} (sh "sh" "-c" "kill -INT $$; echo survived")]
+    (not (or (zero? exit) (str/includes? (str out) "survived")))))
+
+(defn- skip-unless-sigint-deliverable
+  "Run `body-thunk` when a SIGINT can reach this JVM's children; otherwise
+   record a visible pending naming the fix (run the daemon suite in the
+   foreground). Composes inside `skip-without-jar`: no jar is the earlier,
+   quieter precondition."
+  [body-thunk]
+  (if (sigint-deliverable?)
+    (body-thunk)
+    (helpers/skip-pending!
+     (str "SIGINT is inherited as ignored (a background job of a non-interactive "
+          "shell — docs/CI.md) — the abort pins cannot vouch for anything; "
+          "run `./bin/kaocha daemon` in the foreground"))))
+
+(defn- await-client-jvm
+  "Poll until the wrapper has spawned its NreplClient child (the trap is
+   installed before the eval is sent, so once STARTED exists it is up)."
+  [run timeout-ms]
+  (loop [waited 0]
+    (or (client-jvm-pid run)
+        (when (< waited timeout-ms)
+          (Thread/sleep 100)
+          (recur (+ waited 100))))))
+
+(defn- prime-daemon! [root]
+  (run-sl root ["run" "--dry-run"])
+  (read-daemon root))
+
+(defn- assert-aborted-artifacts!
+  "The reports on disk carry the abort record; every teardown marker exists."
+  [{:keys [junit html after stop]}]
+  (is (wait-for-file junit 30000) "the JUnit report landed")
+  (is (wait-for-file html 5000) "the HTML report landed")
+  (when (.exists (io/file junit))
+    (let [xml (slurp junit)]
+      (is (str/includes? xml "held: aborted after step 1 of 2")
+          "the blocking scenario was cut at its boundary")
+      (is (str/includes? xml "held: aborted before this scenario ran")
+          "the queued scenario was held")))
+  (when (.exists (io/file html))
+    (is (str/includes? (slurp html) ":reason :aborted") "the HTML island carries the record"))
+  (is (.exists (io/file after)) "the After hook ran on the cut scenario")
+  (is (.exists (io/file stop)) "the group's :stop ran"))
+
+;; (e-b) the ruled pin: send the abort => wind-down observed, :halted
+;; {:reason :aborted}, exit 4, daemon still serving. Delivered here by
+;; `sl daemon abort` from a second shell — (d) in the proof set.
+(deftest ^:daemon sl-daemon-abort-winds-down-exit-4-daemon-survives
+  (skip-without-jar
+   (fn []
+     (with-root
+      (fn [root]
+        (let [{:keys [started release] :as fx} (abort-project! root)
+              d0 (prime-daemon! root)
+              run (start-sl root ["run"])]
+          (try
+            (is (some? d0) "precondition: daemon running")
+            (is (wait-for-file started 30000) "precondition: the blocking step is in flight")
+            (let [r (run-sl root ["daemon" "abort"])]
+              (is (= 0 (:exit r)) "abort requested")
+              (is (str/includes? (:err r) "aborting: 1 scenario(s) finishing their current step")
+                  "the second terminal gets the immediate line")
+              (is (str/includes? (:err r) "reports will land at ")
+                  "…naming where reports land (fold-in C2)")
+              (is (str/includes? (:err r) "sl/results/")
+                  "the results dir, not the fallback phrase"))
+            (spit release "go")
+            (let [{:keys [exit lines]} (finish run 90000)]
+              (is (= 4 exit) "the attached client waited and exited 4")
+              (is (has-line? lines "HELD (aborted after step 1) blocks then continues"))
+              (is (has-line? lines "HELD (aborted) never runs"))
+              (is (has-line? lines "aborted after scenario 0: 2 scenario(s) held"))
+              (is (has-line? lines "Setup group \"second\": skipped (aborted)")))
+            (assert-aborted-artifacts! fx)
+            (is (= (:pid d0) (:pid (read-daemon root))) "the daemon survived the abort")
+            (let [r (run-sl root ["daemon" "abort"])]
+              (is (= 1 (:exit r)) "nothing in flight afterwards")
+              (is (str/includes? (:err r) "no run in flight")))
+            (finally
+              (spit release "go")
+              (finish run 30000)))))))))
+
+;; (c) warm Ctrl-C: SIGINT to the wrapper AND its client JVM (what a
+;; terminal delivers) — the client traps it, prints the immediate line,
+;; waits, prints the verdict, exits 4 THROUGH bash; the daemon survives.
+(deftest ^:daemon warm-ctrl-c-aborts-client-waits-exit-4
+  (skip-without-jar
+   (fn []
+    (skip-unless-sigint-deliverable
+     (fn []
+     (with-root
+      (fn [root]
+        (let [{:keys [started release] :as fx} (abort-project! root)
+              d0 (prime-daemon! root)
+              run (start-sl root ["run"])]
+          (try
+            (is (some? d0) "precondition: daemon running")
+            (is (wait-for-file started 30000) "precondition: the blocking step is in flight")
+            (let [jvm (await-client-jvm run 10000)]
+              (is (some? jvm) "precondition: the NreplClient JVM is up")
+              (signal! "INT" (.pid ^Process (:proc run)) jvm))
+            (Thread/sleep 1500)
+            (spit release "go")
+            (let [{:keys [exit lines]} (finish run 90000)]
+              (is (= 4 exit) "exit 4 through the wrapper — bash did not die of the SIGINT")
+              (is (has-line? lines "aborting: 1 scenario(s) finishing their current step")
+                  "the immediate line reached the aborting terminal")
+              (is (has-line? lines "aborted after scenario 0: 2 scenario(s) held")
+                  "…and then the verdict: the client waited for the wind-down"))
+            (assert-aborted-artifacts! fx)
+            (is (= (:pid d0) (:pid (read-daemon root))) "the daemon survived")
+            (finally
+              (spit release "go")
+              (finish run 30000)))))))))))
+
+;; (d) a second Ctrl-C detaches: the client prints the hint and exits 130;
+;; the daemon finishes the unwind on its own — teardowns and reports land.
+(deftest ^:daemon warm-second-ctrl-c-detaches-daemon-finishes-unwind
+  (skip-without-jar
+   (fn []
+    (skip-unless-sigint-deliverable
+     (fn []
+     (with-root
+      (fn [root]
+        (let [{:keys [started release] :as fx} (abort-project! root)
+              d0 (prime-daemon! root)
+              run (start-sl root ["run"])]
+          (try
+            (is (some? d0) "precondition: daemon running")
+            (is (wait-for-file started 30000))
+            (let [jvm (await-client-jvm run 10000)
+                  bash (.pid ^Process (:proc run))]
+              (is (some? jvm))
+              (signal! "INT" bash jvm)
+              (Thread/sleep 1500)
+              (signal! "INT" bash jvm))
+            (let [{:keys [exit lines]} (finish run 30000)]
+              (is (= 130 exit) "the client left without a verdict: the platform's 130")
+              (is (has-line? lines "aborting: 1 scenario(s)") "strike one still printed the line")
+              (is (has-line? lines "sl: detached; the daemon is finishing the unwind; reports will land at")
+                  "strike two printed the detach hint"))
+            (spit release "go")
+            (assert-aborted-artifacts! fx)
+            (is (= (:pid d0) (:pid (read-daemon root))) "the daemon survived")
+            (finally
+              (spit release "go")
+              (finish run 30000)))))))))))
+
+;; (e-a) the ruled pin: the client killed outright (SIGKILL — no trap
+;; runs, the abort is undeliverable by construction) => the run completes
+;; server-side and its reports land; the daemon keeps serving. This is
+;; the live-verified warm suspicion (08-11, 08-21) converted into a guard.
+(deftest ^:daemon client-killed-run-completes-server-side
+  (skip-without-jar
+   (fn []
+     (with-root
+      (fn [root]
+        (let [{:keys [started release junit stop]} (abort-project! root)
+              d0 (prime-daemon! root)
+              run (start-sl root ["run"])]
+          (try
+            (is (some? d0))
+            (is (wait-for-file started 30000))
+            (let [jvm (await-client-jvm run 10000)]
+              (is (some? jvm))
+              (signal! "KILL" jvm))
+            (let [{:keys [exit]} (finish run 30000)]
+              (is (not= 4 exit) "the client died without a verdict")
+              (is (not= 0 exit)))
+            (spit release "go")
+            (is (wait-for-file junit 60000) "the run completed server-side: its JUnit landed")
+            (is (wait-for-file stop 5000) "…and the group's :stop ran")
+            (let [xml (slurp junit)]
+              (is (not (str/includes? xml "held: aborted"))
+                  "nothing was aborted — every scenario ran to its verdict")
+              (is (str/includes? xml "never starts") "the second group ran too"))
+            (is (= (:pid d0) (:pid (read-daemon root))) "the daemon kept serving")
+            (finally
+              (spit release "go")
+              (finish run 30000)))))))))
+
+;; (a) cold: SIGINT to the JVM (bin/sl exec's it) => the immediate line,
+;; the wind-down, reports on disk with the abort record, exit 4.
+(deftest ^:daemon cold-sigint-aborts-exit-4
+  (skip-without-jar
+   (fn []
+    (skip-unless-sigint-deliverable
+     (fn []
+     (with-root
+      (fn [root]
+        (let [{:keys [started release] :as fx} (abort-project! root)
+              run (start-sl root ["--no-daemon" "run"])]
+          (try
+            (is (wait-for-file started 60000) "precondition: the blocking step is in flight (cold JVM up)")
+            (signal! "INT" (.pid ^Process (:proc run)))
+            (Thread/sleep 1500)
+            (spit release "go")
+            (let [{:keys [exit lines]} (finish run 90000)]
+              (is (= 4 exit) "an aborted cold run is exit 4, not 130")
+              (is (has-line? lines "aborting: 1 scenario(s) finishing their current step"))
+              (is (has-line? lines "aborted after scenario 0: 2 scenario(s) held")))
+            (assert-aborted-artifacts! fx)
+            (is (nil? (read-daemon root)) "no daemon was involved")
+            (finally
+              (spit release "go")
+              (finish run 30000)))))))))))
+
+;; (b) cold two-strike: a second SIGINT during the unwind takes the crash
+;; row — exit 3 with the sl-crash JUnit suite and the CRASHED HTML TOC
+;; (the 8orx markers; this is a two-group project, so both surfaces exist).
+(deftest ^:daemon cold-second-sigint-is-the-crash-row-exit-3
+  (skip-without-jar
+   (fn []
+    (skip-unless-sigint-deliverable
+     (fn []
+     (with-root
+      (fn [root]
+        (let [{:keys [started release junit html]} (abort-project! root)
+              run (start-sl root ["--no-daemon" "run"])]
+          (try
+            (is (wait-for-file started 60000))
+            (let [pid (.pid ^Process (:proc run))]
+              (signal! "INT" pid)
+              (Thread/sleep 1500)
+              ;; The blocking step is still blocked (RELEASE not written):
+              ;; the unwind has not reached its boundary — strike two lands
+              ;; mid-unwind, as ruled.
+              (signal! "INT" pid))
+            (let [{:keys [exit lines]} (finish run 30000)]
+              (is (= 3 exit) "the crash row")
+              (is (has-line? lines "aborting: 1 scenario(s)"))
+              (is (has-line? lines "second interrupt: abandoning the unwind — crash row; exit 3"))
+              (is (has-line? lines "Runner crash: run abandoned: second interrupt")))
+            (is (.exists (io/file junit)) "the invocation JUnit was materialized by the marker write")
+            (when (.exists (io/file junit))
+              (let [xml (slurp junit)]
+                (is (str/includes? xml "<testsuite name=\"sl-crash\""))
+                (is (str/includes? xml "<error type=\"crash\""))))
+            (is (.exists (io/file html)) "the stable HTML path was rewritten as CRASHED")
+            (when (.exists (io/file html))
+              (is (str/includes? (slurp html) ":status :crashed")))
+            (finally
+              (spit release "go")
+              (finish run 30000)))))))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-o26v — a WARM single-scope crash leaves the sl-crash JUnit + the
+;; CRASHED HTML beside exit 3 (the 8orx-era "a stale previous-run JUnit sits
+;; beside exit 3 under the daemon" claim, retired): seed stale files, crash
+;; the classic pipeline through the daemon, and read the files back.
+;; -----------------------------------------------------------------------------
+
+;; -----------------------------------------------------------------------------
+;; sl-io05: a throw escaping the per-scenario machinery is a RUNNER CRASH —
+;; exit 3 on every scheduler route, across a real process boundary, warm and
+;; cold. The escape is constructed with --sl-internal-scenario-crash=.
+;; -----------------------------------------------------------------------------
+
+(deftest ^:daemon scenario-escape-exits-3-on-every-route-warm-and-cold
+  (skip-without-jar
+   (fn []
+     (with-root
+      (fn [root]
+        (doseq [[label file tag-line]
+                [["escape.feature" "escape.feature" "\n"]
+                 ["escape-serial.feature" "escape-serial.feature" "  @serial\n"]]]
+          (spit (str (fs/path root file))
+                (str "Feature: Escape " label "\n\n"
+                     "  Scenario: first completes\n    Given a thing happens\n"
+                     tag-line
+                     "  Scenario: KABOOM marker scenario\n    Given a thing happens\n\n"
+                     "  Scenario: third\n    Given a thing happens\n")))
+        (doseq [[route file max-parallel]
+                [["max-parallel 1"  "escape.feature"        "1"]
+                 ["a pool task"     "escape.feature"        "2"]
+                 ["the @serial tail" "escape-serial.feature" "2"]]]
+          (testing route
+            (let [args ["run" file "--step-paths" "steps"
+                        "--max-parallel" max-parallel
+                        "--sl-internal-scenario-crash=KABOOM"]
+                  warm (run-sl root args)
+                  cold (run-sl root args :env {"SL_NO_DAEMON" "1"})]
+              (doseq [[mode r] [["warm" warm] ["cold" cold]]]
+                (testing mode
+                  (is (= 3 (:exit r)) "a runner crash, never a scenario verdict")
+                  (is (str/includes? (:err r) "Runner crash: sl-internal-crash: deliberate per-scenario escape"))
+                  (is (re-find #"in scenario: KABOOM marker scenario \(.*:6\)" (:err r))
+                      "the crash names the scenario and its file:line"))))))
+        (is (some? (read-daemon root)) "the daemon survived the crashes"))))))
+
+(deftest ^:daemon warm-single-scope-crash-leaves-truthful-files
+  (skip-without-jar
+   (fn []
+     (with-root
+      (fn [root]
+        (let [junit (str (fs/path root "crash-junit.xml"))
+              html (str (fs/path root "crash-report.html"))
+              stale "STALE SENTINEL — a previous run's report\n"]
+          (spit (str (fs/path root "crash.feature"))
+                (str "Feature: Crash\n\n"
+                     "  Scenario: first completes\n    Given a thing happens\n\n"
+                     "  Scenario: KABOOM marker scenario\n    Given a thing happens\n\n"
+                     "  Scenario: third never starts\n    Given a thing happens\n"))
+          (run-sl root ["fmt" "--check" "good.feature"])   ; prime the daemon
+          (is (some? (read-daemon root)) "precondition: daemon running")
+          (spit junit stale)
+          (spit html stale)
+          (let [r (run-sl root ["run" "crash.feature" "--step-paths" "steps"
+                                "--sl-internal-crash=KABOOM"
+                                "--junit-xml" junit "--html" html])]
+            (is (= 3 (:exit r)) "the crash exits 3 through the daemon")
+            (is (str/includes? (:err r) "Runner crash: sl-internal-crash"))
+            (let [xml (slurp junit) page (slurp html)]
+              (is (not= stale xml) "the stale JUnit was overwritten")
+              (is (str/includes? xml "<testsuite name=\"sl-crash\""))
+              (is (str/includes? xml "first completes"))
+              (is (not= stale page) "the stale HTML was overwritten")
+              (is (str/includes? page ":status :crashed"))))
+          (is (some? (read-daemon root)) "the daemon survived the crash")))))))

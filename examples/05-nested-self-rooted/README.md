@@ -53,9 +53,10 @@ nearest-enclosing-instance pruning.
 
 ## Run it
 
-> **Mode: Shifted** — the config carries `:svo`; the subject *and intent*
-> glossaries are discovered at the conventional paths in `sl/glossary/`
-> (`sl orient` will say `Mode: Shifted`).
+> **Vocabulary:** every step here is typed — the subject *and intent*
+> glossaries are discovered at the conventional paths in `sl/glossary/`, and
+> the config's `:enforcement` block sets the levels (`sl orient --edn` shows
+> the effective ones).
 
 This example is a mini-project pulling the framework via `:local/root`.
 Run from this directory so the `sl/` project (config, glossary, features)

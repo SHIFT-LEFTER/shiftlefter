@@ -121,7 +121,11 @@
                        :elements
                        {:add-to-cart {:bindings {:web {:css "#add"}}}
                         :item_image {:bindings {:web {:css ".img"}}}
-                        :submit2 {:bindings {:web {:css "#s2"}}}}})})]
+                        :submit2 {:bindings {:web {:css "#s2"}}}
+                        ;; sl-ectw: lowerCamel reads too (a shaped element's
+                        ;; name must be binding-legal).
+                        :smsCode {:bindings {:web {:css "#code"}}}
+                        :placeOrder {:bindings {:web {:css "#place"}}}}})})]
     (try
       (let [result (loader/load-all-intents (str dir))]
         (is (:ok result) (str "Should accept valid casing: " (:errors result))))
@@ -602,3 +606,112 @@
                 (str "Error type for " bad-location)))
           (finally
             (cleanup-temp-dir dir)))))))
+
+;; -----------------------------------------------------------------------------
+;; :shape (sl-ectw)
+;; -----------------------------------------------------------------------------
+
+(defn- load-shape
+  "Load one intent whose element `el` declares `shape`; returns the result."
+  [el shape]
+  (let [dir (create-temp-intents-dir
+             {"reset.edn"
+              (pr-str {:intent "Reset"
+                       :elements {el {:bindings {:sms {}} :shape shape}}})})]
+    (try
+      (loader/load-all-intents (str dir))
+      (finally
+        (cleanup-temp-dir dir)))))
+
+(defn- shape-error-type [el shape]
+  (-> (load-shape el shape) :errors first :type))
+
+(deftest shape-single-unnamed-group-binds-to-the-element
+  (let [result (load-shape :smsCode "code is: (\\d{6})")
+        shape (:ok (loader/get-shape (:ok result) "Reset" "smsCode"))]
+    (is (:ok result) (pr-str (:errors result)))
+    (is (= "code is: (\\d{6})" (:source shape)) "authored source kept")
+    (is (= "code is: (?<smsCode>\\d{6})" (:pattern shape)) "effective source renamed")
+    (is (= #{:smsCode} (:names shape)))
+    (is (= 1 (:group-count shape)))))
+
+(deftest shape-single-named-group-must-carry-the-element-name
+  (is (:ok (load-shape :smsCode "code (?<smsCode>\\d+)")))
+  (is (= :intent/shape-group-name-mismatch
+         (shape-error-type :smsCode "code (?<code>\\d+)"))
+      "two names for one value is the defect"))
+
+(deftest shape-single-group-needs-a-bindable-element-name
+  (is (= :intent/shape-name-not-bindable
+         (shape-error-type :sms-code "code (\\d+)")))
+  (is (= :intent/shape-name-not-bindable
+         (shape-error-type :sms_code "code (\\d+)"))))
+
+(deftest shape-several-groups-must-all-be-named
+  (is (:ok (load-shape :order "(?<orderNumber>[A-Z0-9-]+) for (?<amount>[0-9.]+)")))
+  (is (= :intent/shape-unnamed-groups
+         (shape-error-type :order "(?<orderNumber>[A-Z0-9-]+) for ([0-9.]+)")))
+  (testing "a multi-group shape on a kebab element is fine — its names are the groups'"
+    (is (:ok (load-shape :order-line "(?<orderNumber>[A-Z0-9-]+) for (?<amount>[0-9.]+)")))))
+
+(deftest shape-load-errors
+  (is (= :intent/shape-without-group (shape-error-type :total "\\$\\d+"))
+      "constant text is content, not a shape")
+  (is (= :intent/invalid-shape-pattern (shape-error-type :total "(")))
+  (is (= :intent/invalid-shape (shape-error-type :total 42)))
+  (is (= :intent/shape-has-token (shape-error-type :total "{code} (\\d+)"))
+      "a shape is scenario-independent")
+  (is (:ok (load-shape :total "\\{code\\} (\\d+)")) "escaped braces are literal")
+  (is (:ok (load-shape :total "(\\d{6})")) "a {6} quantifier is not a token"))
+
+(deftest shape-errors-carry-the-element-def-site
+  (let [dir (create-temp-intents-dir
+             {"reset.edn" (str "{:intent \"Reset\"\n"
+                               " :elements\n"
+                               " {:email {:bindings {:web {:id \"e\"}}}\n"
+                               "  :total {:bindings {:web {:id \"t\"}}\n"
+                               "          :shape \"\\\\$\\\\d+\"}}}")})]
+    (try
+      (let [err (-> (loader/load-all-intents (str dir)) :errors first)]
+        (is (= :intent/shape-without-group (:type err)))
+        (is (= :total (:element err)))
+        (is (= 4 (:line err)) "the element's own line, not the file's"))
+      (finally
+        (cleanup-temp-dir dir)))))
+
+(deftest shape-rename-scanner-traps
+  (testing "the one-group rename lands on the capturing paren, not a
+            lookbehind, a quoted paren, an escaped paren, a class member,
+            a non-capturing group or an inline flag (tower C2)"
+    (doseq [[src expected] [["(?<=\\$)(\\d+)"     "(?<=\\$)(?<total>\\d+)"]
+                            ["(?<!x)(\\d+)"        "(?<!x)(?<total>\\d+)"]
+                            ["\\Q(\\E(\\d+)"      "\\Q(\\E(?<total>\\d+)"]
+                            ["\\((\\d+)"          "\\((?<total>\\d+)"]
+                            ["[(](\\d+)"          "[(](?<total>\\d+)"]
+                            ["[a[(]](\\d+)"       "[a[(]](?<total>\\d+)"]
+                            ["(?:a|b)(\\d+)"      "(?:a|b)(?<total>\\d+)"]
+                            ["(?i)(\\d+)"         "(?i)(?<total>\\d+)"]
+                            ["(?<total>\\d+)"     "(?<total>\\d+)"]]]
+      (let [result (load-shape :total src)]
+        (is (:ok result) (str src " → " (pr-str (:errors result))))
+        (is (= expected (:pattern (:ok (loader/get-shape (:ok result) "Reset" "total"))))
+            src)))))
+
+(deftest get-shape-and-element-def-site
+  (let [dir (create-temp-intents-dir
+             {"checkout.edn" (str "{:intent \"Checkout\"\n"
+                                  " :elements {:total {:bindings {:web {:id \"t\"}}\n"
+                                  "                    :shape \"\\\\$(\\\\d+)\"}\n"
+                                  "            :note {:bindings {:web {:id \"n\"}}}}}")})]
+    (try
+      (let [intents (:ok (loader/load-all-intents (str dir)))]
+        (is (= #{:total} (-> (loader/get-shape intents "Checkout" "total") :ok :names)))
+        (let [err (:error (loader/get-shape intents "Checkout" "note"))]
+          (is (= :intent/element-has-no-shape (:type err)))
+          (is (= 4 (-> err :def-site :line))))
+        (is (= :intent/unknown-element
+               (-> (loader/get-shape intents "Checkout" "nope") :error :type)))
+        (is (= 2 (:line (loader/element-def-site intents "Checkout" "total"))))
+        (is (nil? (loader/element-def-site intents "Nope" "x"))))
+      (finally
+        (cleanup-temp-dir dir)))))

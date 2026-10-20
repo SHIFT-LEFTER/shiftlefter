@@ -363,6 +363,18 @@
         (is (:verbose (:options parsed)))
         (is (not (:version (:options parsed)))))))
 
+  (testing "-v is counted (sl-jima): absent stays absent, -v is 1, -vv / -v -v / --verbose --verbose are 2, -vh groups"
+    (is (not (contains? (:options (parse-opts ["file.feature"] core/cli-options)) :verbose)))
+    (is (= 1 (:verbose (:options (parse-opts ["-v" "file.feature"] core/cli-options)))))
+    (doseq [args [["-vv"] ["-v" "-v"] ["--verbose" "--verbose"] ["-v" "--verbose"]]]
+      (let [parsed (parse-opts (conj args "file.feature") core/cli-options)]
+        (is (empty? (:errors parsed)) (pr-str args))
+        (is (= 2 (:verbose (:options parsed))) (pr-str args))))
+    (let [parsed (parse-opts ["-vh"] core/cli-options)]
+      (is (empty? (:errors parsed)))
+      (is (= 1 (:verbose (:options parsed))))
+      (is (true? (:help (:options parsed))))))
+
   (testing "--version is long-only"
     (let [parsed (parse-opts ["--version"] core/cli-options)]
       (is (empty? (:errors parsed)))

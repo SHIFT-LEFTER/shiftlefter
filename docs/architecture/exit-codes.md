@@ -25,10 +25,10 @@ page is the reasoning behind those imperatives.
 | Code | Status | Meaning |
 |---|---|---|
 | 0 | `:passed` | Existential pass: ≥1 scenario selected, every selected scenario ran to a tolerated outcome, none failed or errored (pending tolerated only under `:allow-pending?` — the counts still confess). |
-| 1 | `:failed` | ≥1 scenario `:failed` — the app answered and the answer missed the expectation (including [`:sut`-classed](#the-three-error-classes-and-the-witness-relation) errors: the app answered *with* an error). Or pending under strict mode. |
+| 1 | `:failed` | ≥1 scenario `:failed` — the app answered and the answer missed the expectation (including [`:sut`-classed](#the-three-error-classes-and-the-witness-relation) errors: the app answered *with* an error). Or pending under strict mode. Or a stale `@blocked` claim (XPASS: a `@blocked=REF` scenario passed — the test's claim about the app is what is wrong; still a failing corpus). |
 | 2 | `:planning-failed` | Invalid before execution: config/parse/discovery/binding errors, an un-runnable invocation, an empty selection. Pre-execution exclusive — nothing ran. |
-| 3 | `:crashed` | Runner crash — an uncaught throwable in ShiftLefter's own code. Anywhere; wins over everything. |
-| 4 | `:degraded` | ≥1 scenario `:error` — either the harness's own machinery broke (hook throw, capability provisioning, capture, harness; counted `error`) or a step's adapter classified its failure `:observation` — no answer existed (counted `unobserved`). The verdict about the app is unavailable for those scenarios. |
+| 3 | `:crashed` | Runner crash — an uncaught throwable in ShiftLefter's own code, including one that escapes a scenario's execution machinery (never a scenario verdict; the same exit at every `--max-parallel`, and the crash names the scenario). Anywhere; wins over everything. In a multi-group run the report artifacts say so too (sl-8orx): the invocation JUnit gains an `sl-crash` suite with one `<error type="crash">` (exception class, message, run-id), and the stable `--html` path becomes a CRASHED TOC over the groups that ran — the crashing group `crashed`, every later group `skipped`. |
+| 4 | `:degraded` | ≥1 scenario `:error` — either the harness's own machinery broke (hook throw, capability provisioning, capture; counted `error`) or a step's adapter classified its failure `:observation` — no answer existed (counted `unobserved`). The verdict about the app is unavailable for those scenarios. |
 
 Precedence: 3 anywhere; 2 pre-execution exclusive; during execution worst
 wins, 4 > 1 > 0. Across `setup.clj` groups the suite aggregates worst-wins:
@@ -43,12 +43,61 @@ earlier groups already ran. A suite-level 2 therefore means at least one
 group's request was never runnable: the suite-as-asked was never fully
 specified, and no suite verdict exists — which is why 2 outranks 4 and 1
 in the aggregate. The earlier groups' evidence is real and sits in the
-report; gate on the exit code, not the report.
+report; gate on the exit code, not the report. A crash (3) is the one
+code where the multi-group report artifacts carry the verdict themselves
+(sl-8orx): the invocation JUnit is re-materialized with an `sl-crash`
+error suite appended — before that it was a current, all-green, partial
+file beside exit 3 — and the stable `--html` TOC is rewritten as CRASHED,
+where before a previous run's stale page survived. The exit code is still
+the gate; the marker means the artifact no longer contradicts it. A crash
+under `--max-parallel` also arms the halt gate and drops the pool's queue
+(`shutdownNow`, best effort): no queued scenario starts after the
+coordinator is gone. Single-scope runs (no `setup.clj`, or one filtered
+group) carry the same markers since sl-o26v: one crash seam in the
+runner's outer handler writes them for whichever pipeline ran — the
+JUnit reporter's own state re-materialized with the `sl-crash` suite, and
+a CRASHED run page over the scenarios the HTML reporter had seen — so a
+crash never leaves an absent or previous-run file beside exit 3, cold or
+warm.
 
-Aborts sit outside the table: an interrupted run exits by platform
-convention (Ctrl-C = 130) and carries no verdict — and on the warm path
-an interrupted client does not necessarily stop the run; the daemon may
-finish it server-side.
+An **aborted run is exit 4** (sl-617t) — never 0 (it is not the
+measurement you asked for), never 3 (nothing crashed). Ctrl-C (cold or
+warm) and `sl daemon abort` arm the same halt gate the observation policy
+uses, with `{:reason :aborted}`: no not-yet-started scenario starts, a
+scenario already running stops at its **next step boundary** (a step is
+never interrupted — an interrupted step cannot clean up honestly), and the
+run winds down through the ordinary epilogue, so every After hook,
+capability cleanup and `setup.clj` `:stop` runs and every report is
+written. The scenarios that ran keep their verdicts; the rest are **held**
+— `:skipped` with `:held {:reason :aborted}` (`:after-step k` on the one
+cut mid-way), counted under `:counts :held` — and the summary carries
+`:halted {:reason :aborted :after-scenario N}` (N = scenarios that reached
+a verdict; with `setup.clj`, plus `:group/label`, and groups not yet
+started are skipped without their `:start`, `skipped (aborted)`). The
+console prints one line the instant the trap fires — `aborting: N
+scenario(s) finishing their current step, then Afters, cleanup, :stop;
+reports will land at <dir>` — then the verdict when the wind-down is done.
+Two strikes: on the cold path a **second Ctrl-C during the unwind takes
+the crash row** — exit 3 with the `sl-crash` markers; you accepted the
+mess and the report says so — until the final report writes begin, after
+which a second Ctrl-C is a no-op (one line, then the exit-4 verdict lands:
+a crash marker written then would race the writers producing the truthful
+artifacts). On the warm path a second Ctrl-C detaches
+the client (below); the daemon finishes the unwind on its own, and
+survives either way. Evidence is never auto-cleaned.
+
+**Exit 130 sits outside the table by design, and outside our control.**
+It is the platform's "interrupted" status — what a JVM reports when
+SIGINT ends the process — and it is produced only when the process was
+interrupted **before it could reach a verdict**. Three conditions produce
+it: a cold Ctrl-C **before execution began** (planning, config loading —
+nothing ran, nothing to report); a warm **second Ctrl-C** (the client
+detached; the daemon finishes the unwind and the reports land — the client
+says where); and a warm Ctrl-C **when the abort could not be delivered**
+(the daemon unreachable or the abort op failed: the run continues in the
+daemon and the hint says so — `sl daemon status` shows it, `sl daemon
+stop` aborts it and takes the whole daemon). Everything that reaches a
+verdict is in the table: an abort is 4, an abandoned unwind is 3.
 
 ## Two verdicts, three failures to measure
 

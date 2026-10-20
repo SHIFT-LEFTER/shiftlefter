@@ -32,11 +32,13 @@
  ;;              :sms {:type :sms :adapter :twilio
  ;;                    :timing {:deadline-ms 60000}}}
 
- ;; --- Shifted mode (the advertised path) ---
- ;; Uncomment to validate scenarios against a project glossary at planning
- ;; time, before anything runs. The presence of :svo enables Shifted mode;
- ;; `sl orient` confirms which mode you're in. See docs/SVO.md for the
- ;; glossary file formats.
+ ;; --- Vocabulary and enforcement ---
+ ;; Every scenario is validated against the project glossary at planning
+ ;; time, before anything runs — there is no mode to turn on. The
+ ;; :enforcement block below holds nothing but levels; leaving it out means
+ ;; the defaults (:unknown-subject/:unknown-verb :warn, :unknown-interface
+ ;; :error). Uncomment to tighten. `sl orient --edn` shows the effective levels.
+ ;; See docs/SVO.md for the glossary file formats.
  ;;
  ;; Glossaries at the conventional paths next to this config —
  ;; glossary/subjects.edn, glossary/verbs/<type>.edn, glossary/intents/ —
@@ -47,7 +49,7 @@
  ;; key = builtin defaults; :web :default = the builtin def verbatim; a full
  ;; map is used as-is under any name and must declare its :type):
  ;; :interfaces {:web {:type :web :adapter :etaoin}}   ; bundled WebDriver backend
- ;; :svo {:unknown-subject :error
- ;;       :unknown-verb    :warn
- ;;       :unknown-interface :error}
+ ;; :enforcement {:unknown-subject :error
+ ;;               :unknown-verb    :warn
+ ;;               :unknown-interface :error}
  }

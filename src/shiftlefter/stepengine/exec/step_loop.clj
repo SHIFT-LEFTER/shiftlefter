@@ -9,8 +9,10 @@
    `invoke-step` and `execute-scenario` from this ns."
   (:require [shiftlefter.capabilities.ctx :as cap]
             [shiftlefter.events :as events]
+            [shiftlefter.intent.state :as intent-state]
             [shiftlefter.step :as step]
             [shiftlefter.stepengine.bindings :as bindings]
+            [shiftlefter.stepengine.exec.abort :as abort]
             [shiftlefter.stepengine.exec.capture :as capture]
             [shiftlefter.stepengine.exec.provisioning :as prov]))
 
@@ -18,7 +20,7 @@
 ;; Step Invocation
 ;; -----------------------------------------------------------------------------
 
-(declare invoke-step*)
+(declare invoke-step* apply-step-fn)
 
 (defn- recognized-error-class
   "The :error/class a thrown ex-info's data carries, when it is one of the
@@ -64,8 +66,14 @@
         ;; Data-plane normalization (sl-yh7): strip value-slot quotes,
         ;; resolve {binding} tokens — by bind-time :slot-kinds, before the
         ;; stepdef fn ever sees the captures.
-        normalized (bindings/normalize-captures captures (:slot-kinds binding)
-                                                scenario-ctx)]
+        ;; A :matcher slot's Intent.element ref resolves to the element's
+        ;; declared :shape here too (sl-ectw) — the same classifier the
+        ;; bindings lint ran at plan time, against the same registry.
+        normalized (bindings/normalize-captures
+                    captures (:slot-kinds binding) scenario-ctx
+                    {:intents (try (intent-state/get-intents)
+                                   (catch Exception _ nil))
+                     :interface (get-in binding [:metadata :interface])})]
     (if-let [err (:error normalized)]
       {:status :failed
        :scenario scenario-ctx
@@ -90,45 +98,58 @@
         ;; ctx-first: [ctx-with-meta & captures]
         args (if ctx-aware?
                (into [ctx-with-meta] captures)
-               (vec captures))]
-    (try
-      (let [result (apply step-fn args)]
-        (cond
-          ;; :pending → step pending, scenario fails
-          (= :pending result)
-          {:status :pending
-           :scenario scenario-ctx}
+               (vec captures))
+        ;; Poll accumulator (sl-tcsq): every poll-until the step fn runs
+        ;; folds its digest here; lifted onto the result only when a poll
+        ;; happened, so non-polling steps are byte-identical.
+        polls (atom nil)
+        result (binding [step/*poll-counts* polls]
+                 (apply-step-fn step-fn args scenario-ctx))]
+    (cond-> result
+      @polls (assoc :poll-counts @polls))))
 
-          ;; map → new scenario context
-          (map? result)
-          {:status :passed
-           :scenario result}
+(defn- apply-step-fn
+  "The apply half: call the step fn and classify its return (map / nil /
+   :pending / anything else) or throw into an invoke result."
+  [step-fn args scenario-ctx]
+  (try
+    (let [result (apply step-fn args)]
+      (cond
+        ;; :pending → step pending, scenario fails
+        (= :pending result)
+        {:status :pending
+         :scenario scenario-ctx}
 
-          ;; nil → ctx unchanged, step passed
-          (nil? result)
-          {:status :passed
-           :scenario scenario-ctx}
+        ;; map → new scenario context
+        (map? result)
+        {:status :passed
+         :scenario result}
 
-          ;; anything else → invalid return type
-          :else
-          {:status :failed
-           :scenario scenario-ctx
-           :error {:type :step/invalid-return
-                   :message (str "Step returned invalid type: " (type result)
-                                 ". Expected map, nil, or :pending.")
-                   :value result}}))
+        ;; nil → ctx unchanged, step passed
+        (nil? result)
+        {:status :passed
+         :scenario scenario-ctx}
 
-      (catch Throwable t
-        (let [data (when (instance? clojure.lang.ExceptionInfo t)
-                     (ex-data t))
-              error-class (recognized-error-class data)]
-          {:status :failed
-           :scenario scenario-ctx
-           :error (cond-> {:type :step/exception
-                           :message (ex-message t)
-                           :exception-class (.getName (class t))
-                           :data data}
-                    error-class (assoc :error/class error-class))})))))
+        ;; anything else → invalid return type
+        :else
+        {:status :failed
+         :scenario scenario-ctx
+         :error {:type :step/invalid-return
+                 :message (str "Step returned invalid type: " (type result)
+                               ". Expected map, nil, or :pending.")
+                 :value result}}))
+
+    (catch Throwable t
+      (let [data (when (instance? clojure.lang.ExceptionInfo t)
+                   (ex-data t))
+            error-class (recognized-error-class data)]
+        {:status :failed
+         :scenario scenario-ctx
+         :error (cond-> {:type :step/exception
+                         :message (ex-message t)
+                         :exception-class (.getName (class t))
+                         :data data}
+                  error-class (assoc :error/class error-class))}))))
 
 ;; -----------------------------------------------------------------------------
 ;; SVO Event Emission
@@ -297,6 +318,10 @@
                                      bound-step (:status result)
                                      (:scenario result) (:error result))
                                     :duration-ms duration-ms)
+                       ;; sl-tcsq: the step's poll digest, absent when
+                       ;; nothing polled.
+                       (:poll-counts result)
+                       (assoc :poll-counts (:poll-counts result))
                        produced (assoc :bindings/produced (vec produced))
                        (seq (:refs captured))
                        (assoc :attachments (:refs captured)))
@@ -333,7 +358,13 @@
    scenario to :error, capture-attributed — a green scenario whose
    promised evidence silently failed is green with missing evidence.
    Already-red (and pending) scenarios keep their status; the refs record
-   the misses."
+   the misses.
+
+   Abort (sl-617t): a scenario the run abort stopped at a step boundary
+   (`:aborted-after k` on the raw results) has no verdict — it is
+   `:skipped` with `:held {:reason :aborted :after-step k}`; its executed
+   steps stay in the record. Wins over every other flip: a scenario that
+   did not finish proves nothing about the app."
   [raw-results plan]
   (let [rolled-steps (rollup-wrapper-statuses (:steps raw-results))
         leaf-steps (remove wrapper-step? rolled-steps)
@@ -357,7 +388,12 @@
           (assoc :error obs-error))
       (and (seq capture-failures) (= :passed final-status))
       (-> (assoc :status :error)
-          (assoc :error (capture/capture-error capture-failures))))))
+          (assoc :error (capture/capture-error capture-failures)))
+      (contains? raw-results :aborted-after)
+      (-> (assoc :status :skipped)
+          (dissoc :error)
+          (assoc :held {:reason :aborted
+                        :after-step (:aborted-after raw-results)})))))
 
 (defn execute-scenario
   "Execute all steps for a single scenario/pickle plan.
@@ -435,11 +471,30 @@
                       scenario-ctx provisioned-ctx
                       scenario-status :passed
                       capture-failures []]
-                 (if (empty? remaining-steps)
+                 (cond
+                   (empty? remaining-steps)
                    {:status scenario-status
                     :steps executed-steps
                     :scenario-ctx scenario-ctx
                     :capture-failures capture-failures}
+
+                   ;; The step-boundary check (sl-617t): a run abort stops
+                   ;; a still-green scenario HERE, before its next step —
+                   ;; never inside one. The remaining steps are :skipped
+                   ;; and the scenario is held (finalize-scenario-results);
+                   ;; returning normally is what lets Afters and cleanup
+                   ;; run. A scenario already red is left to its fail-fast
+                   ;; skips: it has its verdict.
+                   (and (= :passed scenario-status) (abort/requested?))
+                   {:status :skipped
+                    :aborted-after (count executed-steps)
+                    :steps (into executed-steps
+                                 (map #(prov/make-step-result % :skipped scenario-ctx nil))
+                                 remaining-steps)
+                    :scenario-ctx scenario-ctx
+                    :capture-failures capture-failures}
+
+                   :else
                    (let [{:keys [step-result scenario-ctx status]
                           step-capture-failures :capture-failures}
                          (classify-and-execute-step (first remaining-steps)

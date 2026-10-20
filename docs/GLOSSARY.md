@@ -31,27 +31,31 @@ parser is 100% Gherkin-compatible, so these mean what they mean upstream.
 | **Examples** | Value table driving Scenario Outline substitution. |
 | **Rule** | Keyword grouping scenarios under one business rule. |
 | **Scenario Outline** | Parameterized scenario template; N examples → N scenarios. |
-| **Tag** | Metadata marker (`@wip`, `@slow`). Parsed and preserved; `sl run --tags` / `--skip-tags` selects a tagged subset at planning time. `@serial` marks a scenario as exclusive under parallel runs. Value-tags (`@<key>=<value>`) attach machinery by name: `@hook=<name>` runs the named lifecycle hook from `hooks.clj` around the scenario (unknown hook names are planning errors; unrecognized keys are ordinary tags). `@because=<pointer>` is the documented provenance convention — an opaque why-pointer nothing interprets or validates (see [AGENT.md](AGENT.md#recording-why-the-provenance-convention)). |
+| **Tag** | Metadata marker (`@smoke`, `@slow`). Parsed and preserved; `sl run --tags` / `--skip-tags` selects a tagged subset at planning time (a bare key such as `@env` matches every `@env=VALUE`). `@serial` marks a scenario as exclusive under parallel runs. Value-tags (`@<key>=<value>`) attach machinery by name: `@hook=<name>` runs the named lifecycle hook from `hooks.clj` around the scenario (unknown hook names are planning errors; unrecognized keys are ordinary tags). The **hold family** is reserved: `@wip` and `@skip=REASON` hold a scenario out of the run (named in `--tags`, it runs); `@blocked=REF` runs it expecting failure — a pass is XPASS, exit 1 (see [AGENT.md](AGENT.md#reserved-tags)). `@because=<pointer>` is the documented provenance convention — an opaque why-pointer nothing interprets or validates (see [AGENT.md](AGENT.md#recording-why-the-provenance-convention)). |
 
-## Modes
+## Shifted and unshifted
 
-- **Shifted** — the normal ShiftLefter mode: extensions on (macros, SVO
-  validation, intent references). Turned on by an `:svo` block in
-  `shiftlefter.edn` — explicit configuration, never auto-detected from file
-  contents.
-- **Vanilla** — plain Gherkin with no ShiftLefter extensions. Technically
-  supported, but Shifted is the only path ShiftLefter advertises and supports
-  day-to-day; reach for Vanilla only if you have a specific reason to.
+There is one mode and no switch: ShiftLefter parses all Gherkin and executes
+only typed steps. "Shifted" describes a step or a suite, never a setting.
 
-Validation strictness is **fine-grained**, not a global switch: each check in the
-`:svo` map (`:unknown-subject`, `:unknown-verb`, `:unknown-object`,
-`:unknown-interface`) is independently `:warn`, `:error`, or `:off`. See
-[SVO.md](SVO.md) for the enforcement model.
+- **Shifted** — a step that binds to a typed step definition (it resolves to a
+  Subject–Verb–Object triple checked against the project vocabulary); a suite
+  whose steps all do.
+- **Unshifted suite** — a suite in which every selected step is undefined —
+  typically a Cucumber corpus copied into `sl/features/`. It is a planning
+  *result*, not a mode: exit 2, nothing executes, and one summary line carries
+  the inventory (`:unshifted-suite` under `--edn`). See
+  [Bring Existing Gherkin](adoption.md).
+
+Validation strictness is **fine-grained**, not a global switch: each kind in the
+`:enforcement` map (`:unknown-subject`, `:unknown-verb`, `:unknown-object`,
+`:unknown-interface`, `:untyped-stepdef`, `:raw-locator`) is independently
+`:warn`, `:error`, or `:off`. See [SVO.md](SVO.md) for the enforcement model.
 
 ## Core vocabulary
 
-- **ShiftLefter (SL)** — the framework: a Gherkin-compatible parser, runner,
-  reporter, and optional Shifted extensions.
+- **ShiftLefter (SL)** — the framework: a Gherkin-compatible parser, a runner
+  that executes typed steps, and reporters.
 - **Parser / Stepengine / Runner / Reporter** — the four component boundaries.
   The parser turns text into structure; the stepengine binds steps to definitions
   and validates SVO; the runner orchestrates execution and emits events; the

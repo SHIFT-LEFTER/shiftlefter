@@ -9,7 +9,7 @@ A persona instance can carry a docstring and its own costume in the subjects
 glossary (`{:id :alice :desc "…" :wears :alice-chrome}`); run
 `sl explain user/alice` to see which persona to use in which circumstances.
 
-Shifted syntax may annotate a step with an interface instance, for example
+A step may be annotated with an interface instance, for example
 `[:web]` or `[:admin-console]`. The annotation names an entry in the config's
 `:interfaces` map — an execution target; the entry's `:type` selects which
 verb vocabulary applies. Interface TYPES own verb vocabularies; every
@@ -51,7 +51,9 @@ copy) — forgetting to return it breaks the chain. Throw to fail the step.
   ctx)                                       ; return ctx
 ```
 
-In Shifted mode, attach `:svo` metadata so the step resolves to a typed triple.
+Attach `:svo` metadata so the step resolves to a typed triple — a matched
+`defstep` without it still binds and runs, reported as `:stepdef/untyped`
+(`:warn` by default).
 `:$1`, `:$2` reference capture groups by position. `:interface` names the
 interface TYPE the verb belongs to — never a config instance name or an
 adapter:
@@ -156,12 +158,12 @@ older versions ignore silently.)
 ```clojure
 {:runner {:step-paths ["steps/"]}
 
- ;; Shifted mode (optional) — enabled by the presence of :svo
  :interfaces {:web {:type :web :adapter :etaoin}}
  ;; Glossaries: sl/glossary/{subjects.edn,verbs/<type>.edn,intents/} are
  ;; discovered automatically when :glossaries is unset; an explicit map
  ;; overrides the convention wholesale.
- :svo {:unknown-subject :warn}}
+ ;; Enforcement levels only — absent = the defaults; presence enables nothing.
+ :enforcement {:unknown-subject :warn}}
 ```
 
 A user `:interfaces` map is the **complete** set — it replaces the builtin
@@ -181,6 +183,37 @@ has exactly one interface, and `sl orient` says so:
 :interfaces {:web :default                      ; keep the builtin browser
              :sms {:type :sms :adapter :sms-mock}} ; bring your own
 ```
+
+## Reserved tags
+
+Tags are free-form except for a closed reserved set. Every tag splits on
+its first `=`: the key is left, the value is right (`@env=prod` is key
+`env`, value `prod`); `@` opens a tag and never appears inside one. In
+`--tags` / `--skip-tags`, a bare key matches every tag of that key
+(`--tags @env` selects every `@env=*`); `key=value` matches exactly.
+
+| Tag | What it does |
+|---|---|
+| `@serial` | The scenario runs alone (never alongside another) under `--max-parallel`. Takes no value. |
+| `@hook=NAME` | Runs the named lifecycle hook from `hooks.clj` around the scenario (`sl agent-doc hooks`). |
+| `@wip` | A hold: the scenario does **not run**. The author's word while drafting; temporal. A value is optional and kept as a note (`@wip=half-done`). Named in `--tags`, it runs. |
+| `@skip=REASON` | A hold: the scenario does **not run**, indefinitely. The reason is required — a bare `@skip` still holds but warns on every run, because reason-free holds rot. Named in `--tags`, it runs. |
+| `@blocked=REF` | An expected failure: the scenario **runs**, and a failure or an unobserved run is HELD with what was measured (`blocked by REF — failed at step 2: …`), never counted against the build. If it **passes**, that is XPASS: the claim is stale, the run is exit 1 with `blocked scenario passed: remove @blocked=REF or reopen REF`. A harness error is never excused by the tag (exit 4, tag visible). The REF is required (a bare `@blocked` warns); `{:runner {:ref-url "https://tracker/{ref}"}}` renders it as a link in the record and the HTML report — nothing is fetched. |
+
+Every hold is counted and visible on every surface: the verdict line
+(`6 scenario(s): 1 passed, 5 held (1 wip, 2 skip, 2 blocked)`), the
+`--edn` record (`:held [{:scenario … :reason :wip|:skip|:blocked :tag …
+:note|:ref … :outcome …}]` and `:counts :held`), JUnit (`<skipped
+message="held: …">`), the HTML page (a HELD row). An agent cannot hide a
+failure by tagging: never add `@skip` without a reason, never add
+`@blocked` without a reference, and remove a `@blocked` tag the moment
+the run says XPASS. Cucumber's `--wip` differs in one way: theirs fails
+the build when a wip scenario passes, ours never runs a wip scenario
+unless it is named, because a half-written scenario passing is not a
+signal.
+
+Every selected scenario held is an empty selection — exit 2, the count in
+the message — because exit 0 is existential.
 
 ## Common mistakes
 

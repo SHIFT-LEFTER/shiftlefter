@@ -66,8 +66,10 @@
 
 (def ^:private segment-pattern
   "Regex for one `name[idx]?` segment.
-   Groups: 1=segment-name (lowercase), 2=index (optional: -?\\d+ or *)."
-  #"^([a-z][a-z0-9_-]*)(?:\[(-?\d+|\*)\])?$")
+   Groups: 1=segment-name (lowercase first letter; kebab or lowerCamel —
+   the loader's element-name charset, sl-ectw), 2=index (optional: -?\\d+
+   or *)."
+  #"^([a-z][A-Za-z0-9_-]*)(?:\[(-?\d+|\*)\])?$")
 
 (defn- invalid-ref
   "Build the standard parse-failure result for `ref-str`."
@@ -199,11 +201,19 @@
    `get-binding` for `interface`).
 
    Returns nil when the whole path is structurally valid, else
-   `{:message <human-readable> :segment <offending name>}`."
+   `{:message <human-readable> :segment <offending name>}` plus, since
+   sl-u2r0, the structured facts a did-you-mean needs: `:type`
+   (:unknown-intent | :element-has-children | :no-binding-for-interface |
+   :unknown-segment), `:intent` (the intent the offending segment was
+   looked up in) and, for :no-binding-for-interface,
+   `:available-interfaces`."
   [intents parsed-ref interface]
   (let [{:keys [intent path]} parsed-ref]
     (if-not (loader/known-intent? intents intent)
-      {:message (str "Unknown intent \"" intent "\"") :segment intent}
+      {:type :unknown-intent
+       :message (str "Unknown intent \"" intent "\"")
+       :segment intent
+       :intent intent}
       (loop [cur intent
              segs path]
         (let [{nm :name} (first segs)
@@ -218,19 +228,48 @@
 
             ;; A non-terminal element segment can't have children.
             (and (not terminal?) (loader/known-element? intents cur nm))
-            {:message (str "\"" nm "\" is an element in intent \"" cur
+            {:type :element-has-children
+             :message (str "\"" nm "\" is an element in intent \"" cur
                            "\" and cannot have children")
-             :segment nm}
+             :segment nm
+             :intent cur}
 
             ;; Terminal element: confirm a binding exists for this interface.
             terminal?
             (let [r (loader/get-binding intents cur nm interface)]
               (when (:error r)
-                {:message (-> r :error :message) :segment nm}))
+                (let [err (:error r)]
+                  (cond-> {:type (if (= :intent/no-binding-for-interface (:type err))
+                                   :no-binding-for-interface
+                                   :unknown-segment)
+                           :message (:message err)
+                           :segment nm
+                           :intent cur}
+                    (:available-interfaces err)
+                    (assoc :available-interfaces (:available-interfaces err))))))
 
             :else
-            {:message (str "Unknown segment \"" nm "\" in intent \"" cur "\"")
-             :segment nm}))))))
+            {:type :unknown-segment
+             :message (str "Unknown segment \"" nm "\" in intent \"" cur "\"")
+             :segment nm
+             :intent cur}))))))
+
+(defn terminal-element
+  "Walk a parsed reference's path through the nesting schema to the
+   intent that owns its LAST segment (sl-ectw: a :shape lives on that
+   element). Non-terminal segments must be collections (the walk descends
+   into the referenced component). Returns `{:intent <owner> :element
+   <name>}`, or nil when the path cannot be walked — the caller decides
+   what an unknown element means. `intents` may be nil (→ nil)."
+  [intents parsed-ref]
+  (when intents
+    (loop [cur (:intent parsed-ref)
+           segs (:path parsed-ref)]
+      (when-let [{nm :name} (first segs)]
+        (if (nil? (next segs))
+          {:intent cur :element nm}
+          (when-let [coll (loader/get-collection intents cur nm)]
+            (recur (:intent coll) (next segs))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Named locations (sl-3jr4)

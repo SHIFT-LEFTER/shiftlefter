@@ -8,7 +8,8 @@
             [babashka.fs :as fs]
             [shiftlefter.gherkin.api :as api]
             [shiftlefter.gherkin.fuzz :as fuzz]
-            [shiftlefter.gherkin.printer :as printer]))
+            [shiftlefter.gherkin.printer :as printer]
+            [shiftlefter.test-helpers :as th]))
 
 ;; -----------------------------------------------------------------------------
 ;; Generator version
@@ -458,12 +459,16 @@
       (is (<= (:signatures/unique result) (:mutations/graceful result))))))
 
 (deftest run-mutations-with-corpus-works
-  (testing "corpus source loads and mutates compliance files"
-    (let [temp-dir (str (fs/create-temp-dir {:prefix "fuzz-corpus-test-"}))
-          result (fuzz/run-mutations {:trials 3
-                                      :seed 42
-                                      :sources :corpus
-                                      :save temp-dir})]
-      (fs/delete-tree temp-dir)
-      (is (= :ok (:status result)))
-      (is (pos? (:mutations/total result))))))
+  ;; sl-v6x3: the :corpus source reads the unshipped Cucumber corpus — a cold
+  ;; clone skips this loudly (pending, naming bin/compliance), never red.
+  (th/with-prerequisite th/corpus-prerequisite
+    (fn []
+      (testing "corpus source loads and mutates compliance files"
+        (let [temp-dir (str (fs/create-temp-dir {:prefix "fuzz-corpus-test-"}))
+              result (fuzz/run-mutations {:trials 3
+                                          :seed 42
+                                          :sources :corpus
+                                          :save temp-dir})]
+          (fs/delete-tree temp-dir)
+          (is (= :ok (:status result)))
+          (is (pos? (:mutations/total result))))))))

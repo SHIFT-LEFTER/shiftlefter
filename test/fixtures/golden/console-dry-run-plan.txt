@@ -1,0 +1,11 @@
+EXIT 0
+--- STDOUT ---
+--- STDERR ---
+run seed: 42
+
+SVO validation warnings:
+  WARNING: Untyped step "the login page is loaded"
+         at ROOT/test/fixtures/plan-project/sl/features/plan.feature:4
+         matched stepdef "^the login page is loaded$", which declares no :svo — no subject, verb, or object was checked
+
+1 scenario(s) bound successfully (dry run)

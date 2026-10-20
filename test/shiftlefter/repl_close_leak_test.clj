@@ -31,7 +31,7 @@
     (repl/reset-ctx!)
     (repl/reset-ctxs!)
     (reset! @#'repl/connected-subjects {})
-    (repl/vanilla!)
+    (repl/reset-config!)
     (f)))
 
 (defn- make-real-etaoin-record

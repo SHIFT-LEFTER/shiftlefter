@@ -17,6 +17,10 @@
    - `:subject receives an SMS to '<phone>' since '<iso-timestamp>' matching /<regex>/`
    - `:subject receives an SMS to '<phone>' within the last <N> <unit> matching /<regex>/`
 
+   The matcher slot also takes `Intent.element` — a reference to the
+   element's declared `:shape` (sl-ectw), e.g. `matching Reset.smsCode`;
+   the engine resolves it to the shape's regex before the body runs.
+
    ## Verification step (single-shot)
 
    - `:subject should see <N> messages to '<phone>'`
@@ -304,17 +308,24 @@
                    " with caption (" empty-ok-value-re
                    ") and media (" value-re ")")))
 
+(def ^:private matcher-re
+  "Matcher-slot fragment (sl-ectw): an inline `/…/` captured WITH its
+   slashes, or an `Intent.element` reference to a declared :shape. The
+   engine classifies it (bindings/resolve-matcher) before the body runs,
+   so the bodies below receive bare regex source either way."
+  bindings/matcher-re-fragment)
+
 (def ^:private receive-default-pattern
-  (re-pattern (str ":([\\w./-]+) receives an SMS to (" value-re ") matching /(.+)/")))
+  (re-pattern (str ":([\\w./-]+) receives an SMS to (" value-re ") matching (" matcher-re ")")))
 
 (def ^:private receive-since-pattern
   (re-pattern (str ":([\\w./-]+) receives an SMS to (" value-re ")"
-                   " since (" value-re ") matching /(.+)/")))
+                   " since (" value-re ") matching (" matcher-re ")")))
 
 (def ^:private receive-within-pattern
   (re-pattern (str ":([\\w./-]+) receives an SMS to (" value-re ")"
                    " within the last (\\d+ (?:seconds?|minutes?|hours?))"
-                   " matching /(.+)/")))
+                   " matching (" matcher-re ")")))
 
 (def ^:private see-count-pattern
   (re-pattern (str ":([\\w./-]+) should see (\\d+) messages to (" value-re ")")))

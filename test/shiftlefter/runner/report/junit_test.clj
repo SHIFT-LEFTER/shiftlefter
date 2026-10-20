@@ -25,7 +25,7 @@
 (def ^:private nul (str (char 0x00)))   ; illegal C0 control
 
 (def ^:private run-ctx
-  {:project-name "demo" :version "0.5.1" :mode :shifted
+  {:project-name "demo" :version "0.5.1"
    :started-at "2026-07-09T03:00:00" :hostname "testhost"
    :project-root "/proj" :allow-pending? false})
 
@@ -76,6 +76,60 @@
 ;; -----------------------------------------------------------------------------
 ;; XSD validation + parse-back
 ;; -----------------------------------------------------------------------------
+
+(deftest crash-marker-suite
+  ;; sl-8orx: the crash record renders as ONE synthetic suite with ONE error
+  ;; testcase, counted in the root totals — so a crashed invocation's file
+  ;; is red beside exit 3 (red iff nonzero). nil is byte-identical.
+  (let [scs [(scenario {:name "A" :feature "F" :status :passed
+                        :steps [(step "Given" "x" :passed)]})]
+        crash {:exception-class "clojure.lang.ExceptionInfo"
+               :message "kaboom <b> & \"quoted\""
+               :run-id "run-123"}
+        xml (ju/build-document scs run-ctx nil crash)
+        root (parse xml)
+        suites (filter #(= :testsuite (:tag %)) (:content root))
+        marker (last suites)]
+    (is (xsd-valid? xml) "the marker suite is schema-valid")
+    (is (= "2" (get-in root [:attrs :tests])) "root counts the marker as a test")
+    (is (= "1" (get-in root [:attrs :errors])) "…and as an error")
+    (is (= "0" (get-in root [:attrs :failures])))
+    (is (= 2 (count suites)) "the feature suite, then the marker suite LAST")
+    (is (= ju/crash-suite-name (get-in marker [:attrs :name])))
+    (is (= "1" (get-in marker [:attrs :errors])))
+    (is (= "testhost" (get-in marker [:attrs :hostname])) "run-ctx stamps ride it")
+    (let [testcase (first (filter #(= :testcase (:tag %)) (:content marker)))
+          error (first (filter #(= :error (:tag %)) (:content testcase)))]
+      (is (= "runner crash" (get-in testcase [:attrs :name])))
+      (is (= "crash" (get-in error [:attrs :type])))
+      (is (str/starts-with? (get-in error [:attrs :message])
+                            "Runner crash: clojure.lang.ExceptionInfo: kaboom")
+          "the message is escaped for the attribute context and parses back")
+      (let [body (apply str (:content error))]
+        (is (str/includes? body "exception-class: clojure.lang.ExceptionInfo"))
+        (is (str/includes? body "message: kaboom <b>"))
+        (is (str/includes? body "run-id: run-123") "the three fields the HTML :crash record carries too")))
+    (is (= (ju/build-document scs run-ctx) (ju/build-document scs run-ctx nil nil))
+        "no crash = today's document, byte for byte")
+    (is (= 1 (red-count (ju/build-document scs run-ctx nil crash)))
+        "exactly one red element is the marker's")
+    (testing "sl-n6io: a record carrying :scenario adds ONE body line — name and
+              project-relative file:line, like the testcase file attribute"
+      (let [with-scenario (assoc crash :scenario {:name "KABOOM marker scenario"
+                                                  :source-file "/proj/features/escape.feature"
+                                                  :line 5})
+            ctx (assoc run-ctx :project-root "/proj")
+            plain (ju/build-document scs ctx nil crash)
+            named (ju/build-document scs ctx nil with-scenario)
+            added (remove (set (str/split-lines plain)) (str/split-lines named))]
+        (is (xsd-valid? named) "still schema-valid")
+        (is (= ["scenario: KABOOM marker scenario (features/escape.feature:5)"] added)
+            "exactly one line differs, and it is the scenario line")
+        (is (= (str/replace named "scenario: KABOOM marker scenario (features/escape.feature:5)\n" "")
+               plain)
+            "remove that line and the two documents are byte-identical — the no-scenario body is untouched")
+        (is (not (str/includes? plain "scenario:"))
+            "a crash with no scenario to name prints no scenario line")))))
 
 (deftest validates-against-community-xsd
   (testing "AC2: a mixed pass/fail/error/skipped document validates"

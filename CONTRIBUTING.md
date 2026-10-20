@@ -76,6 +76,7 @@ release/                   # Release packaging (sl wrapper for distribution zip)
 - **Commit messages:** Include WI ID (e.g., `WI-033.010: Description`)
 - **Style:** Pure functions, immutability, specs (`clojure.spec.alpha`), `defstep` for step definitions
 - **Tests required:** Add or update tests for any code change. Run `bin/kaocha` before committing.
+- **Who's who:** the role names (Chair, Tower, Trench, Herald, Warden) and ids like `sl-6qf6` you'll meet in the docs and changelog are explained in [How this project is built](README.md#how-this-project-is-built).
 
 ## What's Bundled
 

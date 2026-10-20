@@ -219,6 +219,37 @@
    history of values."
   {:attempts 0 :answered 0 :threw 0 :observation-throws 0 :returned 0})
 
+(s/def ::attempts nat-int?)
+(s/def ::answered nat-int?)
+(s/def ::threw nat-int?)
+(s/def ::observation-throws nat-int?)
+(s/def ::poll-counts
+  (s/keys :req-un [::attempts ::answered ::threw ::observation-throws]))
+
+(defn- poll-digest
+  "The four public counters of a poll history — the `:poll-counts` digest
+   that rides a timeout record and (sl-tcsq) the step record."
+  [history]
+  (select-keys history [:attempts :answered :threw :observation-throws]))
+
+(def ^:dynamic *poll-counts*
+  "Per-step poll accumulator (sl-tcsq): the step loop binds this to an
+   atom around each step-fn call, and `poll-until` folds every completed
+   poll's digest into it — on success AND on timeout — so the step record
+   carries `:poll-counts` whether or not the oracle passed. Two polls in
+   one step SUM (`merge-with +`): `:attempts` is the step's total. Unbound
+   (nil) outside the step loop — a bare REPL poll records nothing. Thread-
+   local by construction: a poll on a thread the stepdef spawned itself
+   sees the root nil and is not counted."
+  nil)
+
+(defn- record-poll-counts!
+  "Fold one completed poll's digest into the bound step accumulator;
+   no-op when unbound."
+  [history]
+  (when *poll-counts*
+    (swap! *poll-counts* #(merge-with + (or % {}) (poll-digest history)))))
+
 (defn- observation-throw? [e]
   (= :observation (:error/class (ex-data e))))
 
@@ -283,8 +314,7 @@
                      :deadline-ms deadline-ms
                      :deadline-source deadline-source
                      :interval-ms interval-ms
-                     :poll-counts (select-keys history [:attempts :answered
-                                                        :threw :observation-throws])}
+                     :poll-counts (poll-digest history)}
                     (when last-error
                       {:last-error {:message (ex-message last-error)
                                     :type (:type (ex-data last-error))
@@ -351,7 +381,12 @@
    here; a never-answered poll that saw a dark (observation-class) throw at
    any attempt leaves the scenario unobserved. Flows through normal
    step-failure reporting. At least one attempt always runs; the final
-   attempt lands at the deadline edge."
+   attempt lands at the deadline edge.
+
+   Every completed poll — accepted or timed out — also folds its digest
+   into `*poll-counts*` when the step loop has bound it (sl-tcsq), so the
+   step record carries `:poll-counts` and the report surfaces can say how
+   many polls an oracle took."
   ([ctx pred] (poll-until ctx pred {}))
   ([ctx pred opts]
    (let [resolved (timing ctx opts)
@@ -364,9 +399,11 @@
              history (record-attempt history attempt)
              elapsed (- (System/currentTimeMillis) start)]
          (if (and (contains? attempt :value) (until (:value attempt)))
-           (:value attempt)
+           (do (record-poll-counts! history)
+               (:value attempt))
            (if (>= elapsed deadline-ms)
-             (throw (timeout-record resolved elapsed history opts))
+             (do (record-poll-counts! history)
+                 (throw (timeout-record resolved elapsed history opts)))
              (do (Thread/sleep (long (min interval-ms (- deadline-ms elapsed))))
                  (recur history)))))))))
 

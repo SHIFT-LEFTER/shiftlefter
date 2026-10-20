@@ -14,8 +14,8 @@
    Contract: `--edn` output is the stable machine surface. The human
    format is EXPLICITLY UNSTABLE — do not parse it.
 
-   Shifted-only: Vanilla mode gets an honest not-applicable message
-   (exit 0), never a silent empty listing.
+   One mode (sl-6wh9): every project has a vocabulary contract — an empty
+   glossary lists as empty, never as not-applicable.
 
    v2 (sl-mpu5) adds the corpus-riding surfaces over the SVO reverse
    index (projection.usage-index): usage facets on explain, used/unused +
@@ -55,12 +55,6 @@
   (println)
   (flush))
 
-(defn- mode-line [mode]
-  (case mode
-    :shifted "Mode: Shifted — SVO validation ON (:svo present in config)"
-    :vanilla "Mode: Vanilla — SVO validation OFF (no :svo in config)"
-    nil))
-
 (defn- substrate-lines [{:keys [config-path config-source git-sha git-dirty?]}]
   [(str "Config: " (or config-path "(none)")
         (when config-source (str " (" (name config-source) ")")))
@@ -69,41 +63,15 @@
           (str "git " git-sha (when git-dirty? " (dirty — working tree modified)"))
           "git: not a repository"))])
 
-(defn- strictness-line [svo-effective]
-  (if svo-effective
-    (str "Strictness (:svo effective): "
-         (str/join " · " (map (fn [[k v]] (str (name k) " " v))
-                              (sort-by key svo-effective))))
-    "Strictness: n/a (Vanilla — no :svo)"))
+(defn- strictness-line [enforcement-effective]
+  (str "Strictness (:enforcement effective): "
+       (str/join " · " (map (fn [[k v]] (str (name k) " " v))
+                            (sort-by key enforcement-effective)))))
 
 (defn- header-lines [proj]
   (concat
-   (keep identity [(mode-line (:mode proj))])
    (substrate-lines (:substrate proj))
-   [(strictness-line (:svo-effective proj))]))
-
-(defn- vanilla-edn [proj command]
-  {:resolution/version output-version
-   :command command
-   :status :not-applicable
-   :mode :vanilla
-   :substrate (:substrate proj)
-   :message (str "Vanilla mode: no vocabulary contract applies — there are no"
-                 " subjects, and steps bind by pattern alone. Add :svo to the"
-                 " config to enable the typed vocabulary. Builtin step patterns:"
-                 " `sl agent-doc builtins`.")})
-
-(defn- print-vanilla! [proj edn? command]
-  (if edn?
-    (emit-edn! (vanilla-edn proj command))
-    (do (println (str/join "\n" (header-lines proj)))
-        (println)
-        (println (str "No vocabulary contract applies in Vanilla mode — there"
-                      " are no subjects, and steps bind by pattern alone."))
-        (println "Add :svo to the config to enable the typed vocabulary.")
-        (println "Builtin step patterns: `sl agent-doc builtins`.")
-        (flush)))
-  0)
+   [(strictness-line (:enforcement-effective proj))]))
 
 (defn- no-project! [project-context edn? command]
   (if edn?
@@ -137,12 +105,14 @@
 (defn- listing-blocked?
   "Whether a projection error blocks THIS listing surface (sl-hyey).
 
-   A listing is not a run (the mpu5 vacuity law): suite-lint issues —
-   capability gating included — mean a RUN would fail planning, which
-   `sl orient` reports faithfully (:status :error, runner parity, kept).
-   But they say nothing false about the vocabulary or its usage, so
-   glossary/explain proceed when suite-lint issues are the ONLY errors;
-   the corpus-bind carries them as the visible warn caveat instead.
+   A listing is not a run (the mpu5 vacuity law). The projection's
+   :suite-lint stage holds only the corpus-free check
+   (:glossary/orphan-type, sl-a55s) — it flips `sl orient` to :status
+   :error, but says nothing false about the vocabulary or its usage, so
+   glossary/explain proceed when suite-lint issues are the ONLY errors.
+   The corpus-relative lints (undefined interface, capability gating) are
+   not the projection's to compute; the corpus-bind carries them as the
+   visible warn caveat instead.
    Any other :error diagnostic (config, glossary, steps, setup…) still
    blocks — those make the listing itself untrustworthy."
   [proj]
@@ -194,6 +164,7 @@
          :scope (if selection :selection :full-corpus)
          :selection selection
          :corpus (select-keys corpus [:feature-count :scenario-count
+                                      :held-count
                                       :parse-errors :unmatched-step-count
                                       :suite-lint-issues])
          :tuples tuples
@@ -213,6 +184,12 @@
                                                (map str (sort (:include (:tag-filter selection))))
                                                (map #(str "not " %) (sort (:exclude (:tag-filter selection))))))
                          ")")))]
+      ;; sl-190x (C5): held scenarios are outside the run's grammar —
+      ;; visible here, never silent.
+      (pos? (or (:held-count corpus) 0))
+      (conj (str "Held: " (:held-count corpus)
+                 " scenario(s) held by @wip/@skip tags are outside the run's"
+                 " grammar — name the tag in --tags to include them"))
       (seq (:parse-errors corpus))
       (conj (str "Caveat: " (count (:parse-errors corpus))
                  " feature file(s) failed to parse — usage/deadness is"
@@ -393,9 +370,8 @@
   (cond-> {:resolution/version output-version
            :command :glossary
            :status :ok
-           :mode (:mode proj)
            :substrate (:substrate proj)
-           :svo-effective (:svo-effective proj)
+           :enforcement-effective (:enforcement-effective proj)
            :fingerprint (:fingerprint proj)
            :sections sections}
     uctx (assoc :usage (usage-edn uctx))))
@@ -544,7 +520,7 @@
    never a deadness claim. `duplicates` is the on-demand locator-collision
    report (addendum 4) and reads no corpus.
 
-   - 0: listed (or honest Vanilla/no-project message)
+   - 0: listed (or honest no-project message)
    - 1: project found but its accepted truth failed to load
    - 2: malformed invocation or ambiguous config"
   ([arguments options]
@@ -571,9 +547,6 @@
          (cond
            (listing-blocked? proj)
            (projection-failed! proj "list the glossary")
-
-           (= :vanilla (:mode proj))
-           (print-vanilla! proj edn :glossary)
 
            :else
            (let [uctx (when (not= section "duplicates")
@@ -791,13 +764,15 @@
     (concat [(str "## " (:name m) " — intent [" (name (:provenance m)) "]")
              (str "Declared in: " (:def-site m))
              (str "Elements: " (str/join ", " (map name (:elements m))))]
-            (map (fn [{:keys [element bindings]}]
+            (map (fn [{:keys [element bindings shape]}]
                    (str "  " (name element) " — bindings: "
                         (if (seq bindings)
                           (str/join ", " (map (fn [[iface loc]]
                                                 (str iface " " (pr-str loc)))
                                               bindings))
-                          "NONE")))
+                          "NONE")
+                        ;; sl-ectw: the declared content pattern rides along.
+                        (when shape (str " — shape: /" shape "/"))))
                  (:bindings m))
             (when (seq (:interfaces-without-bindings m))
               [(str "MISSING: no bindings for configured interface(s): "
@@ -882,9 +857,8 @@
            :command :explain
            :status (if (seq matches) :ok :miss)
            :name (:input parsed)
-           :mode (:mode proj)
            :substrate (:substrate proj)
-           :svo-effective (:svo-effective proj)
+           :enforcement-effective (:enforcement-effective proj)
            :matches (vec matches)
            :suggestions (when (empty? matches) (miss-suggestions proj parsed))}
     uctx (assoc :usage (usage-edn uctx))))
@@ -896,7 +870,6 @@
    :command :explain
    :status (if (seq owners) :ok :miss)
    :locator locator-edn
-   :mode (:mode proj)
    :substrate (:substrate proj)
    :owners (mapv #(select-keys % [:interface :address :role :intent]) owners)})
 
@@ -981,9 +954,6 @@
          (cond
            (listing-blocked? proj)
            (projection-failed! proj "explain")
-
-           (= :vanilla (:mode proj))
-           (print-vanilla! proj edn :explain)
 
            (str/starts-with? raw "{")
            (explain-locator! proj raw edn)

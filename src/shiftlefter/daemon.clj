@@ -24,6 +24,7 @@
             [shiftlefter.paths :as paths]
             [shiftlefter.project-context :as project-context]
             [shiftlefter.stepengine.registry :as registry]
+            [shiftlefter.stepengine.exec.abort :as abort]
             [shiftlefter.costume :as costume]
             [shiftlefter.runner.report.edn :as report-edn]
             [shiftlefter.runner.verdict :as verdict]
@@ -430,6 +431,35 @@
                           false "DEAD (stale handle)"
                           "unknown"))))))
     (flush)))
+
+(defn abort!
+  "Abort the run in flight WITHOUT stopping the daemon (sl-617t). Evaluated
+   by the wrapper's `sl daemon abort` and by the warm client's Ctrl-C trap
+   via the --sl-internal-abort sentinel, on a FRESH nREPL session (its own
+   SessionThread, so it is never queued behind the dispatch eval it is
+   aborting). No lock: the request is a CAS in the abort registry, guarded
+   by whether `execute!` has a run registered.
+
+   Prints the immediate line to *err* (Chair's condition: the instant the
+   trap fires, before any waiting) — under the client that is the second
+   socket's :err stream, so it lands on the aborting terminal; under `sl
+   daemon abort` it lands on that terminal and names the results dir
+   (fold-in C2). Returns `{:exit 0 :results-dir d}` when the abort was
+   requested (or already was), `{:exit 1}` when no run is in flight. The
+   dispatch eval itself returns its `{:exit 4}` only after the wind-down —
+   that return is how the attached client learns the unwind finished."
+  []
+  (let [{:keys [status] :as r} (abort/request!)]
+    (binding [*out* *err*]
+      (case status
+        :idle (println "sl daemon: no run in flight — nothing to abort")
+        :already-aborting (println (str "already " (abort/announce-line r)))
+        (println (abort/announce-line r)))
+      (flush))
+    (if (= :idle status)
+      {:exit 1}
+      (cond-> {:exit 0}
+        (:results-dir r) (assoc :results-dir (:results-dir r))))))
 
 (defn stop!
   "Stop the running daemon if any (test/programmatic teardown). External callers

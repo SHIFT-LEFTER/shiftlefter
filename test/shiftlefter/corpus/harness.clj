@@ -19,7 +19,7 @@
 
 (defn run-corpus!
   "Materialize (profile, seed), run it through the real runner in-process
-   (vanilla mode, no browser), and collect every verification surface.
+   (untyped corpus steps, no browser), and collect every verification surface.
 
    opts:
    - :seed            required

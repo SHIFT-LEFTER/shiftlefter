@@ -101,7 +101,15 @@
   (testing ":receive :default matches plain-baseline form"
     (let [pat (:pattern (find-sms-stepdef :receive :default))]
       (is (re-matches pat
-                      ":alice receives an SMS to '+15551234567' matching /code: (\\d+)/"))))
+                      ":alice receives an SMS to '+15551234567' matching /code: (\\d+)/"))
+      (testing "the matcher slot is captured WITH its markers (sl-ectw)"
+        (is (= "/code: (\\d+)/"
+               (last (re-matches pat ":alice receives an SMS to '+1' matching /code: (\\d+)/"))))
+        (is (= "Reset.smsCode"
+               (last (re-matches pat ":alice receives an SMS to '+1' matching Reset.smsCode")))
+            "an Intent.element ref to a declared :shape rides the same slot")
+        (is (nil? (re-matches pat ":alice receives an SMS to '+1' matching code (\\d+)"))
+            "a bare pattern without markers does not bind"))))
 
   (testing ":receive :since-iso matches with ISO timestamp"
     (let [pat (:pattern (find-sms-stepdef :receive :since-iso))]

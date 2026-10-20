@@ -305,7 +305,7 @@
           (spit-file dir "sl/shiftlefter.edn"
                      (pr-str {:runner {:step-paths ["steps/"]
                                        :capture {:screenshot :every-step}}
-                              :svo {}
+                              :enforcement {}
                               :glossaries {:subjects "glossary/subjects.edn"
                                            :verbs [verbs]}
                               :interfaces {:web {:type :web

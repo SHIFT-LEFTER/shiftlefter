@@ -38,7 +38,7 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private run-ctx
-  {:run-id "r-1" :project-name "demo" :version "0.5.5" :mode :shifted
+  {:run-id "r-1" :project-name "demo" :version "0.5.5"
    :started-at "2026-08-23T23:00:00" :project-root "/proj"
    :allow-pending? false})
 
@@ -67,7 +67,12 @@
 
 (defn- scen-pass []
   (scenario {:name "p" :feature "F" :status :passed
-             :steps [(step :given "a" :passed) (step :then "b" :passed)]}))
+             :steps [(step :given "a" :passed)
+                     ;; sl-tcsq: a polled oracle — exercises the renderer's
+                     ;; `(N polls)` arm on every generated page.
+                     (assoc (step :then "b" :passed)
+                            :poll-counts {:attempts 3 :answered 1 :threw 0
+                                          :observation-throws 0})]}))
 
 (defn- scen-fail []
   (scenario {:name "f" :feature "F" :status :failed
@@ -113,6 +118,16 @@
          :summary {:run-id "r-1" :exit-code 4 :status :degraded
                    :halted {:after-scenario 1 :scenario "p"}
                    :counts {:passed 1 :failed 0 :pending 0 :skipped 1 :unobserved 1}}})
+  ;; sl-617t: the abort record in the same slot, with a held scenario.
+  (doc! dir "aborted.html"
+        {:run-ctx run-ctx
+         :scenarios [(scen-pass)
+                     (assoc (scen-pass) :status :skipped
+                            :held {:reason :aborted :after-step 1})]
+         :diagnostics nil
+         :summary {:run-id "r-1" :exit-code 4 :status :degraded
+                   :halted {:reason :aborted :after-scenario 1}
+                   :counts {:passed 1 :failed 0 :pending 0 :skipped 0 :held 1}}})
   (doc! dir "empty.html"
         {:run-ctx run-ctx :scenarios [] :diagnostics nil
          :summary {:run-id "r-1" :exit-code 0 :status :passed
@@ -197,6 +212,11 @@
                    "halted after scenario 1 (p): observation failure"))
               (is (str/includes?
                    (header-of "toc.html")
-                   "halted after scenario 2 (d2): observation failure — in group delta"))))
+                   "halted after scenario 2 (d2): observation failure — in group delta")))
+            (testing "sl-617t: the abort record renders in the same header
+                      slot with the held count"
+              (is (str/includes?
+                   (header-of "aborted.html")
+                   "aborted after scenario 1: 1 scenario(s) held"))))
           (finally
             (fs/delete-tree dir)))))))

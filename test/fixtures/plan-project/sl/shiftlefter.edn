@@ -1,0 +1,12 @@
+;; sl-xvae fixture: a typed suite with one macro, for the dry-run step plan
+;; (console -v listing + the :plan / :step/resolved EDN record). Subjects and
+;; intents live under glossary/ by convention; :unknown-object stays off so
+;; the goldens carry no object warnings.
+{:runner {:step-paths ["steps/"]
+          :macros {:enabled? true
+                   :registry-paths ["macros/plan.ini"]}}
+ :interfaces {:web {:type :web :adapter :etaoin :config {:headless true}}}
+ :enforcement {:unknown-subject :warn
+               :unknown-verb :warn
+               :unknown-object :off
+               :unknown-interface :error}}

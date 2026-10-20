@@ -1,0 +1,7 @@
+;; Reset — the password-reset flow's SMS surface. The verification code
+;; arrives as a text message: a readable with no locator, whose :shape is
+;; all it has. The shape's one group binds to the element's own name, so
+;; `matching Reset.smsCode` produces {smsCode} with nothing else to read.
+{:intent "Reset"
+ :elements {:smsCode {:bindings {:sms {}}
+                      :shape "verification code is: (\\d{6})"}}}

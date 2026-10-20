@@ -373,3 +373,14 @@
     (is (= ["Feed"] (resolve/located-intents intents :web))
         "only intents with a :path for the interface are candidates")
     (is (= [] (resolve/located-intents intents :mobile)))))
+
+;; sl-ectw: element segments read lowerCamel too (a shaped element's name
+;; must be binding-legal, and binding names are lowerCamel).
+(deftest accept-lower-camel-element-segment
+  (let [result (resolve/parse-intent-ref "Reset.smsCode")]
+    (is (:ok result))
+    (is (= "smsCode" (-> result :ok :path first :name))))
+  (is (:ok (resolve/parse-intent-ref "Bookmarks.tweet[2].quotedAuthor")))
+  (is (= :intent/invalid-reference
+         (-> (resolve/parse-intent-ref "Reset.SmsCode") :error :type))
+      "an element still starts lowercase"))

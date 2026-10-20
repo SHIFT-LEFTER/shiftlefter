@@ -48,15 +48,20 @@
    :nothing   {:provides []}})
 
 ;; ---------------------------------------------------------------------------
-;; Skip path: no :interfaces config → lint is a no-op
+;; No exempt path (sl-6wh9): nil :interfaces reads as the empty set
 ;; ---------------------------------------------------------------------------
 
-(deftest lint-skipped-without-interfaces-config
-  (testing "When :interfaces is nil, all checks skip and issues = []"
+(deftest lint-runs-against-empty-set-without-interfaces-config
+  (testing "When :interfaces is nil, the checks run against zero configured
+            instances — the :sms stepdef finds no provider (the old vanilla
+            skip is retired)"
     (let [stepdefs [(mk-stepdef "x" {:interface :sms
                                      :requires-protocols
-                                     [:shiftlefter.sms.protocol/ISMSInbound]})]]
-      (is (= [] (suite-lint/lint-suite stepdefs [:sms] nil fake-registry))))))
+                                     [:shiftlefter.sms.protocol/ISMSInbound]})]
+          issues (suite-lint/lint-suite stepdefs [] nil fake-registry)]
+      (is (= [:stepdef/undefined-interface] (mapv :type issues)))
+      (is (= (suite-lint/lint-suite stepdefs [] {} fake-registry) issues)
+          "nil and {} are one shape"))))
 
 ;; ---------------------------------------------------------------------------
 ;; :stepdef/undefined-interface
@@ -281,6 +286,21 @@
       (is (= :glossary/orphan-type (:type issue)))
       (is (= :sms (:glossary-type issue)))
       (is (= [:web] (:configured-types issue))))))
+
+(deftest lint-project-is-the-corpus-free-entry-point
+  (testing "sl-a55s: lint-project runs ONLY the check that needs no bound
+            suite (:glossary/orphan-type) — the projection's entry point.
+            It is the same implementation lint-suite runs, not a second one"
+    (let [project-types [:web :sms]
+          interfaces    {:web {:type :web :adapter :etaoin}}]
+      (is (= [:glossary/orphan-type]
+             (mapv :type (suite-lint/lint-project project-types interfaces))))
+      (is (= (suite-lint/lint-project project-types interfaces)
+             (suite-lint/lint-suite [] project-types interfaces fake-registry))
+          "identical issues to lint-suite's orphan part")
+      (is (= [] (suite-lint/lint-project project-types nil))
+          "nil interfaces reads as the empty set, as in lint-suite")
+      (is (= [] (suite-lint/lint-project nil interfaces))))))
 
 (deftest glossary-types-all-covered
   (testing "Every project glossary type matches some configured interface :type"

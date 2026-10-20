@@ -85,6 +85,26 @@
   (projection/build-projection
    (project-context/resolve {:config-path config-path})))
 
+;; sl-a55s C2: the zero-interfaces WARN tells the reader to "Add one (e.g.
+;; {:interfaces {:web :default}})". A hint that does not work is a lie in a
+;; never-guess tool — so the EXACT snippet is driven through both surfaces.
+(deftest zero-interfaces-hint-is-true
+  (with-project {:interfaces {:web :default}}
+    (fn [p]
+      (let [proj (projection-of p)
+            web (first (filter #(= :web (:name %)) (:interfaces proj)))]
+        (testing "the hinted snippet loads and yields a configured :web interface"
+          (is (= :ok (:status proj)))
+          (is (some? web) "a :web instance is configured")
+          (is (= :web (:type web)))
+          (is (not-any? #(= :config/zero-interfaces (:type %)) (:diagnostics proj))
+              "and the WARN it answers is gone"))
+        (testing "and the same browser feature that exited 2 under zero
+                  interfaces now plans"
+          (let [{:keys [result summary]} (run-dry-edn p)]
+            (is (= 0 (:exit-code result)))
+            (is (empty? (get-in summary [:planning :suite-lint-issues])))))))))
+
 ;; A feature that binds AND runs without any interface — for the W23 live
 ;; run that must still write the reports the dry run only notices.
 (def ^:private simple-feature "test/fixtures/features/simple.feature")
@@ -121,21 +141,45 @@
             (is (some #(= :stepdef/undefined-interface (:type %))
                       (get-in summary [:planning :suite-lint-issues]))
                 "the lint issue rides the planning block's :suite-lint-issues"))))))
-  (testing "orient: nil and {} produce the SAME projection — one
-            zero-interfaces shape (the run-path lint is a used-stepdef
-            lint; orient's s2oa filter shows neither, and that parity is
-            the ruling's claim)"
+  ;; sl-a55s (Chair ruling 2026-09-21, "orient stays in its lane"): the two
+  ;; surfaces above and below no longer answer the same question, so they
+  ;; cannot disagree. dry-run = the features against the project (it exits
+  ;; 2 above); orient = the project WITHOUT the features. Orient does not
+  ;; read features, so it never emits :stepdef/undefined-interface — a fact
+  ;; about MATCHED stepdefs — and it never claims the project is clean as a
+  ;; whole. What it CAN say without a feature: zero interface instances are
+  ;; configured, so no interface-typed step can plan — one WARN, status and
+  ;; exit code untouched. This test used to pin the old parity (both quiet,
+  ;; "Accepted project truth loads clean" beside an exit-2 dry-run).
+  (testing "orient: nil and {} produce the SAME projection — status :ok,
+            exactly one :config/zero-interfaces WARN, no corpus-relative
+            lint, and no whole-project verdict in the render"
     (with-project {:interfaces nil}
       (fn [nil-p]
         (with-project {:interfaces {}}
           (fn [empty-p]
             (let [a (projection-of nil-p)
                   b (projection-of empty-p)]
-              (is (= :ok (:status a) (:status b)))
+              (is (= :ok (:status a) (:status b)) "a WARN never flips :status")
               (is (= [] (:interfaces a) (:interfaces b)))
-              (is (= (mapv :type (:diagnostics a))
-                     (mapv :type (:diagnostics b))))
-              (is (= 0 (:code (orient nil-p)) (:code (orient empty-p)))))))))))
+              (is (= [[:config/zero-interfaces :warn :config]]
+                     (mapv (juxt :type :severity :stage) (:diagnostics a))
+                     (mapv (juxt :type :severity :stage) (:diagnostics b))))
+              (doseq [{:keys [code out]} [(orient nil-p) (orient empty-p)]]
+                (is (= 0 code) "orient's exit code does not change for the WARN")
+                (is (str/includes? out "[warn/config] :config/zero-interfaces"))
+                (is (str/includes? out "no interface-typed step can plan"))
+                (is (str/includes? out "Not checked: your features"))
+                (is (str/includes? out "`sl run --dry-run`"))
+                (is (str/includes? out "Project checks: ok"))
+                (is (not (str/includes? out "loads clean"))
+                    "no sentence reads as a verdict on the whole project")
+                (is (not (str/includes? out "undefined-interface"))))))))))
+  (testing "a CONFIGURED interface set never sees the WARN"
+    (with-project {:interfaces {:web {:type :web :adapter :etaoin}}}
+      (fn [p]
+        (is (not-any? #(= :config/zero-interfaces (:type %))
+                      (:diagnostics (projection-of p))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; W-B2 — a present-but-non-map :interfaces reaches :config/invalid-interfaces
@@ -173,10 +217,15 @@
 (def ^:private legacy-verbs-map {:web "glossary/verbs/web.edn"})
 
 (deftest retired-verbs-map-is-a-planning-error-on-both-surfaces
-  (testing "run --dry-run, Shifted AND Vanilla: exit 2 quoting the found
-            value and naming the path-list form — was exit 3 (MapEntry
-            as-file coercion) because the resolver ran before normalize"
-    (doseq [cfg [{:svo {} :glossaries {:verbs legacy-verbs-map}}
+  ;; sl-6wh9: the W33 repro used to run as a Shifted/Vanilla twin; the
+  ;; Vanilla arm is RETIRED with the mode (there is one run path now). The
+  ;; block-present / block-absent pair below pins that presence means
+  ;; nothing on this path.
+  (testing "run --dry-run, with and without an :enforcement block: exit 2
+            quoting the found value and naming the path-list form — was
+            exit 3 (MapEntry as-file coercion) because the resolver ran
+            before normalize"
+    (doseq [cfg [{:enforcement {} :glossaries {:verbs legacy-verbs-map}}
                  {:glossaries {:verbs legacy-verbs-map}}]]
       (with-project cfg
         (fn [p]
@@ -194,9 +243,9 @@
         (let [{:keys [result summary]} (run-dry-edn p)]
           (is (= 2 (:exit-code result)))
           (is (= [:config/invalid-glossaries] (planning-error-types summary)))))))
-  (testing "orient (Shifted, the strict loader): exit 1 with the
+  (testing "orient (the strict loader): exit 1 with the
             [error/config] line — was a raw trace through normalize-path"
-    (with-project {:svo {} :glossaries {:verbs legacy-verbs-map}}
+    (with-project {:enforcement {} :glossaries {:verbs legacy-verbs-map}}
       (fn [p]
         (let [{:keys [code out]} (orient p)]
           (is (= 1 code))
@@ -266,21 +315,21 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest svo-level-typo-is-a-planning-error-on-both-surfaces
-  (testing "run --dry-run: :warm → exit 2 naming :config/invalid-svo-level with
+  (testing "run --dry-run: :warm → exit 2 naming :config/invalid-enforcement-level with
             did-you-mean — used to flow through as non-blocking"
-    (with-project {:svo {:unknown-subject :warm}}
+    (with-project {:enforcement {:unknown-subject :warm}}
       (fn [p]
         (let [{:keys [result summary]} (run-dry-edn p)
               msg (-> summary :planning :errors first :message)]
           (is (= 2 (:exit-code result)))
-          (is (= [:config/invalid-svo-level] (planning-error-types summary)))
+          (is (= [:config/invalid-enforcement-level] (planning-error-types summary)))
           (is (str/includes? msg "did you mean :warn?"))))))
   (testing "orient: exit 1 with the [error/config] line"
-    (with-project {:svo {:unknown-verb :errror}}
+    (with-project {:enforcement {:unknown-verb :errror}}
       (fn [p]
         (let [{:keys [code out]} (orient p)]
           (is (= 1 code))
-          (is (str/includes? out "[error/config] :config/invalid-svo-level")))))))
+          (is (str/includes? out "[error/config] :config/invalid-enforcement-level")))))))
 
 (deftest hook-entry-unknown-key-is-a-planning-error
   (testing "an unknown key in a hooks.clj entry → exit 2 :hooks/unknown-key

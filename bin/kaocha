@@ -6,6 +6,9 @@
 #   ./bin/kaocha e2e       → live-browser example validators
 #   ./bin/kaocha daemon    → warm-path shell E2E (needs a built jar; self-skips otherwise)
 # Naming a suite (any arg) overrides the default and runs exactly what you ask.
+# Run the daemon suite in the FOREGROUND (sl-cotp): a background job of a
+# non-interactive shell inherits SIGINT as ignored, and its four abort pins
+# then report a visible pending instead of vouching for the abort path.
 
 if [ "$#" -eq 0 ]; then
     exec clj -M:test unit e2e

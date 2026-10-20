@@ -103,6 +103,18 @@
       (is (= "@smoke" (-> island :scenarios first :plan :plan/pickle
                           :pickle/tags first :name))))))
 
+(deftest island-carries-poll-counts-on-steps
+  ;; sl-tcsq: the HTML step row's data — the digest rides the island through
+  ;; the real envelope seam; non-polling steps carry no key.
+  (let [digest {:attempts 3 :answered 1 :threw 0 :observation-throws 0}
+        env (scenario {:name "p" :feature "F" :status :passed
+                       :steps [(step "Given" "a" :passed)
+                               (assoc (step "When" "the oracle" :passed) :poll-counts digest)]})
+        [_doc island] (doc-and-island [env])
+        steps (-> island :scenarios first :steps)]
+    (is (= digest (:poll-counts (second steps))))
+    (is (not (contains? (first steps) :poll-counts)))))
+
 (deftest island-carries-hooks-and-schedule
   ;; sl-esq: hook records and derived scheduling ride the island so the
   ;; client renderer (locked below) has them; hook-less envelopes carry
@@ -316,10 +328,67 @@
       (is (str/includes? js "TOC_STATUS[status]")
           "renderHeader consults TOC_STATUS — exit 3 reads CRASHED, never FAILED")
       (is (str/includes? js "\":crashed\": [\"CRASHED\", \"st-error\"]")))
+    (testing "sl-n6io: the crash line names the crashed scenario when the record carries one"
+      (is (str/includes? js "function appendCrashLine(header, runCtx, summary)")
+          "runCtx is threaded in — the project root relativizes the file")
+      (is (str/includes? js "\" — in scenario \" +"))
+      (is (str/includes? js "relativePath(k(runCtx, \":project-root\"), k(scenario, \":source-file\"))"))
+      (is (= 2 (count (re-seq #"appendCrashLine\(header, runCtx, summary\);" js)))
+          "both call sites — the run header and the invocation TOC — pass runCtx"))
     (testing "sl-t86d: the st-error badge is actually styled"
       (is (str/includes? (slurp (io/resource "report/report.css"))
                          ".run-status.st-error")
-          "PLANNING FAILED / DEGRADED / CRASHED badges need a background"))))
+          "PLANNING FAILED / DEGRADED / CRASHED badges need a background"))
+    (testing "sl-617t: the abort vocabulary — HELD rows, the held count, the
+              abort header line"
+      (is (str/includes? js "\"st-held\": \"HELD\""))
+      (is (str/includes? js "heldSuffix(scenario)"))
+      (is (str/includes? js "\"aborted after scenario \""))
+      (is (str/includes? js "heldCount + \" held\""))
+      (is (str/includes? (slurp (io/resource "report/report.css"))
+                         ".status-word.st-held")
+          "the HELD word is styled"))
+    (testing "sl-190x: the hold family — HELD extends to @blocked with the
+              measured outcome, the XPASS row + block, the planning-held
+              list under the counts, the tracker link"
+      (is (str/includes? js "if (k(scenario, \":held\")) {\n    return \"st-held\";")
+          "any :held record is HELD — aborted and blocked alike, never forked")
+      (is (str/includes? js "function blockedHeldPhrase(held)"))
+      (is (str/includes? js "\" (blocked scenario passed)\""))
+      (is (str/includes? js "el(\"div\", \"error-detail xpass\")"))
+      (is (str/includes? js "function appendHeldList(header, summary)"))
+      (is (str/includes? js "[\":aborted\", \":blocked\"].includes(k(e, \":reason\"))")
+          "engine-held scenarios are rows already; the list renders planning holds")
+      (is (str/includes? js "function refLink(record)"))
+      (is (str/includes? js "a.href = url"))
+      (is (str/includes? js "if (k(scenario, \":held\")) return false;")
+          "a held scenario is never red")
+      (is (str/includes? js "xpassCount + \" xpass\""))
+      (let [css (slurp (io/resource "report/report.css"))]
+        (is (str/includes? css ".held-list"))
+        (is (str/includes? css ".ref-link"))))))
+
+(deftest hold-family-island-carries-the-records
+  ;; sl-190x: the island is the renderer's only input — the :held and
+  ;; :xpass records must survive emission intact, link included.
+  (let [held (scenario {:name "Tracked" :feature "F" :status :failed
+                        :steps [(step "Then" "two" :failed (exc "count mismatch" "clojure.lang.ExceptionInfo"))]})
+        held (assoc held :held {:reason :blocked :tag "@blocked=PROJ-1" :ref "PROJ-1"
+                                :ref-url "https://tracker/PROJ-1"
+                                :outcome {:status :failed :at-step 1 :message "count mismatch"}})
+        xpass (assoc (scenario {:name "Fixed" :feature "F" :status :failed :steps [(step "Given" "one" :passed)]})
+                     :xpass {:reason :blocked :tag "@blocked=PROJ-2" :ref "PROJ-2"
+                             :message "blocked scenario passed: remove @blocked=PROJ-2 or reopen PROJ-2"})
+        [_ island] (doc-and-island [held xpass]
+                                   :summary (assoc run-summary
+                                                   :held [{:scenario "Draft" :reason :wip :tag "@wip"}
+                                                          {:scenario "Tracked" :reason :blocked :ref "PROJ-1"}]
+                                                   :counts {:passed 0 :failed 1 :pending 0 :skipped 0 :held 2 :xpass 1}))]
+    (is (= "https://tracker/PROJ-1" (-> island :scenarios first :held :ref-url)))
+    (is (= {:status :failed :at-step 1 :message "count mismatch"} (-> island :scenarios first :held :outcome)))
+    (is (= "PROJ-2" (-> island :scenarios second :xpass :ref)))
+    (is (= [:wip :blocked] (mapv :reason (-> island :summary :held))))
+    (is (= 1 (-> island :summary :counts :xpass)))))
 
 ;; -----------------------------------------------------------------------------
 ;; AC5: macro golden parity — the same real-expansion scenario the JUnit
@@ -476,7 +545,7 @@
       (let [ctx (:run-ctx island)]
         (is (string? (:version ctx)))
         (is (string? (:started-at ctx)))
-        (is (contains? #{:shifted :vanilla} (:mode ctx)))
+        (is (not (contains? ctx :mode)) "sl-6wh9: no mode on any surface")
         (is (string? (:project-name ctx)))
         (is (nil? (:selection ctx)) "no filter active => no selection key")))
     (testing "the document at corpus scale is still self-contained"

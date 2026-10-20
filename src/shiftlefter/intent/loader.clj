@@ -22,7 +22,23 @@
    ## Naming Conventions
 
    - Intent names: PascalCase (e.g., Login, BuyBox, FrequentlyBoughtTogether)
-   - Element names: lowercase with hyphens (e.g., submit, email-input, add-to-cart)
+   - Element names: lowercase first letter, kebab or lowerCamel (e.g., submit,
+     email-input, add-to-cart, smsCode). An element with a single-group
+     `:shape` binds to its own name and must be lowerCamel (sl-ectw).
+
+   ## :shape (sl-ectw)
+
+   An element may declare the content pattern of the text it owns:
+
+   ```edn
+   :smsCode {:bindings {:sms {}}
+             :shape \"verification code is: (\\\\d{6})\"}
+   ```
+
+   Analyzed at load by `shiftlefter.intent.shape` (compiles; ≥1 group; no
+   {token}; a single group binds to the element's own name; several groups
+   must all be named). The lookup entry carries `:shape {:source :pattern
+   :names :group-count}`; `get-shape` reads it.
 
    ## Usage
 
@@ -40,7 +56,9 @@
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
             [shiftlefter.browser.locators :as locators]
-            [shiftlefter.gherkin.io :as sio]))
+            [shiftlefter.edn-lines :as edn-lines]
+            [shiftlefter.gherkin.io :as sio]
+            [shiftlefter.intent.shape :as shape]))
 
 ;; -----------------------------------------------------------------------------
 ;; Specs — :collections / :root schema (acceptance #6; boundary = EDN file load)
@@ -86,8 +104,13 @@
   #"^[A-Z][A-Za-z0-9_-]*$")
 
 (def ^:private lowercase-pattern
-  "Regex for lowercase element names: starts with lowercase, then lowercase/digits/hyphen/underscore."
-  #"^[a-z][a-z0-9_-]*$")
+  "Regex for element and collection names: a lowercase first letter (what
+   keeps them distinct from PascalCase intents), then letters, digits,
+   hyphen or underscore — kebab (`add-to-cart`) and lowerCamel (`smsCode`)
+   both read (sl-ectw). An element with a single-group `:shape` binds to
+   its own name and must therefore be lowerCamel; `intent.shape` enforces
+   that where the shape is analyzed."
+  #"^[a-z][A-Za-z0-9_-]*$")
 
 (defn- pascal-case?
   "Returns true if string is PascalCase."
@@ -119,7 +142,8 @@
   [element-key intent-name file-path]
   (when-not (lowercase-element? element-key)
     {:type :intent/invalid-element-name
-     :message (str "Element name must be lowercase: " element-key
+     :message (str "Element name must start with a lowercase letter "
+                   "(kebab or lowerCamel): " element-key
                    " in intent \"" intent-name "\"")
      :intent intent-name
      :element element-key
@@ -137,16 +161,34 @@
      :element element-key
      :path file-path}))
 
+(defn- validate-element-shape
+  "Validate an element's optional `:shape` (sl-ectw) via
+   `intent.shape/analyze-shape`. Returns error or nil; the error carries
+   the element's def-site line when the index pass vouched for the file."
+  [element-key element-def intent-name file-path element-line]
+  (when (and (map? element-def) (contains? element-def :shape))
+    (when-let [e (:error (shape/analyze-shape (name element-key)
+                                              (:shape element-def)))]
+      (cond-> (assoc e
+                     :message (str (:message e) " (intent \"" intent-name "\")")
+                     :intent intent-name
+                     :element element-key
+                     :path file-path)
+        element-line (assoc :line element-line)))))
+
 (defn- validate-element
   "Validate a single element. Returns vector of errors (may be empty)."
-  [element-key element-def intent-name file-path]
+  [element-key element-def intent-name file-path element-line]
   (filterv some?
            [(validate-element-name element-key intent-name file-path)
-            (validate-element-bindings element-key element-def intent-name file-path)]))
+            (validate-element-bindings element-key element-def intent-name file-path)
+            (validate-element-shape element-key element-def intent-name file-path
+                                    element-line)]))
 
 (defn- validate-elements
-  "Validate all elements in an intent. Returns vector of errors."
-  [elements intent-name file-path]
+  "Validate all elements in an intent. Returns vector of errors.
+   `element-lines` is the def-site `{name line}` map (sl-u2r0), may be nil."
+  [elements intent-name file-path element-lines]
   (if-not (map? elements)
     [{:type :intent/invalid-elements
       :message (str "Intent \"" intent-name "\" :elements must be a map")
@@ -154,7 +196,8 @@
       :path file-path}]
     (into []
           (mapcat (fn [[k v]]
-                    (validate-element k v intent-name file-path)))
+                    (validate-element k v intent-name file-path
+                                      (get element-lines (name k)))))
           elements)))
 
 ;; -----------------------------------------------------------------------------
@@ -235,8 +278,10 @@
           clashes)))
 
 (defn- validate-intent-structure
-  "Validate a parsed intent map. Returns vector of errors (may be empty)."
-  [intent-data file-path]
+  "Validate a parsed intent map. Returns vector of errors (may be empty).
+   `def-site` is the intent's sl-u2r0 def-site map (element lines feed the
+   :shape errors); may be nil."
+  [intent-data file-path def-site]
   (let [intent-name (:intent intent-data)
         elements (:elements intent-data)
         collections (:collections intent-data)
@@ -269,7 +314,8 @@
         (-> (filterv some? [(validate-intent-name intent-name file-path)
                             (validate-root root intent-name file-path)
                             (validate-location location intent-name file-path)])
-            (into (validate-elements elements intent-name file-path))
+            (into (validate-elements elements intent-name file-path
+                                     (:elements def-site)))
             (into (validate-collections collections intent-name file-path))
             (into (validate-no-name-collision elements collections
                                               intent-name file-path)))))))
@@ -278,9 +324,25 @@
 ;; File Loading
 ;; -----------------------------------------------------------------------------
 
+(defn- intent-def-site
+  "sl-u2r0: where this intent and its parts are declared —
+   `{:file path :line n :elements {name line} :collections {name line}}`,
+   lines from the index metadata when the pass vouched for the file, else
+   file-only (every line key absent)."
+  [intent-data path]
+  (let [indexed (::lines (meta intent-data))
+        names (fn [m] (into {} (map (fn [[k line]] [(name k) line])) m))
+        elements (names (edn-lines/entry-lines indexed [:elements]))
+        collections (names (edn-lines/entry-lines indexed [:collections]))]
+    (cond-> {:file path}
+      (:line (meta indexed)) (assoc :line (:line (meta indexed)))
+      (seq elements) (assoc :elements elements)
+      (seq collections) (assoc :collections collections))))
+
 (defn- read-edn-file
   "Read EDN from a filesystem path.
-   Returns {:ok data} or {:error {...}}."
+   Returns {:ok data} or {:error {...}}. The data carries the def-site
+   line index as `::lines` metadata (sl-u2r0)."
   [path]
   (try
     (let [content (sio/slurp-utf8 path)]
@@ -289,7 +351,13 @@
         {:error {:type :intent/read-failed
                  :message (str "Failed to read intent file: " (:message content))
                  :path path}}
-        {:ok (edn/read-string content)}))
+        (let [data (edn/read-string content)]
+          ;; sl-u2r0: the def-site line index rides as metadata — the
+          ;; position-tracking read of the same text, or nil when that
+          ;; pass could not vouch for itself (shiftlefter.edn-lines/index).
+          {:ok (if (instance? clojure.lang.IObj data)
+                 (vary-meta data assoc ::lines (edn-lines/index content data))
+                 data)})))
     (catch Exception e
       {:error {:type :intent/parse-failed
                :message (str "Failed to parse intent EDN: " (ex-message e))
@@ -304,10 +372,16 @@
     (if (:error read-result)
       {:errors [(:error read-result)]}
       (let [intent-data (:ok read-result)
-            validation-errors (validate-intent-structure intent-data path-str)]
+            ;; sl-ectw: the def-site is computed BEFORE validation so a
+            ;; :shape error can cite the element's line.
+            def-site (intent-def-site intent-data path-str)
+            validation-errors (validate-intent-structure intent-data path-str
+                                                         def-site)]
         (if (seq validation-errors)
           {:errors validation-errors}
-          {:ok (assoc intent-data :source-file path-str)})))))
+          {:ok (assoc intent-data
+                      :source-file path-str
+                      :def-site def-site)})))))
 
 ;; -----------------------------------------------------------------------------
 ;; Building the Lookup Structure
@@ -322,10 +396,14 @@
      (fn [acc element-key element-def]
        (assoc acc
               [intent-name (name element-key)]
-              (merge (select-keys element-def [:description :collection])
-                     {:bindings (:bindings element-def)
-                      :intent intent-name
-                      :element (name element-key)})))
+              (cond-> (merge (select-keys element-def [:description :collection])
+                             {:bindings (:bindings element-def)
+                              :intent intent-name
+                              :element (name element-key)})
+                ;; sl-ectw: the analyzed shape (validated upstream, so :ok).
+                (contains? element-def :shape)
+                (assoc :shape (:ok (shape/analyze-shape (name element-key)
+                                                        (:shape element-def)))))))
      {}
      (:elements intent-data))))
 
@@ -371,8 +449,10 @@
                (update :ok merge (build-element-lookup ok))
                (assoc-in [:regions intent-name] (build-region ok))
                (assoc-in [:intent-files intent-name] (:source-file ok))
+               ;; sl-u2r0: per-intent def-sites (file + entry lines).
+               (assoc-in [:def-sites intent-name] (:def-site ok))
                (update :intents (fnil conj []) intent-name))))))
-   {:ok {} :regions {} :intent-files {} :intents []}
+   {:ok {} :regions {} :intent-files {} :def-sites {} :intents []}
    intent-results))
 
 ;; -----------------------------------------------------------------------------
@@ -488,6 +568,8 @@
 ;; Public API
 ;; -----------------------------------------------------------------------------
 
+(declare load-all-intents*)
+
 (defn load-all-intents
   "Load all intent files from the specified directory.
 
@@ -504,7 +586,16 @@
      cross-intent :root/:selector anchor check, §7.5)
 
    If the directory doesn't exist, returns {:ok {:lookup {} :regions {} :intents []}}
-   (intents are optional)."
+   (intents are optional). Every :ok carries `:intents-dir` (sl-u2r0), so a
+   did-you-mean with nothing to suggest can still say where intents are
+   declared (a scaffold whose only intent is still an .example)."
+  [intents-dir]
+  (let [result (load-all-intents* intents-dir)]
+    (cond-> result
+      (:ok result) (assoc-in [:ok :intents-dir] (str intents-dir)))))
+
+(defn- load-all-intents*
+  "load-all-intents without the :intents-dir stamp."
   [intents-dir]
   (if-not (fs/exists? intents-dir)
     ;; Directory doesn't exist — intents are optional
@@ -535,7 +626,11 @@
                           ;; sl-mpu5: per-intent def-site files (built during
                           ;; merge, previously dropped) — duplicates report and
                           ;; explain :def-site cite files, not the directory.
-                          :intent-files (:intent-files merged)}}))))))))))
+                          :intent-files (:intent-files merged)
+                          ;; sl-u2r0: `{intent-name {:file :line :elements
+                          ;; {name line} :collections {name line}}}` — the
+                          ;; def-site every object did-you-mean names.
+                          :def-sites (:def-sites merged)}}))))))))))
 
 (defn get-binding
   "Look up the binding for an intent/element/interface combination.
@@ -576,6 +671,37 @@
   "Returns true if the intent/element combination exists."
   [intents intent-name element-name]
   (contains? (:lookup intents) [intent-name element-name]))
+
+(defn element-def-site
+  "Where `intent-name.element-name` is declared (sl-u2r0 lines, sl-ectw
+   consumer): `{:file path :line n}` (line absent when the index pass could
+   not vouch for the file), or nil for an unknown intent."
+  [intents intent-name element-name]
+  (when-let [site (get-in intents [:def-sites intent-name])]
+    (cond-> {:file (:file site)}
+      (get-in site [:elements element-name])
+      (assoc :line (get-in site [:elements element-name])))))
+
+(defn get-shape
+  "The analyzed `:shape` of `intent-name.element-name` (sl-ectw):
+   `{:ok {:source :pattern :names :group-count}}`, or `{:error {...}}` with
+   `:intent/unknown-element` or `:intent/element-has-no-shape` (the latter
+   carrying `:def-site`)."
+  [intents intent-name element-name]
+  (if-let [entry (get (:lookup intents) [intent-name element-name])]
+    (if-let [shape (:shape entry)]
+      {:ok shape}
+      {:error (cond-> {:type :intent/element-has-no-shape
+                       :message (str intent-name "." element-name
+                                     " declares no :shape")
+                       :intent intent-name
+                       :element element-name}
+                (element-def-site intents intent-name element-name)
+                (assoc :def-site (element-def-site intents intent-name element-name)))})
+    {:error {:type :intent/unknown-element
+             :message (str "Unknown intent/element: " intent-name "." element-name)
+             :intent intent-name
+             :element element-name}}))
 
 (defn get-region
   "Return the per-intent region entry (`{:root :location :collections :reusable

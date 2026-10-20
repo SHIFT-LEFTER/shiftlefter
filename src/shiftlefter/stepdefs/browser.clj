@@ -154,13 +154,22 @@
    - EDN maps: {:css \"#foo\"}, {:id \"bar\"}
 
    NOTE: Vector shorthand ([...]) is deprecated and no longer matched."
-  "[A-Z][A-Za-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*(?:\\[-?\\d+\\]|\\[\\*\\])?)+|\\{[^}]+\\}")
+  "[A-Z][A-Za-z0-9_-]*(?:\\.[a-z][A-Za-z0-9_-]*(?:\\[-?\\d+\\]|\\[\\*\\])?)+|\\{[^}]+\\}")
 
 (def ^:private value-re
   "Central value-slot fragment (sl-yh7): quoted literal (captured WITH its
    quotes — the engine strips them by the frame's :arg-kinds at exec) or a
    {binding} token resolved from :sl/bindings. '{code}' stays literal."
   bindings/value-re-fragment)
+
+(def ^:private literal-re
+  "Quoted-literal-ONLY slot fragment (sl-90x5): the literal half of value-re,
+   captured WITH its quotes so the engine's :text normalization strips and
+   undoubles it at exec. Used where a {token} alternative would collide with
+   a locator in the same position — `should see O` is both the on-page text
+   assertion and the :visible locator assertion, and locator-re admits any
+   {...}, so a token there would be an ambiguous bind."
+  bindings/literal-re-fragment)
 
 (def ^:private location-re
   "Regex pattern string for :location-slot captures (sl-iseq/sl-3jr4/sl-yh7):
@@ -234,15 +243,27 @@
 ;; :capture (sl-zgna): the match slot is a :matcher (frame :arg-kinds) — its
 ;; (?<name>...) named groups produce bindings; the /.../ delimiters follow the
 ;; SMS receive surface.
+(def ^:private matcher-re
+  "Matcher-slot fragment (sl-ectw): an inline `/…/` captured WITH its
+   slashes, or an `Intent.element` reference to a declared :shape. The
+   engine classifies it (bindings/resolve-matcher) before the body runs,
+   so the bodies receive bare regex source either way."
+  bindings/matcher-re-fragment)
+
 (def ^:private capture-pattern
-  (re-pattern (str ":([\\w./-]+) captures (" locator-re ") matching /(.+)/")))
+  (re-pattern (str ":([\\w./-]+) captures (" locator-re ") matching (" matcher-re ")")))
+
+;; :capture :default (sl-ectw): no matching clause — O's declared :shape
+;; is the pattern. The primary form; the inline clause is the escape hatch.
+(def ^:private capture-shape-pattern
+  (re-pattern (str ":([\\w./-]+) captures (" locator-re ")")))
 
 ;; :see :matching (sl-gwru): assert-only twin of :capture — same matcher
 ;; slot, same poll semantics, binds nothing. Surface is "should see"
 ;; (family consistency with every other :see assertion; the bead's
 ;; "sees ... matching" was discussion shorthand, Chair-confirmed).
 (def ^:private should-see-matching-pattern
-  (re-pattern (str ":([\\w./-]+) should see (" locator-re ") matching /(.+)/")))
+  (re-pattern (str ":([\\w./-]+) should see (" locator-re ") matching (" matcher-re ")")))
 
 ;; --- :hover and :wait patterns (sl-jsn) ---
 
@@ -508,7 +529,7 @@
                            " — nothing has provisioned a browser for this"
                            " subject. In the REPL: (connect-costume! ...)"
                            " attaches an authenticated costume, or load a"
-                           " config with :interfaces (shifted!) to provision"
+                           " config with :interfaces (load-config!) to provision"
                            " a bare browser on demand. In a runner project:"
                            " check the :interfaces config.")
                       {:type :browser/no-session
@@ -586,7 +607,7 @@
                            " — nothing has provisioned a browser for this"
                            " subject. In the REPL: (connect-costume! ...)"
                            " attaches an authenticated costume, or load a"
-                           " config with :interfaces (shifted!) to provision"
+                           " config with :interfaces (load-config!) to provision"
                            " a bare browser on demand. In a runner project:"
                            " check the :interfaces config.")
                       {:type :browser/no-session
@@ -879,15 +900,18 @@
 
 ;; --- Existing Verification Steps (0.3.5) ---
 
-(defstep #":([\w./-]+) should see '((?:[^']|'')+)'"
+;; The on-page O slot is :object-kind :text (sl-90x5, mirroring :title's
+;; sl-2sj6 fix): captured WITH its quotes via literal-re and normalized by
+;; the engine's :text slot-kind (strip quotes, undouble '' per sl-jlqz), so
+;; expected-text arrives here as plain text. The old pattern captured the
+;; literal's interior, which destroyed the quote marker before the engine
+;; saw it — the strict-mode false positive in every project with intents.
+(defstep (re-pattern (str ":([\\w./-]+) should see (" literal-re ")"))
   {:interface :web
    :svo {:subject :$1 :verb :see :frame :on-page :object :$2}
    :doc/example ":alice should see 'Welcome'"}
   [ctx subject-str expected-text]
-  ;; The capture is the literal's INTERIOR (no :object-kind on :see/:on-page,
-  ;; so the engine never normalizes it) — undouble here (sl-jlqz).
-  (let [expected-text (bindings/undouble-quotes expected-text)
-        [ctx' browser] (with-subject-query ctx subject-str)
+  (let [[ctx' browser] (with-subject-query ctx subject-str)
         body-locator (locators/resolve-locator {:tag "body"})]
     (with-retry ctx'
       (fn []
@@ -948,34 +972,62 @@
 ;; :capture (sl-zgna) — assert-plus-bind: read the element's text (same
 ;; wait-then-assert semantics as the should-see family), match the pattern,
 ;; merge its (?<name>...) named groups into the scenario data plane. The
-;; matcher slot reaches this fn untouched (frame :arg-kinds :matcher);
+;; matcher slot reaches this fn as bare regex source: the engine's
+;; normalizer stripped an inline /…/ or resolved an Intent.element ref to
+;; the element's declared :shape (sl-ectw, frame :arg-kinds :matcher);
 ;; embedded {binding} tokens interpolate as regex-quoted literals inside
 ;; attempt-capture. A no-match throws :bindings/capture-failure — retryable
 ;; here (the DOM may still be settling), surfacing on exhaustion with the
 ;; pattern, an excerpt of the text actually seen, and the locator: it fails
 ;; as though the subject could not see that text. An unresolved embedded
 ;; token is NOT retryable and fails fast.
+(defn- capture-element-text!
+  "The :capture exec shared by both frames: resolve O, read its text,
+   capture `match-str` (bare regex source) into the data plane."
+  [ctx' browser locator-str match-str interface]
+  (with-retry ctx'
+    (fn []
+      (let [resolved (target/ensure-single
+                      (resolve-target* browser locator-str interface)
+                      locator-str)
+            actual (bp/get-text browser resolved)]
+        (try
+          (bindings/capture! ctx' match-str actual)
+          (catch clojure.lang.ExceptionInfo e
+            (if (= :bindings/capture-failure (:type (ex-data e)))
+              (throw (ex-info (ex-message e)
+                              (assoc (ex-data e) :locator locator-str)
+                              e))
+              (throw e))))))))
+
 (defstep capture-pattern
   {:interface :web
-   :svo {:subject :$1 :verb :capture :frame :default
+   :svo {:subject :$1 :verb :capture :frame :matching
          :object :$2 :args {:match :$3}}
    :doc/example ":alice captures {:id \"total\"} matching /(?<amount>[0-9.]+)/"}
   [ctx subject-str locator-str match-str]
   (let [[ctx' browser] (with-subject-query ctx subject-str)]
-    (with-retry ctx'
-      (fn []
-        (let [resolved (target/ensure-single
-                        (resolve-target* browser locator-str (:interface step-meta))
-                        locator-str)
-              actual (bp/get-text browser resolved)]
-          (try
-            (bindings/capture! ctx' match-str actual)
-            (catch clojure.lang.ExceptionInfo e
-              (if (= :bindings/capture-failure (:type (ex-data e)))
-                (throw (ex-info (ex-message e)
-                                (assoc (ex-data e) :locator locator-str)
-                                e))
-                (throw e)))))))))
+    (capture-element-text! ctx' browser locator-str match-str
+                           (:interface step-meta))))
+
+;; :capture :default (sl-ectw) — `captures O` with no matching clause: the
+;; pattern is O's declared :shape, read through the same classifier the
+;; lint ran at plan time (a missing shape or binding is a plan error there;
+;; here it would be a hand-rolled bind, and fails the step structurally).
+(defstep capture-shape-pattern
+  {:interface :web
+   :svo {:subject :$1 :verb :capture :frame :default
+         :object :$2 :args {}}
+   :doc/example ":alice captures Checkout.total"}
+  [ctx subject-str locator-str]
+  (let [[ctx' browser] (with-subject-query ctx subject-str)
+        shape (bindings/resolve-matcher locator-str (intent-state/get-intents)
+                                        (:interface step-meta))]
+    (if-let [err (:error shape)]
+      (throw (ex-info (:message err) err))
+      (capture-element-text! ctx' browser locator-str
+                             (get-in shape [:ok :pattern])
+                             (:interface step-meta)))))
 
 ;; :see :matching (sl-gwru) — assert-only: the :capture exec verbatim
 ;; (same attempt-capture core, so the two frames can never drift into a
@@ -984,7 +1036,10 @@
 ;; frame that doesn't pollute the binding namespace. Named groups in
 ;; this slot are rejected at plan time by the bindings lint (clause 4:
 ;; a producer marker is never quietly ignored); all-unnamed is the
-;; expected shape. Embedded {binding} tokens still interpolate — an
+;; expected shape. An Intent.element ref to a declared :shape IS admitted
+;; here (sl-ectw): the reader sees a structure marker, not a producer
+;; marker; the engine resolves it to the shape's source and this frame
+;; still binds nothing. Embedded {binding} tokens still interpolate — an
 ;; unresolved one fails fast, non-retryable, exactly like :capture.
 (defstep should-see-matching-pattern
   {:interface :web

@@ -90,8 +90,8 @@ capability cleanup.**
   hand data to steps; the report records the contributed keys. nil = no
   contribution.
 - `:after` receives `{:ctx ... :scenario ... :result ...}` where `:result`
-  is the in-flight scenario result (status, per-step results with durations,
-  error). On-failure conditionality is a plain `when` on
+  is the in-flight scenario result (status, per-step results with durations
+  and — on steps whose oracle polled — a `:poll-counts` digest, error). On-failure conditionality is a plain `when` on
   `(:status result)` — there is no separate on-failure hook kind. The
   return is the ATTACHMENTS CLAIM: nil (no claim) or
   `{:attachments [{:attachment/kind :screenshot :attachment/path "..."} ..]}`

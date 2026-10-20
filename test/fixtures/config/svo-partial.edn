@@ -1,4 +1,4 @@
-;; Partial :svo config — opts into Shifted mode with one enforcement
-;; override; the remaining levels come from default-config (sl-ieie).
+;; Partial :enforcement config — one named level; the remaining kinds come
+;; from default-config (sl-6wh9).
 {:parser {:dialect "en"}
- :svo {:unknown-subject :error}}
+ :enforcement {:unknown-subject :error}}

@@ -57,11 +57,13 @@
 (defn- arg-cell
   "Render one arg slot, annotating its value kind when the frame declares
    one (sl-yh7): :value slots take a quoted literal or a {binding} token;
-   :matcher slots are regex source whose named groups produce bindings."
+   :matcher slots are an inline /regex/ or an Intent.element ref to a
+   declared :shape (sl-ectw); named groups produce bindings either way."
   [arg arg-kinds]
   (case (get arg-kinds arg)
     :value   (str "`" arg "` (literal or `{binding}`)")
-    :matcher (str "`" arg "` (regex; `(?<name>...)` produces `{name}` bindings)")
+    :matcher (str "`" arg "` (`/regex/`, or `Intent.element` for its declared "
+                  "`:shape`; `(?<name>...)` produces `{name}` bindings)")
     (str "`" arg "`")))
 
 (defn- frame-line

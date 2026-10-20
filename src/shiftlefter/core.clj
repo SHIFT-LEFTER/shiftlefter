@@ -22,6 +22,7 @@
    [shiftlefter.config :as config]
    [shiftlefter.runner.core :as runner]
    [shiftlefter.runner.tag-disposition :as tagd]
+   [shiftlefter.stepengine.exec.abort :as abort]
    [shiftlefter.version :as version])
   (:gen-class))
 
@@ -55,15 +56,16 @@
    [nil "--step-paths PATHS" "Step definition paths (comma-separated)"
     :parse-fn #(str/split % #",")]
    ["-c" "--config FILE" "Config file path (default: discovered sl/shiftlefter.edn)"]
-   [nil "--tags TAGS" "Run only scenarios with any of these tags (comma-separated; repeatable; '@' optional)"
+   [nil "--tags TAGS" "Run only scenarios with any of these tags (comma-separated; repeatable; '@' optional; a bare key such as @env matches every @env=VALUE; naming @wip or @skip=REASON runs the scenarios that tag holds)"
     :parse-fn tagd/parse-tag-list
-    :validate [tagd/valid-tag-set? "must be one or more non-empty tags without whitespace"]
+    :validate [tagd/valid-tag-set? "must be one or more non-empty tags without whitespace, '@' only at the start, a key before any '='"]
     :assoc-fn (fn [m k v] (update m k (fnil into #{}) v))]
    [nil "--skip-tags TAGS" "Skip scenarios with any of these tags (comma-separated; repeatable; exclude wins over --tags)"
     :parse-fn tagd/parse-tag-list
-    :validate [tagd/valid-tag-set? "must be one or more non-empty tags without whitespace"]
+    :validate [tagd/valid-tag-set? "must be one or more non-empty tags without whitespace, '@' only at the start, a key before any '='"]
     :assoc-fn (fn [m k v] (update m k (fnil into #{}) v))]
    [nil "--dry-run" "Bind steps without executing (verify binding only)"]
+   [nil "--hold-unplannable" "Run what plans, hold the rest: scenarios with undefined, ambiguous or binding-error steps are deselected at planning and listed as held (per run; never a config key)"]
    [nil "--max-parallel N" "Run up to N scenarios concurrently (default 1; @serial and auto-serialized scenarios run alone)"
     :parse-fn #(Integer/parseInt %)
     :validate [pos-int? "must be a positive integer"]]
@@ -113,7 +115,11 @@
    ;; "don't daemon at all" escape, so this never needs a disable sentinel.
    [nil "--idle-timeout-min N" "Daemon idle timeout in minutes (default: 60)"
     :parse-fn #(Integer/parseInt %)]
-   ["-v" "--verbose" "Verbose output"]
+   ;; sl-jima: counted — -v is level 1, -vv (or -v -v) level 2. No :default on
+   ;; purpose: absent stays absent, so every truthiness read of :verbose is
+   ;; untouched (a :default 0 would be truthy).
+   ["-v" "--verbose" "Verbose output; -vv also shows each stepdef's pattern in the dry-run plan"
+    :update-fn (fnil inc 0)]
    [nil "--version" "Print version"]
    ["-h" "--help"]])
 
@@ -148,6 +154,7 @@
          result (runner/execute! (cond-> {:paths path-list
                                           :project-context project-context
                                           :dry-run (:dry-run opts)
+                                          :hold-unplannable (:hold-unplannable opts)
                                           :edn (:edn opts)
                                           :verbose (:verbose opts)
                                           :no-color (:no-color opts)}
@@ -158,7 +165,12 @@
                                    (:seed opts) (assoc :seed (:seed opts))
                                    (:capture opts) (assoc :capture (:capture opts))
                                    (tag-filter-opt opts) (assoc :tag-filter (tag-filter-opt opts))
-                                   (:config-path opts) (assoc :config-path (:config-path opts))))]
+                                   (:config-path opts) (assoc :config-path (:config-path opts))
+                                   ;; sl-8orx proof instrument (see dispatch).
+                                   (:internal-crash-on opts) (assoc :internal-crash-on (:internal-crash-on opts))
+                                   ;; sl-io05 proof instrument (see dispatch).
+                                   (:internal-scenario-crash-on opts)
+                                   (assoc :internal-scenario-crash-on (:internal-scenario-crash-on opts))))]
      (:exit-code result))))
 
 
@@ -903,8 +915,33 @@
   ;; Undocumented in --help; mirrors the --sl-internal-stop convention.
   (when (some #{"--sl-internal-crash"} args)
     (throw (ex-info "sl-internal-crash: deliberate crash for exit-3 parity testing (sl-7wv)" {})))
-  (let [parsed (parse-opts args cli-options)
-        options (normalize-cli-options (:options parsed))
+  ;; sl-8orx: the `=SUBSTRING` form crashes the COORDINATOR mid-group instead
+  ;; — a probe reporter throws when the named scenario's envelope completes
+  ;; (runner/core crash-probe-reporter) — so the crash-marker seam is
+  ;; reachable from a cold `sl run`. Same convention: raw args, undocumented.
+  (let [crash-prefix "--sl-internal-crash="
+        crash-on (some #(when (str/starts-with? % crash-prefix)
+                          (subs % (count crash-prefix)))
+                       args)
+        args (if crash-on
+               (vec (remove #(str/starts-with? % crash-prefix) args))
+               args)
+        ;; sl-io05: the sibling form crashes INSIDE the per-scenario weave —
+        ;; a throw escaping execute-scenario-with-cleanup for the named
+        ;; scenario (stepengine/exec/cleanup) — so the runner-crash route is
+        ;; reachable on every scheduler path (--max-parallel 1, a pool task,
+        ;; the @serial tail). Same convention: raw args, undocumented.
+        scenario-crash-prefix "--sl-internal-scenario-crash="
+        scenario-crash-on (some #(when (str/starts-with? % scenario-crash-prefix)
+                                   (subs % (count scenario-crash-prefix)))
+                                args)
+        args (if scenario-crash-on
+               (vec (remove #(str/starts-with? % scenario-crash-prefix) args))
+               args)
+        parsed (parse-opts args cli-options)
+        options (cond-> (normalize-cli-options (:options parsed))
+                  crash-on (assoc :internal-crash-on crash-on)
+                  scenario-crash-on (assoc :internal-scenario-crash-on scenario-crash-on))
         arguments (:arguments parsed)
         errors (:errors parsed)
         needs-project-context? (not (or (seq errors)
@@ -940,7 +977,8 @@
       (:help options)
       (do
         (println "Usage:
-  sl run <path> [<path2> ...] [--step-paths p1,p2] [-c FILE|--config FILE] [--tags t1,t2] [--skip-tags t1,t2] [--max-parallel N] [--seed N] [--capture k=v,...] [--dry-run] [--edn] [--junit-xml PATH] [--html PATH] [-v]
+  sl run <path> [<path2> ...] [--step-paths p1,p2] [-c FILE|--config FILE] [--tags t1,t2] [--skip-tags t1,t2] [--max-parallel N] [--seed N] [--capture k=v,...] [--dry-run] [--hold-unplannable] [--edn] [--junit-xml PATH] [--html PATH] [-v]
+        (--hold-unplannable runs what plans and holds the rest: scenarios with undefined, ambiguous or binding-error steps are deselected at planning and listed as held; per run, never a config key)
         (--junit-xml writes a CI-ingestible report; no file on planning error — see ERRATA E009; under --dry-run: noticed on stderr, not written)
         (--html writes a self-contained HTML run report; open it in any browser, no server needed; under --dry-run: noticed on stderr, not written)
         (--max-parallel N runs up to N scenarios concurrently; @serial-tagged and auto-serialized scenarios run alone)
@@ -967,6 +1005,7 @@
   sl daemon serve [--idle-timeout-min N]        (start the warm-path daemon; normally auto-spawned)
   sl daemon status                              (show this project's daemon)
   sl daemon stop                                (stop this project's daemon)
+  sl daemon abort                               (abort the run in flight; the daemon survives)
   sl --version                                  (print version)")
         0)
 
@@ -1040,11 +1079,74 @@
           (println "Unknown command. Use --help"))
         2))))
 
+(defn handle-cold-sigint!
+  "The cold-path SIGINT handler body (sl-617t) — one call per keypress,
+   on the JVM's signal-dispatch thread. Two strikes:
+
+   - no run registered (Ctrl-C before execution began, or a non-run
+     command): the JVM's own interrupted status, exit 130 — nothing ran,
+     nothing to report; outside the verdict table by design.
+   - strike one: request the abort and print the immediate line, then
+     RETURN — the run winds down at its next step boundary through the
+     normal epilogue (Afters, cleanup, :stop, reports) and -main exits 4.
+   - strike two: the crash row — 'you accepted the mess and the report
+     says so': the registered crash epilogue (8orx markers, the EDN crash
+     form, the 'Runner crash:' line) then exit 3, from this thread, at
+     once. Unless the run is already finalizing (the final report writes
+     have begun — Tower fold-in C1 / fit-pass P1): then the strike is a
+     NO-OP with a line — never exit 3, the epilogue finishes and -main
+     exits 4; a crash marker written now would race the very writers
+     that are producing the truthful artifacts.
+   - later strikes: ignored — the exit is in progress.
+
+   `exit!` is injectable for tests (default `System/exit`)."
+  ([] (handle-cold-sigint! #(System/exit %)))
+  ([exit!]
+   (let [{:keys [outcome] :as r} (abort/cold-sigint!)]
+     (case outcome
+       :no-run (exit! 130)
+       :aborting (binding [*out* *err*]
+                   (println (abort/announce-line r))
+                   (flush))
+       :crash (if (:finalizing? r)
+                (binding [*out* *err*]
+                  (println "second interrupt: final reports being written; exiting 4")
+                  (flush))
+                (do (binding [*out* *err*]
+                      (println "second interrupt: abandoning the unwind — crash row; exit 3")
+                      (flush))
+                    (when-let [epilogue (:crash-epilogue r)]
+                      (try
+                        (epilogue (ex-info "run abandoned: second interrupt during the abort unwind"
+                                           {:type :runner/abort-abandoned}))
+                        (catch Throwable t
+                          (binding [*out* *err*]
+                            (println (str "Crash epilogue failed: "
+                                          (.getName (class t)) ": " (ex-message t)))))))
+                    (exit! 3)))
+       nil))))
+
+(defn- install-cold-sigint-handler!
+  "Replace the JVM's default SIGINT action (exit 130) with the abort trap
+   (sl-617t) — cold path only. `daemon serve` skips it (the daemon JVM is
+   spawned SIGINT-ignored by the wrapper, and the warm client is the one
+   that traps Ctrl-C); an already-ignored or VM-owned signal throws
+   IllegalArgumentException, which is tolerated: the default stays."
+  [args]
+  (when-not (and (= "daemon" (first args)) (= "serve" (second args)))
+    (try
+      (sun.misc.Signal/handle
+       (sun.misc.Signal. "INT")
+       (reify sun.misc.SignalHandler
+         (handle [_ _sig] (handle-cold-sigint!))))
+      (catch IllegalArgumentException _ nil))))
+
 (defn -main [& args]
   ;; Crash parity (sl-rju): an uncaught Throwable becomes exit 3, the
   ;; "crash" code — matching shiftlefter.daemon/dispatch!'s contract so cold
   ;; and warm agree on every exit code (0/1/2/3/4). The catch wraps only `dispatch`;
   ;; the :repl branch must stay outside it (repl-cmd blocks and owns the process).
+  (install-cold-sigint-handler! args)
   (let [result (try
                  (dispatch args)
                  (catch Throwable t

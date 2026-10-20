@@ -28,8 +28,8 @@ Defaults are relative to the config root (`sl/`). Explicit config always wins.
 |---|---|---|---|
 | `shiftlefter.edn` | effectively yes | `sl/shiftlefter.edn`, the only discovered location (git-bounded walk-up) | `-c FILE` |
 | feature files | yes | no `setup.clj`: `[:runner :features]` default `["features/"]`; with `setup.clj`: the declared plan IS the corpus | config key / CLI paths (subset of the plan under setup) |
-| `glossary/subjects.edn` | in Shifted mode | probed at `glossary/subjects.edn` | `:glossaries` — explicit value, *including nil*, used as written |
-| intents | in practice, Shifted web | probed at `glossary/intents/` | `:glossaries {:intents …}` |
+| `glossary/subjects.edn` | in practice yes (none = every actor an unknown subject) | probed at `glossary/subjects.edn` | `:glossaries` — explicit value, *including nil*, used as written |
+| intents | in practice, for web | probed at `glossary/intents/` | `:glossaries {:intents …}` |
 | verb glossaries | no (built-ins cover) | probed at `glossary/verbs/*.edn`; each file's `:type` is its mount key | `:glossaries {:verbs [paths]}` |
 | dev steps | no | `[:runner :step-paths]` default `["steps/"]` | config / `--step-paths` |
 | `setup.clj`, `hooks.clj` | no | sibling of the active config, fixed names | none — fixed by design |

@@ -33,14 +33,14 @@
     :framing (str "The smallest useful config. It lives at `sl/shiftlefter.edn` "
                   "— the ONLY discovered location; everything ShiftLefter "
                   "(config, glossaries, features, steps) lives under `sl/`. "
-                  "Everything beyond the interface map (glossaries, `:svo` "
-                  "enforcement, step paths) is opt-in.")
+                  "Everything beyond the interface map (glossaries, "
+                  "`:enforcement`, step paths) is opt-in.")
     :snippets [{:path "examples/02-browser-zero-code/sl/shiftlefter.edn"
                 :lang "edn"}]}
    {:title "Config with glossaries wired"
     :framing (str "The canonical glossary layout: `glossary/` next to the "
                   "config (so `sl/glossary/`), subjects in "
-                  "`glossary/subjects.edn`, plus `:svo` enforcement levels "
+                  "`glossary/subjects.edn`, plus `:enforcement` levels "
                   "and a macro registry under `:runner :macros`. The "
                   "glossary path is CONVENTIONAL — a config with no "
                   "`:glossaries` key discovers it automatically; this "

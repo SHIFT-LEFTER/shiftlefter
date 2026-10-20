@@ -16,6 +16,6 @@
 
 {:interfaces {:web {:type :web :adapter :etaoin :config {}}
               :sms {:type :sms :adapter :sms-mock}}
- :svo        {:unknown-subject :error
+ :enforcement        {:unknown-subject :error
               :unknown-verb    :warn
               :unknown-interface :error}}

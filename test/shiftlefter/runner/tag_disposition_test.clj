@@ -1,6 +1,7 @@
 (ns shiftlefter.runner.tag-disposition-test
   "Unit tests for the planning-time tag-disposition seam (sl-i608)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [shiftlefter.runner.tag-disposition :as tagd]))
 
 (defn- pickle [& tag-names]
@@ -102,18 +103,135 @@
                                         (pickle "@serial")))))))
 
 (deftest apply-dispositions-test
-  (let [p1 (pickle "@fast") p2 (pickle "@slow") p3 (pickle "@fast" "@wip")]
-    (testing "partition on :selected?, order preserved, both keys present"
-      (is (= {:selected [p1 p3] :filtered-out [p2]}
+  ;; sl-190x: @wip is reserved now (a never-run hold), so the generic
+  ;; third tag is @slow2 here; the hold partition has its own test below.
+  (let [p1 (pickle "@fast") p2 (pickle "@slow") p3 (pickle "@fast" "@slow2")]
+    (testing "partition on :selected?, order preserved, all keys present"
+      (is (= {:selected [p1 p3] :filtered-out [p2] :held []}
              (tagd/apply-dispositions {:include #{"@fast"}} [p1 p2 p3])))
-      (is (= {:selected [p1 p2 p3] :filtered-out []}
+      (is (= {:selected [p1 p2 p3] :filtered-out [] :held []}
              (tagd/apply-dispositions nil [p1 p2 p3])))
-      (is (= {:selected [] :filtered-out [p1 p2 p3]}
+      (is (= {:selected [] :filtered-out [p1 p2 p3] :held []}
              (tagd/apply-dispositions {:include #{"@nope"}} [p1 p2 p3]))))
     (testing "exclude wins in the partition too"
-      (is (= {:selected [p1] :filtered-out [p2 p3]}
-             (tagd/apply-dispositions {:include #{"@fast"} :exclude #{"@wip"}}
+      (is (= {:selected [p1] :filtered-out [p2 p3] :held []}
+             (tagd/apply-dispositions {:include #{"@fast"} :exclude #{"@slow2"}}
                                       [p1 p2 p3]))))))
+
+;; -----------------------------------------------------------------------------
+;; The hold family (sl-190x): @wip, @skip=reason, @blocked=REF
+;; -----------------------------------------------------------------------------
+
+(deftest hold-facet-test
+  (testing "the three reserved kinds, value kept as :note / :ref"
+    (is (= {:reason :wip :tag "@wip" :location {:line 1 :column 1}}
+           (tagd/hold-facet (pickle "@wip"))))
+    (is (= {:reason :wip :tag "@wip=half-done" :location {:line 1 :column 1} :note "half-done"}
+           (tagd/hold-facet (pickle "@wip=half-done")))
+        "@wip's value is optional and kept as a note")
+    (is (= {:reason :skip :tag "@skip=flaky-on-ci" :location {:line 1 :column 1} :note "flaky-on-ci"}
+           (tagd/hold-facet (pickle "@skip=flaky-on-ci"))))
+    (is (= {:reason :blocked :tag "@blocked=PROJ-1" :location {:line 1 :column 1} :ref "PROJ-1"}
+           (tagd/hold-facet (pickle "@blocked=PROJ-1")))))
+  (testing "a bare @skip / @blocked is a hold with no value key"
+    (is (= {:reason :skip :tag "@skip" :location {:line 1 :column 1}}
+           (tagd/hold-facet (pickle "@skip"))))
+    (is (not (contains? (tagd/hold-facet (pickle "@blocked=")) :ref))))
+  (testing "the first hold tag in pickle order decides; unknown keys are not holds"
+    (is (= :skip (:reason (tagd/hold-facet (pickle "@smoke" "@skip=x" "@wip")))))
+    (is (nil? (tagd/hold-facet (pickle "@smoke" "@env=prod" "@hook=reset")))))
+  (testing "never-run-hold? — wip and skip deselect, blocked runs"
+    (is (tagd/never-run-hold? (tagd/hold-facet (pickle "@wip"))))
+    (is (tagd/never-run-hold? (tagd/hold-facet (pickle "@skip=x"))))
+    (is (not (tagd/never-run-hold? (tagd/hold-facet (pickle "@blocked=X")))))))
+
+(deftest hold-precedence-test
+  (testing "a never-run hold deselects with no rules at all"
+    (let [d (tagd/disposition nil (pickle "@smoke" "@wip"))]
+      (is (false? (:selected? d)))
+      (is (= {:rule :hold :tag "@wip"} (:reason d)))
+      (is (= :wip (-> d :hold :reason)) "the facet rides the deselected pickle")))
+  (testing "naming the tag in --tags LIFTS the hold (Cucumber --wip): selected and run"
+    (is (true? (:selected? (tagd/disposition {:include #{"@wip"}} (pickle "@smoke" "@wip")))))
+    (is (true? (:selected? (tagd/disposition {:include #{"@skip=flaky"}} (pickle "@skip=flaky"))))))
+  (testing "naming ANOTHER tag the pickle carries does not lift the hold"
+    (let [d (tagd/disposition {:include #{"@smoke"}} (pickle "@smoke" "@wip"))]
+      (is (false? (:selected? d)))
+      (is (= :hold (-> d :reason :rule)))))
+  (testing "exclude still wins over a hold; an include miss still reads :include"
+    (is (= :exclude (-> (tagd/disposition {:include #{"@wip"} :exclude #{"@wip"}} (pickle "@wip"))
+                        :reason :rule)))
+    (is (= :include (-> (tagd/disposition {:include #{"@other"}} (pickle "@wip"))
+                        :reason :rule))))
+  (testing "@blocked RUNS — selected with the facet, xfail is the engine's business"
+    (let [d (tagd/disposition nil (pickle "@blocked=PROJ-1"))]
+      (is (true? (:selected? d)))
+      (is (= "PROJ-1" (-> d :hold :ref)))))
+  (testing "--tags @blocked (bare key) selects every blocked scenario and keeps the facet"
+    (let [d (tagd/disposition {:include #{"@blocked"}} (pickle "@blocked=PROJ-1"))]
+      (is (true? (:selected? d)))
+      (is (= :blocked (-> d :hold :reason))))
+    (is (false? (:selected? (tagd/disposition {:include #{"@blocked"}} (pickle "@smoke")))))))
+
+(deftest bare-key-match-rule-test
+  (testing "a bare key in --tags matches every value-tag of that key"
+    (is (:selected? (tagd/disposition {:include #{"@env"}} (pickle "@env=prod"))))
+    (is (:selected? (tagd/disposition {:include #{"@skip"}} (pickle "@skip=flaky")))
+        "--tags @skip lifts and selects every skip")
+    (is (not (:selected? (tagd/disposition {:exclude #{"@env"}} (pickle "@env=prod"))))
+        "--skip-tags @env excludes every @env=*"))
+  (testing "key=value matches exactly"
+    (is (:selected? (tagd/disposition {:include #{"@env=prod"}} (pickle "@env=prod"))))
+    (is (not (:selected? (tagd/disposition {:include #{"@env=prod"}} (pickle "@env=staging"))))))
+  (testing "a plain tag still matches exactly itself, never a longer name"
+    (is (:selected? (tagd/disposition {:include #{"@smoke"}} (pickle "@smoke"))))
+    (is (not (:selected? (tagd/disposition {:include #{"@smoke"}} (pickle "@smoketest")))))))
+
+(deftest apply-dispositions-held-partition-test
+  (let [p1 (pickle "@fast") p2 (pickle "@wip") p3 (pickle "@skip=slow") p4 (pickle "@blocked=X")]
+    (is (= {:selected [p1 p4]
+            :filtered-out []
+            :held [{:pickle p2 :hold {:reason :wip :tag "@wip" :location {:line 1 :column 1}}}
+                   {:pickle p3 :hold {:reason :skip :tag "@skip=slow" :location {:line 1 :column 1}
+                                      :note "slow"}}]}
+           (tagd/apply-dispositions nil [p1 p2 p3 p4]))
+        "holds are their own partition, in pickle order; blocked is selected")
+    (let [{:keys [selected filtered-out held]}
+          (tagd/apply-dispositions {:include #{"@fast" "@wip" "@blocked"}} [p1 p2 p3 p4])]
+      (is (= [p1 p2 p4] selected) "naming lifts wip")
+      (is (= [p3] filtered-out)
+          "the skip is an include MISS before it is a hold — precedence: exclude, include, hold")
+      (is (= [] held)))
+    (is (= {:selected [p1 p2 p3 p4] :filtered-out [] :held []}
+           (tagd/apply-dispositions {:include #{"@fast" "@wip" "@blocked" "@skip=slow"}}
+                                    [p1 p2 p3 p4]))
+        "naming @skip=slow too lifts it — nothing is held")))
+
+(deftest tag-grammar-test
+  (testing "'@' inside a name and an empty key are rejected at the CLI boundary"
+    (is (false? (tagd/valid-tag-set? #{"@a@b"})))
+    (is (false? (tagd/valid-tag-set? #{"@=x"})))
+    (is (true? (tagd/valid-tag-set? #{"@env=prod" "@hook=a=b"})) "'=' inside a VALUE is fine"))
+  (testing "the did-you-mean sentence"
+    (is (= "'@' opens a tag and never appears inside one — did you mean @a @b?"
+           (tagd/tag-name-problem "@a@b")))
+    (is (str/includes? (tagd/tag-name-problem "@=x") "did you mean @<key>=x?"))
+    (is (nil? (tagd/tag-name-problem "@fine=v=v")))
+    (is (= "@a@b: '@' opens a tag and never appears inside one — did you mean @a @b?"
+           (tagd/tag-set-problem #{"@ok" "@a@b"})))))
+
+(deftest tag-lints-test
+  (let [p (assoc (pickle "@skip" "@blocked" "@serial=x" "@a@b" "@wip=half" "@skip=fine")
+                 :pickle/name "S" :pickle/source-file "f.feature")
+        lints (tagd/tag-lints p)]
+    (is (= [:tag/reason-required :tag/ref-required :tag/value-ignored :tag/malformed]
+           (mapv :type lints))
+        "bare @skip, bare @blocked, a valued @serial, a malformed tag — @wip=x and @skip=fine are clean")
+    (is (every? #(str/ends-with? (:message %) "(scenario \"S\", f.feature:1)") lints)
+        "every lint names where the tag sits")
+    (is (str/includes? (:message (first lints)) "write @skip=<why>"))
+    (is (= "@blocked" (:tag (second lints))))
+    (is (= [] (tagd/tag-lints (pickle "@smoke" "@env=prod" "@hook=reset" "@wip"))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Value-tags + the :hooks facet (sl-esq)

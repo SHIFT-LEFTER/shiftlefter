@@ -230,6 +230,38 @@
   (= (.getCanonicalPath (java.io.File. a))
      (.getCanonicalPath (java.io.File. b))))
 
+(defn write-html!
+  "The ONE two-target write rule (sl-l9nj; shared since sl-o26v C1): when a
+   `primary` (<group-root>/report.html, inside the run dir) exists it is
+   the real artifact and is written first; the stable configured `path`
+   then gets a byte copy unless it IS the primary. Without a primary the
+   stable path is the only write. A write failure THROWS (invariant 4)."
+  [primary path html]
+  (if primary
+    (do (reporter/write-atomically! primary html)
+        (when-not (same-file-target? primary path)
+          (reporter/write-atomically! path html)))
+    (reporter/write-atomically! path html))
+  nil)
+
+(defn write-crash-page!
+  "sl-o26v: materialize the CRASHED run page for a single-scope crash from
+   an HtmlReporter's accumulated state — `{:run-ctx :scenarios
+   :diagnostics}` as it stood when the coordinator died — with a
+   `:summary {:status :crashed :crash record …}` the renderer already
+   keys on (the run header reads :crashed via TOC_STATUS and
+   appendCrashLine reads :crash on any summary — and, since sl-n6io,
+   names the record's :scenario when it carries one).
+   Same two targets as on-run-end. Throws on a write failure — the
+   CALLER owns not letting that mask the crash itself."
+  [primary path state summary]
+  (let [{:keys [run-ctx scenarios diagnostics]} state]
+    (write-html! primary path
+                 (build-document {:run-ctx run-ctx
+                                  :scenarios scenarios
+                                  :diagnostics diagnostics
+                                  :summary summary}))))
+
 (defrecord HtmlReporter [path primary state]
   reporter/Reporter
   (on-run-start [_this run-ctx]
@@ -262,12 +294,7 @@
                                 :scenarios scenarios
                                 :diagnostics diagnostics
                                 :summary run-summary})]
-      (if primary
-        (do (reporter/write-atomically! primary html)
-            (when-not (same-file-target? primary path)
-              (reporter/write-atomically! path html)))
-        (reporter/write-atomically! path html))
-      nil)))
+      (write-html! primary path html))))
 
 (defn write-planning-failure!
   "Materialize the HTML report for a planning-failed run (exit 2, sl-6hsd).
@@ -299,13 +326,7 @@
    planning-failed, sl-y3wd creates none) writes the stable path only:
    verdicts stay visible, links degrade to labeled text."
   [primary path island-data]
-  (let [html (build-document island-data)]
-    (if primary
-      (do (reporter/write-atomically! primary html)
-          (when-not (same-file-target? primary path)
-            (reporter/write-atomically! path html)))
-      (reporter/write-atomically! path html)))
-  nil)
+  (write-html! primary path (build-document island-data)))
 
 (defn make-reporter
   "Construct an HtmlReporter. `opts` is {:path <stable-configured-path>

@@ -56,7 +56,7 @@
     (spit (str (fs/path project "sl" "shiftlefter.edn"))
           (pr-str {:runner {:step-paths ["steps/"]
                             :allow-pending? false}
-                   :svo {:unknown-subject :warn}
+                   :enforcement {:unknown-subject :warn}
                    :glossaries {:subjects subjects
                                 :verbs [verbs]}
                    ;; a DEFAULT-registry adapter name: since sl-k1pv the
@@ -90,7 +90,7 @@
     (spit (str (fs/path project "sl" "shiftlefter.edn"))
           (pr-str (cond-> {:runner {:step-paths ["steps/"]
                                     :allow-pending? false}
-                           :svo {}
+                           :enforcement {}
                            :glossaries {:subjects "glossary/subjects.edn"
                                         :verbs [verbs]}
                            ;; default-registry names (see write-shifted-warn-
@@ -758,17 +758,17 @@
     (let [result (run-tagged {:include #{"@fast"}})]
       (is (= 0 (:exit-code result)))
       (is (= {:passed 2 :failed 0 :pending 0 :skipped 0} (:counts result))
-          "only @fast and @fast @wip; filtered-out are not passed or skipped"))))
+          "only @fast and @fast @draft; filtered-out are not passed or skipped"))))
 
 (deftest test-tag-filter-exclude
   (testing "exclude filter skips matching scenarios"
-    (let [result (run-tagged {:exclude #{"@wip"}})]
+    (let [result (run-tagged {:exclude #{"@draft"}})]
       (is (= 0 (:exit-code result)))
       (is (= 4 (get-in result [:counts :passed]))))))
 
 (deftest test-tag-filter-exclude-wins
   (testing "composed include+exclude: exclude wins"
-    (let [result (run-tagged {:include #{"@fast"} :exclude #{"@wip"}})]
+    (let [result (run-tagged {:include #{"@fast"} :exclude #{"@draft"}})]
       (is (= 0 (:exit-code result)))
       (is (= 1 (get-in result [:counts :passed]))))))
 
@@ -996,9 +996,13 @@
         "EDN mode stderr suppression still holds — the envelope is the carrier")))
 
 (deftest test-clean-config-edn-summary-has-no-diagnostics
-  ;; byte-identity guard: the additive field is ABSENT on clean configs
+  ;; byte-identity guard: the additive field is ABSENT on clean configs.
+  ;; sl-6wh9: the fixture steps are untyped, which now warns by default —
+  ;; :untyped-stepdef :off keeps this a CONFIG-cleanliness pin.
   (let [{:keys [summary]}
-        (run-edn-with-config "{:runner {:step-paths [\"steps/\"]}}" {})]
+        (run-edn-with-config (str "{:runner {:step-paths [\"steps/\"]}"
+                                  " :enforcement {:untyped-stepdef :off}}")
+                             {})]
     (is (= 0 (:run/exit-code summary)))
     (is (not (contains? summary :diagnostics)))))
 

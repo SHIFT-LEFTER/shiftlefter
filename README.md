@@ -4,13 +4,13 @@
 
 An agent can write you a passing browser test in one shot today. That's not the hard part anymore. The hard part is the **second** shot, and the tenth: each regeneration re-derives your app from scratch — its own selectors, its own names, its own idea of who "the user" is — and the suite drifts faster the more agents (and models) touch it. ShiftLefter gives that loop something stable to stand on: a typed vocabulary you define once, shared by every agent and every human on the team, and validated before anything runs. ([The full problem statement and fit check →](docs/FIT.md))
 
-## Status: v0.5.6
+## Status: v0.5.7
 
 ShiftLefter is an early, openly-scoped foundation for driving real software behavior from Gherkin — multiple users, multiple interfaces, all checked before anything runs. The core — driving a browser with multiple independent actors over a typed glossary you control — is solid and meant to be built on. The surrounding test-suite machinery and the traceability graph are on the way.
 
 It's for **building new (greenfield) behavior**, especially if you want a disciplined, agent-authorable test vocabulary. It is **not yet** a drop-in replacement for a commercial Cucumber/Selenium suite. Not sure if it fits your project? [Would ShiftLefter work for my project?](docs/FIT.md) is a practical fit check you can hand to your agent.
 
-ShiftLefter runs in two modes. **Vanilla** is a plain Gherkin runner — parse, bind, run, no vocabulary required. **Shifted** — the advertised path, and where the value lives — adds a project glossary (the `:svo` key in `shiftlefter.edn`), so every scenario is validated against your vocabulary at planning time, before anything runs. `sl orient` tells you which mode a project is in; [the multi-actor example](examples/02b-browser-multi-actor/) is the first Shifted project on the learning path.
+ShiftLefter parses all Gherkin; the only thing it refuses to run is an untyped step. There are two layers and no mode switch. The **parser layer** — `sl fmt` (check, write, canonical), lossless roundtrip, `sl gherkin fuzz` and `sl gherkin ddmin` — works on any `.feature` file with no config and no step definitions. The **run layer** executes typed steps: each one resolves to a Subject–Verb–Object triple and is checked against your project glossary at planning time, before anything runs. Binding errors block unconditionally; vocabulary checks default to warn (unknown interface: error), and you set each level in the `:enforcement` block of `shiftlefter.edn`. Point `sl run` at a Cucumber suite nobody has typed yet and you get a planning result, not a degraded run: every step undefined, exit 2, and one line with the inventory — [Bring Existing Gherkin](docs/adoption.md) picks up from there. [The multi-actor example](examples/02b-browser-multi-actor/) is the first project on the learning path where the glossary does visible work.
 
 ### What makes it different
 
@@ -30,7 +30,7 @@ ShiftLefter runs in two modes. **Vanilla** is a plain Gherkin runner — parse, 
 - Multi-actor browser driving — multiple independent sessions with real isolation.
 - The typed SVO/glossary discipline — your vocabulary, validated before execution.
 - The `sl` CLI — run, format, dry-run, diagnose; CI-ready output (JUnit XML, HTML, EDN), tag filtering, parallel scenarios.
-- Gherkin parsing & lossless formatting — Cucumber-compliant (46/46 official test files).
+- Gherkin parsing & lossless formatting — Cucumber-compliant (50/50 official test files, Gherkin 42).
 - Scenario lifecycle hooks — `@hook=<name>` tags + `hooks.clj`, with loud
   failure and dry-run preview ([when not to use them](docs/hooks.md)).
 - The scenario data plane — capture a value with a named regex group, consume
@@ -131,11 +131,11 @@ ShiftLefter ships with working examples that cover the most common workflows. Ea
 
 **Run a browser test without writing any code.** ShiftLefter includes built-in step definitions for common browser operations — navigation, clicking, filling forms, and verifying results. This example drives a real browser through a complete scenario using only a `.feature` file and a one-line config. No custom steps, no Clojure. [→ Zero-Code Browser Test](examples/02-browser-zero-code/)
 
-**Run a multi-actor browser test.** Same built-in steps, but now Alice and Bob each get their own browser. ShiftLefter keeps their sessions and state completely separate. This example also includes a bonus section demonstrating vocabulary validation in shifted mode — where a glossary defines which actors are valid and the framework rejects unknown subjects at bind time. [→ Multi-Actor Browser Test](examples/02b-browser-multi-actor/)
+**Run a multi-actor browser test.** Same built-in steps, but now Alice and Bob each get their own browser. ShiftLefter keeps their sessions and state completely separate. This example also includes a bonus section demonstrating vocabulary validation — the glossary defines which actors are valid, and the framework rejects unknown subjects at bind time. [→ Multi-Actor Browser Test](examples/02b-browser-multi-actor/)
 
 **Write your first step definitions.** When you're ready to go beyond the built-in steps, this example walks through `defstep` — pattern matching, captures, context passing, and assertions. A classic cucumbers-and-counting scenario in about 20 lines of Clojure. [→ Your First Steps](examples/03-custom-steps/)
 
-The path continues past these four: cross-interface web + SMS in one scenario (04), nested intent addressing (05 and 06), and a legacy-migration reference project (svo-demo). The full ordered index — what each example teaches, which mode it runs in, and what it needs — is [examples/README.md](examples/README.md).
+The path continues past these four: cross-interface web + SMS in one scenario (04), nested intent addressing (05 and 06), and a legacy-migration reference project (svo-demo). The full ordered index — what each example teaches, how to run it, and what it needs — is [examples/README.md](examples/README.md).
 
 ---
 
@@ -187,7 +187,7 @@ sl run -v
 | `--junit-xml PATH` | `:runner {:report {:junit-xml "..."}}` | Write a CI-ingestible JUnit XML report (alongside console/EDN; flag wins over config). A planning error (exit 2) writes **no** file in a single-group run; in a multi-group run the file covers only the groups that ran — gate CI on the exit code, not the report. See [docs/CI.md](docs/CI.md) for worked pipelines and [ERRATA E009](ERRATA.md) for format details. |
 | `--html PATH` | `:runner {:report {:html "..."}}` | Write a self-contained HTML run report (one file, works offline via double-click; flag wins over config). Embeds the full run data as a readable EDN island alongside the rendered view. |
 | `--capture k=v,…` | `:runner {:capture {...}}` | Capture artifacts into the run's results directory (e.g. `screenshot=on-failure,console=every-step`). Kinds: `screenshot`, `console`, `page-source` (browser). Policies: `never` (default), `on-failure` (the failing step's instant, all live browsers), `every-step` (film strip following the acting subject). Flag wins over config as a whole value. Capture failures on a green scenario flip it to `:error`, capture-attributed — evidence loss is never silent. |
-| `-v, --verbose` | — | Show each step as it executes |
+| `-v, --verbose` | — | Show each step as it executes; with `--dry-run`, print the step plan. Repeat (`-vv`) to add each stepdef's pattern source to the plan |
 | `--version` | — | Print ShiftLefter version |
 
 ### Validation & Formatting
@@ -357,10 +357,11 @@ Feature: Shopping cart
 **Convention:** `ctx` is always the **first** argument, followed by regex captures in order.
 
 Before writing a custom step to *carry a value* from one step to another,
-check the scenario data plane first: a named regex group (`(?<code>\d{6})`)
-in a builtin matcher binds the value, and `{code}` consumes it in later step
-text — often no `defstep` needed. See
-[Test Across Interfaces](docs/across-interfaces.md).
+check the scenario data plane first: declare the shape of the text on its
+intent element (`:shape "verification code is: (\\d{6})"`), a builtin
+matcher step names the element (`matching Reset.smsCode`) and binds the
+value, and `{smsCode}` consumes it in later step text — often no `defstep`
+needed. See [Test Across Interfaces](docs/across-interfaces.md).
 
 **Return values:**
 
@@ -382,9 +383,9 @@ Steps with a DataTable or DocString attached access them via `(step/arguments ct
 
 ---
 
-## SVO Validation (Optional)
+## SVO Validation
 
-Add type-checking to your step definitions with Subject-Verb-Object validation. See `docs/SVO.md` for full documentation.
+Step definitions are typed with Subject-Verb-Object metadata — a matched `defstep` without it still runs, and is reported as untyped. See `docs/SVO.md` for full documentation.
 
 ```clojure
 ;; Step with SVO metadata — subject extracted from first capture
@@ -395,7 +396,7 @@ Add type-checking to your step definitions with Subject-Verb-Object validation. 
   ...)
 ```
 
-Configure enforcement in `sl/shiftlefter.edn`. Glossaries at the
+Set enforcement levels in `sl/shiftlefter.edn`. Glossaries at the
 conventional paths next to the config (`sl/glossary/subjects.edn`,
 `sl/glossary/verbs/*.edn`, `sl/glossary/intents/`) are discovered
 automatically; an explicit `:glossaries` map overrides them:
@@ -408,7 +409,7 @@ automatically; an explicit `:glossaries` map overrides them:
  :interfaces
  {:web {:type :web :adapter :etaoin :config {:headless true}}}
 
- :svo
+ :enforcement                           ;; optional — these ARE the defaults
  {:unknown-subject :warn    ; or :error
   :unknown-verb :warn
   :unknown-interface :error}}
@@ -638,9 +639,9 @@ no browser features, but everything else works.
 ## Behavioral Guarantees
 
 ### Compliance
-- **Parser: 100% Gherkin-compatible** (46/46 official Cucumber test files passing)
+- **Parser: 100% Gherkin-compatible** (50/50 official Cucumber test files passing, cucumber/gherkin v42.0.1)
 - Token format, AST structure, and pickle output match Cucumber reference implementation
-- 11/11 invalid files correctly rejected with appropriate errors
+- 12/12 invalid files correctly rejected with appropriate errors
 
 ### File Encoding
 - **UTF-8 only:** All file reads enforce strict UTF-8 decoding
@@ -690,7 +691,7 @@ isn't), plus a task-based index of every guide. Highlights:
 - [docs/LOCATORS.md](docs/LOCATORS.md) — Choosing web locators that survive refactors
 - [docs/COSTUMES.md](docs/COSTUMES.md) — Costumes & wardrobe: durable authenticated browser sessions actors wear
 - [docs/multiple-actors.md](docs/multiple-actors.md), [docs/across-interfaces.md](docs/across-interfaces.md), [docs/extending-vocabulary.md](docs/extending-vocabulary.md) — capability guides
-- [docs/adoption.md](docs/adoption.md) — Bring existing Gherkin (preview)
+- [docs/adoption.md](docs/adoption.md) — Bring existing Gherkin: what parses today, what `sl run` reports, what shifting a suite means
 - [docs/GLOSSARY.md](docs/GLOSSARY.md) — Terminology reference
 - [docs/FUZZ.md](docs/FUZZ.md) — Fuzz testing and delta debugging
 - [CONTRIBUTING.md](CONTRIBUTING.md) — Development setup and contribution guide
@@ -733,14 +734,22 @@ bin/                           # Dev scripts (kaocha, kondo, compliance, repl-ev
 
 ## Testing
 
-**1546 tests, 4921 assertions, 0 failures**
+The current test counts live in the [CHANGELOG](CHANGELOG.md) Stats block of
+the latest release (`./bin/kaocha unit` is the fast suite; the daemon and
+live-browser suites are listed beside it and each self-skips when its
+prerequisite is absent).
+
+Two prerequisites before the full suite runs for real from a fresh clone: the
+compliance tests read the official Cucumber corpus, which is not shipped in
+this repo, and the CLI-wiring test needs a built jar. Without them those
+tests report as *pending* (each names the one command that fetches its
+prerequisite) — never red.
 
 ```bash
-# Run full test suite
-bin/kaocha
-
-# Run compliance tests
-bin/compliance
+clojure -T:build uberjar   # build the jar (bin/sl needs it)
+bin/compliance             # fetches the official Cucumber corpus into compliance/gherkin, then runs the compliance suite
+bin/kaocha                 # the full suite (unit + live-browser validators, which self-skip without a driver)
+bin/kaocha unit            # the fast suite only
 
 # Fuzz testing
 sl gherkin fuzz --trials 1000 --seed 12345
@@ -756,10 +765,10 @@ CLI commands return consistent exit codes for scripting and CI integration.
 | Code | Meaning |
 |------|---------|
 | 0 | Existential pass: at least one scenario was selected, every selected scenario ran to a tolerated outcome, and none failed or errored. "Tolerated" covers exactly one documented exception — pending steps under `:allow-pending?` (the counts still confess `0 passed / N pending`). |
-| 1 | One or more scenarios failed (a step assertion or step exception — valid tests, app wrong), or pending steps when not allowed |
+| 1 | One or more scenarios failed (a step assertion or step exception — valid tests, app wrong), or pending steps when not allowed, or a stale `@blocked` claim (XPASS: a `@blocked=REF` scenario passed — the test's claim about the app is what is wrong; still a failing corpus) |
 | 2 | Planning failure — invalid before execution: undefined steps, parse errors, config errors, no features found, bad flags/arguments, and **empty selection** (a tag filter matching 0 of N, feature files with no scenarios, CLI paths narrowing every group away). Nothing executed. |
 | 3 | Runner crash (unexpected exception) |
-| 4 | Run degraded: one or more scenarios have no verdict — either the harness's own machinery broke (`:error` — a lifecycle hook threw, capability provisioning failed, capture infrastructure failed, or the harness crashed mid-scenario; counted `error`) or a step's adapter classified its failure `:observation` — no answer existed (connection refused, transport timeout, DNS; counted `unobserved`). Either way the run proves nothing about the app for those scenarios — distinct from 1 by design. |
+| 4 | Run degraded: one or more scenarios have no verdict — either the harness's own machinery broke (`:error` — a lifecycle hook threw, capability provisioning failed, or capture infrastructure failed; counted `error`) or a step's adapter classified its failure `:observation` — no answer existed (connection refused, transport timeout, DNS; counted `unobserved`). Either way the run proves nothing about the app for those scenarios — distinct from 1 by design. |
 
 Precedence: 3 anywhere; 2 is pre-execution exclusive; during execution worst
 wins, 4 over 1 over 0. Across `setup.clj` groups the suite aggregates
@@ -838,6 +847,22 @@ guidance: [docs/architecture/exit-codes.md](docs/architecture/exit-codes.md).
 
 Doctor's codes are a *machine* verdict, deliberately outside `sl run`'s
 verdict table — doctor never executes scenarios. `--list` always exits 0.
+
+---
+
+## How this project is built
+
+ShiftLefter has one maintainer, who works with a standing set of AI agents,
+each in a fixed role; the docs and the changelog name those roles. Chair
+is the maintainer — every ruling, merge and release is Chair's call. Tower plans
+and reviews: architecture, grooming, the fit check on every change. Trench
+writes the code. Herald writes the words — docs, release notes, the site.
+Warden audits, tests, and hunts for what the rest missed. The role is the
+stable part, not the model: the four agent roles have been filled by different
+providers, models and effort levels over the project's life, so a role name
+tells you the job, never which model did it. Work is tracked as *beads* in a
+private tracker; an id like `sl-6qf6` cites one of those records — the tracker
+isn't published, so treat an id as a citation you can ask about, not a link.
 
 ---
 

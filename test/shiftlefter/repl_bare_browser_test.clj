@@ -22,14 +22,14 @@
     (repl/reset-ctx!)
     (repl/reset-ctxs!)
     (reset! @#'repl/connected-subjects {})
-    (repl/vanilla!)
+    (repl/reset-config!)
     (f)
-    (repl/vanilla!)))
+    (repl/reset-config!)))
 
 (def ^:private bare-config
-  ;; :svo all-off: this suite is about provisioning, not vocabulary.
+  ;; enforcement all-off: this suite is about provisioning, not vocabulary.
   {:interfaces {:web {:type :web :adapter :fake-web :config {}}}
-   :svo {:unknown-subject :off :unknown-verb :off :unknown-interface :off}})
+   :enforcement {:unknown-subject :off :unknown-verb :off :unknown-interface :off}})
 
 (defn- fake-web-registry
   "Default registry + a :fake-web adapter whose factory returns `impl`
@@ -47,7 +47,7 @@
           quit-calls (atom [])]
       (with-redefs [areg/default-registry (fake-web-registry impl cleanup-calls)
                     session/quit-driver! (fn [d] (swap! quit-calls conj d) {:ok :quit})]
-        (repl/shifted! bare-config)
+        (repl/load-config! bare-config)
         (defstep #":(\w+) uses the web" {:interface :web} [ctx _subject] ctx)
         (let [r (repl/as :bare "uses the web")]
           (is (= :passed (:status r)))
@@ -66,17 +66,21 @@
                          {:factory (fn [_] {:error {:type :adapter/boom :message "no web today"}})
                           :cleanup (fn [_] {:ok :closed})
                           :provides []})]
-      (repl/shifted! bare-config)
+      (repl/load-config! bare-config)
       (defstep #":(\w+) uses the web" {:interface :web} [ctx _subject] ctx)
       (let [r (repl/as :bare "uses the web")]
         (is (= :failed (:status r)))
         (is (some? (:error r)))))))
 
-(deftest as-without-config-is-unchanged
-  (testing "vanilla mode (no config): no provisioning, non-browser steps unaffected"
+(deftest as-without-interface-is-unchanged
+  (testing "no configured interface for the step's type: no provisioning, non-browser steps unaffected"
+    ;; sl-6wh9: the built-in defaults DO configure :web (etaoin), so a bare
+    ;; REPL mirrors `sl run` with no config file — to see the no-provision
+    ;; path, load a config that declares zero interfaces.
+    (repl/load-config! {:interfaces {}})
     (defstep #":(\w+) uses the web" {:interface :web} [ctx _subject] ctx)
-    ;; No config: the step runs with no capability provisioned — this
-    ;; particular step doesn't need one, so it passes with an empty ctx.
+    ;; No interface entry: the step runs with no capability provisioned —
+    ;; this particular step doesn't need one, so it passes with an empty ctx.
     (let [r (repl/as :bare "uses the web")]
       (is (= :passed (:status r)))
       (is (nil? (cap/get-capability-entry (repl/ctx :bare) :web :bare))))))
@@ -86,10 +90,9 @@
     (let [impl {:fake-impl :web}
           cleanup-calls (atom [])]
       (with-redefs [areg/default-registry (fake-web-registry impl cleanup-calls)]
-        ;; Shifted compile requires glossaries: explicit nils pass the
-        ;; config check and the framework-default :web verb glossary
-        ;; auto-loads, so the svo must use a known verb/frame.
-        (repl/shifted! (assoc bare-config :glossaries {:subjects nil :verbs nil}))
+        ;; The framework-default :web verb glossary auto-loads on every
+        ;; compile (sl-6wh9), so the svo must use a known verb/frame.
+        (repl/load-config! (assoc bare-config :glossaries {:subjects nil :verbs nil}))
         (defstep #":(\w+) uses the web"
           {:interface :web
            :svo {:subject :$1 :verb :navigate :frame :to :object nil :args {}}}

@@ -111,7 +111,7 @@
                       :junit-xml [:runner :report :junit-xml]
                       :capture [:runner :capture]
                       :verbs [:glossaries :verbs]
-                      :unknown-verb [:svo :unknown-verb]
+                      :unknown-verb [:enforcement :unknown-verb]
                       :deadline-ms [:timing :deadline-ms]
                       :interval-ms [:timing :interval-ms]}]
       (let [[w] (config/lint-config {k :whatever})]
@@ -183,10 +183,23 @@
                 :glossaries {:subjects "g/s.edn"}
                 :interfaces {:web {:type :web :adapter :etaoin}}
                 :costumes {:finance {:interface :web}}
-                :svo {:unknown-verb :warn}
+                :enforcement {:unknown-verb :warn}
                 :timing {:deadline-ms 30000 :interval-ms 500}}))))
   (testing "empty config is clean"
     (is (= [] (config/lint-config {})))))
+
+(deftest ref-url-template-spec
+  ;; sl-190x: [:runner :ref-url] is the @blocked link template — a string
+  ;; carrying the {ref} placeholder; nothing is ever fetched.
+  (is (s/valid? ::config/runner {:step-paths ["s"] :allow-pending? false
+                                 :ref-url "https://tracker.example/browse/{ref}"}))
+  (is (not (s/valid? ::config/runner {:step-paths ["s"] :allow-pending? false
+                                      :ref-url "https://tracker.example/browse/"}))
+      "a template without {ref} cannot render a link")
+  (testing "a top-level :ref-url gets the did-you-mean to [:runner :ref-url]"
+    (let [[w] (config/lint-config (merge config/default-config {:ref-url "x/{ref}"}))]
+      (is (= :config/misplaced-key (:type w)))
+      (is (= [:runner :ref-url] (:suggested-path w))))))
 
 (deftest lint-config-warns-on-top-level-webdriver-keys
   ;; sl-7kct: formerly exempted because `normalize` handles them — but the
@@ -316,103 +329,162 @@
 ;; -----------------------------------------------------------------------------
 
 ;; -----------------------------------------------------------------------------
-;; Shifted-Mode Opt-In Tests (sl-ieie)
+;; The :enforcement block is ALWAYS present (sl-6wh9 — one mode)
 ;; -----------------------------------------------------------------------------
 
-(deftest test-load-config-no-user-svo-means-vanilla
-  (testing "User config without :svo → loaded config has NO :svo key (Vanilla)"
+(def ^:private built-in-levels
+  {:unknown-subject :warn
+   :unknown-verb :warn
+   :unknown-interface :error
+   :unknown-object :off
+   :untyped-stepdef :warn
+   :raw-locator :off})
+
+(deftest test-load-config-without-block-carries-the-defaults
+  (testing "User config without :enforcement → loaded config carries the
+            complete built-in block (presence means nothing)"
     (let [cfg (config/load-config {:config-path "test/fixtures/config/minimal.edn"})]
-      (is (not (contains? cfg :svo)))
+      (is (= built-in-levels (:enforcement cfg)))
       ;; Everything else still merges from defaults
       (is (= "de" (get-in cfg [:parser :dialect])))
       (is (= ["steps/"] (get-in cfg [:runner :step-paths]))))))
 
-(deftest test-load-config-user-svo-merges-defaults
-  (testing "User config with partial :svo → Shifted; defaults merged under it"
+(deftest test-load-config-partial-block-merges-defaults
+  (testing "User config with a partial :enforcement → named key wins,
+            the rest are the built-in levels"
     (let [cfg (config/load-config {:config-path "test/fixtures/config/svo-partial.edn"})]
-      (is (contains? cfg :svo))
-      ;; User override wins
-      (is (= :error (get-in cfg [:svo :unknown-subject])))
-      ;; Unspecified levels come from default-config
-      (is (= :warn (get-in cfg [:svo :unknown-verb])))
-      (is (= :error (get-in cfg [:svo :unknown-interface])))
-      (is (= :off (get-in cfg [:svo :unknown-object]))))))
+      (is (= (assoc built-in-levels :unknown-subject :error)
+             (:enforcement cfg))))))
 
-(deftest test-load-config-no-config-file-is-vanilla
-  (testing "No config file at all → defaults WITHOUT :svo (Vanilla)"
+(deftest test-load-config-no-config-file-carries-the-defaults
+  (testing "No config file at all → the built-in defaults, block included"
     (let [tmp (str (fs/create-temp-dir))]
       (try
         (with-redefs [paths/user-cwd (constantly tmp)]
           (let [cfg (config/load-config {})]
-            (is (not (contains? cfg :svo)))
+            (is (= built-in-levels (:enforcement cfg)))
             ;; Remaining defaults intact
             (is (= "en" (get-in cfg [:parser :dialect])))
             (is (= ["steps/"] (get-in cfg [:runner :step-paths])))))
         (finally
           (fs/delete-tree tmp))))))
 
-(deftest test-default-config-still-documents-svo-defaults
-  (testing "default-config keeps the :svo opt-in defaults block"
-    (is (= {:unknown-subject :warn
-            :unknown-verb :warn
-            :unknown-interface :error
-            :unknown-object :off}
-           (:svo config/default-config)))))
+(deftest test-default-config-enforcement-block
+  (testing "default-config's block is the built-in level of every kind"
+    (is (= built-in-levels (:enforcement config/default-config)))
+    (is (= (set config/enforcement-kinds) (set (keys built-in-levels))))))
+
+(defn- load-tmp-config
+  "Write `edn-text` as sl/shiftlefter.edn in a temp project (with the
+   optional extra dirs) and load it."
+  [edn-text & dirs]
+  (let [tmp (str (fs/create-temp-dir))]
+    (try
+      (fs/create-dirs (fs/path tmp "sl"))
+      (doseq [d dirs] (fs/create-dirs (fs/path tmp "sl" d)))
+      (spit (str (fs/path tmp "sl" "shiftlefter.edn")) edn-text)
+      (with-redefs [paths/user-cwd (constantly tmp)]
+        (config/load-config {}))
+      (finally
+        (fs/delete-tree tmp)))))
+
+(deftest test-all-umbrella-merge-rule
+  ;; sl-6wh9 ruling #6: :all sets every knob, a named key overrides it,
+  ;; built-in defaults where neither; :unknown-interface stays :error
+  ;; regardless of the umbrella.
+  (testing "{:all :error} — the strict one-liner"
+    (let [cfg (load-tmp-config "{:enforcement {:all :error}}")]
+      (is (= :error (get-in cfg [:enforcement :all]))
+          "the umbrella is carried through for normalize")
+      (is (= {:unknown-subject :error :unknown-verb :error
+              :unknown-interface :error :unknown-object :error
+              :untyped-stepdef :error :raw-locator :error}
+             (config/get-enforcement cfg)))))
+  (testing "{:all :warn} — interface still :error"
+    (let [enf (config/get-enforcement (load-tmp-config "{:enforcement {:all :warn}}"))]
+      (is (= :error (:unknown-interface enf)))
+      (is (every? #(= :warn (get enf %))
+                  [:unknown-subject :unknown-verb :unknown-object
+                   :untyped-stepdef :raw-locator]))))
+  (testing "{:all :error :unknown-object :warn} — a named key overrides"
+    (let [enf (config/get-enforcement
+               (load-tmp-config "{:enforcement {:all :error :unknown-object :warn :raw-locator :warn}}"))]
+      (is (= :warn (:unknown-object enf)))
+      (is (= :warn (:raw-locator enf)))
+      (is (= :error (:unknown-subject enf)))))
+  (testing ":all beats the conditional intents default"
+    (let [enf (config/get-enforcement
+               (load-tmp-config "{:enforcement {:all :off}}" "glossary/intents"))]
+      (is (= :off (:unknown-object enf)))
+      (is (= :off (:raw-locator enf)))
+      (is (= :error (:unknown-interface enf)))))
+  (testing "an invalid :all never propagates — the kinds keep their defaults
+            and normalize names the umbrella"
+    (let [cfg (load-tmp-config "{:enforcement {:all :warm}}")]
+      (is (= built-in-levels (config/get-enforcement cfg)))
+      (is (= [[:enforcement :all]]
+             (mapv (fn [e] [:enforcement (get-in e [:data :key])])
+                   (:errors (config/normalize cfg)))))))
+  (testing "a named :unknown-interface key is still honored (spec unchanged)"
+    (is (= :warn (config/enforcement-level
+                  (load-tmp-config "{:enforcement {:unknown-interface :warn}}")
+                  :unknown-interface)))))
+
+(deftest test-old-svo-block-gets-the-rename-did-you-mean
+  ;; sl-6wh9 ruling #5: no alias — an old :svo block is ignored and the
+  ;; config lint names the rename.
+  (testing "lint-config on a loaded config with a top-level :svo"
+    (let [cfg (load-tmp-config "{:svo {:unknown-subject :error}}")
+          [w :as ws] (config/lint-config cfg)]
+      (is (= 1 (count ws)))
+      (is (= :config/misplaced-key (:type w)))
+      (is (= :svo (:key w)))
+      (is (= [:enforcement] (:suggested-path w)))
+      (is (str/includes? (:message w) "did you mean [:enforcement]?"))
+      (is (= built-in-levels (config/get-enforcement cfg))
+          "the old block changed nothing"))))
 
 ;; -----------------------------------------------------------------------------
-;; Conditional :unknown-object default (sl-femd)
+;; Conditional :unknown-object / :raw-locator default (sl-femd, sl-6wh9)
 ;; -----------------------------------------------------------------------------
 
-(deftest test-conditional-unknown-object-default
-  (testing "Intents configured + user silent → :warn"
+(deftest test-conditional-intents-defaults
+  (testing "Intents configured + user silent → :warn for both kinds"
     (let [cfg (config/load-config {:config-path "test/fixtures/config/svo-intents.edn"})]
-      (is (= :warn (get-in cfg [:svo :unknown-object])))))
+      (is (= :warn (get-in cfg [:enforcement :unknown-object])))
+      (is (= :warn (get-in cfg [:enforcement :raw-locator])))))
 
   (testing "Intents configured + user-explicit :off → stays :off"
     (let [cfg (config/load-config {:config-path "test/fixtures/config/svo-intents-off.edn"})]
-      (is (= :off (get-in cfg [:svo :unknown-object])))))
+      (is (= :off (get-in cfg [:enforcement :unknown-object])))
+      (is (= :warn (get-in cfg [:enforcement :raw-locator]))
+          "the sibling kind still flips — the override is per key")))
 
-  (testing "Conventionally probed glossary/intents/ flips the default too"
-    (let [tmp (str (fs/create-temp-dir))]
-      (try
-        (fs/create-dirs (fs/path tmp "sl" "glossary" "intents"))
-        (spit (str (fs/path tmp "sl" "shiftlefter.edn")) "{:svo {}}")
-        (with-redefs [paths/user-cwd (constantly tmp)]
-          (let [cfg (config/load-config {})]
-            (is (= "glossary/intents" (get-in cfg [:glossaries :intents])))
-            (is (= :warn (get-in cfg [:svo :unknown-object])))))
-        (finally
-          (fs/delete-tree tmp)))))
+  (testing "Conventionally probed glossary/intents/ flips the defaults too"
+    (let [cfg (load-tmp-config "{:enforcement {}}" "glossary/intents")]
+      (is (= "glossary/intents" (get-in cfg [:glossaries :intents])))
+      (is (= :warn (get-in cfg [:enforcement :unknown-object])))
+      (is (= :warn (get-in cfg [:enforcement :raw-locator])))))
 
   (testing "No intents anywhere + user silent → :off (static default)"
-    (let [tmp (str (fs/create-temp-dir))]
-      (try
-        (fs/create-dirs (fs/path tmp "sl"))
-        (spit (str (fs/path tmp "sl" "shiftlefter.edn")) "{:svo {}}")
-        (with-redefs [paths/user-cwd (constantly tmp)]
-          (let [cfg (config/load-config {})]
-            (is (= :off (get-in cfg [:svo :unknown-object])))))
-        (finally
-          (fs/delete-tree tmp)))))
+    (let [cfg (load-tmp-config "{:enforcement {}}")]
+      (is (= :off (get-in cfg [:enforcement :unknown-object])))
+      (is (= :off (get-in cfg [:enforcement :raw-locator])))))
 
-  (testing "Vanilla config (no :svo) with intents stays Vanilla — no flip"
-    (let [tmp (str (fs/create-temp-dir))]
-      (try
-        (fs/create-dirs (fs/path tmp "sl" "glossary" "intents"))
-        (spit (str (fs/path tmp "sl" "shiftlefter.edn")) "{:parser {:dialect \"en\"}}")
-        (with-redefs [paths/user-cwd (constantly tmp)]
-          (let [cfg (config/load-config {})]
-            (is (not (contains? cfg :svo)))))
-        (finally
-          (fs/delete-tree tmp))))))
+  (testing "A config with NO block and intents flips too — there is no mode
+            to opt into (sl-6wh9)"
+    (let [cfg (load-tmp-config "{:parser {:dialect \"en\"}}" "glossary/intents")]
+      (is (= :warn (get-in cfg [:enforcement :unknown-object]))))))
 
-(deftest test-unknown-object-spec-accepts-both-blocking-spellings
-  (testing ":error is canonical, :strict a deprecated alias (sl-femd)"
-    (is (s/valid? ::config/unknown-object :error))
-    (is (s/valid? ::config/unknown-object :strict))
-    (is (s/valid? ::config/unknown-object :warn))
-    (is (s/valid? ::config/unknown-object :off))
-    (is (not (s/valid? ::config/unknown-object :nope)))))
+(deftest test-level-spec-is-one-closed-set
+  (testing ":strict retired with the rename (sl-6wh9); one level set for every kind"
+    (doseq [k [::config/unknown-object ::config/unknown-subject ::config/all
+               ::config/untyped-stepdef ::config/raw-locator]]
+      (is (s/valid? k :error) (str k))
+      (is (s/valid? k :warn) (str k))
+      (is (s/valid? k :off) (str k))
+      (is (not (s/valid? k :strict)) (str k))
+      (is (not (s/valid? k :nope)) (str k)))))
 
 (deftest test-deep-merge-behavior
   (testing "Config merges deeply, not shallowly"
@@ -578,12 +650,12 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest test-default-config-new-keys
-  (testing "Default config has glossaries, interfaces, and svo keys"
+  (testing "Default config has glossaries, interfaces, and enforcement keys"
     (let [cfg config/default-config]
       (is (nil? (:glossaries cfg)) "glossaries nil by default")
       (is (map? (:interfaces cfg)) "interfaces is a map")
       (is (contains? (:interfaces cfg) :web) "has :web interface")
-      (is (map? (:svo cfg)) "svo is a map")))
+      (is (map? (:enforcement cfg)) "enforcement is a map")))
 
   (testing "Default :web interface has required keys"
     (let [web-iface (get-in config/default-config [:interfaces :web])]
@@ -591,11 +663,12 @@
       (is (= :etaoin (:adapter web-iface)))
       (is (map? (:config web-iface)))))
 
-  (testing "Default SVO settings are :warn/:error"
-    (let [svo (:svo config/default-config)]
-      (is (= :warn (:unknown-subject svo)))
-      (is (= :warn (:unknown-verb svo)))
-      (is (= :error (:unknown-interface svo))))))
+  (testing "Default enforcement levels are :warn/:error"
+    (let [enf (:enforcement config/default-config)]
+      (is (= :warn (:unknown-subject enf)))
+      (is (= :warn (:unknown-verb enf)))
+      (is (= :error (:unknown-interface enf)))
+      (is (= :warn (:untyped-stepdef enf))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Interface Validation Tests
@@ -765,32 +838,36 @@
                         (config/lint-config {:interfaces {:web :default
                                                           :api {:type :api :adapter :http}}}))))))
 
-(deftest test-svo-levels-are-a-closed-set
+(deftest test-enforcement-levels-are-a-closed-set
   ;; sl-3bqv: a typo'd level (:warm) used to flow through compute-severity
   ;; as non-blocking — the strict setting silently became a warning.
   (testing "an unknown level is a hard error with did-you-mean over the enum"
-    (let [[err :as errs] (:errors (config/normalize {:svo {:unknown-subject :warm}}))]
+    (let [[err :as errs] (:errors (config/normalize {:enforcement {:unknown-subject :warm}}))]
       (is (= 1 (count errs)))
-      (is (= :config/invalid-svo-level (:type err)))
-      (is (str/includes? (:message err) "[:svo :unknown-subject]"))
+      (is (= :config/invalid-enforcement-level (:type err)))
+      (is (str/includes? (:message err) "[:enforcement :unknown-subject]"))
       (is (str/includes? (:message err) "did you mean :warn?"))
       (is (= :warn (get-in err [:data :suggestion])))))
-  (testing "every key is checked; :strict is accepted for :unknown-object only"
-    (is (nil? (:errors (config/normalize {:svo {:unknown-subject :error
-                                                :unknown-verb :warn
-                                                :unknown-interface :off
-                                                :unknown-object :strict}}))))
-    (is (= [:config/invalid-svo-level]
-           (mapv :type (:errors (config/normalize {:svo {:unknown-verb :strict}})))))
-    (is (= [:unknown-interface :unknown-object]
+  (testing "every key is checked, :all included; :strict is gone (sl-6wh9)"
+    (is (nil? (:errors (config/normalize {:enforcement {:all :warn
+                                                        :unknown-subject :error
+                                                        :unknown-verb :warn
+                                                        :unknown-interface :off
+                                                        :unknown-object :error
+                                                        :untyped-stepdef :off
+                                                        :raw-locator :warn}}))))
+    (is (= [:config/invalid-enforcement-level]
+           (mapv :type (:errors (config/normalize {:enforcement {:unknown-object :strict}})))))
+    (is (= [:all :unknown-interface :unknown-object]
            (mapv #(get-in % [:data :key])
-                 (:errors (config/normalize {:svo {:unknown-interface "error"
-                                                   :unknown-object :nope}}))))))
-  (testing "no :svo, an empty :svo, and a non-map :svo"
+                 (:errors (config/normalize {:enforcement {:all :strict
+                                                           :unknown-interface "error"
+                                                           :unknown-object :nope}}))))))
+  (testing "no block, an empty block, and a non-map block"
     (is (nil? (:errors (config/normalize {}))))
-    (is (nil? (:errors (config/normalize {:svo {}}))))
-    (is (= [:config/invalid-svo-level]
-           (mapv :type (:errors (config/normalize {:svo [:warn]})))))))
+    (is (nil? (:errors (config/normalize {:enforcement {}}))))
+    (is (= [:config/invalid-enforcement-level]
+           (mapv :type (:errors (config/normalize {:enforcement [:warn]})))))))
 
 (deftest test-halt-policy-tri-state
   ;; sl-78u4 (Warden W3): false | :group | :run, true reads as :run.
@@ -1012,32 +1089,33 @@
     (is (nil? (config/get-interface-adapter {} :web)))))
 
 ;; -----------------------------------------------------------------------------
-;; SVO Config Accessor Tests
+;; Enforcement Config Accessor Tests
 ;; -----------------------------------------------------------------------------
 
-(deftest test-get-svo-settings
-  (testing "get-svo-settings extracts all settings"
-    (let [cfg {:svo {:unknown-subject :error
-                     :unknown-verb :warn
-                     :unknown-interface :error}}]
+(deftest test-get-enforcement
+  (testing "get-enforcement returns the kinds and drops the :all umbrella"
+    (let [cfg {:enforcement {:all :error
+                             :unknown-subject :error
+                             :unknown-verb :warn
+                             :unknown-interface :error}}]
       (is (= {:unknown-subject :error
               :unknown-verb :warn
               :unknown-interface :error}
-             (config/get-svo-settings cfg)))))
+             (config/get-enforcement cfg)))))
 
-  (testing "get-svo-settings returns nil for missing"
-    (is (nil? (config/get-svo-settings {})))))
+  (testing "get-enforcement falls back to the built-in block for a raw map"
+    (is (= (:enforcement config/default-config) (config/get-enforcement {})))))
 
-(deftest test-svo-enforcement
-  (testing "svo-enforcement extracts specific check level"
-    (let [cfg {:svo {:unknown-subject :error
-                     :unknown-verb :warn}}]
-      (is (= :error (config/svo-enforcement cfg :unknown-subject)))
-      (is (= :warn (config/svo-enforcement cfg :unknown-verb)))))
+(deftest test-enforcement-level
+  (testing "enforcement-level extracts one kind's level"
+    (let [cfg {:enforcement {:unknown-subject :error
+                             :unknown-verb :warn}}]
+      (is (= :error (config/enforcement-level cfg :unknown-subject)))
+      (is (= :warn (config/enforcement-level cfg :unknown-verb)))))
 
-  (testing "svo-enforcement returns nil for missing check"
-    (let [cfg {:svo {:unknown-subject :warn}}]
-      (is (nil? (config/svo-enforcement cfg :unknown-verb))))))
+  (testing "enforcement-level returns nil for a kind the raw block omits"
+    (let [cfg {:enforcement {:unknown-subject :warn}}]
+      (is (nil? (config/enforcement-level cfg :unknown-verb))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Task 3.0.3 Acceptance Criteria
@@ -1050,7 +1128,7 @@
                :interfaces {:web {:type :web
                                   :adapter :etaoin
                                   :config {:headless true}}}
-               :svo {:unknown-subject :warn
+               :enforcement {:unknown-subject :warn
                      :unknown-verb :warn
                      :unknown-interface :error}}
           result (config/normalize cfg)]

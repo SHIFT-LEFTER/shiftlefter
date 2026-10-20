@@ -16,6 +16,14 @@
     (is (= :alice (extract/normalize-subject " Alice ")))
     (is (= :bob (extract/normalize-subject "  Bob\t"))))
 
+  (testing "strips exactly one leading colon (sl-74c2): a capture that kept
+            the ':' means the same subject the builtins' :(\\S+) capture does"
+    (is (= :user (extract/normalize-subject ":user")))
+    (is (= :alice (extract/normalize-subject " :Alice ")))
+    (is (= :user/alice (extract/normalize-subject ":user/alice")))
+    (is (= (keyword ":user") (extract/normalize-subject "::user"))
+        "only one — a second colon stays visible (and the envelope stringifies it)"))
+
   (testing "preserves namespaced keywords"
     (is (= :system/test-setup (extract/normalize-subject "system/test-setup")))
     (is (= :admin/super (extract/normalize-subject "ADMIN/SUPER"))))

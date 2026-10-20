@@ -42,11 +42,18 @@ builtin entry wholesale, frames and all — `sl glossary` marks such entries
 `config-override`); intents live under `glossary/intents/` (all under
 `sl/`, next to the config — these conventional paths are discovered
 automatically when `:glossaries` is unset). Once an intents glossary is
-configured (declared or discovered), object checking defaults on at `:warn`:
-an unresolvable intent reference is reported at planning time with the name
-and a did-you-mean (`:svo {:unknown-object …}` — `:error` blocks, `:off`
-silences; raw locators and quoted literals are exempt). The full file formats
-and validation model are in `docs/SVO.md`.
+configured (declared or discovered), object checking defaults on at `:warn`
+(`:enforcement {:unknown-object …}`): an unresolvable intent reference — an
+unknown intent, an unknown element, an element with no binding for the
+selected interface — is a planning error (exit 2) with a did-you-mean AND the
+def-site (`Declared in: sl/glossary/intents/login.edn:4`); free text on an
+intent slot warns and names the fix (`:object-kind :text` on the frame);
+`:off` silences. Raw locators ride their own `:raw-locator` kind (same
+conditional default) and, at `:warn`/`:error`, name the intent element bound
+to the same locator. Every did-you-mean on every path — actor, verb,
+interface, intent, capture, config key, and a misspelled verb in step text —
+names where the suggested thing is declared. The full file formats and
+validation model are in `docs/SVO.md`.
 
 Partial vocabulary is normal. A project may have accepted subjects but missing
 verbs, or accepted verbs but incomplete intents. Treat that as useful diagnostic

@@ -13,7 +13,8 @@
    pattern admission (match/no-match), plan validation (always-on :key
    errors, strict-mode :text silence), and exec normalization — the
    exec/lint agreement the ka80 lesson demands."
-  (:require [clojure.edn :as edn]
+  (:require [babashka.fs :as fs]
+            [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
@@ -21,6 +22,7 @@
             [shiftlefter.stepengine.bind :as bind]
             [shiftlefter.stepengine.bindings :as bindings]
             [shiftlefter.browser.url-match :as url-match]
+            [shiftlefter.intent.loader :as loader]
             [shiftlefter.stepengine.hints :as hints]
             [shiftlefter.stepengine.registry :as registry]
             [shiftlefter.svo.bindings-lint :as bindings-lint]
@@ -86,7 +88,8 @@
   "Run the bindings lint over a single-step plan built from live
    bind-time machinery (slot kinds stamped exactly as the engine
    stamps them) — the lint half of the exec/lint agreement tests."
-  [stepdef text]
+  ([stepdef text] (lint-plan stepdef text nil))
+  ([stepdef text intents]
   (let [captures (captures-of stepdef text)
         kinds (bind/default-slot-kinds (:metadata stepdef) (count captures))
         plan {:plan/pickle {:pickle/source-file "grammar-table-test"}
@@ -98,7 +101,7 @@
                             :binding {:captures captures
                                       :slot-kinds kinds
                                       :metadata (:metadata stepdef)}}]}]
-    (bindings-lint/check-plans [plan])))
+    (bindings-lint/check-plans [plan] intents))))
 
 ;; -----------------------------------------------------------------------------
 ;; Element slot rows (:object-kind :intent) — sl-s04n
@@ -265,7 +268,7 @@
           :when (#{:quoted-literal :ref-shaped-literal} (:case row))]
     (testing (str (:case row) ": " step-text)
       (let [sd (find-stepdef step-text)]
-        (is (some? sd) "quoted text matches the title stepdef")
+        (is (some? sd) "quoted text matches the :text-slot stepdef (title / on-page)")
         ;; The bead repro: strict AND warn stay silent on quoted text.
         (is (= [] (validate-object-issues sd step-text :strict)))
         (is (= [] (validate-object-issues sd step-text :warn)))
@@ -289,10 +292,25 @@
       (is (= [:bindings/consumed-without-producer]
              (mapv :type (lint-plan sd step-text)))))))
 
-(deftest text-slot-bare-reserved-row
-  (let [{:keys [step-text]} (first (filter #(= :bare-reserved (:case %)) (rows :text-slot)))]
-    (testing "unquoted ref-shape in the text slot is RESERVED — no match"
+(deftest text-slot-bare-reserved-rows
+  (doseq [{:keys [step-text]} (filter #(= :bare-reserved (:case %)) (rows :text-slot))]
+    (testing (str "unquoted ref-shape in the text slot is RESERVED — no match: " step-text)
       (is (nil? (find-stepdef step-text))))))
+
+;; sl-90x5: a {token} in the `should see O` position is NOT a text-slot
+;; token — it is the :visible LOCATOR slot (locator-re admits any {...}).
+;; The row pins that exactly one stepdef fires and it is the locator one by
+;; frame identity, so the on-page :text frame never admits a token there
+;; (which would make every such step an ambiguous bind, exit 2).
+(deftest text-slot-token-reserved-locator-shape-rows
+  (doseq [{:keys [step-text locator-frame]}
+          (filter #(= :token-reserved-locator-shape (:case %)) (rows :text-slot))]
+    (testing (str "token in the on-page position binds to the locator stepdef alone: " step-text)
+      (let [matches (filter #(re-matches (:pattern %) step-text) (registry/all-stepdefs))]
+        (is (= 1 (count matches)) "exactly one stepdef — never ambiguous")
+        (is (= {:verb :see :frame locator-frame}
+               (select-keys (get-in (first matches) [:metadata :svo]) [:verb :frame]))
+            "and it is the :see locator frame, not :on-page")))))
 
 ;; -----------------------------------------------------------------------------
 ;; Key slot rows (:object-kind :key)
@@ -424,6 +442,74 @@
 (deftest matcher-malformed-pattern-error
   (let [{:keys [step-text]} (matcher-row :malformed-pattern-error)]
     (is (= [[:bindings/invalid-pattern :error]] (lint-types step-text)))))
+
+;; --- Declared shapes (sl-ectw) ---
+
+(def ^:private shaped-intents
+  "Checkout.total declares a :shape (web); Checkout.note none; Reset.smsCode
+   declares one on :sms only."
+  (delay
+    (let [dir (fs/create-temp-dir)]
+      (spit (str (fs/path dir "checkout.edn"))
+            (str "{:intent \"Checkout\"\n"
+                 " :elements {:total {:bindings {:web {:id \"total\"}}\n"
+                 "                    :shape \"\\\\$(?<total>[0-9.]+)\"}\n"
+                 "            :note {:bindings {:web {:id \"note\"}}}}}"))
+      (spit (str (fs/path dir "reset.edn"))
+            (str "{:intent \"Reset\"\n"
+                 " :elements {:smsCode {:bindings {:sms {}}\n"
+                 "                      :shape \"code is: (\\\\d{6})\"}}}"))
+      (:ok (loader/load-all-intents (str dir))))))
+
+(defn- shaped-lint-types [step-text]
+  (let [sd (find-stepdef step-text)]
+    (is (some? sd) (str "stepdef match for: " step-text))
+    (mapv (juxt :type :severity) (lint-plan sd step-text @shaped-intents))))
+
+(deftest matcher-capture-declared-shape
+  (let [{:keys [step-text]} (matcher-row :capture-declared-shape)
+        sd (find-stepdef step-text)
+        issues (lint-plan sd step-text @shaped-intents)]
+    ;; The shape's one group binds {total}; unconsumed here → the nudge,
+    ;; pointing at the glossary line that declared it.
+    (is (= [[:bindings/produced-never-consumed :warn]]
+           (mapv (juxt :type :severity) issues)))
+    (is (= :total (:name (first issues))))
+    (is (= 2 (-> issues first :def-site :line)))))
+
+(deftest matcher-capture-without-shape-error
+  (let [{:keys [step-text]} (matcher-row :capture-without-shape-error)
+        sd (find-stepdef step-text)
+        issues (lint-plan sd step-text @shaped-intents)]
+    (is (= [[:bindings/captures-without-shape :error]]
+           (mapv (juxt :type :severity) issues)))
+    (is (str/includes? (:message (first issues)) "matching /…/") "both exits named")))
+
+(deftest matcher-shape-and-inline-error
+  (let [{:keys [step-text]} (matcher-row :shape-and-inline-error)
+        sd (find-stepdef step-text)
+        issues (lint-plan sd step-text @shaped-intents)
+        err (first (filter #(= :bindings/shape-and-inline (:type %)) issues))]
+    (is (some? err))
+    (is (= :error (:severity err)))
+    (is (some? (:def-site err)) "both sites: the step location and the glossary line")))
+
+(deftest matcher-receive-shape-ref-binds
+  (let [{:keys [step-text]} (matcher-row :receive-shape-ref-binds)
+        sd (find-stepdef step-text)
+        issues (lint-plan sd step-text @shaped-intents)]
+    (is (= [[:bindings/produced-never-consumed :warn]]
+           (mapv (juxt :type :severity) issues)))
+    (is (= :smsCode (:name (first issues))) "a single group binds to the element's own name")))
+
+(deftest matcher-assert-only-shape-ref-silent
+  (let [{:keys [step-text]} (matcher-row :assert-only-shape-ref-silent)]
+    (is (= [] (shaped-lint-types step-text)))))
+
+(deftest matcher-shape-ref-wrong-interface-error
+  (let [{:keys [step-text]} (matcher-row :shape-ref-wrong-interface-error)]
+    (is (= [[:bindings/shape-no-binding-for-interface :error]]
+           (shaped-lint-types step-text)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Grammar topic drift guard (sl-fcw0): the public doc's key list must

@@ -17,6 +17,27 @@
       (is (= (slurp f) (gen/generate))
           "docs/AGENT.md is stale — run `clojure -T:build gen-agent-md`"))))
 
+(deftest standalone-pages-up-to-date-test
+  (testing "sl-d4pf: each standalone projection (docs/adoption.md) equals fresh
+            generation from its packaged topic — one text, drift-guarded like AGENT.md"
+    (doseq [[topic path] gen/standalone-pages]
+      (let [f (io/file path)]
+        (is (.exists f) (str path " must exist"))
+        (is (= (slurp f) (gen/generate-standalone topic))
+            (str path " is stale — run `clojure -T:build gen-agent-md`"))
+        (is (str/starts-with? (slurp f) "<!-- GENERATED")
+            "the banner names it as generated")
+        (is (str/ends-with? (slurp f) (:content (agent-doc/load-topic topic)))
+            "below the banner the page IS the topic source, verbatim")))))
+
+(deftest render-standalone-purity-test
+  (testing "render-standalone is pure and puts the banner above the source's H1"
+    (let [out (gen/render-standalone "a" "# A\n\nBody A.\n")]
+      (is (= out (gen/render-standalone "a" "# A\n\nBody A.\n")))
+      (is (str/starts-with? out "<!-- GENERATED"))
+      (is (str/includes? out "`sl agent-doc a`"))
+      (is (str/ends-with? out "# A\n\nBody A.\n")))))
+
 (deftest single-h1-test
   (testing "the derived guide has exactly one H1 (topic headings are demoted)"
     (let [h1s (->> (str/split-lines (gen/generate))

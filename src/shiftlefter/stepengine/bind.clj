@@ -25,7 +25,8 @@
 
    For matched steps with `:metadata` containing `:svo`, extracts SVO:
    - `:svo` key added to binding with extracted subject/verb/object/interface
-   - Legacy steps (no metadata) get `:svo nil`
+   - Untyped stepdefs (no `:svo` metadata) get `:svo nil` and raise
+     `:stepdef/untyped` at the configured level (sl-6wh9)
 
    ## SVO Validation
 
@@ -33,7 +34,7 @@
    validated against glossaries and interface config:
    - `:unknown-subject :warn` — log warning, don't block
    - `:unknown-subject :error` — log error, block execution
-   - Same for `:unknown-verb` and `:unknown-interface`
+   - Same for `:unknown-verb`, `:unknown-interface`, `:untyped-stepdef`
 
    ## Usage
 
@@ -51,6 +52,7 @@
             [shiftlefter.stepengine.annotations :as annotations]
             [shiftlefter.stepengine.costume-lint :as costume-lint]
             [shiftlefter.stepengine.hints :as hints]
+            [shiftlefter.text :as text]
             [shiftlefter.svo.extract :as extract]
             [shiftlefter.svo.glossary :as glossary]
             [shiftlefter.svo.validate :as validate]))
@@ -82,9 +84,41 @@
 
 (s/def ::hint ::hints/hint)
 
+;; sl-u2r0 (Fable 5): the step-text did-you-mean on an undefined step —
+;; `{:token "clikcs" :suggestion "clicks" :repaired-text "…" :def-site
+;; {:file :line} :pattern-src "…"}`; present only when replacing the token
+;; makes the text match a candidate stepdef (rematch-gated, like the
+;; grammar hints — a suggestion is never a guess).
+(s/def ::token string?)
+(s/def ::repaired-text string?)
+(s/def ::pattern-src string?)
+(s/def ::verb-suggestion
+  (s/keys :req-un [::token ::suggestion ::repaired-text]
+          :opt-un [::def-site ::pattern-src]))
+(s/def ::suggestion string?)
+(s/def ::def-site map?)
+
+;; sl-xvae: what a bound step RESOLVED TO — the dry-run plan record, computed
+;; once at bind time (`stamp-resolved`) and rendered as `:step/resolved` by
+;; the EDN and console reporters. Present on every :matched step; a step
+;; bound to an untyped stepdef carries the stepdef half only (SVO keys
+;; absent, never nil); wrappers and unbound steps carry none.
+(s/def :resolved/subject keyword?)
+(s/def :resolved/verb keyword?)
+(s/def :resolved/frame keyword?)
+(s/def :resolved/object any?)
+(s/def :resolved/interface keyword?)
+(s/def :resolved/interface-type keyword?)
+(s/def :resolved/pattern-src (s/nilable string?))
+(s/def :resolved/stepdef-source (s/nilable map?))
+(s/def ::resolved
+  (s/keys :req-un [:resolved/pattern-src :resolved/stepdef-source]
+          :opt-un [:resolved/subject :resolved/verb :resolved/frame
+                   :resolved/object :resolved/interface :resolved/interface-type]))
+
 (s/def ::bound-step
   (s/keys :req-un [::status ::step]
-          :opt-un [::binding ::alternatives ::hint]))
+          :opt-un [::binding ::alternatives ::hint ::verb-suggestion ::resolved]))
 
 ;; Options threaded from bind-suite down to bind-step (sl-s04n)
 (s/def ::intents (s/nilable map?))
@@ -154,6 +188,72 @@
   (keep #(match-step step-text %) stepdefs))
 
 ;; -----------------------------------------------------------------------------
+;; Step-text did-you-mean (sl-u2r0, Fable 5)
+;; -----------------------------------------------------------------------------
+
+(defn- pattern-words
+  "The literal words a stepdef pattern can match: its regex source with
+   named-group markers and metacharacters stripped, split into words of
+   three or more letters. Group NAMES are removed first so `subject` and
+   `object` never enter the pool."
+  [pattern-src]
+  (-> pattern-src
+      (str/replace #"\(\?<[^>]+>" "(")
+      (str/replace #"\\[a-zA-Z]" " ")
+      (as-> s (re-seq #"[A-Za-z][A-Za-z-]{2,}" s))
+      set))
+
+(defn- text-words
+  "The candidate tokens of an undefined step's text: words of three or
+   more letters OUTSIDE single-quoted spans (a literal's content is never a
+   typo of a verb — fold-in C3). The annotation is already stripped by the
+   caller; `{binding}` tokens and `/regex/` spans are dropped too."
+  [text]
+  (-> text
+      (str/replace #"'[^']*'" " ")
+      (str/replace #"\{[^}]*\}" " ")
+      (str/replace #"/[^/]*/" " ")
+      (as-> s (re-seq #"[A-Za-z][A-Za-z-]{2,}" s))
+      distinct))
+
+(defn- replace-word
+  "`text` with the first whole-word occurrence of `from` replaced by `to`."
+  [text from to]
+  (str/replace-first text (re-pattern (str "\\b" (java.util.regex.Pattern/quote from) "\\b")) to))
+
+(defn- verb-suggestion
+  "The step-text did-you-mean for an undefined step, or nil. For each word
+   of the text (quoted spans excluded), the nearest word of the candidate
+   stepdefs' patterns within two edits (case-insensitive, never the same
+   word) is tried as a repair; the FIRST repair that makes the text match
+   a candidate wins — the rematch is the confidence signal, exactly as the
+   grammar hints reason (sl-s04n). Carries the matched stepdef's pattern
+   and source as the def-site."
+  [match-text candidates]
+  (let [pool (into #{} (mapcat #(pattern-words (:pattern-src %))) candidates)]
+    (when (seq pool)
+      (some (fn [word]
+              (let [lower (str/lower-case word)
+                    nearest (->> pool
+                                 (remove #(= lower (str/lower-case %)))
+                                 (map (fn [c] [c (text/levenshtein lower (str/lower-case c))]))
+                                 (filter #(<= (second %) 2))
+                                 (sort-by second)
+                                 (map first))]
+                (some (fn [candidate]
+                        (let [repaired (replace-word match-text word candidate)
+                              {:keys [stepdef]} (first (find-all-matches repaired candidates))]
+                          (when stepdef
+                            (cond-> {:token word
+                                     :suggestion candidate
+                                     :repaired-text repaired
+                                     :pattern-src (:pattern-src stepdef)}
+                              (:source stepdef)
+                              (assoc :def-site (select-keys (:source stepdef) [:file :line]))))))
+                      nearest)))
+            (text-words match-text)))))
+
+;; -----------------------------------------------------------------------------
 ;; Arity Validation
 ;; -----------------------------------------------------------------------------
 
@@ -193,7 +293,7 @@
 (defn- declared-instance-type
   "Resolve an annotation's declared INSTANCE name to its configured TYPE
    (sl-s2oa). Unconfigured names read as types directly — the type-as-name
-   fallback that keeps vanilla/no-config paths byte-identical."
+   fallback that keeps unconfigured paths byte-identical."
   [interfaces declared]
   (or (get-in interfaces [declared :type]) declared))
 
@@ -219,9 +319,9 @@
    - 2+ instances -> the type-named entry (name = T) iff it exists with
      :type T (the zero-config default); otherwise a planning error naming
      the candidate instances
-   - zero instances -> T itself (type-as-name fallback: vanilla mode and
-     unconfigured types keep today's behavior; suite-lint and provisioning
-     surface the gap downstream).
+   - zero instances -> T itself (type-as-name fallback: unconfigured types
+     keep today's behavior; suite-lint and provisioning surface the gap
+     downstream).
 
    Returns {:instance kw} or {:error {...}}."
   [interfaces declared iface-type]
@@ -359,13 +459,19 @@
                  ;; here alone.
                  hint (when-not (and declared
                                      (= :grammar/prose-as-step (:type hint)))
-                        hint)]
+                        hint)
+                 ;; sl-u2r0 (Fable 5): the step-text did-you-mean, beside
+                 ;; the grammar hint — on the diagnostic, not in the hint
+                 ;; family (judgment call J-c). Computed on the stripped
+                 ;; text against the same narrowed candidates.
+                 suggestion (verb-suggestion match-text candidates)]
              (cond-> {:status :undefined
                       :step pickle-step
                       :binding nil
                       :alternatives []}
                filter-info (assoc :filter-info filter-info)
-               hint (assoc :hint hint)))
+               hint (assoc :hint hint)
+               suggestion (assoc :verb-suggestion suggestion)))
 
          ;; Single match - check arity, extract SVO, resolve the execution
          ;; instance and stamp it on the SVO (sl-s2oa). Stepdefs without
@@ -491,32 +597,72 @@
 ;; -----------------------------------------------------------------------------
 
 (def ^:private issue-type->config-key
-  "Map SVO issue types to their config keys."
+  "Map issue types to their :enforcement kinds. :svo/raw-locator-disallowed
+   rides its own :raw-locator kind since sl-u2r0 (the key shipped with
+   sl-6wh9; the issue now honors it)."
   {:svo/missing-subject :unknown-subject
    :svo/unknown-subject :unknown-subject
    :svo/unknown-verb :unknown-verb
    :svo/unknown-interface :unknown-interface
    :svo/unknown-object :unknown-object
-   :svo/raw-locator-disallowed :unknown-object})
+   :svo/raw-locator-disallowed :raw-locator
+   :stepdef/untyped :untyped-stepdef})
 
 (defn- compute-severity
-  "Compute severity for an SVO issue based on config.
+  "Compute severity for an issue based on the :enforcement levels.
    Returns :error or :warn (default :warn if not configured).
 
    Issues that arrive with a :severity keep it — framework-owned closed
    sets (:key slots, sl-2sj6) are always-on errors with no config knob:
    project-owned vocabulary gets a leniency knob because an unresolved
    ref may be tomorrow's glossary entry; a typo'd key name has no such
-   future, so it doesn't get one.
-
-   For object enforcement, :strict is the deprecated alias for :error
-   (sl-femd) — normalized here so downstream only ever sees :error."
-  [issue svo-config]
+   future, so it doesn't get one."
+  [issue enforcement]
   (or (:severity issue)
-      (let [config-key (issue-type->config-key (:type issue))
-            level (get svo-config config-key :warn)]
-        ;; Normalize the deprecated :strict alias to :error (sl-femd)
-        (if (= level :strict) :error level))))
+      (let [config-key (issue-type->config-key (:type issue))]
+        (get enforcement config-key :warn))))
+
+(defn- step-location
+  "The location map every issue carries (sl-6wh9: shared by the SVO and
+   untyped collectors)."
+  [bound-step source-file]
+  (let [step (:step bound-step)
+        step-loc (:step/location step)]
+    {:step-text (:step/text step)
+     :step-id (:step/id step)
+     :uri source-file
+     :line (:line step-loc)
+     :column (:column step-loc)}))
+
+(defn- collect-untyped-issues
+  "sl-6wh9: one `:stepdef/untyped` issue per matched step whose stepdef
+   declares no :svo metadata — nothing ran through the type system for
+   that step (no subject, verb, or object checked). Builtins all carry
+   :svo, so this names user stepdefs by construction. Rides :svo-issues
+   at the :untyped-stepdef level (:warn default; :error blocks; :off
+   drops the issue entirely — the ONE kind :off silences here, since the
+   validators never see an untyped step)."
+  [plans enforcement]
+  (let [level (get enforcement :untyped-stepdef :warn)]
+    (when-not (= :off level)
+      (->> plans
+           (mapcat (fn [plan]
+                     (let [source-file (-> plan :plan/pickle :pickle/source-file)]
+                       (->> (:plan/steps plan)
+                            (filter #(and (= :matched (:status %))
+                                          (nil? (-> % :binding :svo))))
+                            (map (fn [bound-step]
+                                   (let [src (-> bound-step :binding :source)]
+                                     {:type :stepdef/untyped
+                                      :stepdef (-> bound-step :binding :pattern-src)
+                                      :location (step-location bound-step source-file)
+                                      :severity level
+                                      :message (str "step matched an untyped stepdef"
+                                                    (when src (str " (" (:file src) ":" (:line src) ")"))
+                                                    " — it declares no :svo metadata, so"
+                                                    " no subject, verb, or object was"
+                                                    " checked for this step")})))))))
+           vec))))
 
 (defn- collect-svo-issues
   "Collect SVO validation issues from all bound steps.
@@ -524,12 +670,17 @@
    For each matched step with a non-nil :svo, validates against glossary
    and interfaces. Returns vector of issues with full location and severity:
    :step-text, :step-id, :uri, :line, :column, :severity."
-  [plans glossary interfaces svo-config]
+  [plans glossary interfaces enforcement config-path]
   (when (and glossary interfaces)
     (let [;; Extract object enforcement for validate-svo. The :off here is
           ;; the no-config safety net, NOT the default — load-config owns
           ;; the effective default (:warn when :intents configured, sl-femd).
-          validate-opts {:unknown-object (:unknown-object svo-config :off)}]
+          ;; sl-u2r0: the :raw-locator level rides beside it (same
+          ;; conditional default), and the config path is the def-site an
+          ;; unknown-interface issue names.
+          validate-opts (cond-> {:unknown-object (:unknown-object enforcement :off)
+                                 :raw-locator (:raw-locator enforcement :off)}
+                          config-path (assoc :config-path config-path))]
       (->> plans
            (mapcat (fn [plan]
                      (let [source-file (-> plan :plan/pickle :pickle/source-file)]
@@ -540,17 +691,11 @@
                                       (let [result (validate/validate-svo glossary interfaces svo validate-opts)]
                                         (when-not (:valid? result)
                                           ;; Attach full location and severity to each issue
-                                          (let [step (:step bound-step)
-                                                step-loc (:step/location step)
-                                                location {:step-text (:step/text step)
-                                                          :step-id (:step/id step)
-                                                          :uri source-file
-                                                          :line (:line step-loc)
-                                                          :column (:column step-loc)}]
+                                          (let [location (step-location bound-step source-file)]
                                             (mapv (fn [issue]
                                                     (assoc issue
                                                            :location location
-                                                           :severity (compute-severity issue svo-config)))
+                                                           :severity (compute-severity issue enforcement)))
                                                   (:issues result))))))))
                             (apply concat)))))
            vec))))
@@ -567,8 +712,8 @@
 
    Resolves the costume here — at bind time, the one place the glossary is in
    scope — so the runtime provisioning path can read `(:wears svo)` without
-   the glossary being threaded to it. No-op in vanilla mode (no glossary) or
-   when a subject wears nothing."
+   the glossary being threaded to it. No-op for a bare bind (no glossary in
+   opts) or when a subject wears nothing."
   [plans glossary]
   (if-not glossary
     plans
@@ -579,6 +724,42 @@
                   bound-step)
                 bound-step))]
       (mapv #(update % :plan/steps (partial mapv stamp-step)) plans))))
+
+(defn resolved-record
+  "What a bound step RESOLVED TO (sl-xvae): the per-step plan record, from
+   fields the binding already holds. nil unless the step is :matched.
+
+   {:pattern-src \"regex\"                ;; the matched stepdef, as sl explain
+    :stepdef-source {:ns .. :file .. :line ..}   ;; renders it
+    :subject :alice :verb :fill :frame :with :object \"username\"
+    :interface :web          ;; the resolved execution INSTANCE (sl-s2oa)
+    :interface-type :web}    ;; the stepdef's TYPE — the join key to the
+                             ;; vocabulary sl explain reports on
+   The SVO keys are present only when the stepdef declares :svo and the
+   extraction succeeded; an untyped stepdef yields the stepdef half alone."
+  [bound-step]
+  (when (= :matched (:status bound-step))
+    (let [{:keys [binding]} bound-step
+          svo (let [s (:svo binding)] (when (and (map? s) (:verb s)) s))]
+      (cond-> {:pattern-src (:pattern-src binding)
+               :stepdef-source (select-keys (:source binding) [:ns :file :line])}
+        (some? (:subject svo)) (assoc :subject (:subject svo))
+        svo (assoc :verb (:verb svo))
+        (some? (:frame svo)) (assoc :frame (:frame svo))
+        (some? (:object svo)) (assoc :object (:object svo))
+        (some? (:interface svo)) (assoc :interface (:interface svo))
+        (and svo (some? (stepdef-interface binding)))
+        (assoc :interface-type (stepdef-interface binding))))))
+
+(defn- stamp-resolved
+  "Stamp every :matched bound step with its `resolved-record` under
+   :resolved (sl-xvae). Plan-side only; the pickle never carries it."
+  [plans]
+  (letfn [(stamp-step [bound-step]
+            (if-let [r (resolved-record bound-step)]
+              (assoc bound-step :resolved r)
+              bound-step))]
+    (mapv #(update % :plan/steps (partial mapv stamp-step)) plans)))
 
 (defn frame-slot-kinds
   "Vector aligned with a bound step's captures: the slot kind governing
@@ -617,17 +798,19 @@
           with-args)))))
 
 (def ^:private default-stamp-glossary
-  "Framework default glossaries, for slot-kind stamping in vanilla mode.
-   Builtin value slots capture WITH their quote delimiters (sl-yh7), so
-   the exec normalization that strips them must run in EVERY mode — the
-   builtin frames' :arg-kinds are compiled-in truth, not an SVO opt-in."
+  "Framework default glossaries, for slot-kind stamping on a BARE bind
+   (bind-suite called without opts — the REPL and test harnesses; the
+   runner always threads a loaded glossary). Builtin value slots capture
+   WITH their quote delimiters (sl-yh7), so the exec normalization that
+   strips them must run on every path — the builtin frames' :arg-kinds
+   are compiled-in truth."
   (delay (glossary/load-default-glossaries)))
 
 (defn default-slot-kinds
   "Slot kinds for a stepdef's metadata against the FRAMEWORK DEFAULT
-   glossaries — the same kinds vanilla-mode stamping produces. For test
-   harnesses that invoke stepdef fns directly and must replicate the
-   engine's capture normalization (bindings/normalize-captures)."
+   glossaries — the same kinds a bare bind stamps. For test harnesses
+   that invoke stepdef fns directly and must replicate the engine's
+   capture normalization (bindings/normalize-captures)."
   [metadata capture-count]
   (frame-slot-kinds metadata @default-stamp-glossary nil capture-count))
 
@@ -635,8 +818,8 @@
   "Stamp each matched bound step's binding with :slot-kinds (sl-yh7) —
    at bind time, the one place the glossary is in scope — so the exec
    path can normalize value/location captures (strip quotes, resolve
-   {binding} tokens) without the glossary being threaded to it. Vanilla
-   mode (no project glossary) stamps from the framework defaults. No-op
+   {binding} tokens) without the glossary being threaded to it. A bare
+   bind (no glossary in opts) stamps from the framework defaults. No-op
    for steps without a resolvable frame. Plan-side only; never enters
    the pickle."
   [plans glossary interfaces]
@@ -661,7 +844,8 @@
    - opts: Optional map with SVO validation settings:
      - :glossary — loaded glossary for SVO validation
      - :interfaces — interface config map
-     - :svo — enforcement config {:unknown-subject :warn|:error ...}
+     - :enforcement — levels {:unknown-subject :warn|:error|:off ...}
+       (`shiftlefter.config/get-enforcement`)
 
    Returns:
    - :plans - seq of run plans (one per pickle)
@@ -679,7 +863,7 @@
   ([pickles stepdefs]
    (bind-suite pickles stepdefs nil))
   ([pickles stepdefs opts]
-   (let [{:keys [glossary interfaces svo costumes]} opts
+   (let [{:keys [glossary interfaces enforcement costumes config-path]} opts
          ;; Intent glossary for grammar hints on undefined steps (sl-s04n).
          ;; Same degradation as svo.validate: not loaded -> nil, hints degrade.
          intents (try (intent-state/get-intents) (catch Exception _ nil))
@@ -691,10 +875,16 @@
                                                    :interfaces interfaces})
                          pickles)
                    (stamp-costumes glossary)
-                   (stamp-slot-kinds glossary interfaces))
+                   (stamp-slot-kinds glossary interfaces)
+                   ;; sl-xvae: the dry-run plan record, once, here
+                   (stamp-resolved))
          binding-issues (collect-issues plans)
          ;; SVO validation (only if opts provided)
-         svo-issues (collect-svo-issues plans glossary interfaces svo)
+         svo-issues (collect-svo-issues plans glossary interfaces enforcement config-path)
+         ;; Untyped stepdefs (sl-6wh9): only when a caller threaded
+         ;; enforcement levels — a bare bind has nothing to judge them by.
+         untyped-issues (when enforcement
+                          (collect-untyped-issues plans enforcement))
          ;; Costume lints (sl-1206): wrong-interface wear + same-scenario
          ;; shared wear (errors), undeclared wear (warn). Ride :svo-issues so
          ;; blocking, counts, and every renderer come from the same channel.
@@ -702,7 +892,8 @@
          ;; wears, no issues.
          costume-issues (when glossary
                           (costume-lint/check-plans plans costumes interfaces))
-         svo-issues (vec (concat (or svo-issues []) (or costume-issues [])))
+         svo-issues (vec (concat (or svo-issues []) (or untyped-issues [])
+                                 (or costume-issues [])))
          all-issues (assoc binding-issues :svo-issues svo-issues)
          counts (issue-counts all-issues)
          ;; Runnable if no binding issues AND no blocking SVO issues.

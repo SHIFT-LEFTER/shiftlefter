@@ -130,18 +130,22 @@
       (is (= :stepdef/undefined-interface (:type issue)))
       (is (= :sms (:interface issue))))))
 
-(deftest compile-skips-gating-without-interfaces-config
-  (testing "No :interfaces in config → suite-lint is a no-op (vanilla mode)"
+(deftest compile-gates-against-the-default-interfaces-without-config
+  (testing "No :interfaces in a raw config map → suite-lint runs against
+            an empty interface set (sl-6wh9: no exempt mode); a stepdef
+            declaring :sms then finds no configured instance"
     (let [stepdefs [(mk-stepdef
                      "text 'STOP'"
                      {:interface :sms
                       :requires-protocols
                       [:shiftlefter.sms.protocol/ISMSInbound]})]
           pickles  [(pickle ["text 'STOP'"])]
-          {:keys [runnable?]}
+          {:keys [runnable? diagnostics]}
           (compile/compile-suite {:runner {:step-paths []}}
                                  pickles stepdefs nil)]
-      (is runnable?))))
+      (is (not runnable?))
+      (is (= :stepdef/undefined-interface
+             (-> diagnostics :suite-lint-issues first :type))))))
 
 (deftest compile-uses-default-registry-when-none-supplied
   (testing "Without :adapter-registry opt, suite-lint uses adapters/default-registry"

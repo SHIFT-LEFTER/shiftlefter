@@ -14,7 +14,7 @@
 ;; conventional path next to this file.
 
 {:interfaces {:sms {:type :sms :adapter :sms-mock}}
- :svo        {:unknown-subject :error
+ :enforcement        {:unknown-subject :error
               :unknown-verb    :warn
               :unknown-interface :error}
  :runner     {:capture {:message-log :every-step}

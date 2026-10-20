@@ -55,6 +55,6 @@
  ;; - :error — fail at bind time (before execution)
  ;; :unknown-object is deliberately unset: it defaults :warn once an
  ;; :intents glossary exists, :off without one (nothing to validate against).
- :svo {:unknown-subject :warn    ; Typos in subject names
+ :enforcement {:unknown-subject :warn    ; Typos in subject names
        :unknown-verb :warn       ; Unknown verbs for interface type
        :unknown-interface :error}} ; Misconfigured interfaces

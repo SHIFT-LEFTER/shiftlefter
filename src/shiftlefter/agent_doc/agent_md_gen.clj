@@ -63,22 +63,53 @@
        (str/join "\n\n---\n\n" (map render-topic topics))
        "\n"))
 
+(defn- load-topic-content
+  [topic]
+  (let [{:keys [status content]} (agent-doc/load-topic topic)]
+    (if (= :ok status)
+      content
+      (throw (ex-info "agent-doc topic resource missing during AGENT.md generation"
+                      {:topic topic :status status})))))
+
 (defn generate
   "Load the live packaged topic resources in registry order and render."
   []
   (render
-   (for [topic (agent-doc/topic-names)
-         :let [{:keys [status content]} (agent-doc/load-topic topic)]]
-     (if (= :ok status)
-       {:topic topic :content content}
-       (throw (ex-info "agent-doc topic resource missing during AGENT.md generation"
-                       {:topic topic :status status}))))))
+   (for [topic (agent-doc/topic-names)]
+     {:topic topic :content (load-topic-content topic)})))
+
+(defn render-standalone
+  "Pure render of ONE topic as a standalone human page under docs/ (sl-d4pf):
+   a pre-H1 GENERATED banner naming the source, then the source verbatim.
+   docs/adoption.md is this projection of the `adoption` topic — one text,
+   read by a human in docs/ and by anyone's agent from the jar."
+  [topic content]
+  (str "<!-- GENERATED — do not edit. Single-sourced from the packaged\n"
+       "     `sl agent-doc " topic "` topic at " (agent-doc/topic-resource-path topic) "\n"
+       "     under resources/. Edit the source, then run:\n"
+       "     clojure -T:build gen-agent-md -->\n"
+       "\n"
+       content))
+
+(defn generate-standalone
+  "Load the live packaged `topic` resource and render it as a standalone page."
+  [topic]
+  (render-standalone topic (load-topic-content topic)))
+
+(def standalone-pages
+  "Topics that ALSO render as a standalone page under docs/ (sl-d4pf):
+   topic -> path. The drift guard covers each entry like docs/AGENT.md."
+  {"adoption" "docs/adoption.md"})
 
 (defn write-doc!
-  "Exec entry point: write the generated guide to `:out`.
+  "Exec entry point: write the generated guide to `:out`, and every
+   standalone projection in `standalone-pages` to its path.
 
    Invoked from the build via `clojure -X` so generation runs on the project
    classpath (the `-T:build` tool classpath does not see the framework)."
   [{:keys [out]}]
   (spit out (generate))
-  (println (str "Wrote " out)))
+  (println (str "Wrote " out))
+  (doseq [[topic path] standalone-pages]
+    (spit path (generate-standalone topic))
+    (println (str "Wrote " path))))

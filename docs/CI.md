@@ -38,10 +38,21 @@ D3). `sl run`'s codes:
 | Code | Meaning |
 |------|---------|
 | 0 | Existential pass: ≥1 scenario selected, all ran to a tolerated outcome, none failed or errored (pending tolerated only under `:allow-pending?`) |
-| 1 | One or more scenarios failed (valid tests, app wrong), or pending steps when not allowed |
+| 1 | One or more scenarios failed (valid tests, app wrong), or pending steps when not allowed, or a stale `@blocked` claim (XPASS — the test's claim about the app is what is wrong; still a failing corpus) |
 | 2 | Planning failure (undefined steps, parse errors, config errors, no features found, bad flags, empty selection) — **single-group: no JUnit file; multi-group: the file covers only the groups that ran** — gate on the exit code |
-| 3 | Runner crash (unexpected exception) |
-| 4 | Run degraded: the harness's own machinery broke (hook throw, capability provisioning, capture, harness — counted `error`) or a step's adapter classified its failure `:observation` (no answer existed — counted `unobserved`) — the run proves nothing about the app for those scenarios |
+| 3 | Runner crash (unexpected exception) — **the JUnit file carries an `sl-crash` suite with one `<error type="crash">` beside every scenario that completed, and the HTML page (the invocation TOC in a multi-group run) reads CRASHED — every pipeline, since 0.5.7** — gate on the exit code |
+| 4 | Run degraded: the harness's own machinery broke (hook throw, capability provisioning, capture — counted `error`) or a step's adapter classified its failure `:observation` (no answer existed — counted `unobserved`) — the run proves nothing about the app for those scenarios |
+
+A **cancelled job** that reaches the runner is an abort, and an aborted
+run is exit **4** with truthful artifacts (every scenario that ran keeps
+its verdict, the rest are held `:aborted`, teardowns run, reports written):
+send the runner SIGINT (or call `sl daemon abort`) rather than SIGKILL, and
+the report beside the exit code tells the truth. A kill before execution
+began is the platform's 130 — nothing ran, no report. One POSIX trap: a
+job a **non-interactive** shell script starts with `&` has SIGINT
+*ignored* for that job, and the JVM inherits it — a later `kill -INT` is
+a no-op. Run the job in the foreground, enable job control (`set -m`), or
+prefer `sl daemon abort`, which needs no signal at all.
 
 Canonical table for all commands: [README → Return Codes](../README.md#return-codes);
 the ladder, the `:error/class` contract and the triage guidance:
@@ -212,11 +223,11 @@ Any image with **Java 21 or later** runs ShiftLefter — a JRE is enough, e.g.
 The installer drops a runnable `sl` + jar into `./sl/`. Fetch the script
 from the release **tag**, not from `main`: the script and the jar it
 downloads must be the same release (the flags below exist only in the
-0.5.6 script), and a tag never moves under a pipeline the way `main` does.
+0.5.6+ scripts), and a tag never moves under a pipeline the way `main` does.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/v0.5.6/release/install.sh \
-  | bash -s -- --version 0.5.6 --no-write-agents
+curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/v0.5.7/release/install.sh \
+  | bash -s -- --version 0.5.7 --no-write-agents
 ```
 
 - **Pin the tag in the URL and `--version` to the same release** — the one
@@ -244,12 +255,12 @@ image: eclipse-temurin:21-jre
 stages: [test]
 
 cache:
-  key: "sl-0.5.6"
+  key: "sl-0.5.7"
   paths: [sl/]
 
 .install-sl: &install-sl
   - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl unzip
-  - '[ -x sl/sl ] || curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/v0.5.6/release/install.sh | bash -s -- --version 0.5.6 --no-write-agents'
+  - '[ -x sl/sl ] || curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/v0.5.7/release/install.sh | bash -s -- --version 0.5.7 --no-write-agents'
 
 smoke:
   stage: test
@@ -318,8 +329,8 @@ jobs:
           java-version: '21'
       - name: Install sl
         run: |
-          curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/v0.5.6/release/install.sh \
-            | bash -s -- --version 0.5.6 --no-write-agents
+          curl -fsSL https://raw.githubusercontent.com/SHIFT-LEFTER/shiftlefter/v0.5.7/release/install.sh \
+            | bash -s -- --version 0.5.7 --no-write-agents
       - name: Run features
         # PRs run the @smoke subset; main runs everything.
         run: |

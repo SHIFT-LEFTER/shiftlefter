@@ -1,0 +1,10 @@
+;; The whole vocabulary of this example: one subject. Every step in
+;; login.feature is a builtin acting as :user, and this file is what makes
+;; :user a known actor (an unknown subject warns at planning time).
+;;
+;; Discovered automatically — it sits at the conventional path next to
+;; shiftlefter.edn, so the config needs no :glossaries key. Example 02b
+;; grows this file into a multi-actor glossary (:user/alice, :user/bob).
+
+{:subjects
+ {:user {:desc "The one person driving the browser"}}}

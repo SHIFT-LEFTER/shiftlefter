@@ -1,5 +1,5 @@
 (ns shiftlefter.stepengine.annotations
-  "Interface annotation parsing for pickle steps (Shifted mode only).
+  "Interface annotation parsing for pickle steps.
 
    Feature files may prefix step text with `[:interface-name]` to declare
    which interface the step targets. This pass parses that prefix and
@@ -12,8 +12,8 @@
 
    ## Pipeline position
 
-   Runs post-pickle, pre-macro-expansion, in Shifted mode only. Vanilla
-   mode treats `[:foo]` as literal step text (no new behavior introduced).
+   Runs post-pickle, pre-macro-expansion, on every compile (sl-6wh9: there
+   is no mode in which `[:foo]` is literal step text).
 
    ## Prefix regex
 

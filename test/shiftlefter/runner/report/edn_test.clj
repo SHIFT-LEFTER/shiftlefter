@@ -48,6 +48,32 @@
         (is (= "Failing" (:scenario/name failure)))
         (is (= "Not found" (-> failure :error :message)))))))
 
+(deftest test-build-summary-failure-carries-poll-counts
+  ;; sl-tcsq: a failing oracle's :failures entry carries its summed poll
+  ;; digest top-level; a failing step that never polled carries no key.
+  (let [digest {:attempts 5 :answered 0 :threw 0 :observation-throws 0}
+        failing-step (fn [extra]
+                       (merge {:status :failed
+                               :step {:step/id #uuid "00000000-0000-0000-0000-000000000003"
+                                      :step/text "the oracle"}
+                               :error {:type :step/exception :message "Timed out"}}
+                              extra))
+        summary-of (fn [step]
+                     (report-edn/build-summary
+                      "run-789" 1
+                      {:scenarios [{:status :failed
+                                    :plan {:plan/pickle {:pickle/id #uuid "00000000-0000-0000-0000-000000000002"
+                                                         :pickle/name "Failing"}}
+                                    :steps [step]}]
+                       :counts {:passed 0 :failed 1 :pending 0 :skipped 0}}
+                      {}))]
+    (testing "polled: the digest rides the failure entry"
+      (is (= digest (-> (summary-of (failing-step {:poll-counts digest}))
+                        :failures first :poll-counts))))
+    (testing "never polled: no key"
+      (is (not (contains? (-> (summary-of (failing-step {})) :failures first)
+                          :poll-counts))))))
+
 (deftest test-build-summary-exit-2
   (testing "Exit 2 (planning failure) includes diagnostics"
     (let [diagnostics {:undefined [{:step {:step/id #uuid "00000000-0000-0000-0000-000000000001"
@@ -555,7 +581,7 @@
   (testing "Exit 0 (passed) omits :diagnostics key when no SVO issues"
     (let [result {:scenarios [{:status :passed :steps [{:status :passed}]}]
                   :counts {:passed 1 :failed 0 :pending 0 :skipped 0}}
-          ;; Empty diagnostics (vanilla mode or no issues)
+          ;; Empty diagnostics (no issues)
           diagnostics {:undefined []
                        :ambiguous []
                        :invalid-arity []
@@ -570,11 +596,11 @@
       ;; No :diagnostics key (no noise on clean runs)
       (is (nil? (:diagnostics summary))))))
 
-(deftest test-no-diagnostics-key-vanilla-mode
-  (testing "Exit 0 (vanilla mode) omits :diagnostics key entirely"
+(deftest test-no-diagnostics-key-when-none-passed
+  (testing "Exit 0 with no diagnostics passed omits the :diagnostics key entirely"
     (let [result {:scenarios [{:status :passed :steps [{:status :passed}]}]
                   :counts {:passed 1 :failed 0 :pending 0 :skipped 0}}
-          ;; No diagnostics passed (vanilla mode)
+          ;; No diagnostics passed
           summary (report-edn/build-summary "run" 0 result {})]
       (is (= 0 (:run/exit-code summary)))
       ;; No :diagnostics key

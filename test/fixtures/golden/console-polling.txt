@@ -1,0 +1,42 @@
+EXIT 0
+--- STDOUT ---
+--- STDERR ---
+run seed: 42
+PASSED Oracle answers on the third poll
+  ✓ a counter that answers on attempt 3
+  ✓ I wait for the counter to answer (3 polls)
+  ✓ the counter answered on attempt 3
+
+PASSED Oracle answers on the first poll
+  ✓ a counter that answers on attempt 1
+  ✓ I wait for the counter to answer
+  ✓ the counter answered on attempt 1
+
+
+2 scenario(s): 2 passed
+
+SVO validation warnings:
+  WARNING: Untyped step "a counter that answers on attempt 3"
+         at ROOT/test/fixtures/features/polling.feature:8
+         matched stepdef "a counter that answers on attempt (\\d+)", which declares no :svo — no subject, verb, or object was checked
+
+  WARNING: Untyped step "I wait for the counter to answer"
+         at ROOT/test/fixtures/features/polling.feature:9
+         matched stepdef "I wait for the counter to answer", which declares no :svo — no subject, verb, or object was checked
+
+  WARNING: Untyped step "the counter answered on attempt 3"
+         at ROOT/test/fixtures/features/polling.feature:10
+         matched stepdef "the counter answered on attempt (\\d+)", which declares no :svo — no subject, verb, or object was checked
+
+  WARNING: Untyped step "a counter that answers on attempt 1"
+         at ROOT/test/fixtures/features/polling.feature:13
+         matched stepdef "a counter that answers on attempt (\\d+)", which declares no :svo — no subject, verb, or object was checked
+
+  WARNING: Untyped step "I wait for the counter to answer"
+         at ROOT/test/fixtures/features/polling.feature:14
+         matched stepdef "I wait for the counter to answer", which declares no :svo — no subject, verb, or object was checked
+
+  WARNING: Untyped step "the counter answered on attempt 1"
+         at ROOT/test/fixtures/features/polling.feature:15
+         matched stepdef "the counter answered on attempt (\\d+)", which declares no :svo — no subject, verb, or object was checked
+

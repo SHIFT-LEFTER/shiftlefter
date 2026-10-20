@@ -5,9 +5,10 @@ verification code — arrives by SMS. ShiftLefter captures it into the
 scenario data plane and types it back into the form. One scenario, two
 interfaces, **zero custom code**.
 
-> **Mode: Shifted** — the config carries `:svo`, a subject glossary, and a
-> `Login` intent, so the scenario validates against the project vocabulary
-> at planning time (`sl orient` will say `Mode: Shifted`). This is also the
+> **Vocabulary:** every step here is typed — the project carries a subject
+> glossary and a `Login` intent, and the config's `:enforcement` block sets
+> the levels, so the scenario validates against the project vocabulary at
+> planning time. This is also the
 > first example where you write `setup.clj` orchestration of your own —
 > 02/02b ship a ready-made one — see
 > [the examples index](../README.md) for where it sits on the path.
@@ -23,29 +24,48 @@ Feature: Two-factor password reset via SMS
     And  :user/alice clicks Login.submit
     Then :user/alice should see 'Enter Verification Code'
 
-    When [:sms] :user/alice receives an SMS to '+15550001111' matching /verification code is: (?<code>\d{6})/
-    And  :user/alice fills Login.code with {code}
+    When :user/alice receives an SMS to '+15550001111' matching Reset.smsCode
+    And  :user/alice fills Login.code with {smsCode}
     And  :user/alice clicks Login.submit
     Then :user/alice should see 'Code verified for alice'
 ```
 
 That's it. Each step calls into one of two interface instances (`:web` via
-Etaoin, `:sms` via a mock adapter). The `[:sms]` annotation on the receive
-step names the instance it executes on; the instance's `:sms` type narrows
-binding to the SMS vocabulary — that's the lane marker.
+Etaoin, `:sms` via a mock adapter). No step says which: "receives an SMS"
+only binds to SMS vocabulary, and this project configures exactly one
+`:sms` instance, so the lane is derived. (With two instances of a type,
+a `[:sms-name]` annotation at the head of the step picks one — see
+`docs/SVO.md`.)
 
-## The Handoff: Named Bindings
+## The Handoff: A Declared Shape and a Token
 
-The cross-interface bridge is two tokens of Gherkin:
+The cross-interface bridge is one reference and one token of Gherkin:
 
-1. **Produce.** The receive step's match pattern names a group:
-   `(?<code>\d{6})`. On a match, the captured text becomes a scenario
-   binding — `{code}` — in the scenario's data plane. (An unnamed group
-   `(\d{6})` binds nothing, and the dry run notices it.)
+1. **Produce.** `matching Reset.smsCode` names an intent element, and the
+   element declares the shape of the text it owns — in
+   `sl/glossary/intents/reset.edn`:
+
+   ```edn
+   {:intent "Reset"
+    :elements {:smsCode {:bindings {:sms {}}
+                         :shape "verification code is: (\\d{6})"}}}
+   ```
+
+   A message is a readable with no locator, so the `:sms` binding is
+   empty and the shape is all it has. The shape has one capture group, so
+   its value binds to the element's own name: on a match, `{smsCode}`
+   enters the scenario's data plane. (A shape with several groups names
+   each one — `(?<orderNumber>…)` — and those names are the tokens.)
 2. **Consume.** Any literal-admitting slot accepts a `{name}` token:
-   `fills Login.code with {code}` resolves the binding at execution time.
-   Quoted text is always literal — `'{code}'` would type the five
-   characters `{code}`.
+   `fills Login.code with {smsCode}` resolves the binding at execution
+   time. Quoted text is always literal — `'{smsCode}'` would type the
+   eight characters `{smsCode}`.
+
+The regex never appears in the scenario. It can — `matching /verification
+code is: (?<code>\d{6})/` inline is the escape hatch for a one-off pattern
+— but a shape declared once on the element is the primary form, and
+putting both on one step is a planning error (two declarations of one
+shape).
 
 Bindings are scenario-scoped, flow forward only, and die at scenario end.
 The dry run statically checks every consumed name has an upstream producer
@@ -131,13 +151,13 @@ fixture server sends the code. So the step reads "any matching SMS since
 the scenario started."
 
 An explicit wall-clock window is also available when you need one —
-`receives an SMS to '…' within the last 1 minute matching /…/` — e.g.
-for messages sent before the scenario began.
+`receives an SMS to '…' within the last 1 minute matching Reset.smsCode`
+— e.g. for messages sent before the scenario began.
 
 ## What This Proves
 
 - **Cross-interface composition needs zero custom code.** One feature
-  file, two interfaces, a named group, and a `{code}` token.
+  file, two interfaces, a declared shape, and a `{smsCode}` token.
 - **The data plane is statically checked.** Consumed-without-producer is
   a planning error with a did-you-mean; a groups-but-no-names pattern
   gets a notice. Typos die in the dry run.

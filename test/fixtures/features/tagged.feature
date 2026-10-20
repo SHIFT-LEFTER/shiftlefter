@@ -13,7 +13,7 @@ Feature: Tagged fixture for tag-filter tests
     When I add 1 more items
     Then I should have 2 items total
 
-  @fast @wip
+  @fast @draft
   Scenario: Fast but WIP scenario
     Given I have 2 items in my cart
     When I add 2 more items

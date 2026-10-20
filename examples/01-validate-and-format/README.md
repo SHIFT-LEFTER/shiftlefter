@@ -3,9 +3,9 @@
 ShiftLefter can parse, validate, and reformat any Cucumber-compatible Gherkin file. No configuration, no step definitions, no Clojure. Just point it at a `.feature` file.
 
 > **Running the commands:** the release zip installs `sl`; in a checkout of
-> this repo substitute `bin/sl`. Mode doesn't apply here — `sl fmt` works on
-> any Gherkin file with no config at all (see [the examples index](../README.md)
-> for the Vanilla/Shifted story).
+> this repo substitute `bin/sl`. This is the parser layer — `sl fmt` works on
+> any Gherkin file with no config and no step definitions (see
+> [the examples index](../README.md) for where running typed steps begins).
 
 This directory contains the three files used below: `login.feature` (clean),
 `messy.feature` (bad indentation), `broken.feature` (structurally invalid).

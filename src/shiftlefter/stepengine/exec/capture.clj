@@ -13,7 +13,7 @@
      kind: failure is rare, and Bob's screen may explain Alice's failure.
    - INSTANT kinds, :every-step — after each step, the ACTING SUBJECT's
      capability only (the film strip follows the actor; SVO names the
-     actor). A no-SVO step (vanilla mode) captures ALL live — the porting
+     actor). An untyped step (no SVO) captures ALL live — the porting
      promise beats literal actor-following, and single-browser suites
      make it cheap (the docs state the linear cost).
    - SCENARIO-SCOPED kinds (console — a DESTRUCTIVE returns-and-clears
@@ -172,7 +172,7 @@
 
 (defn- actor-targets
   "The acting subject's capability as a single target — or ALL live when
-   the step carries no SVO (vanilla mode) or the actor's capability is
+   the step carries no SVO (an untyped stepdef) or the actor's capability is
    not provisioned under its keyed name."
   [scenario-ctx interfaces svo]
   (or (when-let [{:keys [interface subject]} svo]

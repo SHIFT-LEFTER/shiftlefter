@@ -2,6 +2,16 @@ EXIT 0
 --- STDOUT ---
 --- STDERR ---
 run seed: 42
+
+SVO validation warnings:
+  WARNING: Untyped step "I have 5 items in my cart"
+         at ROOT/test/fixtures/hooks-project/sl/features/hooked.feature:5
+         matched stepdef "I have (\\d+) items in my cart", which declares no :svo — no subject, verb, or object was checked
+
+  WARNING: Untyped step "I have 5 items in my cart"
+         at ROOT/test/fixtures/hooks-project/sl/features/hooked.feature:8
+         matched stepdef "I have (\\d+) items in my cart", which declares no :svo — no subject, verb, or object was checked
+
 2 scenario(s) bound successfully (dry run)
 hooks:
   Seeded scenario: audit, reset-db

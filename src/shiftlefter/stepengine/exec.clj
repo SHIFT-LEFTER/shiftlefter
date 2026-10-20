@@ -61,9 +61,14 @@
                        :opt [:error/class]))
 (s/def ::scenario map?)
 
+;; :poll-counts (sl-tcsq) — the step's summed poll digest
+;; ({:attempts :answered :threw :observation-throws}); present only when
+;; the step fn ran at least one `poll-until`, pass or timeout.
+(s/def ::poll-counts ::step/poll-counts)
+
 (s/def ::invoke-result
   (s/keys :req-un [::status ::scenario]
-          :opt-un [::error]))
+          :opt-un [::error ::poll-counts]))
 
 ;; execute-scenario result — keys are :status, :plan, :steps, :scenario-ctx
 (s/def ::steps (s/coll-of map?))
@@ -78,9 +83,23 @@
 ;; vector arrives with the capture policy (sl-3q9r).
 (s/def ::attachments ::attachments/attachments)
 
+;; The hold record (sl-617t abort, sl-190x @blocked): `{:reason :aborted
+;; :after-step k}` on a scenario the abort kept from a verdict, or
+;; `{:reason :blocked :tag "@blocked=REF" :ref "REF" :outcome {:status
+;; :failed|:unobserved :at-step k :message ..}}` on one that failed as its
+;; tag claims. Open map: the runner adds :ref-url. Absent on every
+;; scenario that ran to an unexcused verdict.
+(s/def :shiftlefter.held/reason #{:aborted :blocked})
+(s/def ::held (s/keys :req-un [:shiftlefter.held/reason]))
+;; The XPASS record (sl-190x): a @blocked scenario that passed — the
+;; scenario is :failed and this carries the tag, the ref and the imperative.
+(s/def :shiftlefter.xpass/tag string?)
+(s/def ::xpass (s/keys :req-un [:shiftlefter.xpass/tag ::message]))
+
 (s/def ::scenario-exec-result
   (s/keys :req-un [::status ::steps]
-          :opt-un [::plan ::scenario-ctx ::duration-ms ::attachments]))
+          :opt-un [::plan ::scenario-ctx ::duration-ms ::attachments
+                   ::held ::xpass]))
 
 ;; execute-suite result — keys are :scenarios, :counts, :status
 (s/def ::passed nat-int?)
@@ -89,17 +108,23 @@
 (s/def ::skipped nat-int?)
 ;; :error count is ABSENT unless positive (sl-esq) — error-free runs keep the
 ;; historical four-key counts map byte-identical in --edn output. Counts the
-;; infrastructure-failure family (hook/provisioning/capture/harness, sl-7c7i).
+;; infrastructure-failure family (hook/provisioning/capture, sl-7c7i).
 (s/def :shiftlefter.counts/error nat-int?)
 ;; :unobserved (sl-kowi): :error scenarios whose attribution class is
 ;; :observation — the witness between spec and app went dark. Disjoint from
 ;; :error (which keeps the SL-machinery family only); same absent-unless-
 ;; positive rule. Two rendered buckets under one exit code (4).
 (s/def :shiftlefter.counts/unobserved nat-int?)
+;; :held (sl-617t, sl-190x): scenarios carrying a :held record, carved out
+;; of every verdict bucket; :xpass (sl-190x): @blocked scenarios that
+;; passed (also counted :failed). Both absent-unless-positive.
+(s/def :shiftlefter.counts/held nat-int?)
+(s/def :shiftlefter.counts/xpass nat-int?)
 
 (s/def ::counts
   (s/keys :req-un [::passed ::failed ::pending ::skipped]
-          :opt-un [:shiftlefter.counts/error :shiftlefter.counts/unobserved]))
+          :opt-un [:shiftlefter.counts/error :shiftlefter.counts/unobserved
+                   :shiftlefter.counts/held :shiftlefter.counts/xpass]))
 
 (s/def ::scenarios (s/coll-of map?))
 

@@ -1466,7 +1466,7 @@
         ;; interface name).
         (spit-file dir "shiftlefter.edn"
                    (pr-str {:runner {:step-paths []}
-                            :svo {:unknown-subject :warn}
+                            :enforcement {:unknown-subject :warn}
                             :glossaries {:subjects (str (fs/absolutize "test/fixtures/glossaries/subjects.edn"))}
                             :interfaces {:web {:type :web :adapter :etaoin}
                                          :admin {:type :web :adapter :playwright}}}))
@@ -1523,7 +1523,7 @@
    NOVEL adapter :mock-web; `live-adapters` = adapter names the group's
    :start puts in the mock registry; `opts`: :extra-interface? adds a
    second interface :extra → :sms-mock (a DEFAULT-registry name) that no
-   scenario touches; :tag-toucher? tags the provisioning scenario @wip
+   scenario touches; :tag-toucher? tags the provisioning scenario @draft
    and adds a second, target-free scenario; :requires-protocols? puts
    `:requires-protocols [IBrowser]` on the stepdef (sl-8cvd P2-2 — the
    shape every bundled stepdef has, which used to trip the suite-lint
@@ -1540,7 +1540,7 @@
                (pr-str {:subjects {:user {:desc "u" :instances [{:id :alice}]}}}))
     (spit-file dir "shiftlefter.edn"
                (pr-str (cond-> {:runner {:step-paths []}
-                                :svo {}
+                                :enforcement {}
                                 :glossaries {:subjects "glossary/subjects.edn"
                                              :verbs [verbs]}
                                 :interfaces {:web {:type :web :adapter :mock-web}}}
@@ -1552,7 +1552,7 @@
                                    {:type :sms :adapter :bogus-adapter}))))
     (spit-file dir "features/bound.feature"
                (str "Feature: B\n\n"
-                    (when tag-toucher? "  @wip\n")
+                    (when tag-toucher? "  @draft\n")
                     "  Scenario: touches\n    Given user/alice clicks the button\n"
                     (when tag-toucher?
                       "\n  Scenario: trivial\n    Given nothing happens\n")))
@@ -1639,9 +1639,9 @@
                                                  {:tag-toucher? true})]
           (let [{:keys [result]} (run-captured opts)]
             (is (= 2 (:exit-code result))
-                "control: unfiltered, the @wip toucher errors"))
+                "control: unfiltered, the @draft toucher errors"))
           (let [{:keys [result]} (run-captured
-                                  (assoc opts :tag-filter {:exclude #{"@wip"}}))]
+                                  (assoc opts :tag-filter {:exclude #{"@draft"}}))]
             (is (= 0 (:exit-code result))
                 "filtered: the toucher is deselected, the run is safe")))))))
 
@@ -1755,9 +1755,9 @@
                                                   :tag-toucher? true})]
           (let [{:keys [result]} (run-captured opts)]
             (is (= 2 (:exit-code result))
-                "control: unfiltered, the @wip toucher errors"))
+                "control: unfiltered, the @draft toucher errors"))
           (let [{:keys [result]} (run-captured
-                                  (assoc opts :tag-filter {:exclude #{"@wip"}}))]
+                                  (assoc opts :tag-filter {:exclude #{"@draft"}}))]
             (is (= 0 (:exit-code result))
                 "filtered: the toucher is deselected, the run is safe")))))))
 

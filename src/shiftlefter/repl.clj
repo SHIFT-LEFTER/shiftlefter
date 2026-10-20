@@ -82,10 +82,17 @@
 (defonce ^:private connected-subjects (atom {}))
 
 ;; -----------------------------------------------------------------------------
-;; Shifted Mode (SVO validation toggle)
+;; REPL config (sl-6wh9: one mode — nil means the built-in defaults)
 ;; -----------------------------------------------------------------------------
 
 (defonce ^:private repl-config (atom nil))
+
+(defn- effective-config
+  "The config every REPL run/bind/provision reads: the loaded one
+   (`load-config!`) or `shiftlefter.config/default-config` — the same
+   defaults `sl run` uses with no config file (sl-6wh9)."
+  []
+  (or @repl-config config/default-config))
 
 ;; Forward declarations for lifecycle functions
 (declare cleanup-all-contexts!)
@@ -146,23 +153,19 @@
   ctx-value)
 
 ;; -----------------------------------------------------------------------------
-;; Shifted Mode API
+;; Config API
 ;; -----------------------------------------------------------------------------
 
-(defn shifted?
-  "Returns true if REPL is in Shifted mode (SVO validation enabled)."
-  []
-  (some? @repl-config))
+(defn load-config!
+  "Load the project config into the REPL (sl-6wh9 — replaces `shifted!`;
+   there is no mode to switch, only WHICH config the REPL runs under).
 
-(defn shifted!
-  "Enable Shifted mode with SVO validation.
+   With no argument, loads the discovered `sl/shiftlefter.edn`.
+   With a config map, uses that map directly (a raw map is not passed
+   through load-config — hand it the shape a loaded config has).
 
-   With no argument, loads config from `shiftlefter.edn`.
-   With a config map, uses that config directly.
-
-   In Shifted mode:
-   - `run` and `run-dry` use SVO validation
-   - `as` warns on unknown actor names
+   The loaded config drives `run`/`run-dry` (glossaries, enforcement
+   levels, interfaces for provisioning) and `as` (actor validation).
 
    Returns:
    - {:status :ok :config {...}} on success
@@ -171,17 +174,14 @@
    Example:
    ```clojure
    ;; Load from shiftlefter.edn
-   (shifted!)
+   (load-config!)
 
    ;; Use custom config
-   (shifted! {:svo {:unknown-subject :warn}
-              :glossaries {:subjects \"my/subjects.edn\"}})
+   (load-config! {:enforcement {:unknown-subject :warn}
+                  :glossaries {:subjects \"my/subjects.edn\"}})
 
-   ;; Check mode
-   (shifted?) ;; => true
-
-   ;; Back to vanilla
-   (vanilla!)
+   ;; Back to the built-in defaults
+   (reset-config!)
    ```"
   ([]
    (let [result (config/load-config-safe)]
@@ -199,49 +199,49 @@
        (reset! repl-config cfg)
        {:status :ok :config cfg}))))
 
-(defn vanilla!
-  "Disable Shifted mode, returning to vanilla mode.
-
-   In vanilla mode, SVO validation is disabled.
-   Step execution proceeds without subject/verb/interface checks."
+(defn reset-config!
+  "Drop the loaded config; the REPL runs under the built-in defaults again
+   (`shiftlefter.config/default-config` — the same config `sl run` uses
+   with no config file). Returns :defaults."
   []
   (reset! repl-config nil)
-  :vanilla)
+  :defaults)
 
 (defn get-repl-config
-  "Get the current REPL config (nil if vanilla mode)."
+  "Get the config the REPL currently runs under: the loaded one, or the
+   built-in defaults when none is loaded."
   []
-  @repl-config)
+  (effective-config))
 
 (def config
-  "Alias for `get-repl-config`. Returns current REPL config (nil if vanilla mode)."
+  "Alias for `get-repl-config`."
   get-repl-config)
 
 (defn glossary
-  "Get the loaded glossary for the current Shifted mode config.
+  "Get the loaded glossary for the current config.
 
    Returns the merged glossary map (defaults + project glossaries),
-   or nil if not in Shifted mode or no glossaries configured.
+   or nil when the config declares no glossaries.
 
    Example:
    ```clojure
-   (shifted! {:glossaries {:subjects \"path/to/subjects.edn\"}})
+   (load-config! {:glossaries {:subjects \"path/to/subjects.edn\"}})
    (glossary)
    ;; => {:subjects {:alice {...} :admin {...}} :verbs {:web {...}}}
    ```"
   []
-  (when-let [cfg @repl-config]
-    (when-let [glossary-config (:glossaries cfg)]
-      (glossary/load-all-glossaries glossary-config))))
+  (when-let [glossary-config (:glossaries (effective-config))]
+    (glossary/load-all-glossaries glossary-config)))
 
 (defn subjects
   "Get known subject names from the glossary.
 
-   Returns a vector of subject keywords, or nil if not in Shifted mode.
+   Returns a vector of subject keywords, or nil when no glossaries are
+   configured.
 
    Example:
    ```clojure
-   (shifted! {:glossaries {:subjects \"path/to/subjects.edn\"}})
+   (load-config! {:glossaries {:subjects \"path/to/subjects.edn\"}})
    (subjects)
    ;; => [:alice :admin :guest]
    ```"
@@ -255,11 +255,11 @@
    With no argument, returns a map of all interfaces to their verbs.
    With an interface-type argument, returns verbs for that interface.
 
-   Returns nil if not in Shifted mode.
+   Returns nil when no glossaries are configured.
 
    Example:
    ```clojure
-   (shifted! {:glossaries {:verbs [\"path/to/verbs-web.edn\"]}})
+   (load-config! {:glossaries {:verbs [\"path/to/verbs-web.edn\"]}})
    (verbs)
    ;; => {:web [:click :fill :see]}
    (verbs :web)
@@ -277,11 +277,11 @@
   "Get known interface types from the glossary.
 
    Returns a vector of interface keywords (e.g., [:web :api]),
-   or nil if not in Shifted mode.
+   or nil when no glossaries are configured.
 
    Example:
    ```clojure
-   (shifted! {:glossaries {:verbs [\"verbs-web.edn\" \"verbs-api.edn\"]}})
+   (load-config! {:glossaries {:verbs [\"verbs-web.edn\" \"verbs-api.edn\"]}})
    (interfaces)
    ;; => [:web :api]
    ```"
@@ -384,7 +384,9 @@
 
    Useful for checking step definitions match.
 
-   In Shifted mode (see `shifted!`), SVO validation is performed.
+   Binds through `compile-suite` under the effective config (see
+   `load-config!`), so SVO validation and enforcement levels apply exactly
+   as in the runner.
 
    Returns:
    - {:status :ok :plans [...] :diagnostics {...}}
@@ -401,13 +403,8 @@
         {:status :parse-error :errors errors}
         (let [{:keys [pickles]} (api/pickles ast "repl://")
               stepdefs (registry/all-stepdefs)
-              config @repl-config
               {:keys [plans runnable? diagnostics]}
-              (if config
-                ;; Shifted mode: use compile-suite for full validation
-                (compile/compile-suite config pickles stepdefs)
-                ;; Vanilla mode: direct bind
-                (bind/bind-suite pickles stepdefs))]
+              (compile/compile-suite (effective-config) pickles stepdefs)]
           (if runnable?
             {:status :ok :plans plans :diagnostics diagnostics}
             {:status :bind-error :diagnostics diagnostics}))))))
@@ -417,11 +414,11 @@
 
    Assumes step definitions are already loaded via `defstep`.
 
-   In Shifted mode (see `shifted!`), SVO validation is performed, and the
-   config's `:interfaces` drive the engine's capability provisioning
-   exactly as in the runner (sl-vmc5): bare browsers (and other
-   capabilities) provision on demand and ephemeral ones are cleaned up at
-   each scenario's end. Vanilla mode provisions nothing.
+   Compiles under the effective config (see `load-config!`): SVO
+   validation and enforcement levels apply, and the config's `:interfaces`
+   drive the engine's capability provisioning exactly as in the runner
+   (sl-vmc5): bare browsers (and other capabilities) provision on demand
+   and ephemeral ones are cleaned up at each scenario's end.
 
    Returns:
    - {:status :ok :results {...} :summary {...}}
@@ -448,19 +445,14 @@
         {:status :parse-error :errors errors}
         (let [{:keys [pickles]} (api/pickles ast "repl://")
               stepdefs (registry/all-stepdefs)
-              config @repl-config
+              config (effective-config)
               {:keys [plans runnable? diagnostics]}
-              (if config
-                ;; Shifted mode: use compile-suite for full validation
-                (compile/compile-suite config pickles stepdefs)
-                ;; Vanilla mode: direct bind
-                (bind/bind-suite pickles stepdefs))]
+              (compile/compile-suite config pickles stepdefs)]
           (if-not runnable?
             {:status :bind-error :diagnostics diagnostics}
-            ;; Thread the loaded config's :interfaces so the engine's lazy
+            ;; Thread the config's :interfaces so the engine's lazy
             ;; provisioning + per-scenario ephemeral cleanup run exactly as
-            ;; in the runner (sl-vmc5). Vanilla (no config) → nil, engine
-            ;; skips provisioning as before.
+            ;; in the runner (sl-vmc5).
             ;;
             ;; sl-xjx0 (Warden W8): mirror the runner's exec-opts subset the
             ;; ENGINE consumes — the global :timing rung (sl-99u2 ladder;
@@ -577,33 +569,35 @@
          :matches (mapv #(-> % :stepdef :pattern-src) matches)}))))
 
 (defn- validate-actor
-  "In Shifted mode, validate actor name against subject glossary.
+  "Validate an actor name against the subject glossary when the effective
+   config declares glossaries (a bare `as` under the defaults has no
+   glossary to check against — this is not a suite bind).
 
    Returns:
-   - nil if valid (known subject, no config, or warn mode with warning printed)
-   - {:status :error :type :svo/unknown-subject ...} if invalid in error mode
+   - nil if valid (known subject, no glossaries, or warn level with warning printed)
+   - {:status :error :type :svo/unknown-subject ...} if invalid at :error
 
-   In :warn mode, prints warning but returns nil (allows execution).
-   In :error mode, returns error map (blocks execution)."
+   At :warn, prints warning but returns nil (allows execution).
+   At :error, returns error map (blocks execution). At :off, silent."
   [ctx-name]
-  (when-let [config @repl-config]
-    (when (contains? config :svo)
-      (when-let [glossary-config (:glossaries config)]
-        (let [glossary (glossary/load-all-glossaries glossary-config)
-              mode (get-in config [:svo :unknown-subject] :warn)]
-          (when-not (glossary/known-subject? glossary ctx-name)
-            (let [known (glossary/known-subjects glossary)
-                  msg (str ":" (name ctx-name) " not in subject glossary. Known: " (pr-str known))]
-              (case mode
-                :error {:status :error
-                        :type :svo/unknown-subject
-                        :message msg
-                        :subject ctx-name
-                        :known-subjects known}
-                ;; :warn or default
-                (do (binding [*out* *err*]
-                      (println (str "WARNING: " msg)))
-                    nil)))))))))
+  (let [config (effective-config)]
+    (when-let [glossary-config (:glossaries config)]
+      (let [glossary (glossary/load-all-glossaries glossary-config)
+            level (config/enforcement-level config :unknown-subject)]
+        (when (and (not= :off level)
+                   (not (glossary/known-subject? glossary ctx-name)))
+          (let [known (glossary/known-subjects glossary)
+                msg (str ":" (name ctx-name) " not in subject glossary. Known: " (pr-str known))]
+            (case level
+              :error {:status :error
+                      :type :svo/unknown-subject
+                      :message msg
+                      :subject ctx-name
+                      :known-subjects known}
+              ;; :warn or default
+              (do (binding [*out* *err*]
+                    (println (str "WARNING: " msg)))
+                  nil))))))))
 
 (defn- inject-subject-browser
   "If ctx-name matches a connected persistent subject, inject its browser into ctx.
@@ -620,8 +614,9 @@
 
 (defn- ensure-step-capability
   "Bare-caller lazy provisioning (sl-vmc5): when the matched stepdef
-   declares an :interface, a loaded config (`shifted!`) has an
-   `:interfaces` entry for the resolved instance, and the ctx lacks the
+   declares an :interface, the effective config (`load-config!`, or the
+   built-in defaults) has an `:interfaces` entry for the resolved
+   instance, and the ctx lacks the
    capability, provision it via the engine's lazy primitive — the exact
    path the :lazy mode was built for (config.clj's own comment:
    bare REPL callers have no plan to scan). The capability lands
@@ -633,7 +628,7 @@
    Returns {:ok ctx'} or {:error {...}}."
   [ctx ctx-name stepdef]
   (let [iface-type (get-in stepdef [:metadata :interface])
-        interfaces (:interfaces @repl-config)
+        interfaces (:interfaces (effective-config))
         instance (when iface-type (step/interface-instance ctx iface-type))]
     (if (and instance (get interfaces instance))
       (exec/ensure-capability-for-svo ctx {:interface instance :subject ctx-name}
@@ -705,14 +700,14 @@
    (idempotent — you can also write the full step text explicitly).
 
    Browsers (sl-vmc5): a connected costume's browser is injected for its
-   subject; otherwise, when a loaded config (`shifted!`) declares the
+   subject; otherwise, when the effective config (`load-config!`) declares the
    step's interface under `:interfaces`, a BARE capability is provisioned
    on demand (the engine's lazy path) and lives in this named context
    until `reset-ctxs!`/`clear!` closes it. With neither, browser steps
    fail with `:browser/no-session` naming both options.
 
-   In Shifted mode with `:unknown-subject :warn`, warns but proceeds.
-   In Shifted mode with `:unknown-subject :error`, returns error without executing.
+   With glossaries configured and `:unknown-subject :warn`, warns but proceeds;
+   at `:error`, returns error without executing.
 
    Parameters:
    - ctx-name: keyword identifying the context (e.g., :alice, :bob)
@@ -750,7 +745,7 @@
           (or last-result {:status :ok :session ctx-name :ctx current-ctx})
           (let [raw-text (first remaining)
                 ;; Prepend :subject if not already present (idempotent).
-                ;; repl/as is shifted-mode: every step gets a subject.
+                ;; repl/as: every step gets a subject.
                 step-text (if (.startsWith raw-text subject-prefix)
                             raw-text
                             (str subject-prefix raw-text))

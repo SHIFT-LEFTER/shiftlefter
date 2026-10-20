@@ -137,7 +137,28 @@
      :step-text ":alice should see the title {orderNumber}"}
     {:example "should see title Welcome"
      :status "RAT" :case :bare-reserved
-     :step-text ":alice should see the title Welcome"}]}
+     :step-text ":alice should see the title Welcome"}
+    ;; The on-page text slot (sl-90x5): the built-in `should see '<text>'`
+    ;; joins the :text family — same cases as title, except tokens.
+    {:example "should see 'Enter Verification Code'"
+     :status "RAT (sl-90x5)" :case :quoted-literal
+     :step-text ":alice should see 'Enter Verification Code'"
+     :normalized "Enter Verification Code"}
+    {:example "should see 'Dashboard.home'"
+     :status "RAT (sl-90x5)" :case :ref-shaped-literal
+     :step-text ":alice should see 'Dashboard.home'"
+     :normalized "Dashboard.home"}
+    {:example "should see 'Don''t'"
+     :status "RAT (sl-90x5)" :case :quoted-literal
+     :step-text ":alice should see 'Don''t'"
+     :normalized "Don't"}
+    {:example "should see {orderNumber}"
+     :status "RAT (sl-90x5)" :case :token-reserved-locator-shape
+     :step-text ":alice should see {orderNumber}"
+     :locator-frame :visible}
+    {:example "should see Welcome"
+     :status "RAT (sl-90x5)" :case :bare-reserved
+     :step-text ":alice should see Welcome"}]}
   :matcher-slot
   {:wiki-heading "Matcher slot"
    :rows
@@ -161,7 +182,27 @@
      :step-text ":alice captures {:id \"m\"} matching /code (?<c>\\d+) was {prev}/"}
     {:example "… matching /Order (?<c>[/"
      :status "RAT" :case :malformed-pattern-error
-     :step-text ":alice captures {:id \"m\"} matching /Order (?<c>[/"}]}
+     :step-text ":alice captures {:id \"m\"} matching /Order (?<c>[/"}
+    ;; sl-ectw: the declared shape — Capitalized.dotted in the matcher slot
+    ;; resolves to the element's :shape; `captures O` alone reads O's.
+    {:example "captures Checkout.total (total declares :shape)"
+     :status "RAT (sl-ectw)" :case :capture-declared-shape
+     :step-text ":alice captures Checkout.total"}
+    {:example "captures Checkout.note (no :shape)"
+     :status "RAT (sl-ectw)" :case :capture-without-shape-error
+     :step-text ":alice captures Checkout.note"}
+    {:example "captures Checkout.total matching /…/ (total declares :shape)"
+     :status "RAT (sl-ectw)" :case :shape-and-inline-error
+     :step-text ":alice captures Checkout.total matching /\\$(?<total>[0-9.]+)/"}
+    {:example "receives … matching Reset.smsCode"
+     :status "RAT (sl-ectw)" :case :receive-shape-ref-binds
+     :step-text ":alice receives an SMS to '+15550001111' matching Reset.smsCode"}
+    {:example "should see Checkout.note matching Checkout.total"
+     :status "RAT (sl-ectw)" :case :assert-only-shape-ref-silent
+     :step-text ":alice should see Checkout.note matching Checkout.total"}
+    {:example "captures Checkout.note matching Reset.smsCode (no :web binding)"
+     :status "RAT (sl-ectw)" :case :shape-ref-wrong-interface-error
+     :step-text ":alice captures Checkout.note matching Reset.smsCode"}]}
 
   :key-slot
   {:wiki-heading "Key slot"

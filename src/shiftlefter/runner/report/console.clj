@@ -67,6 +67,10 @@
   [status use-color?]
   (colorize (str/upper-case (name status)) (status-color status) use-color?))
 
+(def ^:private blocked-held-phrase
+  "sl-190x: the shared phrase (reporter.clj) — one wording on every surface."
+  reporter/blocked-held-phrase)
+
 (defn- format-scenario-status
   "The status token for a scenario line (sl-kowi): an observation-class
    :error renders `UNOBSERVED` (the witness went dark — distinct from
@@ -75,9 +79,33 @@
    error)`. Everything else is `format-status` verbatim."
   [scenario-result status use-color?]
   (cond
+    ;; sl-190x: a @blocked scenario that failed as its tag claims is
+    ;; `HELD (blocked by REF — <what was measured>)` — checked FIRST, before
+    ;; the measured status's own token (an unobserved one keeps :error).
+    (= :blocked (-> scenario-result :held :reason))
+    (str (colorize "HELD" :cyan use-color?) " "
+         (colorize (str "(" (blocked-held-phrase (:held scenario-result)) ")")
+                   :cyan use-color?))
+
     (and (= :error status)
          (= :observation (-> scenario-result :error :error/class)))
     (colorize "UNOBSERVED" :red use-color?)
+
+    ;; sl-617t: a scenario the run abort held — never started, or stopped
+    ;; at a step boundary (`:after-step k`) — is `HELD (aborted)`: not a
+    ;; verdict, and not the plain SKIPPED of a non-runnable plan.
+    (and (= :skipped status) (= :aborted (-> scenario-result :held :reason)))
+    (str (colorize "HELD" :cyan use-color?) " "
+         (colorize (if-let [k (-> scenario-result :held :after-step)]
+                     (str "(aborted after step " k ")")
+                     "(aborted)")
+                   :cyan use-color?))
+
+    ;; sl-190x: XPASS — the @blocked claim is false; a wrong test, so the
+    ;; row is FAILED with the reason.
+    (:xpass scenario-result)
+    (str (format-status :failed use-color?) " "
+         (colorize "(blocked scenario passed)" :red use-color?))
 
     (and (= :failed status)
          (some #(and (= :failed (:status %)) (= :sut (-> % :error :error/class)))
@@ -152,7 +180,7 @@
 
 (defn- format-scenario-error
   "Format a scenario-level :error (the infrastructure-failure family,
-   sl-esq/sl-7c7i: hook throw, capability provisioning, capture, harness;
+   sl-esq/sl-7c7i: hook throw, capability provisioning, capture;
    plus the observation-class flip, sl-kowi — headed `Unobserved`).
    Hook-attributed errors keep the dual attribution: the hook's name +
    registration home, and the @hook= tag's file:line."
@@ -205,6 +233,11 @@
         attachments (concat (mapcat :attachments (:steps scenario-result))
                             (:attachments scenario-result))]
     (str (colorize (str "Scenario: " (:pickle/name pickle)) :bold use-color?) "\n"
+         ;; XPASS (sl-190x): no step failed — the block is the imperative
+         ;; and, when the config renders one, the tracker link.
+         (when-let [{:keys [message ref-url]} (:xpass scenario-result)]
+           (str "  " (colorize message :red use-color?) "\n"
+                (when ref-url (str "  " ref-url "\n"))))
          (when-let [error (:error scenario-result)]
            (when-not (some #(= error (:error %)) failed-steps)
              (format-scenario-error error use-color?)))
@@ -244,9 +277,20 @@
 ;; Verbose Output
 ;; -----------------------------------------------------------------------------
 
+(defn- format-poll-suffix
+  "The gray ` (N polls)` suffix for a step whose oracle polled more than
+   once (sl-tcsq); nil otherwise, so zero-poll and single-answer lines
+   stay byte-identical."
+  [step-result use-color?]
+  (let [n (get-in step-result [:poll-counts :attempts] 0)]
+    (when (> n 1)
+      (str " " (colorize (str "(" n " polls)") :gray use-color?)))))
+
 (defn- format-step-verbose
   "Format a step for verbose output.
-   Transforms subject display: `:user/alice` → `[:user] alice`."
+   Transforms subject display: `:user/alice` → `[:user] alice`. A step
+   that polled more than once carries its poll count right after the
+   text, before any failure message."
   ([step-result use-color?]
    (format-step-verbose step-result use-color? "  "))
   ([step-result use-color? indent]
@@ -262,6 +306,7 @@
      (str indent
           (colorize prefix (status-color status) use-color?)
           display-text
+          (format-poll-suffix step-result use-color?)
           (when (= :failed status)
             (str " — " (-> step-result :error :message)))))))
 
@@ -343,9 +388,18 @@
              :line (:line step-loc)
              :column (:column step-loc)}
         hint (-> bound-step :hint :suggestion)
-        filter-suggestion (-> bound-step :filter-info :suggestion)]
+        filter-suggestion (-> bound-step :filter-info :suggestion)
+        ;; sl-u2r0 (Fable 5): the step-text did-you-mean and its def-site,
+        ;; one line — `did you mean "clicks"? — <pattern> (steps.clj:12)`.
+        verb-suggestion (:verb-suggestion bound-step)
+        verb-line (when-let [{:keys [suggestion pattern-src def-site]} verb-suggestion]
+                    (str "did you mean \"" suggestion "\"?"
+                         (when pattern-src (str " — " pattern-src))
+                         (when-let [{:keys [file line]} def-site]
+                           (str " (" file (when line (str ":" line)) ")"))))]
     (cond-> (str "  - " (colorize (:step/text step) :yellow use-color?)
                  " (" (format-location loc) ")")
+      verb-line (str "\n      " (colorize verb-line :cyan use-color?))
       hint (str "\n      hint: " (colorize hint :cyan use-color?))
       filter-suggestion
       (str "\n      hint: " (colorize filter-suggestion :cyan use-color?)))))
@@ -496,6 +550,153 @@
         (println)
         (println (colorize (str total " binding issue(s) found. Cannot execute.") :red use-color?))))))
 
+(defn print-unshifted-suite!
+  "sl-6wh9: the summary line for the degenerate planning result — every
+   selected step undefined. Reads :unshifted-suite off the diagnostics
+   (absent → prints nothing). Outputs to stderr. The migration pointer
+   names the packaged `adoption` topic (sl-d4pf) — the same text as
+   docs/adoption.md, reachable from the jar alone, which a repo path is not."
+  [diagnostics opts]
+  (when-let [{:keys [features scenarios distinct-steps]} (:unshifted-suite diagnostics)]
+    (let [use-color? (colors-enabled? opts)]
+      (binding [*out* *err*]
+        (println)
+        (println (colorize "This reads as an unshifted suite: every selected step is undefined."
+                           :yellow use-color?))
+        (println (str "ShiftLefter parsed " features " feature file(s), " scenarios
+                      " scenario(s), " distinct-steps " distinct step text(s)"
+                      " — and executes only typed steps."))
+        (println "To shift this suite, run: sl agent-doc adoption")))))
+
+(defn print-plannability-hint!
+  "sl-6wh9: the mixed-state hint on an exit-2 diagnostic — some scenarios
+   plan, some do not. Reads :plannability off the diagnostics (absent →
+   prints nothing). Outputs to stderr. PLACEHOLDER PROSE — Herald words it
+   at sl-02cl."
+  [diagnostics opts]
+  (when-let [{:keys [plannable unplannable total]} (:plannability diagnostics)]
+    (let [use-color? (colors-enabled? opts)]
+      (binding [*out* *err*]
+        (println)
+        (println (colorize (str plannable " of " total " scenario(s) plan; "
+                                unplannable " are held by undefined, ambiguous or binding-error steps.")
+                           :cyan use-color?))
+        (println (str "To run the " plannable " now and list the " unplannable
+                      ", pass --hold-unplannable."))))))
+
+(defn held-reason-phrase
+  "The reason phrase for one run-level :held entry, by kind (sl-6wh9,
+   sl-617t, sl-190x): `not plannable (2 undefined, 0 ambiguous)` — with
+   `, 1 binding error(s): element-has-no-shape` appended when lint errors
+   held it (sl-8ezu) — `@wip`, `@skip=flaky-on-ci`, `blocked by REF — failed
+   at step 2: …`, `aborted after step 1` / `aborted`."
+  [{:keys [reason tag undefined ambiguous after-step] :as entry}]
+  (case reason
+    :unplannable (str "not plannable (" undefined " undefined, " ambiguous " ambiguous"
+                      (when-let [b (reporter/binding-errors-phrase entry)] (str ", " b))
+                      ")")
+    :blocked (blocked-held-phrase entry)
+    :aborted (if after-step (str "aborted after step " after-step) "aborted")
+    tag))
+
+(defn print-held-notice!
+  "One stderr line per scenario held at planning (dry-run preview; the
+   live run's verdict line carries the count): --hold-unplannable's
+   (sl-6wh9) and the @wip/@skip tags' (sl-190x), each with its reason.
+   Reads :held off the diagnostics; absent → prints nothing."
+  [diagnostics opts]
+  (when-let [held (seq (:held diagnostics))]
+    (let [use-color? (colors-enabled? opts)]
+      (binding [*out* *err*]
+        (println (colorize (str (count held) " scenario(s) held:") :cyan use-color?))
+        (doseq [{:keys [scenario uri line] :as entry} held]
+          (println (str "  - " scenario " (" uri ":" line "; "
+                        (held-reason-phrase entry) ")")))))))
+
+(defn held-breakdown
+  "`(2 wip, 1 skip, 1 blocked)` — the per-kind breakdown of a run-level
+   :held vector in the verdict line (sl-190x), kinds in first-seen order;
+   nil when the vector is empty."
+  [held]
+  (when (seq held)
+    (let [kinds (distinct (map :reason held))
+          counts (frequencies (map :reason held))]
+      (str "(" (str/join ", " (map #(str (counts %) " " (name %)) kinds)) ")"))))
+
+;; -----------------------------------------------------------------------------
+;; Dry-run plan listing (sl-xvae) — under -v only
+;; -----------------------------------------------------------------------------
+
+(defn- format-resolved-triple
+  "The bound SVO in SL's own notation: `:subject :verb [:frame] object via
+   :interface`; nil when the stepdef is untyped (no verb)."
+  [{:keys [subject verb frame object interface]}]
+  (when verb
+    (str/join " " (remove nil?
+                          [subject verb
+                           (when frame (str "[" frame "]"))
+                           (when (some? object) (pr-str object))
+                           (when interface (str "via " interface))]))))
+
+(defn- verbose-level
+  "The -v count: 0 when :verbose is absent, 1 for a bare `true` (programmatic
+   callers), n for the CLI's counted flag (sl-jima)."
+  [opts]
+  (let [v (:verbose opts)]
+    (cond (number? v) v
+          v 1
+          :else 0)))
+
+(defn- format-plan-step
+  "One listing line: the step text, then what it bound to — the resolved
+   triple or `(untyped)`, then the stepdef's def site `(file:line)`
+   (sl-jima: the triple leads; the pattern source is a debugging detail).
+   Under `show-pattern?` (-vv) a bound step gains one sub-line beneath it,
+   `pattern: <src>`, so the -v lines stay byte-identical inside -vv output.
+   A macro wrapper names its macro and expansion size; a step that did not
+   bind (holds only) shows its status."
+  [bound-step indent show-pattern?]
+  (let [step (:step bound-step)
+        text (format-subject-display (:step/text step))
+        r (:resolved bound-step)
+        m (:step/macro step)
+        {:keys [file line]} (:stepdef-source r)]
+    (str indent text "  →  "
+         (cond
+           (= :synthetic (:status bound-step))
+           (str "macro \"" (:key m) "\""
+                (when-let [f (get-in m [:definition :file])] (str " (" f ")"))
+                (when-let [n (:step-count m)] (str ", " n " step(s)")))
+
+           r
+           (str (or (format-resolved-triple r) "(untyped)")
+                (when file (str "  (" file ":" line ")"))
+                (when show-pattern?
+                  (str "\n" indent "  pattern: " (or (:pattern-src r) "(pattern)"))))
+
+           :else
+           (str "(" (name (:status bound-step)) ")")))))
+
+(defn print-dry-run-plan!
+  "stderr block under the dry-run summary line, under :verbose only: the
+   step plan — per scenario, one line per step naming the resolved triple
+   and the stepdef it bound to; expanded macro steps indent under their
+   wrapper. At verbose level 2 (-vv) each bound step also prints its
+   stepdef's pattern source on a sub-line. Byte-identical output without
+   :verbose (prints nothing)."
+  [plans opts]
+  (when (:verbose opts)
+    (let [show-pattern? (>= (verbose-level opts) 2)]
+      (binding [*out* *err*]
+        (println "plan:")
+        (doseq [plan plans]
+          (println (str "  " (get-in plan [:plan/pickle :pickle/name])))
+          (doseq [bound-step (:plan/steps plan)]
+            (let [expanded? (= :expanded (-> bound-step :step :step/macro :role))]
+              (println (format-plan-step bound-step
+                                         (if expanded? "      " "    ")
+                                         show-pattern?)))))))))
+
 (defn print-warnings!
   "Print warn-level diagnostics that did not block the run (success paths:
    dry-run and execute): SVO issues, and capability-cleanup failures
@@ -505,12 +706,20 @@
   [diagnostics opts]
   (let [use-color? (colors-enabled? opts)
         warns (filter #(= :warn (:severity %)) (:svo-issues diagnostics))
+        ;; sl-6wh9: warn-level Tier-2 issues (:stepdef/unknown-verb at :warn)
+        stepdef-warns (filter #(= :warn (:severity %)) (:stepdef-issues diagnostics))
         cleanup-failures (:cleanup-failures diagnostics)]
     (when (seq warns)
       (binding [*out* *err*]
         (println (colorize "\nSVO validation warnings:" :yellow use-color?))
         (doseq [issue warns]
           (println (format-svo-issue issue use-color?))
+          (println))))
+    (when (seq stepdef-warns)
+      (binding [*out* *err*]
+        (println (colorize "\nStepdef glossary warnings:" :yellow use-color?))
+        (doseq [issue stepdef-warns]
+          (println (format-message-issue issue use-color?))
           (println))))
     (when (seq cleanup-failures)
       (binding [*out* *err*]
@@ -530,7 +739,10 @@
    Outputs to stderr."
   [scenarios opts]
   (let [use-color? (colors-enabled? opts)
-        failed (filter #(#{:failed :error} (:status %)) scenarios)]
+        ;; A @blocked scenario held as claimed (sl-190x) keeps its measured
+        ;; :failed/:error status but is not a failure of this run — its row
+        ;; already says what was measured.
+        failed (filter #(and (#{:failed :error} (:status %)) (not (:held %))) scenarios)]
     (when (seq failed)
       (binding [*out* *err*]
         (println)
@@ -545,32 +757,45 @@
 
    Parameters:
    - result: execution result from execute-suite
-   - opts: {:no-color bool :verbose bool :duration-ms N}"
+   - opts: {:no-color bool :verbose bool-or-count :duration-ms N} — :verbose is
+     `true` from programmatic callers or the CLI's -v count (sl-jima)"
   [result opts]
   (let [use-color? (colors-enabled? opts)
-        {:keys [passed failed error unobserved pending skipped]} (:counts result)
+        {:keys [passed failed error unobserved pending skipped held]} (:counts result)
         total (+ (or passed 0) (or failed 0) (or error 0) (or unobserved 0)
-                 (or pending 0) (or skipped 0))
+                 (or pending 0) (or skipped 0) (or held 0))
         ;; Segments joined with ", " — identical output to the historical
-        ;; nested-when chain for the four original statuses; :error (sl-esq)
-        ;; and :unobserved (sl-kowi) appear only when positive.
+        ;; nested-when chain for the four original statuses; :error (sl-esq),
+        ;; :unobserved (sl-kowi) and :held (sl-6wh9, --hold-unplannable)
+        ;; appear only when positive. The held segment carries its per-kind
+        ;; breakdown (sl-190x: `3 held (2 wip, 1 skip)`) read off the run's
+        ;; :held record; an XPASS count rides the failed segment.
+        held-label (str "held" (when-let [b (held-breakdown (:held result))] (str " " b)))
+        xpass (:xpass (:counts result))
+        failed-label (str "failed" (when (pos? (or xpass 0)) (str " (" xpass " XPASS)")))
         segments (keep (fn [[n label color]]
                          (when (pos? (or n 0))
                            (colorize (str n " " label) color use-color?)))
                        [[passed "passed" :green]
-                        [failed "failed" :red]
+                        [failed failed-label :red]
                         [unobserved "unobserved" :red]
                         [error "error" :red]
                         [pending "pending" :yellow]
-                        [skipped "skipped" :cyan]])]
+                        [skipped "skipped" :cyan]
+                        [held held-label :cyan]])]
     (binding [*out* *err*]
       (println)
       (println (str total " scenario(s): " (str/join ", " segments)))
       ;; sl-kowi (Ruling 4): the halt line — only when the policy fired.
-      (when-let [{:keys [after-scenario scenario]} (:halted result)]
-        (println (colorize (str "halted after scenario " after-scenario
-                                (when scenario (str " (" scenario ")"))
-                                ": observation failure")
+      ;; sl-617t: the same slot carries the abort — the run stopped on
+      ;; request; the held count says how many never got a verdict.
+      (when-let [{:keys [after-scenario scenario reason]} (:halted result)]
+        (println (colorize (if (= :aborted reason)
+                             (str "aborted after scenario " after-scenario
+                                  ": " (or held 0) " scenario(s) held")
+                             (str "halted after scenario " after-scenario
+                                  (when scenario (str " (" scenario ")"))
+                                  ": observation failure"))
                            :red use-color?)))
       (when-let [duration (:duration-ms opts)]
         (println (colorize (format "Completed in %.2fs" (/ duration 1000.0)) :gray use-color?))))))
@@ -586,15 +811,17 @@
    `group-result` is run-with-setups!'s per-group result map
    (:group-label :exit-code :status). A group the :run-scope halt SKIPPED
    (sl-78u4, Warden W3) has no exit code — it never started — and renders
-   `skipped (halted)`."
+   `skipped (halted)`; one the run abort skipped (sl-617t) renders
+   `skipped (aborted)`."
   [group-result opts]
-  (let [{:keys [group-label exit-code status]} group-result
+  (let [{:keys [group-label exit-code status halted-by]} group-result
         use-color? (colors-enabled? opts)
         skipped? (nil? exit-code)
         color (cond skipped? :gray (zero? exit-code) :green :else :red)
-        verdict (if skipped?
-                  "skipped (halted)"
-                  (str "exit code " exit-code " (" (name status) ")"))]
+        verdict (cond
+                  (and skipped? (= :aborted (:reason halted-by))) "skipped (aborted)"
+                  skipped? "skipped (halted)"
+                  :else (str "exit code " exit-code " (" (name status) ")"))]
     (binding [*out* *err*]
       (println (str "Setup group " (pr-str group-label) ": "
                     (colorize verdict color use-color?))))))

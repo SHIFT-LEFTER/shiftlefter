@@ -67,6 +67,7 @@ work (canvas, custom JS), or contributing a new interface. See
 | decide whether it fits my project | [Would ShiftLefter work for my project?](FIT.md) |
 | understand why it's built this way | [Why ShiftLefter is built this way](PHILOSOPHY.md) |
 | get a browser test running | [Add your first browser behavior](browser-getting-started.md) |
+| check, format, or bring over `.feature` files I already have — the parser needs no config and no step definitions | [Bring Existing Gherkin](adoption.md) |
 | run my suite in CI (GitLab, GitHub Actions) | [Running ShiftLefter in CI](CI.md) |
 | build a custom report from the run record | [Build your own report](REPORTS.md) |
 | choose a locator that survives refactors | [Choosing web locators](LOCATORS.md) |
@@ -82,7 +83,6 @@ work (canvas, custom JS), or contributing a new interface. See
 | know what I can run (Java vs Clojure) | [What can I do?](INSTALL-TIERS.md) |
 | know where everything lives & what gets written into my repo | [Project layout](project-layout.md) |
 | look up a term | [Glossary](GLOSSARY.md) |
-| bring existing Gherkin (preview) | [Adoption](adoption.md) |
 
 Runnable projects live in [`examples/`](https://github.com/SHIFT-LEFTER/shiftlefter/tree/main/examples)
 — [`examples/README.md`](https://github.com/SHIFT-LEFTER/shiftlefter/tree/main/examples/README.md)

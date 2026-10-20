@@ -27,7 +27,7 @@
 
    - <testsuites name=PROJECT>            — one run-scope
    - <testsuite name='Feature: X' …>      — one feature file; <properties>
-     carry shiftlefter.version + mode; timestamp=run start (ISO-8601 UTC,
+     carry shiftlefter.version; timestamp=run start (ISO-8601 UTC,
      no offset); hostname for XSD validity.
    - <testcase name=SCENARIO classname=FEATURE file=REL line=SCENARIO-LINE
      time=SECONDS>                        — one scenario (macro-proof:
@@ -258,7 +258,7 @@
 
 (defn- scenario-error-message
   "Message for a scenario-level :error (the infrastructure-failure family,
-   sl-esq/sl-7c7i: hook throw, capability provisioning, capture, harness).
+   sl-esq/sl-7c7i: hook throw, capability provisioning, capture).
    Hook-attributed errors keep the dual attribution (hook name +
    registration home + @hook= tag file:line); other family members render
    their own message verbatim."
@@ -271,13 +271,15 @@
          (when (and ts (:file ts))
            (str " [tagged at " (:file ts) ":" (:line ts) "]")))))
 
+(declare testcase-verdict-outcome)
+
 (defn- testcase-outcome
   "Return the outcome child element for a scenario testcase, or nil for a pass.
    :error when the failing step carried an :exception-class, else :failure;
    pending mirrors the exit code via allow-pending? (D2). `counts` is the
    macro N/M lookup (may be {} when only the outcome tag is needed).
    Scenario :error (the infrastructure-failure family, sl-esq/sl-7c7i:
-   hook throw, capability provisioning, capture, harness) renders <error>
+   hook throw, capability provisioning, capture) renders <error>
    with the error's type as the type attribute, reading the
    SCENARIO-level :error map.
 
@@ -285,6 +287,22 @@
    — `[unobserved] ` on an observation-class scenario error, `[SUT error] `
    on a failed step classed :sut. The type attribute keeps the error type;
    the envelope carries the key structurally."
+  [scenario allow-pending? counts]
+  (cond
+    ;; sl-190x: a @blocked scenario held as claimed — <skipped> with the
+    ;; `held:` prefix and what was measured (C2), whatever its status.
+    (= :blocked (-> scenario :held :reason))
+    (el "skipped" {:message (str "held: " (reporter/blocked-held-phrase (:held scenario)))} nil)
+
+    ;; sl-190x: XPASS — the claim is false; a <failure> carrying the
+    ;; imperative (never <error>: nothing in the harness broke).
+    (:xpass scenario)
+    (el "failure" {:type "xpass" :message (-> scenario :xpass :message)} nil)
+
+    :else (testcase-verdict-outcome scenario allow-pending? counts)))
+
+(defn- testcase-verdict-outcome
+  "`testcase-outcome` for a scenario that ran to an unexcused verdict."
   [scenario allow-pending? counts]
   (case (:status scenario)
     :passed nil
@@ -310,8 +328,17 @@
                (if allow-pending?
                  (el "skipped" {:message msg} nil)
                  (el "failure" {:type "pending" :message msg} nil)))
-    ;; :skipped (non-runnable plan) — didn't execute
-    (el "skipped" {:message "scenario not executed"} nil)))
+    ;; :skipped — didn't execute. A scenario the run abort held (sl-617t)
+    ;; says so with the 6wh9 `held:` prefix, so a CI reader sees it was
+    ;; held, not silently dropped; a non-runnable plan keeps the old line.
+    (if-let [held (:held scenario)]
+      (el "skipped"
+          {:message (if-let [k (:after-step held)]
+                      (str "held: aborted after step " k " of "
+                           (count (:steps scenario)))
+                      "held: aborted before this scenario ran")}
+          nil)
+      (el "skipped" {:message "scenario not executed"} nil))))
 
 ;; -----------------------------------------------------------------------------
 ;; Name disambiguation — identical outline-row names get ' (example N)'
@@ -373,13 +400,38 @@
           {:tests 0 :failures 0 :errors 0 :skipped 0}
           scenarios))
 
-(defn- testsuite-el [scenarios run-ctx]
-  (let [{:keys [version mode started-at hostname project-root allow-pending?
+(defn- held-testcase-el
+  "A scenario held at planning — --hold-unplannable's (sl-6wh9) or a
+   @wip/@skip tag's (sl-190x) — never ran, so it renders <skipped> with a
+   `held:` message naming why (the CI consumer sees it was held, not
+   silently dropped): `held: not plannable (2 undefined, 0 ambiguous
+   step(s))` — `, 1 binding error(s): element-has-no-shape` appended when
+   lint errors held it (sl-8ezu) — `held: @wip`, `held: @skip=flaky-on-ci`."
+  [{:keys [scenario feature uri line reason tag undefined ambiguous] :as entry} project-root]
+  (el "testcase"
+      {:name (clean scenario)
+       :classname (clean feature)
+       :file (relative-path project-root uri)
+       :line line
+       :time (secs 0.0)}
+      [(el "skipped" {:message (if (= :unplannable reason)
+                                 (str "held: not plannable (" undefined
+                                      " undefined, " ambiguous " ambiguous step(s)"
+                                      (when-let [b (reporter/binding-errors-phrase entry)]
+                                        (str ", " b))
+                                      ")")
+                                 (str "held: " tag))}
+           nil)]))
+
+(defn- testsuite-el [scenarios held run-ctx]
+  (let [{:keys [version started-at hostname project-root allow-pending?
                 artifacts-root]} run-ctx
         pickle (pickle-of (first scenarios))
-        feature-name (:pickle/feature-name pickle)
+        feature-name (or (:pickle/feature-name pickle) (:feature (first held)))
         names (disambiguate-names (map pickle-of scenarios))
-        counts (count-outcomes scenarios allow-pending?)
+        counts (-> (count-outcomes scenarios allow-pending?)
+                   (update :tests + (count held))
+                   (update :skipped + (count held)))
         total-ms (reduce + 0.0 (map scenario-ms scenarios))]
     (el "testsuite"
         {:name (clean (str "Feature: " feature-name))
@@ -390,39 +442,109 @@
          :time (secs total-ms)
          :timestamp started-at
          :hostname hostname}
-        (into [(el "properties" {}
-                   [(el "property" {:name "shiftlefter.version" :value version} nil)
-                    (el "property" {:name "mode" :value (some-> mode name)} nil)])]
-              (map (fn [sc nm]
-                     (testcase-el sc nm project-root allow-pending? artifacts-root))
-                   scenarios names)))))
+        (-> [(el "properties" {}
+                 [(el "property" {:name "shiftlefter.version" :value version} nil)])]
+            (into (map (fn [sc nm]
+                         (testcase-el sc nm project-root allow-pending? artifacts-root))
+                       scenarios names))
+            (into (map #(held-testcase-el % project-root) held))))))
+
+(def crash-suite-name
+  "The synthetic <testsuite> a runner crash appends (sl-8orx). Named so a
+   consumer can tell the marker from a feature suite at a glance."
+  "sl-crash")
+
+(defn- crash-testsuite-el
+  "sl-8orx: the crash marker — ONE synthetic testsuite holding ONE testcase
+   whose <error type=\"crash\"> names the exception class, the message and
+   the run-id (the same three fields the HTML TOC's :crash record carries,
+   so a reader can match the two artifacts), plus — sl-n6io — a `scenario:`
+   line naming the crashed scenario (project-relative file:line, like the
+   <testcase file=> attribute) when the record carries `:scenario`; a
+   crash with no scenario to name renders the three-line body unchanged.
+   Appended on the crash path so the invocation file satisfies 'at least
+   one failure/error iff the exit is nonzero' beside exit 3 — before it, a
+   mid-run crash left a CURRENT, all-green, partial document (the xwwv
+   finding)."
+  [{:keys [exception-class message run-id scenario]} run-ctx]
+  (let [{:keys [started-at hostname project-root]} run-ctx
+        headline (str "Runner crash: " exception-class ": " message)
+        scenario-line (when scenario
+                        (str "scenario: " (:name scenario)
+                             " (" (relative-path project-root (:source-file scenario))
+                             ":" (:line scenario) ")\n"))]
+    (el "testsuite"
+        {:name crash-suite-name
+         :tests 1
+         :failures 0
+         :errors 1
+         :skipped 0
+         :time (secs 0.0)
+         :timestamp started-at
+         :hostname hostname}
+        [(el "testcase"
+             {:name "runner crash"
+              :classname crash-suite-name
+              :time (secs 0.0)}
+             [(el "error" {:type "crash" :message (clean headline)}
+                  [{:cdata (clean (str "exception-class: " exception-class "\n"
+                                       "message: " message "\n"
+                                       "run-id: " run-id "\n"
+                                       scenario-line
+                                       "The runner crashed after the scenarios"
+                                       " above completed; every later scenario"
+                                       " and group never started."))}])])])))
 
 (defn build-document
   "Pure: build the JUnit-XML document string from accumulated scenario
    envelopes and the enriched run-ctx. Scenarios are grouped into one
-   <testsuite> per feature file, preserving plan order."
-  [scenarios run-ctx]
-  (let [groups (->> scenarios
-                    (group-by #(:pickle/source-file (pickle-of %)))
-                    ;; deterministic suite order: first appearance in plan order
-                    (sort-by (fn [[_ scs]]
-                               (->> scenarios (keep-indexed (fn [i s] (when (identical? s (first scs)) i))) first))))
-        totals (reduce (fn [acc [_ scs]]
-                         (merge-with + acc (count-outcomes scs (:allow-pending? run-ctx))))
-                       {:tests 0 :failures 0 :errors 0 :skipped 0}
-                       groups)
-        total-ms (reduce + 0.0 (map scenario-ms scenarios))
-        root (el "testsuites"
-                 {:name (clean (:project-name run-ctx))
-                  :tests (:tests totals)
-                  :failures (:failures totals)
-                  :errors (:errors totals)
-                  :skipped (:skipped totals)
-                  :time (secs total-ms)}
-                 (map (fn [[_ scs]] (testsuite-el scs run-ctx)) groups))]
-    (str "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-         (render-node root)
-         "\n")))
+   <testsuite> per feature file, preserving plan order. `held` (sl-6wh9,
+   optional) is the run's :held record — each entry renders as a
+   <skipped> testcase under its feature file's suite (a suite is created
+   for a file with only held scenarios). `crash` (sl-8orx, optional) is the
+   runner-crash record {:exception-class :message :run-id}, plus
+   `:scenario` when the crash escaped one scenario (sl-io05/sl-n6io): when
+   present one synthetic `sl-crash` suite with one <error type=\"crash\">
+   testcase is appended and counted in the root totals; nil is
+   byte-identical to the no-crash document."
+  ([scenarios run-ctx] (build-document scenarios run-ctx nil nil))
+  ([scenarios run-ctx held] (build-document scenarios run-ctx held nil))
+  ([scenarios run-ctx held crash]
+   (let [held-by-file (group-by :uri held)
+         groups (->> scenarios
+                     (group-by #(:pickle/source-file (pickle-of %)))
+                     ;; deterministic suite order: first appearance in plan order
+                     (sort-by (fn [[_ scs]]
+                                (->> scenarios (keep-indexed (fn [i s] (when (identical? s (first scs)) i))) first))))
+         executed-files (set (map first groups))
+         held-only (->> held-by-file
+                        (remove (fn [[file _]] (executed-files file)))
+                        (sort-by first))
+         totals (reduce (fn [acc [_ scs]]
+                          (merge-with + acc (count-outcomes scs (:allow-pending? run-ctx))))
+                        {:tests 0 :failures 0 :errors 0 :skipped 0}
+                        groups)
+         totals (-> totals
+                    (update :tests + (count held))
+                    (update :skipped + (count held)))
+         ;; sl-8orx: the crash marker is one more test and one more error.
+         totals (cond-> totals
+                  crash (-> (update :tests inc) (update :errors inc)))
+         total-ms (reduce + 0.0 (map scenario-ms scenarios))
+         root (el "testsuites"
+                  {:name (clean (:project-name run-ctx))
+                   :tests (:tests totals)
+                   :failures (:failures totals)
+                   :errors (:errors totals)
+                   :skipped (:skipped totals)
+                   :time (secs total-ms)}
+                  (concat
+                   (map (fn [[file scs]] (testsuite-el scs (get held-by-file file) run-ctx)) groups)
+                   (map (fn [[_ hs]] (testsuite-el [] hs run-ctx)) held-only)
+                   (when crash [(crash-testsuite-el crash run-ctx)])))]
+     (str "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+          (render-node root)
+          "\n"))))
 
 ;; -----------------------------------------------------------------------------
 ;; Reporter
@@ -435,7 +557,7 @@
 (defrecord JUnitReporter [path state]
   reporter/Reporter
   (on-run-start [_this run-ctx]
-    ;; Stash the enriched run-ctx (version/mode/timestamp/project) and stamp a
+    ;; Stash the enriched run-ctx (version/timestamp/project) and stamp a
     ;; hostname for XSD validity. Console/EDN ignore run-start.
     ;; In a multi-group run `state` is the invocation-shared atom (sl-xjx0,
     ;; Warden W7) — the FIRST group's ctx wins so timestamp/name don't churn
@@ -454,13 +576,18 @@
     ;; JUnit carries results, not planning diagnostics.
     nil)
 
-  (on-run-end [_this _run-summary]
+  (on-run-end [_this run-summary]
+    ;; sl-6wh9: held scenarios (--hold-unplannable; sl-190x's @wip/@skip)
+    ;; ride the :run-end payload; accumulate across groups like scenarios
+    ;; do. Only the PLANNING holds — the engine's held scenarios are
+    ;; already testcases of their own.
+    (swap! state update :held (fnil into []) (reporter/planning-held (:held run-summary)))
     ;; Materialize the artifact. A write failure THROWS (invariant 4): a CI
     ;; gate reading this file must never get a silent partial. Atomic
     ;; temp-sibling + rename (sl-luhn): a concurrent reader/writer on the
     ;; fixed path sees last-writer-wins, never a torn file.
-    (let [{:keys [scenarios run-ctx]} @state
-          xml (build-document scenarios run-ctx)]
+    (let [{:keys [scenarios run-ctx held]} @state
+          xml (build-document scenarios run-ctx held)]
       (reporter/write-atomically! path xml)
       nil)))
 
@@ -474,10 +601,29 @@
    (breaking the ERRATA invariant: ≥1 failure/error iff exit nonzero).
    The runner passes one invocation-scoped atom for all groups; each
    :run-end write then aggregates every scenario seen so far — the last
-   write carries the full invocation, and a mid-run crash still leaves the
-   honest partial file. Absent (single group / direct construction) the
+   write carries the full invocation. A mid-run crash re-materializes the
+   same state with the `sl-crash` marker suite appended (sl-8orx,
+   write-crash-marker!), so the partial file is red beside exit 3 instead
+   of current-and-green. Absent (single group / direct construction) the
    reporter keeps its own atom, byte-identical to before."
   [opts]
   (->JUnitReporter (:path opts)
                    (or (:shared-state opts)
                        (atom {:scenarios [] :run-ctx nil}))))
+
+(defn write-crash-marker!
+  "sl-8orx: materialize the invocation JUnit with the crash marker appended.
+   `state` is the invocation-shared atom (sl-xjx0) — every scenario the
+   reporters saw before the crash is in it; `crash` is the runner-crash
+   record {:exception-class :message :run-id} (+ `:scenario` when one
+   scenario crashed, sl-n6io), stored into the state (the record is part
+   of the invocation's truth, not a render-time flag) and rendered as the
+   `sl-crash` suite. `fallback-run-ctx` covers a crash
+   before any group's on-run-start stamped the state's :run-ctx. The write
+   rides the same atomic path as on-run-end; a write failure THROWS
+   (invariant 4) — the CALLER owns not letting that mask the crash itself."
+  [path state crash fallback-run-ctx]
+  (let [{:keys [scenarios run-ctx held]} (swap! state assoc :crash crash)
+        run-ctx (or run-ctx (assoc fallback-run-ctx :hostname (hostname)))]
+    (reporter/write-atomically! path (build-document scenarios run-ctx held crash))
+    nil))

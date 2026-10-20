@@ -119,7 +119,7 @@ data flow legible rather than ambient:
 - A hook can declare `:provides` — the binding names (bare keywords, a
   letter then letters/digits — lowerCamel by convention, e.g.
   `[:sessionToken]`) it seeds into the scenario's
-  [data plane](across-interfaces.md#passing-a-value-between-interfaces-named-bindings).
+  [data plane](across-interfaces.md#passing-a-value-between-interfaces-a-declared-shape-and-a-token).
   Declared names satisfy the dry run's consumed-without-producer check, so a
   step consuming `{sessionToken}` plans cleanly against a hook-seeded value.
   Contribution keys that fit the binding shape mirror into the data plane
@@ -168,7 +168,7 @@ What the policy buys over a hand-rolled After hook:
   screenshot of an optimistic UI shows *paint*, not settled state —
   settled ≠ painted.)
 - **The film strip.** `:every-step` follows the acting subject, one
-  capture per step. A step with no SVO actor (vanilla mode) captures
+  capture per step. A step with no SVO actor (an untyped step) captures
   every live capability — which in a single-browser suite is exactly the
   one browser; multi-capability suites pay that linear cost knowingly.
 - **Step-grain console provenance.** Browser console reads are
@@ -346,13 +346,11 @@ to make them findable, not survivable.
 ## Porting note
 
 If you're bringing an existing Cucumber suite: your `.feature` files parse
-unchanged, and nothing forces a rewrite of features you haven't touched —
-vanilla mode (built-in steps plus your own step definitions, in Clojure) is a
-supported way to run, not a migration stage you must pass through — a suite
-you already have is exactly the *specific reason* the
-[glossary](GLOSSARY.md) asks for before you reach for Vanilla. Your
-step definitions themselves don't come over; [Adoption](adoption.md) is honest
-about where migration actually stands. The hook story rides each migration
-slice for free: global Befores land as `:global?` hooks, screenshot
+unchanged, but only typed steps execute — until its steps are typed, the suite
+plans as unshifted (exit 2, nothing runs), and your step definitions
+themselves don't come over. [Bring Existing Gherkin](adoption.md) is the
+honest account. The way through is a slice at a time: `sl run
+--hold-unplannable` runs the scenarios that plan and holds the rest. The hook
+story rides each migration slice for free: global Befores land as `:global?` hooks, screenshot
 infrastructure IS a config line (`:capture`, above), and per-scenario seeding
 maps onto named hooks one `@hook=` tag at a time.

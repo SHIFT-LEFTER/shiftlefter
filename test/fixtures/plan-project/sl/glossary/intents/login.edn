@@ -1,0 +1,6 @@
+;; sl-xvae fixture intents: the login form the typed steps act on.
+{:intent "Login"
+ :elements {:username {:bindings {:web {:id "username"}}}
+            :password {:bindings {:web {:id "password"}}}
+            :login-button {:bindings {:web {:css "button[type=\"submit\"]"}}}
+            :dashboard {:bindings {:web {:id "dashboard"}}}}}

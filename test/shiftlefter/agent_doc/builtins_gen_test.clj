@@ -51,7 +51,7 @@
         (is (str/includes? md "S is on exactly O — O: literal URL")))
       (testing ":arg-kinds are rendered (sl-yh7 AC11 — regen is not a no-op)"
         (is (str/includes? md "`:value` (literal or `{binding}`)"))
-        (is (str/includes? md "`:match` (regex; `(?<name>...)` produces `{name}` bindings)"))))))
+        (is (str/includes? md "`:match` (`/regex/`, or `Intent.element` for its declared `:shape`; `(?<name>...)` produces `{name}` bindings)"))))))
 
 (deftest builtin-examples-bind-test
   ;; sl-bqo AC 1, machine-checked: every built-in stepdef ships a

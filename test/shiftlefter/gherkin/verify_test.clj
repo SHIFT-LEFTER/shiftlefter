@@ -3,17 +3,22 @@
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
             [babashka.fs :as fs]
-            [shiftlefter.gherkin.verify :as verify]))
+            [shiftlefter.gherkin.verify :as verify]
+            [shiftlefter.test-helpers :as th]))
 
 ;; -----------------------------------------------------------------------------
 ;; CLI wiring tests
 ;; -----------------------------------------------------------------------------
 
 (deftest check-cli-wiring-works
-  (testing "CLI wiring check passes when bin/sl exists"
-    (let [result (verify/check-cli-wiring)]
-      (is (= :ok (:status result)))
-      (is (= :cli-wiring (:id result))))))
+  ;; sl-v6x3: bin/sl --help needs a built jar, which a cold clone lacks —
+  ;; skip loudly (pending, naming clojure -T:build uberjar), never red.
+  (th/with-prerequisite th/jar-prerequisite
+    (fn []
+      (testing "CLI wiring check passes when bin/sl exists"
+        (let [result (verify/check-cli-wiring)]
+          (is (= :ok (:status result)))
+          (is (= :cli-wiring (:id result))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Smoke fixture tests

@@ -92,10 +92,16 @@ once, in `glossary/intents/`:
 
 A step's **Object** is then the intent reference `Login.submit`, validated before the
 run. When the page moves, you update the binding in one place and every feature that
-references it follows. Intent names are PascalCase; element names are lowercase
-(`submit`, `add-to-cart`). Elements carry per-interface bindings (`:web`, `:mobile`,
-…), and intents can nest via `:root` / `:collections` for components that repeat —
-see [SVO.md](SVO.md#object-validation-against-intent-regions).
+references it follows. Intent names are PascalCase; element names start lowercase,
+kebab or lowerCamel (`submit`, `add-to-cart`, `smsCode`). Elements carry
+per-interface bindings (`:web`, `:mobile`, …), and intents can nest via `:root` /
+`:collections` for components that repeat — see
+[SVO.md](SVO.md#object-validation-against-intent-regions).
+
+An element whose text carries a value can also declare the **shape** of that
+text — `:shape "Order (?<orderNumber>[A-Z0-9-]+)"` — so a step reads
+`captures Checkout.confirmation` and the regex lives with the element, not in
+the scenario. See [Test Across Interfaces](across-interfaces.md#passing-a-value-between-interfaces-a-declared-shape-and-a-token).
 
 ## When you actually write a step definition
 
@@ -112,10 +118,12 @@ only here:
   contribution, and you're the best kind of user.
 
 **Composing interfaces is no longer on this list.** Passing a value captured
-on one interface into another is built in: name a regex group
-(`(?<code>\d{6})`) to produce a scenario binding, consume it as `{code}` in
-any literal-admitting slot — see
-[Test Across Interfaces](across-interfaces.md#passing-a-value-between-interfaces-named-bindings).
+on one interface into another is built in: declare the shape of the text on
+the intent element (`:shape "verification code is: (\\d{6})"` on
+`Reset.smsCode`), match it (`receives an SMS … matching Reset.smsCode`) to
+produce a scenario binding, consume it as `{smsCode}` in any literal-admitting
+slot — an inline `/regex/` with a named group is the escape hatch. See
+[Test Across Interfaces](across-interfaces.md#passing-a-value-between-interfaces-a-declared-shape-and-a-token).
 The 2FA demo's old 14-line handoff `defstep` is deleted.
 
 One forward note for custom steps you do write: a step definition may read

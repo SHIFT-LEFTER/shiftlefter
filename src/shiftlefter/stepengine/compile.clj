@@ -50,70 +50,55 @@
   [runner-config]
   (get-in runner-config [:macros :registry-paths] []))
 
-(defn- shifted-mode?
-  "Check if config indicates Shifted mode (SVO validation enabled).
-   Per A1: Shifted mode is indicated by presence of :svo key.
-
-   Invariant (sl-ieie): `shiftlefter.config/load-config` includes :svo in its
-   result iff the USER's config contained it — default-config's :svo block
-   is only merged under an explicit user opt-in. So this check on the loaded
-   config faithfully reflects user intent: no :svo key = Vanilla."
-  [config]
-  (contains? config :svo))
-
 ;; -----------------------------------------------------------------------------
-;; Binding Options Builder (Shifted Mode)
+;; Binding Options Builder
 ;; -----------------------------------------------------------------------------
 
 (defn- build-binding-opts
-  "Build options for bind-suite based on config.
-
-   In vanilla mode (no :svo key): returns either nil (no SVO validation)
-   or `{:ok {:adapter-registry r}}` if a custom registry was supplied —
-   capability gating still needs the registry even without SVO.
-
-   In Shifted mode (:svo present): loads glossaries strictly and returns
-   binding opts including `:adapter-registry` if supplied.
+  "Build options for bind-suite from config. One mode (sl-6wh9): the
+   glossaries always load strictly — an absent/nil :glossaries value is an
+   EMPTY glossary (framework default verbs still load, so builtin steps
+   bind); an explicit path that is missing is a hard :glossary error.
 
    Returns:
-   - nil — vanilla mode, no SVO, no custom registry
-   - {:ok opts} — opts include :glossary :interfaces :svo :adapter-registry
-   - {:error {...}} — Shifted mode, configuration or loading failed"
-  [config adapter-registry]
-  (if-not (shifted-mode? config)
-    ;; Vanilla mode: SVO off; only build opts if a custom registry was given.
-    (when adapter-registry
-      {:ok {:adapter-registry adapter-registry}})
-    ;; Shifted mode: require glossaries, load strictly
-    (if-not (contains? config :glossaries)
-      {:error {:type :svo/missing-glossaries-config
-               :message (str "Shifted mode requires glossaries: add :glossaries to "
-                             "shiftlefter.edn or create the conventional files under "
-                             "the config root (glossary/subjects.edn, "
-                             "glossary/verbs/<type>.edn, glossary/intents/).")}}
-      (let [glossary-result (glossary/load-all-glossaries-strict (:glossaries config))]
-        (if (:error glossary-result)
-          glossary-result
-          ;; :glossary-lints (sl-67dj, Warden P3-13): structured glossary-load
-          ;; warnings ride along so compile-suite can surface them as
-          ;; diagnostics — bind-suite ignores the extra key.
-          {:ok (cond-> {:glossary (:ok glossary-result)
-                        :interfaces (config/get-interfaces config)
-                        :costumes (config/get-costumes config)
-                        :svo (config/get-svo-settings config)
-                        :glossary-lints (vec (:warnings glossary-result))}
-                 adapter-registry (assoc :adapter-registry adapter-registry))})))))
+   - {:ok opts} — opts include :glossary :interfaces :costumes :enforcement
+     :glossary-lints, plus :adapter-registry when supplied and :config-path
+     (sl-u2r0: the def-site an unknown-interface issue names) when known
+   - {:error {...}} — a glossary failed to load"
+  [config adapter-registry config-path]
+  (let [glossary-result (glossary/load-all-glossaries-strict (:glossaries config))]
+    (if (:error glossary-result)
+      glossary-result
+      ;; :glossary-lints (sl-67dj, Warden P3-13): structured glossary-load
+      ;; warnings ride along so compile-suite can surface them as
+      ;; diagnostics — bind-suite ignores the extra key.
+      {:ok (cond-> {:glossary (:ok glossary-result)
+                    :interfaces (config/get-interfaces config)
+                    :costumes (config/get-costumes config)
+                    :enforcement (config/get-enforcement config)
+                    :glossary-lints (vec (:warnings glossary-result))}
+             adapter-registry (assoc :adapter-registry adapter-registry)
+             config-path (assoc :config-path config-path))})))
 
 (defn- attach-glossary-lints
   "sl-67dj (Warden P3-13): thread the structured glossary-load warnings
    (build-binding-opts' :glossary-lints) onto a compile result's
    :diagnostics for the runner to report. Applied on the post-bind paths
    only — the earlier fail-fast planning branches surface their error as
-   the actionable item, matching the loader's error-drops-warnings rule."
-  [result binding-opts]
+   the actionable item, matching the loader's error-drops-warnings rule.
+   `warn-stepdef-issues` (sl-6wh9): the warn-level Tier-2 issues
+   (:stepdef/unknown-verb at :warn) ride :stepdef-issues the same way —
+   reported, counted, never blocking."
+  [result binding-opts warn-stepdef-issues]
   (let [lints (:glossary-lints binding-opts)]
     (cond-> result
-      (seq lints) (update :diagnostics assoc :glossary-lints lints))))
+      (seq lints) (update :diagnostics assoc :glossary-lints lints)
+      (seq warn-stepdef-issues)
+      (-> (update :diagnostics assoc :stepdef-issues (vec warn-stepdef-issues))
+          (update-in [:diagnostics :counts :stepdef-issue-count]
+                     (fnil + 0) (count warn-stepdef-issues))
+          (update-in [:diagnostics :counts :total-issues]
+                     (fnil + 0) (count warn-stepdef-issues))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Pre-bind Pass: Macro Expansion
@@ -166,26 +151,47 @@
    - :macro-errors - macro loading/expansion errors (if any)
 
    Pipeline:
-   1. Build binding opts (load glossaries if Shifted mode; thread adapter-registry)
-   2. If Shifted mode: annotation pass (fail fast on annotation errors)
+   1. Build binding opts (load glossaries; thread adapter-registry)
+   2. Annotation pass (fail fast on annotation errors)
    3. If macros enabled: load registries (fail fast on load error)
    4. If macros enabled: expand pickles (fail fast on expansion error)
-   5. Bind expanded pickles to step definitions (with SVO opts if Shifted)"
+   5. Bind expanded pickles to step definitions (with the enforcement opts)"
   [config pickles stepdefs & [opts]]
   (let [runner-config       (:runner config)
         adapter-registry    (:adapter-registry opts)
-        binding-opts-result (build-binding-opts config adapter-registry)
-        binding-error       (and binding-opts-result (:error binding-opts-result))
-        binding-opts        (when (and binding-opts-result (not binding-error))
+        binding-opts-result (build-binding-opts config adapter-registry
+                                                (:config-path opts))
+        binding-error       (:error binding-opts-result)
+        binding-opts        (when-not binding-error
                               (:ok binding-opts-result))
         ;; Tier 2: cross-check stepdef :svo metadata against the loaded
-        ;; glossary (sl-hse). Runs in Shifted mode only — without a glossary
-        ;; there's nothing to cross-check against.
+        ;; glossary (sl-hse). Always runs (sl-6wh9) — an empty project
+        ;; glossary still carries the framework default verbs.
+        ;;
+        ;; :stepdef/unknown-verb rides the :unknown-verb knob (sl-6wh9,
+        ;; ruling #1: an unknown verb is project-owned vocabulary — it
+        ;; warns by default and EXECUTES; the stepdef body is the
+        ;; executor, the frame only stamps slot kinds). Before the
+        ;; retirement this check ran in Shifted mode only and every issue
+        ;; was a hard error; with one mode, a custom verb on a user
+        ;; stepdef would otherwise fail every project without a verb
+        ;; glossary. The structural kinds (a frame or args the glossary
+        ;; does not declare for a verb it DOES define) stay hard errors.
+        unknown-verb-level  (get (:enforcement binding-opts) :unknown-verb :warn)
         stepdef-issues      (when binding-opts
-                              (validate/validate-stepdefs-against-glossary
-                               stepdefs
-                               (:glossary binding-opts)
-                               (:interfaces binding-opts)))]
+                              (->> (validate/validate-stepdefs-against-glossary
+                                    stepdefs
+                                    (:glossary binding-opts)
+                                    (:interfaces binding-opts))
+                                   (keep (fn [issue]
+                                           (if (= :stepdef/unknown-verb (:type issue))
+                                             (case unknown-verb-level
+                                               :off nil
+                                               (assoc issue :severity unknown-verb-level))
+                                             (assoc issue :severity :error))))
+                                   vec))
+        {blocking-stepdef-issues :error
+         warn-stepdef-issues :warn} (group-by :severity stepdef-issues)]
     (cond
       binding-error
       {:plans      []
@@ -202,13 +208,13 @@
                                      :error-count         1
                                      :total-issues        1}}}
 
-      (seq stepdef-issues)
+      (seq blocking-stepdef-issues)
       {:plans      []
        :runnable?  false
        :diagnostics {:errors         [{:type    :stepdef/glossary-mismatch
-                                       :issues  stepdef-issues
+                                       :issues  blocking-stepdef-issues
                                        :message (str "Found "
-                                                     (count stepdef-issues)
+                                                     (count blocking-stepdef-issues)
                                                      " stepdef(s) inconsistent with the glossary")}]
                      :stepdef-issues stepdef-issues
                      :undefined      []
@@ -223,12 +229,10 @@
                                       :total-issues         (count stepdef-issues)}}}
 
       :else
-      (let [annotation-result (if (shifted-mode? config)
-                                (annotations/annotate-pickles
-                                 pickles
-                                 (:interfaces config)
-                                 (macros-enabled? runner-config))
-                                {:pickles pickles :errors []})]
+      (let [annotation-result (annotations/annotate-pickles
+                               pickles
+                               (:interfaces config)
+                               (macros-enabled? runner-config))]
         (if (seq (:errors annotation-result))
           ;; Annotation pass produced errors — fail fast
           {:plans      []
@@ -289,34 +293,29 @@
             ;; Suite-load lint (sl-unz): post-bind, dedup-by-stepdef pass.
             ;; Lifts sl-ewn's per-step :requires-protocols / :provides
             ;; check from per-scenario to per-stepdef and adds
-            ;; :stepdef/undefined-interface + :glossary/orphan-type. Only
-            ;; engages when :interfaces config is present (vanilla without
-            ;; interfaces is exempt). Issues block planning even if bind
-            ;; otherwise succeeded.
+            ;; :stepdef/undefined-interface + :glossary/orphan-type.
+            ;; Unconditional (sl-6wh9): an absent :interfaces reads as the
+            ;; empty set. Issues block planning even if bind otherwise
+            ;; succeeded.
             ;;
             ;; Orphan-type lint scopes to PROJECT-DECLARED glossary types,
             ;; read from the LOADED glossary's actual mounts (:sources =
             ;; declared-type → path, built by the loader — sl-67dj: config
             ;; is a path list; the files declare their types). Framework
             ;; defaults are loaded transparently and shouldn't trip the
-            ;; check. In VANILLA mode this is nil and the orphan check is
-            ;; SKIPPED — chosen semantics (sl-67dj plan verdict): vanilla
-            ;; never loads glossary files, so declared types are unknowable
-            ;; here without extra reads; the projection, which always
-            ;; loads (sl-hjnp), keeps the lint live in both modes.
-            (if-let [iss (and (:interfaces config)
-                              (seq (suite-lint/lint-suite
-                                    (suite-lint/used-stepdef-infos (:plans bind-result))
-                                    (keys (get-in binding-opts [:glossary :sources :verbs]))
-                                    (:interfaces config)
-                                    adapter-registry)))]
+            ;; check.
+            (if-let [iss (seq (suite-lint/lint-suite
+                               (suite-lint/used-stepdef-infos (:plans bind-result))
+                               (keys (get-in binding-opts [:glossary :sources :verbs]))
+                               (:interfaces config)
+                               adapter-registry))]
               (if (= :warn (:suite-lint-mode opts))
                 ;; Corpus-bind mode (sl-hyey): a listing is not a run —
                 ;; keep the plans, carry the issues as data. The caller
                 ;; surfaces them (warn, never silent).
                 (attach-glossary-lints
                  (assoc-in bind-result [:diagnostics :suite-lint-issues] iss)
-                 binding-opts)
+                 binding-opts warn-stepdef-issues)
                 (let [counts (suite-lint/issue-counts iss)
                       diag   (:diagnostics bind-result)]
                   (attach-glossary-lints
@@ -335,5 +334,5 @@
                                                     :total-issues
                                                     (+ (or (:total-issues (:counts diag)) 0)
                                                        (:total counts)))))}
-                   binding-opts)))
-              (attach-glossary-lints bind-result binding-opts))))))))
+                   binding-opts warn-stepdef-issues)))
+              (attach-glossary-lints bind-result binding-opts warn-stepdef-issues))))))))

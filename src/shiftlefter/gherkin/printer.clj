@@ -176,8 +176,8 @@
             (mapcat examples-anchors (:examples node)))
 
     (instance? shiftlefter.gherkin.parser.Step node)
-    (cons node (when (instance? shiftlefter.gherkin.parser.DataTable (:argument node))
-                 (:rows (:argument node))))
+    (cons node (mapcat #(when (instance? shiftlefter.gherkin.parser.DataTable %) (:rows %))
+                       (:arguments node)))
 
     :else nil))
 
@@ -267,19 +267,15 @@
         text (:text step)
         step-line (str (attached-comments-block att step indent-level)
                        indent-str keyword-str text)
-        arg (:argument step)]
-    (cond
-      (nil? arg)
-      step-line
+        ;; Gherkin 42 (sl-8nku): 0–2 arguments, rendered in source order.
+        format-argument (fn [arg]
+                          (cond
+                            (instance? shiftlefter.gherkin.parser.DataTable arg)
+                            (format-data-table arg (inc indent-level) att)
 
-      (instance? shiftlefter.gherkin.parser.DataTable arg)
-      (str step-line "\n" (format-data-table arg (inc indent-level) att))
-
-      (instance? shiftlefter.gherkin.parser.Docstring arg)
-      (str step-line "\n" (format-docstring arg (inc indent-level)))
-
-      :else
-      step-line)))
+                            (instance? shiftlefter.gherkin.parser.Docstring arg)
+                            (format-docstring arg (inc indent-level))))]
+    (str/join "\n" (cons step-line (keep format-argument (:arguments step))))))
 
 (defn- format-steps
   "Format a sequence of steps."

@@ -7,6 +7,7 @@
    project's own intents never reached the browser step path. (sl-1ps)"
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [shiftlefter.intent.loader :as loader]
             [shiftlefter.intent.state :as intent-state]
@@ -91,3 +92,28 @@
           (is (seq (:errors err))
               "per-entry sub-errors survive serialization")
           (is (every? #(string? (:message %)) (:errors err))))))))
+
+(deftest shape-error-renders-its-def-site
+  (testing "sl-mk0t (Warden W2): a :shape error on the console names the
+            element's file:line — the record carried :path and :line, the
+            render dropped them. The a2-mismatch shape: one named group whose
+            name is not the element's own."
+    (let [dir (temp-project
+               {"login.edn"
+                (str "{:intent \"Login\"\n"
+                     " :elements\n"
+                     " {:submit {:bindings {:web {:css \"#submit\"}}}\n"
+                     "  :code {:bindings {:web {:css \"#code\"}}\n"
+                     "         :shape \"code is (?<x>\\\\d+)\"}}}")})
+          err (java.io.StringWriter.)
+          [status result] (binding [*err* err]
+                            (load-intents-stage "rid" (opts-for dir)
+                                                {:glossaries {:intents "intents"}}))
+          text (str err)]
+      (is (= :exit status))
+      (is (= 2 (:exit-code result)))
+      (is (str/includes? text "Intents load error: Failed to load intents"))
+      (is (str/includes? text ":shape on element code names its one group \"x\"")
+          "the sub-error's message still prints")
+      (is (re-find #"\n    Declared at: \S+/intents/login\.edn:4\n" text)
+          "the element's def-site line, in the sl-u2r0 form"))))

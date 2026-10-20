@@ -12,8 +12,11 @@ Core commands:
 
 - `sl agent-doc --list` lists packaged doctrine topics.
 - `sl agent-doc <topic>` prints one topic.
-- `sl orient` orients you in a project: resolved context, what would fail
-  (static validation), validate/run commands, and pointers to these topics.
+- `sl orient` orients you in a project: resolved context, diagnostics on the
+  project's own truth (config, glossaries, step files, stepdefs against the
+  glossary, macros, setup declarations), validate/run commands, and pointers
+  to these topics. It does not read your features — `sl run --dry-run` is the
+  gate for them.
 - `sl doctor` probes the MACHINE (orient's machine-side counterpart):
   chromedriver↔Chrome version lockstep, `~/.shiftlefter/config.edn` validity,
   extra-dependency adapters present when configured, daemon health, orphaned
@@ -27,7 +30,15 @@ Core commands:
   `resolution` topic.
 - `sl run <path>` executes features.
 - `sl run <path> --dry-run` binds every step without executing — the cheap
-  validation pass to run before a real browser run.
+  validation pass to run before a real browser run. Add `-v` for the step
+  plan on stderr (`plan:` — per scenario, each step → the resolved
+  `:subject :verb [:frame] object via :interface` and the stepdef's
+  `(file:line)`; expanded macro steps indent under their call); `-vv` adds
+  each stepdef's pattern source on a `pattern:` sub-line, the detail for
+  debugging a stepdef collision; under `--edn` the summary
+  always carries `:plan`, the same listing as data, with `:step/resolved`
+  on every bound step (`:interface-type` joins it to `sl explain`'s
+  vocabulary) and `:step/macro` provenance on wrappers and expanded steps.
 - `sl run <path> --tags TAGS` / `--skip-tags TAGS` runs a tagged subset
   (comma-separated, repeatable; `@` optional; include is OR, exclude wins;
   feature/Rule/Examples-block tags inherit per Gherkin). Filtering happens at
@@ -84,7 +95,8 @@ Core commands:
 - `sl fmt --check <path>` checks that features parse and match canonical formatting.
 - `sl verify` is a framework-development tool: in a consumer project it prints a
   notice to stderr and exits 2 (the un-runnable-invocation code — never a silent
-  green in CI). Use `sl orient` and `--dry-run` to validate a project.
+  green in CI). Use `sl orient` to check the project and `sl run --dry-run`
+  to check the features against it.
 
 `sl orient --edn` dumps the entire project projection as one EDN value — the
 machine-readable feed for a planning or disposable sub-agent reasoning over the

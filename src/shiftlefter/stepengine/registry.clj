@@ -326,7 +326,7 @@
 
    ## With SVO Metadata
 
-   For Shifted mode with subject/verb/object validation:
+   For a typed (Shifted) step, with subject/verb/object validation:
    ```clojure
    (defstep #\"(.*) clicks (.*)\"
      {:interface :web

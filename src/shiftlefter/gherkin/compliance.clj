@@ -92,6 +92,13 @@
   :args (s/cat :our-file string? :expected-file string?)
   :ret boolean?)
 
+(s/fdef corpus-status
+  :args (s/cat)
+  :ret (s/nilable (s/keys :req-un [::head ::pinned?])))
+
+(s/def ::head string?)
+(s/def ::pinned? boolean?)
+
 (s/fdef download-testdata
   :args (s/cat)
   :ret string?)
@@ -132,18 +139,59 @@
 ;; IO Functions - Side-effectful operations (download, file I/O)
 ;; -----------------------------------------------------------------------------
 
-(defn download-testdata
-  "Download cucumber/gherkin testdata to compliance dir in project root. Returns path to testdata."
+(def corpus-snapshot
+  "The cucumber/gherkin commit the compliance suite is verified against
+   (sl-8nku). `download-testdata` checks the clone out HERE, never at
+   upstream HEAD, so the published compliance count is reproducible from the
+   public tree. The number pair beside it is what `run-compliance-test`
+   asserts; move both together.
+
+   33693f4b = the commit tagged v42.0.1 (2026-08-05): 50 good / 12 bad — a
+   step may carry both a DataTable and a Docstring (#599, #643), CRLF
+   fixtures (#635). (95bf25a9 was the v37-era snapshot: 46 / 11.)"
+  "33693f4b5a76bb86dee61d0b287d6f2c700813e4")
+
+(def ^:private corpus-repo-dir "compliance/gherkin")
+(def ^:private corpus-upstream "https://github.com/cucumber/gherkin.git")
+
+(defn corpus-status
+  "Where the fetched corpus clone sits: {:head sha :pinned? bool}, or nil when
+   compliance/gherkin is not a git clone (absent, or a hand-copied tree)."
   []
-  (let [compliance-dir (fs/path "compliance")
-        repo-dir (fs/path compliance-dir "gherkin")
-        testdata-dir (fs/path compliance-dir "testdata")]
-    (fs/create-dirs compliance-dir)
-    (when-not (fs/exists? repo-dir)
-      (sh "git" "clone" "https://github.com/cucumber/gherkin.git" (str repo-dir)))
-    (when-not (fs/exists? testdata-dir)
-      (fs/copy-tree (fs/path repo-dir "testdata") testdata-dir))
-    (str testdata-dir)))
+  (when (fs/directory? (fs/path corpus-repo-dir ".git"))
+    (let [{:keys [exit out]} (sh "git" "-C" corpus-repo-dir "rev-parse" "HEAD")]
+      (when (zero? exit)
+        (let [head (str/trim out)]
+          {:head head :pinned? (= head corpus-snapshot)})))))
+
+(defn- checkout-snapshot!
+  "Detach the clone at `corpus-snapshot`, fetching first when the commit is
+   not local yet. Throws with the git output when it still cannot."
+  []
+  (let [checkout #(sh "git" "-C" corpus-repo-dir "checkout" "--quiet" "--detach" corpus-snapshot)
+        first-try (checkout)]
+    (when-not (zero? (:exit first-try))
+      (sh "git" "-C" corpus-repo-dir "fetch" "--quiet" "origin")
+      (let [second-try (checkout)]
+        (when-not (zero? (:exit second-try))
+          (throw (ex-info (str "cannot check the compliance corpus out at " corpus-snapshot)
+                          {:reason :corpus-checkout-failed
+                           :snapshot corpus-snapshot
+                           :git (:err second-try)})))))))
+
+(defn download-testdata
+  "Fetch cucumber/gherkin into compliance/gherkin (clone when absent) and check
+   it out at `corpus-snapshot`. Returns the clone's own testdata path — the one
+   the compliance suite and the fuzz :corpus source read; no copy is made."
+  []
+  (fs/create-dirs "compliance")
+  (when-not (fs/exists? corpus-repo-dir)
+    (let [{:keys [exit err]} (sh "git" "clone" "--quiet" corpus-upstream corpus-repo-dir)]
+      (when-not (zero? exit)
+        (throw (ex-info "cannot clone the compliance corpus"
+                        {:reason :corpus-clone-failed :upstream corpus-upstream :git err})))))
+  (checkout-snapshot!)
+  (str (fs/path corpus-repo-dir "testdata")))
 
 ;; -----------------------------------------------------------------------------
 ;; Shim Helpers - Format compatibility utilities
@@ -591,17 +639,19 @@
     (if (empty? remaining)
       [step-jsons current-id id-map]
       (let [step (first remaining)
-            arg (:argument step)
-            ;; Check if step has a DataTable or Docstring argument
-            has-data-table? (instance? shiftlefter.gherkin.parser.DataTable arg)
-            has-docstring? (instance? shiftlefter.gherkin.parser.Docstring arg)
-            ;; Assign IDs to DataTable rows first (they come before step ID)
+            ;; A step carries 0–2 arguments (Gherkin 42: a DataTable and a
+            ;; Docstring may both be present, either order — sl-8nku). The
+            ;; AST JSON has one key per kind; only the pickle carries order.
+            table-arg (first (filter #(instance? shiftlefter.gherkin.parser.DataTable %) (:arguments step)))
+            docstring-arg (first (filter #(instance? shiftlefter.gherkin.parser.Docstring %) (:arguments step)))
+            ;; Assign IDs to DataTable rows first (they come before step ID,
+            ;; whichever argument came first in the source — upstream does the same)
             [data-table-json next-id-after-table]
-            (if has-data-table?
-              (data-table->json-with-ids arg current-id)
+            (if table-arg
+              (data-table->json-with-ids table-arg current-id)
               [nil current-id])
             ;; Convert Docstring to JSON (no IDs needed for docstring)
-            docstring-json (when has-docstring? (docstring->json arg))
+            docstring-json (when docstring-arg (docstring->json docstring-arg))
             ;; Step gets next ID after DataTable rows
             step-id next-id-after-table
             step-json (step->json-with-id step step-id data-table-json docstring-json)
@@ -977,6 +1027,15 @@
    - nil/empty"
   [arguments]
   (cond
+    ;; Both (Gherkin 42, cucumber/gherkin #643): one key per kind, each
+    ;; carrying its 1-based argumentIndex in source order. Checked BEFORE the
+    ;; table branch — the 2-vector's first element may itself be a table.
+    (pickler/both-arguments? arguments)
+    (into {}
+          (map-indexed (fn [i argument]
+                         (let [[kind json] (first (arguments->pickle-argument-json argument))]
+                           [kind (assoc json :argumentIndex (inc i))])))
+          arguments)
     ;; DataTable: vector of cell vectors
     (and (vector? arguments) (seq arguments) (vector? (first arguments)))
     {:dataTable

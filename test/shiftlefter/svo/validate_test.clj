@@ -381,16 +381,26 @@
       (is (empty? (:issues result))))))
 
 (deftest object-enforcement-strict-raw-locator-test
-  (testing "Object enforcement :strict rejects raw locators"
+  (testing "The :raw-locator level rejects raw locators (sl-u2r0: its own
+            kind, independent of :unknown-object — :strict still reads as
+            :error)"
     (let [result (validate/validate-svo
                   test-glossary
                   test-interfaces
                   {:subject :alice :verb :click :object "{:css \"#submit\"}" :interface :web}
-                  {:unknown-object :strict})]
+                  {:unknown-object :warn :raw-locator :strict})]
       (is (false? (:valid? result)))
       (let [issue (first (:issues result))]
         (is (= :svo/raw-locator-disallowed (:type issue)))
-        (is (= "{:css \"#submit\"}" (:object issue)))))))
+        (is (= "{:css \"#submit\"}" (:object issue))))))
+  (testing ":unknown-object :error alone no longer touches raw locators —
+            the :raw-locator key decides (default :off without intents)"
+    (let [result (validate/validate-svo
+                  test-glossary
+                  test-interfaces
+                  {:subject :alice :verb :click :object "{:css \"#submit\"}" :interface :web}
+                  {:unknown-object :error})]
+      (is (true? (:valid? result))))))
 
 (deftest object-enforcement-warn-unknown-intent-test
   (testing "Object enforcement :warn flags unknown intent reference"
@@ -422,12 +432,13 @@
 ;; alias with identical behavior. Both halves pinned pairwise.
 
 (deftest object-enforcement-error-equals-strict-test
-  (testing ":error rejects raw locators exactly like :strict"
+  (testing ":error rejects raw locators exactly like :strict (on the
+            :raw-locator kind, sl-u2r0)"
     (let [run #(validate/validate-svo
                 test-glossary
                 test-interfaces
                 {:subject :alice :verb :click :object "{:css \"#submit\"}" :interface :web}
-                {:unknown-object %})
+                {:raw-locator %})
           error-result (run :error)
           strict-result (run :strict)]
       (is (false? (:valid? error-result)))
@@ -1081,3 +1092,45 @@
               "the test-pinned error text is unchanged")
           (is (= :Feed (:suggestion issue)))
           (is (str/includes? (:message issue) "Did you mean: :Feed?")))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-mk0t (Warden W3): the assert-only producer-marker error has a formatter
+;; -----------------------------------------------------------------------------
+
+(deftest format-named-groups-in-assert-only-test
+  (testing ":bindings/named-groups-in-assert-only renders as a console line —
+            pattern, the names it would bind, the lint's pointer at captures,
+            the step and its site; never the raw-map fallback with the step UUID"
+    (let [step-id (random-uuid)
+          out (validate/format-svo-issue
+               {:type :bindings/named-groups-in-assert-only
+                ;; sl-0qzd: the record carries the slot AS WRITTEN, slashes included
+                :pattern "/(?<code>\\d+)/" :names [:code] :severity :error
+                :message "named groups produce bindings, and 'should see ... matching' binds nothing — did you mean 'captures ... matching'?"
+                :location {:step-text "Alice should see the Total matching /(?<code>\\d+)/"
+                           :step-id step-id
+                           :uri "/proj/sl/features/a.feature" :line 7 :column 5}})]
+      (is (= (str "Pattern /(?<code>\\d+)/ names {code} in an assert-only step — "
+                  "named groups produce bindings, and 'should see ... matching' binds nothing"
+                  " — did you mean 'captures ... matching'?\n"
+                  "       in step \"Alice should see the Total matching /(?<code>\\d+)/\"\n"
+                  "       at /proj/sl/features/a.feature:7")
+             out))
+      (is (not (str/includes? out "SVO issue:")))
+      (is (not (str/includes? out (str step-id)))
+          "the console line is byte-stable run to run — no step UUID"))))
+
+(deftest format-unnamed-only-groups-renders-the-slot-as-written-test
+  (testing "sl-0qzd: :bindings/unnamed-only-groups carries the matcher slot
+            as written (slashes included) and the formatter prints it as
+            carried — no doubled delimiters"
+    (let [out (validate/format-svo-issue
+               {:type :bindings/unnamed-only-groups
+                :pattern "/(\\d+)/" :severity :warn
+                :location {:step-text "Alice captures the Total matching /(\\d+)/"
+                           :uri "/proj/sl/features/a.feature" :line 9 :column 5}})]
+      (is (= (str "Capture pattern /(\\d+)/ has only unnamed groups — it binds nothing"
+                  " in step \"Alice captures the Total matching /(\\d+)/\"\n"
+                  "       at /proj/sl/features/a.feature:9\n"
+                  "       Name a group ((?<name>...)) to produce a {name} binding.")
+             out)))))

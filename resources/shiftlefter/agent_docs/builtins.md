@@ -39,11 +39,11 @@ frame; every one of those is machine-verified to bind. Copy those.
 
 #### `:receive` — Poll for an inbound SMS matching a body pattern
 
-- frame `:default` — schema (not a step): S receives an SMS to TO-PHONE matching MATCH — args `:to-phone` (literal or `{binding}`), `:match` (regex; `(?<name>...)` produces `{name}` bindings) — implicit object `:sms-message`
+- frame `:default` — schema (not a step): S receives an SMS to TO-PHONE matching MATCH — args `:to-phone` (literal or `{binding}`), `:match` (`/regex/`, or `Intent.element` for its declared `:shape`; `(?<name>...)` produces `{name}` bindings) — implicit object `:sms-message`
   - bind with: `:alice receives an SMS to '+15550100' matching /your code is (?<code>\d+)/`
-- frame `:since-iso` — schema (not a step): S receives an SMS to TO-PHONE since SINCE-ISO matching MATCH — args `:to-phone` (literal or `{binding}`), `:since-iso` (literal or `{binding}`), `:match` (regex; `(?<name>...)` produces `{name}` bindings) — implicit object `:sms-message`
+- frame `:since-iso` — schema (not a step): S receives an SMS to TO-PHONE since SINCE-ISO matching MATCH — args `:to-phone` (literal or `{binding}`), `:since-iso` (literal or `{binding}`), `:match` (`/regex/`, or `Intent.element` for its declared `:shape`; `(?<name>...)` produces `{name}` bindings) — implicit object `:sms-message`
   - bind with: `:alice receives an SMS to '+15550100' since '2026-01-01T00:00:00Z' matching /code (?<code>\d+)/`
-- frame `:within-last` — schema (not a step): S receives an SMS to TO-PHONE within the last DURATION matching MATCH — args `:to-phone` (literal or `{binding}`), `:duration`, `:match` (regex; `(?<name>...)` produces `{name}` bindings) — implicit object `:sms-message`
+- frame `:within-last` — schema (not a step): S receives an SMS to TO-PHONE within the last DURATION matching MATCH — args `:to-phone` (literal or `{binding}`), `:duration`, `:match` (`/regex/`, or `Intent.element` for its declared `:shape`; `(?<name>...)` produces `{name}` bindings) — implicit object `:sms-message`
   - bind with: `:alice receives an SMS to '+15550100' within the last 30 seconds matching /code (?<code>\d+)/`
 
 #### `:see` — Assert observable state about SMS messages
@@ -67,9 +67,9 @@ Reference grammar for each built-in step. To author a step, copy a
 `bind with:` example from the verb entries above — never this regex
 source.
 
-- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching /(.+)/` → `:receive`/`:default` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) since ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching /(.+)/` → `:receive`/`:since-iso` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
-- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) within the last (\d+ (?:seconds?|minutes?|hours?)) matching /(.+)/` → `:receive`/`:within-last` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching (/.+/|[^\s/]\S*)` → `:receive`/`:default` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) since ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) matching (/.+/|[^\s/]\S*)` → `:receive`/`:since-iso` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
+- `:([\w./-]+) receives an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) within the last (\d+ (?:seconds?|minutes?|hours?)) matching (/.+/|[^\s/]\S*)` → `:receive`/`:within-last` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
 - `:([\w./-]+) sends an MMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) with caption ('(?:[^']|'')*'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) and media ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:send-media`/`:to` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
 - `:([\w./-]+) sends an SMS to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) saying ('(?:[^']|'')*'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:send`/`:to` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
 - `:([\w./-]+) should see (\d+) messages to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:count` `(type :sms)` — requires `:shiftlefter.sms.protocol/ISMS`
@@ -95,9 +95,11 @@ source.
 - frame `:at-exactly` — schema (not a step): S is on exactly O — O: literal URL
   - bind with: `:alice should be on exactly '/dashboard?tab=1'`
 
-#### `:capture` — Observe an element's text and bind named-group matches
+#### `:capture` — Observe an element's text and bind its declared shape's named groups
 
-- frame `:default` — schema (not a step): S captures O matching MATCH — args `:match` (regex; `(?<name>...)` produces `{name}` bindings)
+- frame `:default` — schema (not a step): S captures O
+  - bind with: `:alice captures Checkout.total`
+- frame `:matching` — schema (not a step): S captures O matching MATCH — args `:match` (`/regex/`, or `Intent.element` for its declared `:shape`; `(?<name>...)` produces `{name}` bindings)
   - bind with: `:alice captures {:id "total"} matching /(?<amount>[0-9.]+)/`
 
 #### `:clear` — Clear input field contents
@@ -206,9 +208,9 @@ source.
   - bind with: `:alice should see {:id "submit"} disabled`
 - frame `:enabled` — schema (not a step): S sees O enabled
   - bind with: `:alice should see {:id "submit"} enabled`
-- frame `:matching` — schema (not a step): S sees O matching MATCH — args `:match` (regex; `(?<name>...)` produces `{name}` bindings)
+- frame `:matching` — schema (not a step): S sees O matching MATCH — args `:match` (`/regex/`, or `Intent.element` for its declared `:shape`; `(?<name>...)` produces `{name}` bindings)
   - bind with: `:alice should see {:id "total"} matching /\d+ items/`
-- frame `:on-page` — schema (not a step): S sees O on the page
+- frame `:on-page` — schema (not a step): S sees O on the page — O: text (quoted literal or `{binding}`)
   - bind with: `:alice should see 'Welcome'`
 - frame `:text` — schema (not a step): S sees O with text TEXT — args `:text` (literal or `{binding}`)
   - bind with: `:alice should see {:id "banner"} with text 'Success'`
@@ -254,45 +256,46 @@ Reference grammar for each built-in step. To author a step, copy a
 source.
 
 - `:([\w./-]+) accepts the alert` → `:accept-alert`/`:default` `(type :web)`
-- `:([\w./-]+) captures ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) matching /(.+)/` → `:capture`/`:default` `(type :web)`
-- `:([\w./-]+) clears ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:clear`/`:default` `(type :web)`
-- `:([\w./-]+) clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:click`/`:default` `(type :web)`
+- `:([\w./-]+) captures ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:capture`/`:default` `(type :web)`
+- `:([\w./-]+) captures ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) matching (/.+/|[^\s/]\S*)` → `:capture`/`:matching` `(type :web)`
+- `:([\w./-]+) clears ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:clear`/`:default` `(type :web)`
+- `:([\w./-]+) clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:click`/`:default` `(type :web)`
 - `:([\w./-]+) dismisses the alert` → `:dismiss-alert`/`:default` `(type :web)`
-- `:([\w./-]+) double-clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:doubleclick`/`:default` `(type :web)`
-- `:([\w./-]+) drags ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:drag`/`:to` `(type :web)`
-- `:([\w./-]+) fills ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:fill`/`:with` `(type :web)`
+- `:([\w./-]+) double-clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:doubleclick`/`:default` `(type :web)`
+- `:([\w./-]+) drags ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:drag`/`:to` `(type :web)`
+- `:([\w./-]+) fills ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:fill`/`:with` `(type :web)`
 - `:([\w./-]+) goes back` → `:navigate-back`/`:default` `(type :web)`
 - `:([\w./-]+) goes forward` → `:navigate-forward`/`:default` `(type :web)`
-- `:([\w./-]+) hovers over ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:hover`/`:default` `(type :web)`
+- `:([\w./-]+) hovers over ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:hover`/`:default` `(type :web)`
 - `:([\w./-]+) maximizes the window` → `:maximize`/`:default` `(type :web)`
-- `:([\w./-]+) moves to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:move`/`:default` `(type :web)`
+- `:([\w./-]+) moves to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:move`/`:default` `(type :web)`
 - `:([\w./-]+) opens the browser to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}|[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)` → `:navigate`/`:to` `(type :web)`
 - `:([\w./-]+) presses ([A-Z][A-Za-z0-9]*|'(?:[^']|'')+')` → `:press`/`:default` `(type :web)`
 - `:([\w./-]+) refreshes the page` → `:refresh`/`:default` `(type :web)`
 - `:([\w./-]+) resizes the window to (\d+)x(\d+)` → `:resize`/`:dimensions` `(type :web)`
-- `:([\w./-]+) right-clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:rightclick`/`:default` `(type :web)`
-- `:([\w./-]+) scrolls to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:scroll`/`:to-element` `(type :web)`
+- `:([\w./-]+) right-clicks ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:rightclick`/`:default` `(type :web)`
+- `:([\w./-]+) scrolls to ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:scroll`/`:to-element` `(type :web)`
 - `:([\w./-]+) scrolls to the (top|bottom)` → `:scroll`/`:to-position` `(type :web)`
-- `:([\w./-]+) selects ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) from ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:select`/`:from` `(type :web)`
+- `:([\w./-]+) selects ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) from ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:select`/`:from` `(type :web)`
 - `:([\w./-]+) should be on ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}|[A-Z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)` → `:be`/`:at` `(type :web)`
 - `:([\w./-]+) should be on exactly ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:be`/`:at-exactly` `(type :web)`
-- `:([\w./-]+) should not see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:not-see`/`:invisible` `(type :web)`
-- `:([\w./-]+) should see '((?:[^']|'')+)'` → `:see`/`:on-page` `(type :web)`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:see`/`:visible` `(type :web)`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) disabled` → `:see`/`:disabled` `(type :web)`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) enabled` → `:see`/`:enabled` `(type :web)`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) matching /(.+)/` → `:see`/`:matching` `(type :web)`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with attribute ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) equal to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:attribute` `(type :web)`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with text ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:text` `(type :web)`
-- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with value ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:value` `(type :web)`
-- `:([\w./-]+) should see (\d+) ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) elements` → `:see`/`:count` `(type :web)`
+- `:([\w./-]+) should not see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:not-see`/`:invisible` `(type :web)`
+- `:([\w./-]+) should see ('(?:[^']|'')+')` → `:see`/`:on-page` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:see`/`:visible` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) disabled` → `:see`/`:disabled` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) enabled` → `:see`/`:enabled` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) matching (/.+/|[^\s/]\S*)` → `:see`/`:matching` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with attribute ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\}) equal to ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:attribute` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with text ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:text` `(type :web)`
+- `:([\w./-]+) should see ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) with value ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:value` `(type :web)`
+- `:([\w./-]+) should see (\d+) ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) elements` → `:see`/`:count` `(type :web)`
 - `:([\w./-]+) should see an alert` → `:see`/`:alert` `(type :web)`
 - `:([\w./-]+) should see an alert with ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:alert-with-text` `(type :web)`
 - `:([\w./-]+) should see the title ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:see`/`:title` `(type :web)`
-- `:([\w./-]+) switches to frame ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:switch-frame`/`:into` `(type :web)`
+- `:([\w./-]+) switches to frame ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:switch-frame`/`:into` `(type :web)`
 - `:([\w./-]+) switches to the main frame` → `:switch-frame`/`:main` `(type :web)`
 - `:([\w./-]+) switches to the next window` → `:switch-window`/`:default` `(type :web)`
 - `:([\w./-]+) waits (\d+(?:\.\d+)?) seconds?` → `:wait`/`:duration` `(type :web)`
-- `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:wait`/`:for-element` `(type :web)`
-- `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to show ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:wait`/`:for-text` `(type :web)`
-- `:([\w./-]+) waits for (\d+) ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][a-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:wait`/`:for-count` `(type :web)`
+- `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:wait`/`:for-element` `(type :web)`
+- `:([\w./-]+) waits for ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\}) to show ('(?:[^']|'')+'|\{[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*\})` → `:wait`/`:for-text` `(type :web)`
+- `:([\w./-]+) waits for (\d+) ([A-Z][A-Za-z0-9_-]*(?:\.[a-z][A-Za-z0-9_-]*(?:\[-?\d+\]|\[\*\])?)+|\{[^}]+\})` → `:wait`/`:for-count` `(type :web)`

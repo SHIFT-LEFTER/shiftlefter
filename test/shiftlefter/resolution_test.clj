@@ -35,7 +35,7 @@
                        :verbs ["glossary/verbs-web.edn"]
                        :intents "glossary/intents"}
           :interfaces {:web {:type :web :adapter :etaoin :config {:headless true}}}
-          :svo {:unknown-subject :error}}
+          :enforcement {:unknown-subject :error}}
          overrides))
 
 (defn- make-shifted-project!
@@ -108,7 +108,7 @@
                               "sl/shiftlefter.edn"))
           (is (= :discovered (get-in value [:substrate :config-source])))
           (is (contains? (:substrate value) :git-sha) "git key present (nil-safe)")
-          (is (= :error (get-in value [:svo-effective :unknown-subject]))))))))
+          (is (= :error (get-in value [:enforcement-effective :unknown-subject]))))))))
 
 (deftest glossary-narrowing-test
   (with-temp-project
@@ -185,38 +185,45 @@
       (make-shifted-project! dir)
       (testing "intents configured + no explicit :unknown-object → :warn (femd flip)"
         (let [value (glossary-edn (context dir))]
-          (is (= :warn (get-in value [:svo-effective :unknown-object]))
+          (is (= :warn (get-in value [:enforcement-effective :unknown-object]))
               "the conditional default is only readable from the resolved state")))
-      (testing ":strict displays as :error (binder normalization)"
+      (testing ":all sets every kind; :unknown-interface stays :error (sl-6wh9)"
         (write-edn! (fs/path dir "sl" "shiftlefter.edn")
-                    (shifted-config {:svo {:unknown-subject :error
-                                           :unknown-object :strict}}))
+                    (shifted-config {:enforcement {:all :warn}}))
         (let [value (glossary-edn (context dir))]
-          (is (= :error (get-in value [:svo-effective :unknown-object]))))))))
+          (is (= :warn (get-in value [:enforcement-effective :unknown-object])))
+          (is (= :error (get-in value [:enforcement-effective :unknown-interface])))
+          (is (not (contains? (:enforcement-effective value) :all))))))))
 
 ;; -----------------------------------------------------------------------------
-;; Vanilla + no-project honesty
+;; No-block project + no-project honesty
 ;; -----------------------------------------------------------------------------
 
-(deftest vanilla-honest-message-test
+(deftest no-enforcement-block-lists-normally-test
+  ;; sl-6wh9: the Vanilla not-applicable gate is retired — a project without
+  ;; an :enforcement block lists its (framework-default) vocabulary like
+  ;; any other, with the effective levels in the header.
   (with-temp-project
     (fn [dir]
       (write-edn! (fs/path dir "sl" "shiftlefter.edn")
                   {:interfaces {:web {:type :web :adapter :etaoin}}})
       (let [ctx (context dir)]
-        (testing "human: honest message, exit 0"
+        (testing "human: an ordinary listing, exit 0"
           (let [r (run-cmd resolution/glossary-cmd ["glossary"] {} ctx)]
             (is (= 0 (:code r)))
-            (is (str/includes? (:out r) "Vanilla"))
-            (is (str/includes? (:out r) "vocabulary contract applies"))))
-        (testing "EDN discriminator"
-          (let [r (run-cmd resolution/glossary-cmd ["glossary"] {:edn true} ctx)]
+            (is (not (str/includes? (:out r) "Vanilla")))
+            (is (str/includes? (:out r) "Strictness (:enforcement effective)"))))
+        (testing "EDN: :ok with the effective levels, no :mode"
+          (let [r (run-cmd resolution/glossary-cmd ["glossary"] {:edn true} ctx)
+                value (edn/read-string (:out r))]
             (is (= 0 (:code r)))
-            (is (= :not-applicable (:status (edn/read-string (:out r)))))))
-        (testing "explain is Vanilla-gated the same way"
+            (is (= :ok (:status value)))
+            (is (not (contains? value :mode)))
+            (is (= :warn (get-in value [:enforcement-effective :unknown-subject])))))
+        (testing "explain resolves a builtin verb the same way"
           (let [r (run-cmd resolution/explain-cmd ["explain" "click"] {:edn true} ctx)]
             (is (= 0 (:code r)))
-            (is (= :not-applicable (:status (edn/read-string (:out r)))))))))))
+            (is (= :ok (:status (edn/read-string (:out r)))))))))))
 
 (deftest no-project-test
   (with-temp-project

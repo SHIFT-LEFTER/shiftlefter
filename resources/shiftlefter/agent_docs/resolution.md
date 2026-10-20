@@ -117,12 +117,15 @@ all frames; there is no frame-level merge, so restating a builtin verb
 to add one frame silently drops its other frames. `sl explain <verb>`
 shows exactly what survived and marks the entry `config-override`.
 `defstep` contributes step BINDINGS, never vocabulary — a stepdef naming
-a verb absent from the glossary is a planning error, not an addition.
+a verb absent from the glossary is reported (`:unknown-verb`, `:warn` by
+default — it warns and runs; unknown frames or args on a KNOWN verb stay
+hard errors), never an addition.
 
 ## Scope
 
-Shifted-only: in Vanilla mode there is no vocabulary contract, and both
-commands say so honestly (exit 0) instead of listing nothing. Macros
+Both commands always resolve: a project with no glossary of its own lists
+the framework defaults, and steps that did not bind are named in a `Caveat:`
+line because they contribute no usage facts. Macros
 contribute steps, not vocabulary — they do not appear here. The
 coverage-matrix renders (vocabulary × interface grids) are a future
 surface pending a second interface type in real use; the per-intent

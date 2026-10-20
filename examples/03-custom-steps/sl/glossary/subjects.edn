@@ -1,0 +1,5 @@
+;; Subject glossary — who holds the basket. Discovered automatically at
+;; the conventional path next to shiftlefter.edn.
+
+{:subjects
+ {:user {:desc "The person holding the cucumber basket"}}}

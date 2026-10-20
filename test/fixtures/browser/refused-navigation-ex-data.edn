@@ -1,0 +1,13 @@
+;; sl-6qf6 — the REAL ex-data of etaoin's `:etaoin/http-error` for a navigation
+;; to a refused port, CAPTURED LIVE (2026-09-20, headless Chrome 153 through
+;; shiftlefter.adapters.etaoin/create-browser + browser.protocol/open-to! against
+;; http://127.0.0.1:59999/), then passed through shiftlefter.runner.reporter/scrub
+;; exactly as the reporters do (the process objects are the strings they print).
+;;
+;; Machine-specific values are PLACEHOLDERS so a re-capture is not a noisy diff:
+;; <CHROMEDRIVER> the driver binary path, <DRIVER-PORT> chromedriver's port,
+;; <SESSION-ID> the WebDriver session, <PID> the process id, <EPOCH-MS> the
+;; driver's creation time, 0x<HEX>/@<HASH> object addresses. The chromedriver
+;; native stacktrace keeps its first three frames (real frame shape) and elides
+;; the remaining 22.
+{:response {:value {:error "unknown error", :message "unknown error: net::ERR_CONNECTION_REFUSED\n  (Session info: chrome=153.0.8010.52)", :stacktrace "0   chromedriver                        0x<HEX> chromedriver + 3444228\n1   chromedriver                        0x<HEX> chromedriver + 283580\n2   chromedriver                        0x<HEX> chromedriver + 272836\n… <22 more chromedriver frames elided>"}}, :path "session/<SESSION-ID>/url", :payload {:url "http://127.0.0.1:59999/"}, :method :post, :type :etaoin/http-error, :port <DRIVER-PORT>, :host "127.0.0.1", :status 500, :webdriver-url nil, :driver {:args ("<CHROMEDRIVER>" "--port=<DRIVER-PORT>"), :headless true, :capabilities {:goog:loggingPrefs {:browser "ALL"}, :goog:chromeOptions {:args ("--headless"), :prefs {"profile.password_manager_leak_detection" false, "credentials_enable_service" false, "profile.password_manager_enabled" false}, :w3c true}}, :process {:proc "#object[java.lang.ProcessImpl 0x<HEX> \"Process[pid=<PID>, exitValue=\\\"not exited\\\"]\"]", :exit nil, :in "#object[java.lang.ProcessImpl$ProcessPipeOutputStream 0x<HEX> \"java.lang.ProcessImpl$ProcessPipeOutputStream@<HASH>\"]", :out "#object[java.lang.ProcessBuilder$NullInputStream 0x<HEX> \"java.lang.ProcessBuilder$NullInputStream@<HASH>\"]", :err "#object[java.lang.ProcessBuilder$NullInputStream 0x<HEX> \"java.lang.ProcessBuilder$NullInputStream@<HASH>\"]", :prev nil, :cmd ["<CHROMEDRIVER>" "--port=<DRIVER-PORT>"]}, :locator "xpath", :type :chrome, :port <DRIVER-PORT>, :host "127.0.0.1", :url "http://127.0.0.1:<DRIVER-PORT>", :created-epoch-ms <EPOCH-MS>, :session "<SESSION-ID>"}}

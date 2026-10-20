@@ -11,7 +11,7 @@ examples teach. If you're starting fresh, write `:type/instance` steps
 from day one (see [`02b`](../02b-browser-multi-actor/)); this example is
 for teams bringing an existing plain-name suite under validation.
 
-Note the `:svo` levels here are deliberately permissive (`:warn` for
+Note the `:enforcement` levels here are deliberately permissive (`:warn` for
 subjects and verbs) — that's the migration posture: surface unknowns
 without breaking the legacy suite, then ratchet to `:error` as the
 glossary fills in.
@@ -152,7 +152,7 @@ type-named entry when several exist.
 ```clojure
 (defstep #"the login page is loaded"
   [ctx]
-  ;; No SVO validation
+  ;; No SVO validation — binds and runs, reported as :stepdef/untyped
   ...)
 ```
 
@@ -171,9 +171,9 @@ type-named entry when several exist.
 In `shiftlefter.edn`:
 
 ```clojure
-:svo {:unknown-subject :warn    ; Log warning, continue
-      :unknown-verb :warn       ; Log warning, continue
-      :unknown-interface :error} ; Fail at bind time
+:enforcement {:unknown-subject :warn    ; Log warning, continue
+              :unknown-verb :warn       ; Log warning, continue
+              :unknown-interface :error} ; Fail at bind time
 ```
 
 ## Trying Validation Errors

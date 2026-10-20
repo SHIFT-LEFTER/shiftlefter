@@ -161,7 +161,7 @@ stamp.
 | step assertion miss / step throws ✓ | step + scenario `:failed` | 1 | step_loop.clj:111-118 |
 | step invalid return ✓ | `:failed` (`:step/invalid-return`) | 1 | step_loop.clj:103-109 |
 | `{binding}` normalization error | `:failed`, fn never called | 1 | step_loop.clj:59-62 |
-| step `:pending` ✓ (both modes) | `:pending` | 1 strict · 0 under `:allow-pending?` | step_loop.clj:87-90, core.clj:172 |
+| step `:pending` ✓ | `:pending` | 1 strict · 0 under `:allow-pending?` | step_loop.clj:87-90, core.clj:172 |
 | Before throws / returns non-map ✓ | `:error`, all steps `:skipped`, no provisioning paid | 4 | hooks.clj:129-141, cleanup.clj:224 |
 | provisioning fails (eager or lazy) ✓ | step `:failed`, scenario `:error` — steps never carry `:error` | 4 | step_loop.clj:314-324, provisioning.clj:486-519 |
 | After throws ✓ | `:error` even when every step passed — broken cleanup is a lying suite | 4 | hooks.clj:190-207, cleanup.clj:269-271 |
@@ -273,7 +273,7 @@ wrapper placement, not runtime checks: oracles retry, mutations never,
 negation doesn't wait (`step.clj:41-55`, `browser.clj:97-100`). User
 prose: [extending-vocabulary § Timing](../extending-vocabulary.md).
 
-**Capture — two sites, one matrix.** Per-step site
+**Capture — two sites, one matrix (sl-3q9r/sl-sehc).** Per-step site
 (`step_loop.clj:267-272`): `:every-step` follows the acting subject, all
 kinds; `:on-failure` fires **on `:failed` only** — provisioning failures
 have no settled instant to witness, Before failures never reach the loop,

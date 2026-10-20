@@ -1,0 +1,15 @@
+;; sl-6qf6 — the REAL etaoin `:etaoin/http-ex` (the HTTP request to the driver
+;; itself threw — the transport edge classify-observation labels), CAPTURED LIVE
+;; (2026-09-21, etaoin 1.1.42 etaoin.api/go against a driver map whose port
+;; nothing listens on): the exception's MESSAGE beside its ex-data, the cause's
+;; class and message, the ex-data passed through shiftlefter.runner.reporter/scrub
+;; as the reporters do.
+;;
+;; The message is the point (fit-pass F1): etaoin throws through slingshot, whose
+;; message is the whole ex-data pretty-printed — the dump itself.
+;;
+;; Placeholders (see refused-navigation-ex-data.edn): <DRIVER-PORT>.
+{:ex-message "throw+: {:type :etaoin/http-ex, :driver {:type :chrome, :host \"127.0.0.1\", :port <DRIVER-PORT>, :session \"no-session\"}, :webdriver-url nil, :host \"127.0.0.1\", :port <DRIVER-PORT>, :method :post, :path \"session/no-session/url\", :payload {:url \"http://127.0.0.1:59999/\"}}"
+ :cause-class "java.net.ConnectException"
+ :cause-message "Connection refused"
+ :ex-data {:type :etaoin/http-ex, :driver {:type :chrome, :host "127.0.0.1", :port <DRIVER-PORT>, :session "no-session"}, :webdriver-url nil, :host "127.0.0.1", :port <DRIVER-PORT>, :method :post, :path "session/no-session/url", :payload {:url "http://127.0.0.1:59999/"}}}

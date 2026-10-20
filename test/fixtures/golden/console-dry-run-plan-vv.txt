@@ -1,0 +1,24 @@
+EXIT 0
+--- STDOUT ---
+--- STDERR ---
+run seed: 42
+
+SVO validation warnings:
+  WARNING: Untyped step "the login page is loaded"
+         at ROOT/test/fixtures/plan-project/sl/features/plan.feature:4
+         matched stepdef "^the login page is loaded$", which declares no :svo — no subject, verb, or object was checked
+
+1 scenario(s) bound successfully (dry run)
+plan:
+  Login through the macro
+    the login page is loaded  →  (untyped)  (ROOT/test/fixtures/plan-project/sl/steps/plan_steps.clj:7)
+      pattern: ^the login page is loaded$
+    Alice logs in +  →  macro "Alice logs in" (ROOT/test/fixtures/plan-project/sl/macros/plan.ini), 3 step(s)
+      Alice fills the username field with 'alice@example.com'  →  :alice :fill [:with] "username" via :web  (ROOT/test/fixtures/plan-project/sl/steps/plan_steps.clj:11)
+        pattern: ^(\w+) fills the (\w+) field with '([^']+)'$
+      Alice fills the password field with 'correct-password'  →  :alice :fill [:with] "password" via :web  (ROOT/test/fixtures/plan-project/sl/steps/plan_steps.clj:11)
+        pattern: ^(\w+) fills the (\w+) field with '([^']+)'$
+      Alice clicks the login button  →  :alice :click [:default] "login button" via :web  (ROOT/test/fixtures/plan-project/sl/steps/plan_steps.clj:21)
+        pattern: ^(\w+) clicks the (.+)$
+    Alice sees the dashboard  →  :alice :see [:visible] "dashboard" via :web  (ROOT/test/fixtures/plan-project/sl/steps/plan_steps.clj:30)
+      pattern: ^(\w+) sees the (.+)$

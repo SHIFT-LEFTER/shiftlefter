@@ -12,8 +12,11 @@ it holds in every slot, and it exists so that nobody ever has to guess:
   an unknown name is a plan error with a did-you-mean.
 - `{name}` — **content in motion.** A value from the scenario data plane,
   captured earlier (or provided by a hook) and consumed here.
-- `/…/` — **a content pattern.** A regex to match against observed text;
-  `(?<name>…)` named groups inside it produce `{name}` bindings.
+- `/…/` — **a content pattern, inline.** A regex to match against observed
+  text; `(?<name>…)` named groups inside it produce `{name}` bindings. The
+  same slot takes a `Capitalized.dotted` element reference instead, and then
+  the pattern is the element's declared `:shape` — the primary form; inline
+  is the escape hatch.
 - Bare lowercase words — the step language itself (`fills`, `with`,
   `should see`).
 - `:alice` / `:user/alice` — the subject, the actor whose session runs the
@@ -163,27 +166,58 @@ could produce. So the spacebar answers to `Space`.
 
 ### Matcher slots — patterns, and who binds
 
-Three steps share the `/…/` matcher slot, and they divide cleanly by what
-happens to named groups:
+An element can declare the shape of the text it owns, once, in the intents
+glossary:
 
-- `captures Order.summary matching /Order (?<orderNumber>[A-Z0-9-]+)/` —
-  assert **and bind**: the step fails unless the element's text matches, and
-  every named group becomes a `{binding}`. A `captures` with *no* named groups
-  is a plan error — a capture that binds nothing has lost the verb's point —
-  and the error points you at the assertion below.
+```edn
+{:intent "Reset"
+ :elements {:smsCode {:bindings {:sms {}}
+                      :shape "verification code is: (\\d{6})"}}}
+```
+
+`:shape` is regex source, compiled at planning time. A shape with exactly
+**one** group binds its value to the element's own name — so the scenario
+reads end to end with no second file open: `receives an SMS … matching
+Reset.smsCode` produces `{smsCode}`, and `fills Login.code with {smsCode}`
+consumes it. A shape with several groups names each one (`(?<orderNumber>…)`)
+and those names are the tokens. The SMS element's `:sms` binding is empty: a
+message is a readable with no locator, and the shape is all it has. An element
+name that carries a single-group shape must be lowerCamel (`smsCode`, not
+`sms-code`), because binding names are; element names otherwise read in kebab
+or lowerCamel.
+
+Three steps share the matcher slot, and they divide cleanly by what happens
+to named groups:
+
+- `captures Checkout.total` — assert **and bind** by the element's declared
+  shape: the step fails unless the element's text matches, and every named
+  group becomes a `{binding}`. `captures Checkout.total matching /\$(?<total>[0-9.]+)/`
+  is the inline form for a one-off pattern. Both on one step is a plan error
+  (two declarations of one shape, both sites named); `captures` on an element
+  with no shape and no clause is a plan error pointing at the element's line
+  with both exits. A `captures` whose pattern has *no* named groups is a plan
+  error — a capture that binds nothing has lost the verb's point — and the
+  error points you at the assertion below.
 - `should see Order.total matching /\d+\.\d{2}/` — **assert only**: format
   assertions (order-number shapes, prices, dates) without inventing a
   throwaway binding. Unnamed groups are the expected shape here. A *named*
-  group in this frame is a plan error pointing back at `captures`: named
-  groups produce bindings everywhere, and a frame that binds nothing can't
-  quietly ignore one.
-- `receives an SMS … matching /code (\d+)/` — the polling assertions accept
-  either shape; all-unnamed just earns a notice, since `/(\d+)/` plausibly
-  meant `/(?<code>\d+)/`.
+  group written inline in this frame is a plan error pointing back at
+  `captures`: named groups produce bindings everywhere, and a frame that
+  binds nothing can't quietly ignore one. `should see Confirmation.code
+  matching Reset.smsCode` — a declared shape as the assertion — is fine:
+  the step shows a structure reference, not a producer marker, and still
+  binds nothing.
+- `receives an SMS … matching Reset.smsCode` (or `matching /code (\d+)/`) —
+  the polling assertions accept either shape; all-unnamed inline just earns
+  a notice, since `/(\d+)/` plausibly meant `/(?<code>\d+)/`.
 
-Inside any matcher, an embedded `{binding}` token interpolates as the *escaped
-literal text* of its value — never as regex syntax. A malformed pattern is a
-structured plan error.
+A shape is read through the element's binding on the interface that runs the
+step: `captures` on the web wants a `:web` binding, an SMS receive wants
+`:sms`. Inside any matcher, an embedded `{binding}` token interpolates as the
+*escaped literal text* of its value — never as regex syntax; a shape may not
+contain one (the glossary is scenario-independent — `\{word\}` is a literal
+brace pair). A malformed pattern, inline or declared, is a structured plan
+error.
 
 ## When a step doesn't match
 

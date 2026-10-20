@@ -20,25 +20,32 @@
    - --edn output shape across groups;
    - per-group streaming console output for every running group, including
      those after the 2;
-   - CRASH: a Throwable escaping a group's body unwinds past
-     write-invocation-report! — run-group! catches it as ::crashed, runs
-     :stop, RE-THROWS; execute!'s tail catch is the in-process crash
-     surface ({:exit-code 3 :status :crashed}, 'Runner crash:' on stderr).
-     Injection = a throwing Reporter scoped to one marker scenario — the
-     codebase's own pinned loud-crash contract (reporter_test
-     a-throwing-reporter-fails-the-run-loudly; incremental_output_test
-     single-release-point-drives-report-plane), wrap-not-replace so real
-     reporters keep flowing for pre-crash groups. Groups after the crash
-     never start (the crash aborts the invocation — pinned as current
-     behavior). The report-file hazard beside exit 3, pinned in two
-     shapes: the HTML TOC keeps a previous run's STALE bytes (its write
-     is post-groups and never happens), while the shared-state JUnit file
-     is SHARPER than stale — materialized at each completed group's end,
-     it holds a partial, all-green, CURRENT run. Documented, not
-     mitigated (mitigation would be src/ and is not this bead).
+   - CRASH: a Throwable escaping a group's body unwinds past the normal
+     epilogue — run-group! catches it as ::crashed, runs :stop, RE-THROWS;
+     execute!'s tail catch is the in-process crash surface ({:exit-code 3
+     :status :crashed}, 'Runner crash:' on stderr). Injection = the
+     src-side crash probe (`:internal-crash-on` / `--sl-internal-crash=`,
+     sl-8orx): a Reporter appended LAST that throws when one marker
+     scenario's envelope completes — the codebase's own pinned loud-crash
+     contract (reporter_test a-throwing-reporter-fails-the-run-loudly;
+     incremental_output_test single-release-point-drives-report-plane),
+     so real reporters have already seen every pre-crash scenario. Groups
+     after the crash never start. The report files beside exit 3 (sl-8orx,
+     the xwwv finding, mitigated): the invocation JUnit — shared state,
+     materialized at each completed group's end, so it USED to hold a
+     partial, all-green, CURRENT run — now carries the `sl-crash` suite
+     with one error element of type crash (red iff nonzero holds); the stable
+     --html path — whose post-groups TOC write never happened, so a
+     previous run's STALE bytes survived — is now a CRASHED TOC over the
+     groups that ran. A marker write that itself fails is one stderr
+     line; exit 3 stands.
 
-   Sequential-shaped on purpose: crash-path orphan behavior under
-   :max-parallel is sl-617t's, not pinned here.
+   The crash pins come in both shapes: sequential (the tournament fixture,
+   whose :stop-still-runs and never-started-group assertions are
+   sequential on purpose) and parallel (sl-8orx: a coordinator crash under
+   :max-parallel 2 arms the halt gate and shutdownNow drains the queue —
+   no queued scenario starts after the crash). Aborts (Ctrl-C, the daemon
+   abort op) are sl-617t's, not pinned here.
 
    Siblings (rows pinned there, not duplicated): verdict_contract_test
    (per-code rows incl. the redef exit-3 row), error_class_test (the
@@ -51,6 +58,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [shiftlefter.runner.core :as rc]
+            [shiftlefter.runner.report.html :as report-html]
             [shiftlefter.runner.reporter :as reporter]))
 
 ;; -----------------------------------------------------------------------------
@@ -92,6 +100,16 @@
 (defonce tournament-log (atom []))
 
 (defn ^:export record! [tag] (swap! tournament-log conj tag))
+
+;; sl-8orx parallel crash pin: the counting scenarios BLOCK on this latch
+;; after recording :started, so "how many started" is measured without a
+;; sleep race (Tower C2). A worker interrupted by shutdownNow leaves the
+;; deref with InterruptedException — the step fails, the scenario ends.
+(defonce pool-latch (atom (promise)))
+
+(defn ^:export reset-pool-latch! [] (reset! pool-latch (promise)))
+
+(defn ^:export await-pool! [] (deref @pool-latch 10000 :timeout))
 
 ;; -----------------------------------------------------------------------------
 ;; The tournament fixture: four groups, four different codes, the 2 SECOND
@@ -501,21 +519,22 @@
   (spit-file dir "features/foxtrot.feature"
              "Feature: Foxtrot\n  Scenario: Foxtrot passes\n    Given the foxtrot step passes\n"))
 
-(defn- kaboom-probe
-  "A Reporter whose on-scenario-complete throws only for the marker
-   scenario — every value handed to a reporter is pure EDN data (the
-   reporter contract), so pr-str matching is shape-agnostic."
-  []
-  (reify reporter/Reporter
-    (on-run-start [_ _] nil)
-    (on-scenario-complete [_ scenario-result]
-      (when (str/includes? (pr-str scenario-result) "KABOOM")
-        (throw (ex-info "tournament kaboom: deliberate reporter crash" {})))
-      nil)
-    (on-diagnostics [_ _] nil)
-    (on-run-end [_ _] nil)))
+(defn- crash-opts
+  "The crash-project run: the src-side probe (sl-8orx) crashes the
+   coordinator when the KABOOM marker scenario's envelope completes."
+  [dir junit-path html-path]
+  (assoc (tournament-opts dir)
+         :internal-crash-on "KABOOM"
+         :junit-xml junit-path
+         :html html-path))
 
-(deftest crash-unwinds-past-the-invocation-report
+(defn- island-of
+  "The HTML report's embedded EDN island as a string (the renderer's input)."
+  [html]
+  (let [[_ island] (re-find #"(?s)<script type=\"application/edn\" id=\"run-data\">\n(.*?)\n</script>" html)]
+    island))
+
+(deftest crash-leaves-a-truthful-report
   (with-temp-project
     (fn [dir]
       (reset! tournament-log [])
@@ -525,43 +544,240 @@
             stale "STALE SENTINEL — a previous run's report\n"
             _ (spit junit-path stale)
             _ (spit html-path stale)
-            orig @#'rc/make-reporters
-            {:keys [result err]}
-            (with-redefs [rc/make-reporters
-                          (fn [& args] (conj (vec (apply orig args)) (kaboom-probe)))]
-              (run-captured (assoc (tournament-opts dir)
-                                   :junit-xml junit-path
-                                   :html html-path)))]
-        (testing "the crash surface: execute!'s tail catch, in-process"
+            {:keys [result err]} (run-captured (crash-opts dir junit-path html-path))]
+        (testing "the crash surface: execute!'s tail catch, in-process —
+                  unchanged by the markers"
           (is (= 3 (:exit-code result)))
           (is (= :crashed (:status result)))
           (is (= :runner/crash (get-in result [:error :type])))
           (is (str/includes? err "Runner crash:")
-              "the crash line reaches stderr (stacktrace only under :verbose)"))
+              "the crash line reaches stderr (stacktrace only under :verbose)")
+          (is (not (str/includes? err "Crash marker not written"))
+              "both marker writes succeeded"))
         (testing "the crash group's :stop still ran (run-group! ::crashed
                   runs :stop, then rethrows)"
           (is (= [:echo :kaboom :kaboom-stop] @tournament-log)
               "echo ran, kaboom started and stopped — and foxtrot NEVER
-               started: the crash aborts the invocation (current behavior,
-               pinned; parallel orphan timing is sl-617t's)"))
-        (testing "the throw unwound PAST write-invocation-report!: the HTML
-                  invocation TOC (post-groups write) was never written —
-                  the stale sentinel survives beside exit 3"
-          (is (= stale (slurp html-path))
-              "an HTML consumer after a crash reads the PREVIOUS run"))
-        (testing "the JUnit hazard is SHARPER than stale (pinned finding):
-                  the shared-state file is materialized at each completed
-                  group's end, so beside exit 3 it holds a PARTIAL,
-                  ALL-GREEN, CURRENT run — the pre-crash group only, more
-                  convincing than a stale file. Pair report files with the
-                  exit code; mitigation is a src/ question, not this pin's"
+               started: the crash aborts the invocation"))
+        (testing "the stable --html path is a CRASHED TOC over the groups
+                  that ran — the stale sentinel is gone (sl-8orx)"
+          (let [html (slurp html-path)
+                island (island-of html)]
+            (is (not= stale html) "the sentinel was overwritten")
+            (is (some? island) "a real report, with its EDN island")
+            (is (str/includes? island ":status :crashed") "the invocation verdict is CRASHED")
+            (is (str/includes? island ":exit-code 3"))
+            (is (str/includes? island ":crash {") "the summary carries the :crash record")
+            (is (str/includes? island ":group/label \"kaboom\"")
+                "the crash record names the group in flight")
+            (is (str/includes? island ":run-id") "and the run-id (matches the JUnit body)")
+            (is (re-find #":label \"echo-pass\"[^}]*:status :passed" island)
+                "the completed group keeps its verdict row")
+            (is (re-find #":label \"kaboom\"[^}]*:status :crashed" island)
+                "the crashing group renders :crashed")
+            (is (re-find #":label \"foxtrot-never\"[^}]*:status :skipped" island)
+                "the never-started group renders :skipped (the sl-78u4 word)")
+            (is (str/includes? island ":crashed-by") "…carrying the crash record as the reason")))
+        (testing "the invocation JUnit carries the crash marker: red iff
+                  nonzero holds beside exit 3 (sl-8orx) — before, this file
+                  was a PARTIAL, ALL-GREEN, CURRENT run"
           (let [xml (slurp junit-path)]
             (is (not= stale xml) "the sentinel was overwritten")
-            (is (str/includes? xml "Echo passes") "the pre-crash group is in it")
-            (is (str/includes? xml "tests=\"1\" failures=\"0\" errors=\"0\"")
-                "and it reads green")
-            (is (not (str/includes? xml "KABOOM"))
-                "the crashing group's scenario never materialized")))))))
+            (is (str/includes? xml "Echo passes") "the pre-crash group is still in it")
+            (is (str/includes? xml "<testsuite name=\"sl-crash\"") "the synthetic crash suite")
+            (is (str/includes? xml "<error type=\"crash\"") "with one error element")
+            (is (str/includes? xml "tests=\"3\" failures=\"0\" errors=\"1\"")
+                "root totals count the marker: no longer green")
+            (is (str/includes? xml "sl-internal-crash: deliberate coordinator crash")
+                "the message is the exception's")
+            (is (str/includes? xml (str "run-id: " (:run-id result)))
+                "the body names the run-id")
+            (is (str/includes? xml "KABOOM marker scenario")
+                "the crashing group's completed scenario IS in it: the
+                 shared state had recorded it before the probe (appended
+                 last) threw — the marker re-materializes everything the
+                 reporters saw, then says the runner crashed")))))))
+
+(deftest crash-marker-write-failure-never-masks-the-crash
+  ;; sl-8orx item 7: a marker write can itself throw (reporter invariant 4).
+  ;; It is one stderr line per surface; the original crash keeps exit 3.
+  (with-temp-project
+    (fn [dir]
+      (reset! tournament-log [])
+      (crash-project! dir)
+      (let [junit-path (str (fs/path dir "invocation-junit.xml"))
+            html-path (str (fs/path dir "invocation-report.html"))
+            orig reporter/write-atomically!
+            {:keys [result err]}
+            (with-redefs [reporter/write-atomically!
+                          (fn [path content]
+                            ;; Only the marker artifacts carry the crash
+                            ;; message; every pre-crash group write is real.
+                            (if (str/includes? (str content) "sl-internal-crash")
+                              (throw (java.io.IOException. "disk full (simulated)"))
+                              (orig path content)))]
+              (run-captured (crash-opts dir junit-path html-path)))]
+        (is (= 3 (:exit-code result)) "exit 3 stands")
+        (is (= :runner/crash (get-in result [:error :type])))
+        (is (str/includes? err "Runner crash: sl-internal-crash")
+            "the ORIGINAL crash is the one reported")
+        (is (str/includes? err "Crash marker not written (junit): java.io.IOException: disk full")
+            "the JUnit marker failure is one stderr line")
+        (is (str/includes? err "Crash marker not written (html): java.io.IOException: disk full")
+            "the HTML marker failure is one stderr line — the surfaces fail independently")
+        (is (= [:echo :kaboom :kaboom-stop] @tournament-log) ":stop still ran")
+        (is (str/includes? (slurp junit-path) "tests=\"1\" failures=\"0\" errors=\"0\"")
+            "the pre-crash partial is what remains when the marker cannot land
+             (the documented fallback: gate on the exit code)")))))
+
+(deftest epilogue-crash-leaves-a-truthful-report
+  ;; sl-8orx F1: the throw comes AFTER every group ran — the invocation TOC
+  ;; write itself fails (exactly where the original tournament crash
+  ;; unwound). No group is in flight: every row keeps its verdict, no row
+  ;; is :crashed or :skipped, the summary is :crashed, the JUnit carries
+  ;; every scenario plus the sl-crash suite, exit 3.
+  (with-temp-project
+    (fn [dir]
+      (reset! tournament-log [])
+      (crash-project! dir)
+      (let [junit-path (str (fs/path dir "invocation-junit.xml"))
+            html-path (str (fs/path dir "invocation-report.html"))
+            orig report-html/write-invocation-toc!
+            calls (atom 0)
+            {:keys [result err]}
+            (with-redefs [report-html/write-invocation-toc!
+                          (fn [& args]
+                            ;; The normal epilogue's write throws; the
+                            ;; crash path's rewrite (second call) lands.
+                            (if (= 1 (swap! calls inc))
+                              (throw (java.io.IOException. "toc write failed (simulated)"))
+                              (apply orig args)))]
+              (run-captured (assoc (tournament-opts dir)
+                                   :junit-xml junit-path
+                                   :html html-path)))]
+        (is (= 3 (:exit-code result)))
+        (is (= :runner/crash (get-in result [:error :type])))
+        (is (str/includes? err "Runner crash: toc write failed"))
+        (is (not (str/includes? err "Crash marker not written")))
+        (is (= 2 @calls) "the epilogue write threw, the crashed TOC write followed")
+        (is (= [:echo :kaboom :kaboom-stop :foxtrot] @tournament-log)
+            "every group ran before the throw")
+        (let [island (island-of (slurp html-path))]
+          (is (str/includes? island ":status :crashed"))
+          (is (str/includes? island ":crash {"))
+          (is (not (str/includes? island ":group/label"))
+              "no group was in flight — the crash record names none")
+          (doseq [label ["echo-pass" "kaboom" "foxtrot-never"]]
+            (is (re-find (re-pattern (str ":label \"" label "\"[^}]*:status :passed")) island)
+                (str label " keeps its completed verdict row")))
+          (is (not (str/includes? island ":crashed-by")) "no never-started rows"))
+        (let [xml (slurp junit-path)]
+          (is (str/includes? xml "<testsuite name=\"sl-crash\""))
+          (is (str/includes? xml "tests=\"4\" failures=\"0\" errors=\"1\"")
+              "three scenarios plus the marker")
+          (doseq [nm ["Echo passes" "KABOOM marker scenario" "Foxtrot passes"]]
+            (is (str/includes? xml nm))))))))
+
+;; -----------------------------------------------------------------------------
+;; (j) — CRASH under --max-parallel: the gate arms, the queue drains
+;; -----------------------------------------------------------------------------
+
+(def ^:private pool-steps-src
+  "(ns pool-steps
+     (:require [shiftlefter.stepengine.registry :refer [defstep]]
+               [shiftlefter.runner.exit-tournament-test :as t]))
+   (defstep #\"the warmup step passes\" [] nil)
+   (defstep #\"the kaboom step passes\" [] nil)
+   (defstep #\"the pool step counts\" []
+     (t/record! :started)
+     (t/await-pool!)
+     nil)")
+
+(def ^:private pool-setup-src
+  "(ns setup
+     (:require [shiftlefter.runner.exit-tournament-test :as t]))
+   (def setups
+     [{:label \"warmup-pass\"
+       :start (fn [_] (t/record! :warmup) {})
+       :features [\"features/warmup.feature\"]}
+      {:label \"pool\"
+       :start (fn [_] (t/record! :pool)
+                {:stop (fn [] (t/record! :pool-stop))})
+       :features [\"features/pool.feature\"]}
+      {:label \"after-never\"
+       :start (fn [_] (t/record! :after) {})
+       :features [\"features/warmup.feature\"]}])")
+
+(def ^:private pool-scenario-count 5)
+
+(defn- pool-project! [dir]
+  (spit-file dir "shiftlefter.edn" (pr-str {:runner {:step-paths []}}))
+  (spit-file dir "steps/pool.clj" pool-steps-src)
+  (spit-file dir "setup.clj" pool-setup-src)
+  (spit-file dir "features/warmup.feature"
+             "Feature: Warmup\n  Scenario: Warmup passes\n    Given the warmup step passes\n")
+  (spit-file dir "features/pool.feature"
+             (apply str
+                    "Feature: Pool\n  Scenario: KABOOM marker scenario\n    Given the kaboom step passes\n"
+                    (for [n (range 1 (inc pool-scenario-count))]
+                      (str "  Scenario: Pool scenario " n "\n    Given the pool step counts\n")))))
+
+(defn- settle
+  "Poll `pred` for up to `ms`; returns as soon as it is true. Used only to
+   give the OLD behavior (queued tasks still running after the coordinator
+   is gone) time to show itself — never to assert timing."
+  [pred ms]
+  (let [deadline (+ (System/currentTimeMillis) ms)]
+    (loop []
+      (cond (pred) true
+            (> (System/currentTimeMillis) deadline) false
+            :else (do (Thread/sleep 25) (recur))))))
+
+(deftest parallel-crash-arms-the-gate-and-drains-the-queue
+  (with-temp-project
+    (fn [dir]
+      (reset! tournament-log [])
+      (reset-pool-latch!)
+      (pool-project! dir)
+      (let [junit-path (str (fs/path dir "invocation-junit.xml"))
+            html-path (str (fs/path dir "invocation-report.html"))
+            max-parallel 2
+            {:keys [result err]}
+            (try
+              (run-captured (assoc (crash-opts dir junit-path html-path)
+                                   :max-parallel max-parallel))
+              (finally
+                ;; Release anything still blocked (in-flight workers the
+                ;; interrupt did not reach) — and, under the OLD graceful
+                ;; shutdown, every queued scenario would now start.
+                (deliver @pool-latch :go)))
+            started-count #(count (filter #{:started} @tournament-log))]
+        (settle #(>= (started-count) pool-scenario-count) 1500)
+        (testing "the crash surface"
+          (is (= 3 (:exit-code result)))
+          (is (str/includes? err "Runner crash:"))
+          (is (= [:warmup :pool :pool-stop]
+                 (remove #{:started} @tournament-log))
+              "warmup ran, pool started and stopped, after-never never started"))
+        (testing "no queued scenario started after the crash (Tower C2):
+                  at most max-parallel counting scenarios were ever in
+                  flight, and the queue was drained rather than run"
+          (let [started (started-count)]
+            (is (<= started max-parallel)
+                (str "started " started " > max-parallel " max-parallel))
+            (is (< started pool-scenario-count)
+                (str "all " pool-scenario-count " ran — the queue was not drained"))))
+        (testing "both markers landed"
+          (let [xml (slurp junit-path)
+                island (island-of (slurp html-path))]
+            (is (str/includes? xml "<testsuite name=\"sl-crash\""))
+            (is (str/includes? xml "<error type=\"crash\""))
+            (is (str/includes? xml "KABOOM marker scenario")
+                "the marker scenario reached the JUnit reporter before the probe (appended last) threw")
+            (is (str/includes? xml "Warmup passes"))
+            (is (str/includes? island ":status :crashed"))
+            (is (re-find #":label \"pool\"[^}]*:status :crashed" island))
+            (is (re-find #":label \"after-never\"[^}]*:status :skipped" island))))))))
 
 (deftest crash-under-edn-emits-no-invocation-aggregate
   ;; sl-6vz8 (Warden W22): the crash case above runs without :edn. Under
@@ -570,16 +786,15 @@
   ;; write, so the aggregate must be ABSENT and a machine consumer reading
   ;; the stream sees no suite verdict. Pinned as current behavior (the
   ;; agent-doc exit-codes topic already says "absent on a crash"); the
-  ;; stale-report hazard beside exit 3 is sl-8orx's.
+  ;; report-file hazard beside exit 3 was sl-8orx's (the marker pins above).
   (with-temp-project
     (fn [dir]
       (reset! tournament-log [])
       (crash-project! dir)
-      (let [orig @#'rc/make-reporters
-            {:keys [result out]}
-            (with-redefs [rc/make-reporters
-                          (fn [& args] (conj (vec (apply orig args)) (kaboom-probe)))]
-              (run-captured (assoc (tournament-opts dir) :edn true)))
+      (let [{:keys [result out]}
+            (run-captured (assoc (tournament-opts dir)
+                                 :edn true
+                                 :internal-crash-on "KABOOM"))
             forms (read-forms out)]
         (is (= 3 (:exit-code result)) "precondition: the crash surface fired")
         (is (seq forms) "the pre-crash group's forms still reached stdout")

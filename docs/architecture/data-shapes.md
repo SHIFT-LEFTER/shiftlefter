@@ -68,7 +68,7 @@ graph TD
 
 One station per boundary shape. Producer pins are definition lines at
 the 2026-08-19 extraction
-(§ 1's config pins re-verified 2026-08-23);
+(§ 1's config pins re-verified 2026-08-23, sl-d3cz);
 "spec" is the registered `s/def` keyword (— means none registered: the
 contract is docstring/doc, see § Stability tiers).
 
@@ -76,24 +76,27 @@ contract is docstring/doc, see § Stability tiers).
 
 | Shape | Producer | Spec | Consumers | Stability |
 |---|---|---|---|---|
-| loaded config map | `shiftlefter.config/load-config` config.clj:392 (safe wrapper `load-config-safe` :492; `normalize` :1068; `lint-config` :670) | `::config` config.clj:189 + ~44 sub-specs (`::runner` :123, `::interfaces` :159, `::costumes` :166 + `::costume-def` :165, `::svo` :175, `::glossaries` :186, `::timing` :135, …) | projection (project_projection.clj:94), run pipeline (runner/core.clj:622), doctor, repl, usage-index; all downstream reads go through the accessor surface config.clj:509-624, :1121-1215 | additive; unknown top-level keys are WARNINGS never errors (forward-compat rule, config.clj:677-697) |
+| loaded config map | `shiftlefter.config/load-config` config.clj:452 (safe wrapper `load-config-safe` :492; `normalize` :1068; `lint-config` :670) | `::config` config.clj:189 + ~44 sub-specs (`::runner` :123, `::interfaces` :159, `::costumes` :166 + `::costume-def` :165, `::enforcement` :200, `::glossaries` :186, `::timing` :135, …) | projection (project_projection.clj:82), run pipeline (runner/core.clj:622), doctor, repl, usage-index; all downstream reads go through the accessor surface config.clj:509-624, :1121-1215 | additive; unknown top-level keys are WARNINGS never errors (forward-compat rule, config.clj:677-697) |
 
 - Top-level key set:
-  `#{:parser :runner :glossaries :interfaces :costumes :svo :timing}`
-  (`known-top-level-keys` config.clj:633). `:errors` is synthetic,
+  `#{:parser :runner :glossaries :interfaces :costumes :enforcement :timing}`
+  (`known-top-level-keys` config.clj:693). `:errors` is synthetic,
   added only by `normalize`.
-- **Mode invariant (config.clj:405-411):** the loaded map
-  contains `:svo` iff the user's file did. `:svo` presence IS Shifted
-  mode — `stepengine/compile.clj:62` and `project_projection.clj:471`
-  both key on it.
-- **The one computed default (config.clj:350):**
+- **One mode (sl-6wh9):** the loaded map ALWAYS carries `:enforcement`
+  (`resolve-enforcement` config.clj:398) — the block holds nothing but
+  levels; its absence in the user's file means the defaults, its presence
+  means nothing, and no consumer keys on it as a switch.
+  `stepengine/compile.clj:59-78` loads glossaries and reads the levels on
+  every compile. A top-level `:svo` (the retired block name) is ignored
+  with a did-you-mean lint.
+- **The one computed default (sl-femd, config.clj:350):**
   `:unknown-object` flips to `:warn` iff `[:glossaries :intents]` is
   configured, else `:off` — `apply-conditional-object-default` is the
   single place this is decided (visible live in the trace below).
-- Conventional glossary probing (config.clj:313) runs only when
+- Conventional glossary probing (sl-fcjm, config.clj:313) runs only when
   the user config has no `:glossaries` key at all — whole-map semantics.
 - Nested maps (`:interfaces` entries, adapter `:config`) are open by
-  design; `:webdriver`/`:webdriver-url` deliberately excluded.
+  design; `:webdriver`/`:webdriver-url` deliberately excluded (sl-7kct).
 
 ### 2. Machine config — `~/.shiftlefter/config.edn`
 
@@ -109,14 +112,14 @@ contract is docstring/doc, see § Stability tiers).
 
 | Shape | Producer | Spec | Consumers | Stability |
 |---|---|---|---|---|
-| project-context map | `project-context/resolve` project_context.clj:153; resolved once per invocation at core.clj:913, threaded as opts `:project-context` | — | config.clj :295/:307/:433, projection :68-96, runner.core :179-213, results.clj :69/:130, teardown-marker :37, wardrobe :65, usage-index :76, daemon :150, doctor, orient, resolution | doc-contract; ownership rule "location facts only, prints nothing, diagnostics are data" (ns docstring) |
+| project-context map | `project-context/resolve` project_context.clj:153; resolved once per invocation at core.clj:913, threaded as opts `:project-context` | — | config.clj :295/:307/:433, projection :65-94, runner.core :179-213, results.clj :69/:130, teardown-marker :37, wardrobe :65, usage-index :76, daemon :150, doctor, orient, resolution | doc-contract; ownership rule "location facts only, prints nothing, diagnostics are data" (ns docstring) |
 
 - Key set: `:invocation-root :workspace-root :project-root :config-root
   :config-path :config-source :layout :portable? :diagnostics`
   (project_context.clj:167-199). `:config-source` ∈
   `#{:explicit :discovered :defaults}`; `:layout` ∈
   `#{:sl-directory :root :defaults}`.
-- **Cross-process lockstep:** `instance-root`
+- **Cross-process lockstep (sl-v7l6):** `instance-root`
   (project_context.clj:201) MUST match `bin/sl`'s `find_instance_root`
   exactly — the shell wrapper and daemon agree on
   `.shiftlefter/daemon.edn` by parallel implementation, not shared code.
@@ -129,26 +132,26 @@ contract is docstring/doc, see § Stability tiers).
 
 | Shape | Producer | Spec | Consumers | Stability |
 |---|---|---|---|---|
-| projection map | `project-projection/build-projection` project_projection.clj:490 (assembler `complete-projection` :420; bounded view `project-view` :604) | — | orient (orient.clj:208; `--edn` emits it verbatim), resolution (resolution.clj:943), usage-index (usage_index.clj:57), sieve/contract.clj:78 | `:projection/version` = 1 (project_projection.clj:23), stamped on every branch including errors; fingerprint = content identity |
+| projection map | `project-projection/build-projection` project_projection.clj:573 (assembler `complete-projection` :497; bounded view `project-view` :700) | — | orient (orient.clj:215; `--edn` emits it verbatim), resolution (resolution.clj:943), usage-index (usage_index.clj:57), sieve/contract.clj:78 | `:projection/version` = 1 (project_projection.clj:24), stamped on every branch including errors; fingerprint = content identity |
 
-- Full key set at project_projection.clj:466-488: `:projection/id`
+- Full key set at project_projection.clj:544-568: `:projection/id`
   (fresh UUID) · `:projection/version` · `:built-at` · `:project-context`
   · `:source` (`:working-tree`, closed set :25) · `:status` · `:mode` ·
-  `:config` · `:substrate` · `:svo-effective` · `:subjects` `:instances`
+  `:config` · `:substrate` · `:enforcement-effective` · `:subjects` `:instances`
   `:interfaces` `:verbs` `:intents` `:stepdefs` `:macros` ·
   `:diagnostics` · `:validation-commands` · `:inputs` · `:fingerprint`.
-- **The fingerprint key set is a contract** (project_projection.clj:411-425):
+- **The fingerprint key set is a contract** (project_projection.clj:432-446):
   sha256 over exactly `[:projection/version :project-context :source
   :inputs :config :subjects :instances :interfaces :verbs :intents
   :stepdefs :macros :diagnostics]`. `:substrate` (config-path +
   config-source + git sha/dirty) is DELIBERATELY outside it — "the
-  fingerprint is content identity; substrate is the citation".
+  fingerprint is content identity; substrate is the citation" (sl-0gfc).
   Adding a key to that `select-keys` breaks fingerprint stability.
 - `:inputs` entries are `{:kind :path :exists? :digest}` per contributing
   file (kinds: `:config :glossary/subjects :glossary/verbs
   :glossary/intents :stepdef :macro`).
 - Macro entries carry their own nested `:representation-version` 1
-  (project_projection.clj:264).
+  (project_projection.clj:279).
 - Same-path doctrine: the projection resolves through the run's own
   loaders (never a parallel path), so a listing can never disagree with
   the run it predicts — see invocation-map § query family.
@@ -159,7 +162,7 @@ contract is docstring/doc, see § Stability tiers).
 
 | Shape | Producer | Spec | Consumers | Stability |
 |---|---|---|---|---|
-| resolution EDN maps | `glossary-edn` resolution.clj:355, `explain-edn` :843, `locator-owners-edn` :857, `vanilla-edn` :80, no-project :105 | — | external tooling/agents (the machine surface) | `:resolution/version` = 1 (resolution.clj:42) on all five shapes; "`--edn` is the stable machine surface; the human format is EXPLICITLY UNSTABLE — do not parse it" (ns docstring) |
+| resolution EDN maps | `glossary-edn` resolution.clj:355, `explain-edn` :843, `locator-owners-edn` :857, no-project :105 (`vanilla-edn` retired at sl-6wh9; every shape carries `:enforcement-effective`, none carries `:mode`) | — | external tooling/agents (the machine surface) | `:resolution/version` = 1 (resolution.clj:42) on all four shapes; "`--edn` is the stable machine surface; the human format is EXPLICITLY UNSTABLE — do not parse it" (ns docstring) |
 
 - **Structural wording discipline:** full-corpus
   entries carry `:unused?`, scoped selections carry
@@ -178,7 +181,7 @@ contract is docstring/doc, see § Stability tiers).
 
 | Shape | Producer | Spec | Consumers | Stability |
 |---|---|---|---|---|
-| merged glossary map | `svo.glossary/load-all-glossaries` glossary.clj:732 (strict variant :774 — returns `{:ok g :warnings […]}`, defaults :392; merge :414; normalize :522) | `::glossary` glossary.clj:175 + sub-specs `::subject-entry` :118, `::verb-entry` :169, `::frame` :160, `::glossary-error` :183 | binder opts via `compile/build-binding-opts` compile.clj:68; bind.clj :575/:599/:617; svo.validate :150; usage-index :150; projection :488; repl; agent-doc builtins-gen | explicit additive contract: "`::glossary` is `req-un`, so consumers that don't know about [added keys] conform unchanged" (glossary.clj:465-467) |
+| merged glossary map | `svo.glossary/load-all-glossaries` glossary.clj:732 (strict variant :774 — returns `{:ok g :warnings […]}`, sl-67dj; defaults :392; merge :414; normalize :522) | `::glossary` glossary.clj:175 + sub-specs `::subject-entry` :118, `::verb-entry` :169, `::frame` :160, `::glossary-error` :183 | binder opts via `compile/build-binding-opts` compile.clj:68; bind.clj :575/:599/:617; svo.validate :150; usage-index :150; projection :323; repl; agent-doc builtins-gen | explicit additive contract: "`::glossary` is `req-un`, so consumers that don't know about [added keys] conform unchanged" (glossary.clj:465-467) |
 
 - Runtime key set is a superset of the spec: `:subjects :verbs` (spec'd)
   plus loader-added `:provenance :sources :instance-index`. `:verbs` mount
@@ -187,7 +190,7 @@ contract is docstring/doc, see § Stability tiers).
   `:sources :verbs` maps each declared type to the file that mounted it.
 - **Merge is wholesale-per-key** (glossary.clj:48-60): a project entry
   replaces the builtin entry entirely, documented lossy. The
-  `:override-defaults` flag was REMOVED — glossaries always
+  `:override-defaults` flag was REMOVED (sl-h7c3) — glossaries always
   extend; a file carrying the key draws a load-time warning.
 - Frame sub-shape carries the slot vocabulary the binder stamps from:
   `::object-kind` `#{:intent :location :text :key}`, `::arg-kind`
@@ -197,7 +200,7 @@ contract is docstring/doc, see § Stability tiers).
 
 | Shape | Producer | Spec | Consumers | Stability |
 |---|---|---|---|---|
-| loaded intents map | `intent.loader/load-all-intents` loader.clj:491 → `{:ok {:lookup :regions :boundaries :intents :intent-files}}` | — (loader specs the AUTHORED EDN only: `::interface-locator` :50, `:intent/location` :64, `::collection` :73, …) | bind.clj:683 (grammar hints), svo.validate :42 (object-slot checks), browser/intent.clj:297, locator-index :46, projection :293 | open-map + optional `:path` are the declared forward-compat guards (loader.clj:56-59); loaded-map shape is doc-contract |
+| loaded intents map | `intent.loader/load-all-intents` loader.clj:491 → `{:ok {:lookup :regions :boundaries :intents :intent-files}}` | — (loader specs the AUTHORED EDN only: `::interface-locator` :50, `:intent/location` :64, `::collection` :73, …) | bind.clj:683 (grammar hints), svo.validate :42 (object-slot checks), browser/intent.clj:297, locator-index :46, projection :330 | open-map + optional `:path` are the declared forward-compat guards (sl-4mv8, loader.clj:56-59); loaded-map shape is doc-contract |
 | parsed intent ref | `intent.resolve/parse-intent-ref` resolve.clj:95 | `::parsed-ref` resolve.clj:57 (`::segment` :55, `::path` :56) | resolve-intent-ref :152, static validators :193/:266, resolve-location :299 | spec'd; the O-slot value grammar (`Intent.element[n].child`) |
 
 - Global cache boundary: `intent.state/get-intents` state.clj:41
@@ -208,7 +211,7 @@ contract is docstring/doc, see § Stability tiers).
 
 | Shape | Producer | Spec | Consumers | Stability |
 |---|---|---|---|---|
-| pickle | `gherkin.pickler/pickles` pickler.clj:432 (public wrapper `gherkin.api/pickles` api.clj:151) | `::pickle` pickler.clj:117 (`:req` namespaced), `::pickle-step` :93, fdefs :460-475 | runner parse stage (runner/core.clj:126/:137 → `:all-pickles`), compile-suite (compile.clj:150), bind-pickle (bind.clj:420), usage-index :52, compliance harness | spec'd; `:pickle/feature-name` is a documented local extension over cucumber pickles |
+| pickle | `gherkin.pickler/pickles` pickler.clj:432 (public wrapper `gherkin.api/pickles` api.clj:151) | `::pickle` pickler.clj:117 (`:req` namespaced), `::pickle-step` :93, fdefs :460-475 | runner parse stage (runner/core.clj:126/:137 → `:all-pickles`), compile-suite (compile.clj:150), bind-pickle (bind.clj:420), usage-index :52, compliance harness | spec'd; `:pickle/feature-name` is a documented local extension over cucumber pickles (sl-40to) |
 
 - Req keys: `:pickle/id :pickle/name :pickle/source-file :pickle/location
   :pickle/tags :pickle/steps`; step req keys: `:step/id :step/text
@@ -246,7 +249,7 @@ contract is docstring/doc, see § Stability tiers).
   bind time (bind.clj:563-579) so runtime provisioning never needs the
   glossary threaded.
 - Validation issues: `::svo-issue` validate.clj:65 with a closed `::type`
-  set :48-57 (includes the `:bindings/*` family).
+  set :48-57 (includes the `:bindings/*` family, sl-yh7/sl-gwru).
 
 ### 10. Ctx stash
 
@@ -258,7 +261,7 @@ contract is docstring/doc, see § Stability tiers).
   `{:impl :mode :cleanup-handle}` (ctx.clj:116; NOT EDN-safe — live
   drivers); `:run/interfaces` (:166) and `:run/timing` (:186), stashed
   once per scenario; `:sl/bindings` → flat `{lowerCamel-kw → edn value}`
-  (bindings.clj:32), the scenario data plane: forward-only,
+  (bindings.clj:32), the scenario data plane (sl-yh7): forward-only,
   last-write-wins, dead at scenario end, provenance rides run evidence
   (`:bindings/produced`) never the map.
 - **Mutation asymmetry** (exec/hooks.clj:29-33): a step's map return
@@ -282,7 +285,7 @@ contract is docstring/doc, see § Stability tiers).
 | run result | `execute!` runner/core.clj:1885 → :1264-1280 | — (component specs: `:shiftlefter.runner.run/status` reporter.clj:131) | CLI exit path, programmatic callers | `{:exit-code :run-id :status :counts :result}` + opt `:dropped-events :results-dir :group-root`; `:result` is the RAW exec result BY DESIGN (core.clj:1282-1285) — envelopes are a projection, programmatic callers keep fidelity |
 
 - The exit-code table is its own locked contract (verdict.clj:37): locked
-  at 0.5.1, reopened STRENGTHEN-ONLY from 0.5.5 and held that
+  at 0.5.1, reopened STRENGTHEN-ONLY from 0.5.5 (sl-7c7i) and held that
   way through the 0.5.x line — see invocation-map § verdict contract.
 
 ### 12. Reporter envelopes — the seam
@@ -299,7 +302,7 @@ contract is docstring/doc, see § Stability tiers).
   patch): coordinator thread only; plan order on the
   report plane (actual order + `:seq` on the bus); pure EDN-native data —
   `scrub` (:222) kills live drivers/fns/atoms and flattens defrecords,
-  `pr-edn-str` (:200) pins printer bindings; exit-code
+  `pr-edn-str` (:200) pins printer bindings (sl-3ub4); exit-code
   independence with loud failure.
 
 ### 13. The `--edn` run summary + attachment refs — the locked contract
@@ -320,7 +323,7 @@ contract is docstring/doc, see § Stability tiers).
   § Stability tiers.
 - The contract stays EDN-native (tagged UUIDs, bare symbols survive
   typed); lowering for JSON consumers is a foreign-worker transcoder's
-  job, not an envelope constraint (reporter.clj:54-60).
+  job (sl-rdiz), not an envelope constraint (reporter.clj:54-60).
 - The summary is NOT a file — nothing like `summary.edn` lands in the
   run directory (REPORTS.md:18-21). Redirect stdout to capture it.
 
@@ -383,26 +386,28 @@ captured:
 `{:config-source :discovered, :git-sha "39468a25", :git-dirty? false}`.
 
 **Station 1-2 (config in).** The project config declares two interfaces
-and three `:svo` levels — and deliberately omits `:unknown-object`:
+and three `:enforcement` levels — and deliberately omits `:unknown-object`:
 
 ```clojure
 {:interfaces {:web {:type :web :adapter :etaoin :config {}}
               :sms {:type :sms :adapter :sms-mock}}
- :svo        {:unknown-subject :error
-              :unknown-verb    :warn
-              :unknown-interface :error}}
+ :enforcement {:unknown-subject :error
+               :unknown-verb    :warn
+               :unknown-interface :error}}
 ```
 
 **Station 3-4 (context → projection).** `sl orient --edn` emits the
-projection verbatim. `:mode :shifted` (the `:svo` key is present). The conditional default is visible: intents are
-configured, so the effective levels gained `:unknown-object :warn`:
+projection verbatim. It carries no `:mode` — there is one. The sl-femd
+conditional default is visible: intents are configured, so the effective
+levels gained `:unknown-object :warn` and `:raw-locator :warn`:
 
 ```clojure
-:svo-effective {:unknown-subject :error, :unknown-verb :warn,
-                :unknown-interface :error, :unknown-object :warn}
-:projection/id "proj-87a5c62e-341b-4045-8447-26809c0500b8"
+:enforcement-effective {:unknown-subject :error, :unknown-verb :warn,
+                        :unknown-interface :error, :unknown-object :warn,
+                        :untyped-stepdef :warn, :raw-locator :warn}
+:projection/id "proj-b42c719b-0de1-4ca3-9a81-a9a081de6cce"
 :projection/version 1
-:fingerprint "cdbc7c77844aa95b17c645a4be4e81761886db918764845b6574707b9a3effdc"
+:fingerprint "02ec0e7fadd488136358c5811b458a1d5734f4cb4eb82417dfd05ba2a6f506d5"
 ```
 
 Each contributing file rides `:inputs` with a digest — content identity,
@@ -412,11 +417,11 @@ not just a path:
 {:kind :config,
  :path ".../examples/04-sms-2fa/sl/shiftlefter.edn",
  :exists? true,
- :digest "d9bbd9a37a13223e5c08719eeec5c51e8db08882d7cfd4af2c2d6bf26d4b546d"}
+ :digest "9ec0ac3dd131f3d246b7003bd72b6f7f8e6996d18347c509f744702145948739"}
 ```
 
 The adapter registry surfaces as `:adapter-metadata` per interface, with
-PROVENANCE: an interface on an undeclared builtin adapter shows
+PROVENANCE (sl-hyey): an interface on an undeclared builtin adapter shows
 the default entry's full fields (`:provenance :builtin-default`,
 `:impl-key`, `:provides`, `:capture-kinds`, `:has-on-provision?`). An
 adapter that setup.clj declares shows `:provenance :declared` with the
@@ -489,7 +494,7 @@ Every ledger claim is visible in miniature: the locked summary's key
 vocabulary; counts with `:error` absent (zero); `#uuid` tagged literals
 surviving typed (EDN-native stance); the `::svo-issue` shape with its
 closed `:type` and full `:location`; and the two `:warn` diagnostics are
-the default from station 1 firing on the two free-text
+the sl-femd default from station 1 firing on the two free-text
 assertions — config decision in, diagnostic severity out, one chain.
 
 **Station 15 (disk).** The run created

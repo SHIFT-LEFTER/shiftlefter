@@ -448,7 +448,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-subject :error
+                :enforcement {:unknown-subject :error
                       :unknown-verb :error
                       :unknown-interface :error}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
@@ -535,7 +535,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-subject :warn}}
+                :enforcement {:unknown-subject :warn}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
       ;; Runnable because :warn doesn't block
       (is (:runnable? result))
@@ -556,7 +556,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-subject :error}}
+                :enforcement {:unknown-subject :error}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
       ;; NOT runnable because :error blocks
       (is (not (:runnable? result)))
@@ -580,7 +580,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-subject :error
+                :enforcement {:unknown-subject :error
                       :unknown-verb :error
                       :unknown-interface :error}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
@@ -606,7 +606,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-subject :warn}}
+                :enforcement {:unknown-subject :warn}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
           issue (-> result :diagnostics :svo-issues first)]
       (is (:runnable? result))
@@ -626,7 +626,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-verb :error}}
+                :enforcement {:unknown-verb :error}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
       (is (not (:runnable? result)))
       (is (= :svo/unknown-verb (-> result :diagnostics :svo-issues first :type))))))
@@ -644,7 +644,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-interface :error}}
+                :enforcement {:unknown-interface :error}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
       (is (not (:runnable? result)))
       (is (= :svo/unknown-interface (-> result :diagnostics :svo-issues first :type))))))
@@ -679,7 +679,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-subject :error}}
+                :enforcement {:unknown-subject :error}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
           issue (-> result :diagnostics :svo-issues first)
           location (:location issue)]
@@ -721,7 +721,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-subject :warn}}  ;; warn, not error
+                :enforcement {:unknown-subject :warn}}  ;; warn, not error
           result (bind/bind-suite [undefined-pickle svo-pickle]
                                   (registry/all-stepdefs)
                                   opts)
@@ -746,16 +746,17 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-subject :error}}  ;; error, not warn
+                :enforcement {:unknown-subject :error}}  ;; error, not warn
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
           issue (-> result :diagnostics :svo-issues first)]
       (is (= :error (:severity issue)))
       ;; With :error severity, should not be runnable
       (is (not (:runnable? result)))))
 
-  (testing ":unknown-object :error and its deprecated alias :strict both
-            yield :severity :error (sl-femd)"
-    (doseq [level [:error :strict]]
+  (testing ":raw-locator :error yields :severity :error on the raw-locator
+            issue (sl-femd; the :strict alias retired at sl-6wh9; the issue
+            rides its own :raw-locator kind since sl-u2r0)"
+    (doseq [level [:error]]
       (registry/clear-registry!)
       (registry/register! #"(.+) clicks (.+)"
                           (fn [_ctx _s _t] nil)
@@ -768,7 +769,7 @@
             interfaces {:web {:type :web :adapter :etaoin}}
             opts {:glossary glossary
                   :interfaces interfaces
-                  :svo {:unknown-object level}}
+                  :enforcement {:raw-locator level}}
             result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
             issue (->> result :diagnostics :svo-issues
                        (filter #(= :svo/raw-locator-disallowed (:type %)))
@@ -791,7 +792,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-subject :warn}}
+                :enforcement {:unknown-subject :warn}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
       ;; Two steps with unknown subjects
       (is (= 2 (count (-> result :diagnostics :svo-issues))))
@@ -815,7 +816,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-subject :warn}}
+                :enforcement {:unknown-subject :warn}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)
           counts (-> result :diagnostics :counts)]
       (is (= 1 (:undefined-count counts)))
@@ -841,7 +842,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-subject :error}}
+                :enforcement {:unknown-subject :error}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
       (is (not (:runnable? result)))
       (let [issue (-> result :diagnostics :svo-issues first)]
@@ -862,7 +863,7 @@
           interfaces {:web {:type :web :adapter :etaoin}}
           opts {:glossary glossary
                 :interfaces interfaces
-                :svo {:unknown-subject :warn}}
+                :enforcement {:unknown-subject :warn}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]
       ;; Runnable because :warn
       (is (:runnable? result))

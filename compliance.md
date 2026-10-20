@@ -1,21 +1,21 @@
 ```mermaid
 flowchart LR
-  A[Start: 46] --> B[After parse: 46, 100 pct]
-  B --> C[After token: 46, 100 pct]
+  A[Start: 50] --> B[After parse: 50, 100 pct]
+  B --> C[After token: 50, 100 pct]
 
-  C --> D[After AST: 46, 100.0 pct survive]
+  C --> D[After AST: 50, 100.0 pct survive]
   C --> X[AST failures: 0, 0.0 pct of total]
 
-  D --> E[After pickle: 46, 100.0 pct survive]
+  D --> E[After pickle: 50, 100.0 pct survive]
   D --> Y[Pickle failures: 0, 0.0 pct of total; 0.0 pct of reached]
 
-  E --> Z[Full pass: 46, 100.0 pct]
+  E --> Z[Full pass: 50, 100.0 pct]
 ```
 
 ```mermaid
 pie showData
-  title Outcomes (n=46)
-  "Full pass (46, 100.0%)" : 46
+  title Outcomes (n=50)
+  "Full pass (50, 100.0%)" : 50
   "AST failures (0, 0.0%)" : 0
   "Pickle failures (0, 0.0%)" : 0
 ```
@@ -26,17 +26,17 @@ pie showData
 
 | Category | Count |
 |----------|-------|
-| Good files total | 46 |
+| Good files total | 50 |
 | Parse errors | 0 |
 | Token failures | 0 |
 | AST failures | 0 |
 | Pickle failures | 0 |
-| **Full pass** | **46** |
+| **Full pass** | **50** |
 
 | Category | Count |
 |----------|-------|
-| Bad files total | 11 |
-| Correctly rejected | 11 |
+| Bad files total | 12 |
+| Correctly rejected | 12 |
 | Should reject but didn't | 0 |
 
 ---

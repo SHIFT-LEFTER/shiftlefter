@@ -27,7 +27,9 @@
    | 1    | :failed           | >=1 scenario :failed (valid tests, app       |
    |      |                   | wrong — the app answered and the answer      |
    |      |                   | missed, incl. :sut-classed errors), or       |
-   |      |                   | pending under strict mode.                   |
+   |      |                   | pending under strict mode, or a stale        |
+   |      |                   | @blocked claim (XPASS, sl-190x: the test's   |
+   |      |                   | claim is what is wrong; a failing corpus).   |
    | 2    | :planning-failed  | Invalid before execution: config/parse/      |
    |      |                   | discovery/binding errors, un-runnable        |
    |      |                   | invocation, empty selection. Pre-execution   |
@@ -35,8 +37,8 @@
    | 3    | :crashed          | Runner crash. Anywhere, wins over all.       |
    | 4    | :degraded         | Run degraded: >=1 scenario :error — the      |
    |      |                   | harness family (hook throw, capability       |
-   |      |                   | provisioning, capture, harness; counted      |
-   |      |                   | :error) OR a step whose adapter classified   |
+   |      |                   | provisioning, capture; counted :error)       |
+   |      |                   | OR a step whose adapter classified           |
    |      |                   | its failure :observation — no answer existed |
    |      |                   | (counted :unobserved). Verdict about the app |
    |      |                   | unavailable for those scenarios.             |

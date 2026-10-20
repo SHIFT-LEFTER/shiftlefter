@@ -1,10 +1,17 @@
 (ns shiftlefter.orient
   "`sl orient` — the dynamic project-validity / project-state query (sl-jim).
 
-   Orient answers the one discovery question grep cannot: \"given the accepted
-   working-tree truth, what would fail?\" It is a thin RENDERER over the Project
-   Knowledge Projection (`project-projection/build-projection`) — it never
-   re-implements loading and never synthesizes accepted vocabulary.
+   Orient answers the one discovery question grep cannot: \"is the project's
+   own truth — everything except the features — sound?\" It is a thin
+   RENDERER over the Project Knowledge Projection
+   (`project-projection/build-projection`) — it never re-implements loading
+   and never synthesizes accepted vocabulary.
+
+   It does NOT read the features (sl-a55s, Chair 2026-09-21): whether the
+   features plan against the project is `sl run --dry-run`'s question — the
+   gate. So orient reports no fact defined over a matched step, says what it
+   checked and what it did not, and never prints a verdict on the project as
+   a whole.
 
    Lane (decisions/agent-surface.md): orient is the DYNAMIC validity lane. It
    points to `sl agent-doc` (including the generated `builtins` topic) for
@@ -14,8 +21,9 @@
    orient validates the project, doctor validates the machine; no overlap.
 
    Two modes:
-   - default (thin): resolved context, counts, static-validation diagnostics,
-     exact validate/run commands, and pointers to packaged agent-doc topics.
+   - default (thin): resolved context, counts, the project checks'
+     diagnostics, exact validate/run commands, and pointers to packaged
+     agent-doc topics.
      A menu, not a meal — for the editing (Trench-like) agent.
    - --edn: a one-shot dump of the whole projection value, for a planning
      (Tower-like) or disposable sub-agent reasoning over the project's whole
@@ -97,20 +105,40 @@
         " · macros: " (:macros counts))
    (str "- diagnostics: " (:diagnostics counts))])
 
-(defn- diagnostic-line [{:keys [stage severity type message]}]
+(defn- first-sub-error-suffix
+  "sl-mk0t (Warden W2): an aggregate load error (intents, parse, step-load)
+   carries its per-entry detail as nested :errors. The thin line surfaces
+   the FIRST sub-error's message and def-site, and counts the rest — the
+   line stays one line, `--edn` carries them all."
+  [{:keys [errors]}]
+  (when-let [{:keys [message path line]} (first errors)]
+    (str ": " message
+         (when path (str " (Declared at: " path (when line (str ":" line)) ")"))
+         (when (> (count errors) 1)
+           (str " (+ " (dec (count errors)) " more; use `--edn` for all)")))))
+
+(defn- diagnostic-line [{:keys [stage severity type message] :as diagnostic}]
   (str "- [" (name (or severity :error)) "/" (name (or stage :?)) "] "
        (or type "")
-       (when message (str " — " message))))
+       (when message (str " — " message))
+       (first-sub-error-suffix diagnostic)))
 
 (defn- diagnostics-lines [diagnostics]
   (let [total (count diagnostics)
         shown (take max-diagnostics diagnostics)
         omitted (- total (count shown))]
     (concat
-     ["## What would fail (static validation)"
+     ;; sl-a55s: say what was checked AND what was not — no line here may
+     ;; read as a verdict on the whole project.
+     ["## Project checks"
+      ""
+      (str "Checked: config, glossaries, step files, stepdefs against the"
+           " glossary, macros, setup declarations.")
+      (str "Not checked: your features — orient does not read them."
+           " `sl run --dry-run` (under Validate / run) is the gate for features.")
       ""]
      (if (zero? total)
-       ["No static-validation diagnostics. Accepted project truth loads clean."]
+       ["No diagnostics from these checks."]
        (concat
         (map diagnostic-line shown)
         (when (pos? omitted)
@@ -132,15 +160,6 @@
     ""]
    (map #(str "- `sl agent-doc " % "`") (agent-doc/topic-names))))
 
-(defn- mode-line
-  "One-line mode statement (sl-hjnp) — the silent-vanilla guard. Nil when the
-   projection has no :mode (config never loaded)."
-  [mode]
-  (case mode
-    :shifted "Mode: Shifted — SVO validation ON (:svo present in config)"
-    :vanilla "Mode: Vanilla — SVO validation OFF (no :svo in config; add :svo to enable)"
-    nil))
-
 (defn- render-thin
   "Render the thin default orientation from a complete projection."
   [projection-value]
@@ -151,10 +170,11 @@
       (concat
        ["# Orientation"
         ""
-        (str "Status: " (name (or (:status projection-value) :unknown))
-             " · fingerprint: " (or (:fingerprint projection-value) "n/a"))]
-       (keep identity [(mode-line (:mode projection-value))])
-       [""]
+        ;; The label names the section it summarizes (sl-a55s): a bare
+        ;; "Status: ok" reads as a verdict on the whole project.
+        (str "Project checks: " (name (or (:status projection-value) :unknown))
+             " · fingerprint: " (or (:fingerprint projection-value) "n/a"))
+        ""]
        (context-lines (:project-context projection-value))
        [""]
        (counts-lines (:counts view))

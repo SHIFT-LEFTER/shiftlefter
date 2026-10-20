@@ -7,6 +7,6 @@
 ;; Dashboard.featured[1].rating.stars against this example's own intents.
 ;; setup.clj stands up the fixture server.
 {:interfaces {:web {:type :web :adapter :etaoin :config {}}}
- :svo        {:unknown-subject :error
+ :enforcement        {:unknown-subject :error
               :unknown-verb    :warn
               :unknown-interface :error}}

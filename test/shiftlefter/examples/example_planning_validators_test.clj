@@ -57,12 +57,8 @@
       (is (= 0 exit))
       (is (pos? plan-count)))))
 
-(deftest multi-actor-vanilla-config-plans-clean
-  (let [{:keys [exit plan-count]} (plan-example (str ex-02b "shiftlefter-vanilla.edn")
-                                                [(str ex-02b "features")])]
-    (testing "02b Vanilla contrast config binds clean (any subject accepted)"
-      (is (= 0 exit))
-      (is (pos? plan-count)))))
+;; sl-6wh9: 02b's Vanilla-contrast config (shiftlefter-vanilla.edn) and its
+;; "any subject accepted" validator are retired with vanilla execution.
 
 (deftest multi-actor-no-glossary-config-rejects-all
   (let [{:keys [exit status]} (plan-example (str ex-02b "shiftlefter-shifted-no-glossary.edn")

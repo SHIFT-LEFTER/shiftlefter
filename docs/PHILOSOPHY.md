@@ -45,9 +45,9 @@ consequences, not features.
 One ordering, said out loud because the rest of this page can hide it. The typed
 vocabulary is the *how*. The *why* is older and plainer: **never guess before the
 run, never lie after it.** Where the two pull apart, the design sides with the
-second — it keeps a plain-Gherkin mode, leaves a raw locator legible rather than
-banned, and refuses to promote an error it cannot classify into a claim it cannot
-back. In each case it withholds the claim rather than insist on the type.
+second — it leaves a raw locator legible rather than banned, and refuses to
+promote an error it cannot classify into a claim it cannot back. In both cases it
+withholds the claim rather than insist on the type.
 
 ## Subjects are never anonymous
 

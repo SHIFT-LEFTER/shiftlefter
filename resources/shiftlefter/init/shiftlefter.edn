@@ -12,9 +12,16 @@
  ;;   :admin-web {:type :web :adapter :etaoin}
  :interfaces {:web :default}
 
- ;; Shifted mode: vocabulary enforcement is ON (unknown subjects/verbs warn,
- ;; unknown interfaces error). DELETE this key for Vanilla mode (no checks).
- :svo {}
+ ;; Enforcement levels (:warn / :error / :off) — the built-in defaults are
+ ;; shown; the block may be omitted entirely. `:all :error` is the strict
+ ;; one-liner (a named key overrides it; :unknown-interface is always :error).
+ ;; Two kinds are left UNNAMED on purpose: :unknown-object and :raw-locator
+ ;; default to :warn once an intents glossary is configured (it is, below)
+ ;; and :off otherwise — naming them here would pin them.
+ :enforcement {:unknown-subject :warn
+               :unknown-verb :warn
+               :unknown-interface :error
+               :untyped-stepdef :warn}
 
  ;; Glossaries — these are the conventional paths (the same ones discovered
  ;; when this key is absent), kept explicit so the knobs are visible.

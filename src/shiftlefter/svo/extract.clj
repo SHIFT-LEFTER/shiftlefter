@@ -66,6 +66,12 @@
   "Normalize a subject string to a keyword.
 
    - Trims whitespace
+   - Strips exactly ONE leading ':' (sl-74c2): the builtins capture AFTER
+     the colon (`:(\\S+)`), so a user pattern that captures it (`(\\S+)`)
+     gets the same shape — \":user\" and \"user\" both mean :user. Only one:
+     a second colon stays visible (\"::user\" -> (keyword \":user\"), which
+     the report envelope stringifies rather than emitting the unreadable
+     ::user form).
    - Lowercases
    - Converts to keyword
 
@@ -73,11 +79,13 @@
      \"Alice\" => :alice
      \"ADMIN\" => :admin
      \" Bob \" => :bob
+     \":user\" => :user
      \"system/test-setup\" => :system/test-setup"
   [s]
   (when (string? s)
     (let [trimmed (str/trim s)
-          lower (str/lower-case trimmed)]
+          uncoloned (if (str/starts-with? trimmed ":") (subs trimmed 1) trimmed)
+          lower (str/lower-case uncoloned)]
       (keyword lower))))
 
 ;; -----------------------------------------------------------------------------

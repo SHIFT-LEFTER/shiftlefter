@@ -6,15 +6,26 @@
 # Module Map — checked against the actual require graph (2026-08-18; re-extracted 2026-08-26)
 
 Arrows below are EXTRACTED from `(:require …)` forms across
-`src/shiftlefter/**/*.clj` — **316 require edges** at the 2026-08-30
+`src/shiftlefter/**/*.clj` — **330 require edges** at the 2026-10-19
 re-extraction (distinct `shiftlefter.*` → `shiftlefter.*` pairs, require
 forms only; freshness-guarded by the test suite, which re-runs the
 extraction and fails when this stamp disagrees with the code) — not drawn
 from memory. Raw edge list: regenerate with the one-liner in § Method.
-Re-stamped the same day (+2 over the 314 the basis change
+Re-stamped the same day (sl-afs9, +2 over the 314 the basis change
 measured): `stepengine.exec` and `stepengine.exec.step-loop` now require
 `shiftlefter.step` for the shared `error-classes` literal — the guard's
 first live catch.
+Re-stamped 2026-10-19 (sl-ectw, +5 over 325): the declared-shape
+feature. `intent.loader → intent.shape` (the new shape analyzer, JDK-only
+so the intent layer never reaches back into the engine);
+`stepengine.bindings → intent.{loader,resolve}` (the matcher-slot
+classifier resolves `Intent.element` refs to the element's `:shape` —
+engine → language, the lawful direction, same as `stepengine.bind →
+intent.state`); `stepengine.exec.step-loop → intent.state` (the exec
+normalizer reads the same registry the lint read at plan time — the
+shared-classifier doctrine, plan and run cannot disagree); and
+`svo.bindings-lint → svo.extract` (placeholder → capture index, in-layer).
+No new cycle: `intent.*` requires nothing under `stepengine` or `svo`.
 
 ## The intended shape (the laws as practiced)
 

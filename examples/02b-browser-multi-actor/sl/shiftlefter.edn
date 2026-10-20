@@ -1,7 +1,7 @@
-;; Primary config — Shifted mode: the glossary declares who can act, and
-;; :svo validates every scenario at planning time, before a browser opens.
+;; Primary config: the glossary declares who can act, and the :enforcement
+;; levels validate every scenario at planning time, before a browser opens.
 ;;
-;; The :svo levels below are the recommended baseline (same as examples
+;; The :enforcement levels below are the recommended baseline (same as examples
 ;; 04-06): unknown subjects and interfaces are hard errors; unknown verbs
 ;; warn (builtin verbs cover the common web actions).
 ;;
@@ -18,6 +18,6 @@
 
 {:interfaces {:web {:type :web
                     :adapter :etaoin}}
- :svo {:unknown-subject :error
+ :enforcement {:unknown-subject :error
        :unknown-verb :warn
        :unknown-interface :error}}

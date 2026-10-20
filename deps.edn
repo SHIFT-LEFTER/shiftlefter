@@ -27,8 +27,11 @@
          :extra-paths ["test"]
          :main-opts  ["-m" "kaocha.runner"]}
   :run {:main-opts ["-m" "shiftlefter.core"]}
-  :compliance {:extra-deps {io.cucumber/gherkin-utils {:mvn/version "28.2.0"}
-                            io.cucumber/messages      {:mvn/version "28.2.0"}}
+  ;; sl-8nku: the line cucumber/gherkin v42.0.1's expectations were generated
+  ;; with (its pom wants messages [34.0.2,35); gherkin-utils 12.0.2 wants
+  ;; messages [32,35)). Nothing in src imports io.cucumber — declarative.
+  :compliance {:extra-deps {io.cucumber/gherkin-utils {:mvn/version "12.0.2"}
+                            io.cucumber/messages      {:mvn/version "34.2.1"}}
                :ns-default shiftlefter.gherkin.compliance}
   :repl {:jvm-opts ["-Dclojure.spec.skip-macros=true"]
         :main-opts ["-m" "nrepl.cmdline" "--middleware" "[cider.nrepl/cider-middleware]"]}

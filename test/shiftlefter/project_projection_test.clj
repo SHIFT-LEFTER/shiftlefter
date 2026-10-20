@@ -60,10 +60,10 @@
                :interfaces {:web {:type :web
                                    :adapter :etaoin
                                    :config {:headless true}}}
-               :svo {:unknown-subject :error
+               :enforcement {:unknown-subject :error
                      :unknown-verb :error
                      :unknown-interface :error
-                     :unknown-object :strict}}))
+                     :unknown-object :error}}))
 
 (deftest projection-requires-real-config-by-default
   (with-temp-project
@@ -157,10 +157,10 @@ steps =
                    :interfaces {:web {:type :web
                                        :adapter :etaoin
                                        :config {}}}
-                   :svo {:unknown-subject :warn
+                   :enforcement {:unknown-subject :warn
                          :unknown-verb :warn
                          :unknown-interface :error
-                         :unknown-object :strict}})
+                         :unknown-object :error}})
       (let [p (projection/build-projection (project-context dir)
                                            {:source :working-tree})
             m (first (:macros p))]
@@ -217,10 +217,10 @@ steps =
                             :intents "glossary/intents"}
                :interfaces {:web {:type :web :adapter :etaoin}
                             :sms {:type :sms :adapter :sms-mock}}
-               :svo {:unknown-subject :error
+               :enforcement {:unknown-subject :error
                      :unknown-verb :error
                      :unknown-interface :error
-                     :unknown-object :strict}}))
+                     :unknown-object :error}}))
 
 (def ^:private declared-sms-setup
   "An examples/04-shaped setup.clj: :sms-mock (a builtin NAME) re-declared
@@ -295,10 +295,10 @@ steps =
                    :glossaries {:subjects "glossary/subjects.edn"
                                 :intents "glossary/intents"}
                    :interfaces {:mail {:type :email :adapter :my-mail}}
-                   :svo {:unknown-subject :error
+                   :enforcement {:unknown-subject :error
                          :unknown-verb :error
                          :unknown-interface :error
-                         :unknown-object :strict}})
+                         :unknown-object :error}})
       (write-text! (fs/path dir "sl" "setup.clj")
                    "(ns setup)
                     (def setups
@@ -333,10 +333,10 @@ steps =
                    :interfaces {:mail {:type :email :adapter :my-mail}
                                 :post {:type :email :adapter :my-post}
                                 :half {:type :email :adapter :my-half}}
-                   :svo {:unknown-subject :error
+                   :enforcement {:unknown-subject :error
                          :unknown-verb :error
                          :unknown-interface :error
-                         :unknown-object :strict}})
+                         :unknown-object :error}})
       (write-text! (fs/path dir "sl" "setup.clj")
                    "(ns setup)
                     (def setups
@@ -433,19 +433,19 @@ steps =
                                            :budget {:max-items 1}})]
         (is (= v1 v2))
         (is (= #{:projection/id :projection/version :fingerprint :source :status
-                 :mode :counts :subjects :interfaces}
+                 :counts :subjects :interfaces}
                (set (keys v1))))
         (is (= 1 (count (get-in v1 [:subjects :items]))))
         (is (= 1 (get-in v1 [:subjects :omission :omitted-count])))))))
 
 ;; -----------------------------------------------------------------------------
-;; Mode visibility + mode-respecting validation (sl-hjnp)
+;; Runner-real validation, block or no block (sl-hjnp honesty, sl-6wh9 one mode)
 ;; -----------------------------------------------------------------------------
 
 (defn- write-mismatched-stepdef!
   "A stepdef whose :svo declares a frame absent from the framework-default
-   web verb glossary (:click has no :nope frame). Tier-2 catches it in
-   Shifted mode; the runner ignores it in Vanilla."
+   web verb glossary (:click has no :nope frame). Tier-2 catches it on
+   every compile."
   [dir]
   (write-text! (fs/path dir "sl" "steps" "mismatched.clj")
                "(ns mismatched.steps
@@ -456,9 +456,10 @@ steps =
                   [ctx _subject _thing]
                   ctx)"))
 
-(defn- drop-svo-from-config!
-  "Rewrite the temp project's shiftlefter.edn without its :svo key — the
-   vanilla twin of make-basic-project!."
+(defn- drop-enforcement-from-config!
+  "Rewrite the temp project's shiftlefter.edn without its :enforcement
+   block — presence means nothing (sl-6wh9), so the projection must read
+   identically."
   [dir]
   (write-edn! (fs/path dir "sl" "shiftlefter.edn")
               {:runner {:step-paths ["steps/"]
@@ -470,58 +471,56 @@ steps =
                                    :adapter :etaoin
                                    :config {:headless true}}}}))
 
-(deftest projection-shifted-mode-validates-stepdefs
+(deftest projection-validates-stepdefs
   (with-temp-project
     (fn [dir]
       (make-basic-project! dir)
       (write-mismatched-stepdef! dir)
       (let [p (projection/build-projection (project-context dir)
                                            {:source :working-tree})]
-        (is (= :shifted (:mode p)))
+        (is (not (contains? p :mode)))
+        (is (map? (:enforcement-effective p)))
         (is (= :error (:status p)))
         (is (some #(and (= :stepdefs (:stage %))
                         (= :stepdef/unknown-frame (:type %)))
                   (:diagnostics p)))))))
 
-(deftest projection-vanilla-mode-skips-stepdef-validation
+(deftest projection-validates-stepdefs-without-enforcement-block
   (with-temp-project
     (fn [dir]
       (make-basic-project! dir)
       (write-mismatched-stepdef! dir)
-      (drop-svo-from-config! dir)
+      (drop-enforcement-from-config! dir)
       (let [p (projection/build-projection (project-context dir)
                                            {:source :working-tree})]
-        (is (= :vanilla (:mode p)))
-        ;; The runner would ignore the mismatch in vanilla — so must we.
-        (is (not-any? #(= :stepdefs (:stage %)) (:diagnostics p)))
-        (is (= :ok (:status p)))))))
+        ;; The runner catches the mismatch on every compile — so must we.
+        (is (= :error (:status p)))
+        (is (some #(and (= :stepdefs (:stage %))
+                        (= :stepdef/unknown-frame (:type %)))
+                  (:diagnostics p)))))))
 
-(deftest projection-vanilla-glossary-failure-is-warn
+(deftest projection-glossary-failure-errors-without-enforcement-block
   (with-temp-project
     (fn [dir]
       (make-basic-project! dir)
-      (drop-svo-from-config! dir)
-      ;; Break the subjects glossary path — the runner never loads it in
-      ;; vanilla, so orientation must not fail; it warns and falls back to
-      ;; framework defaults.
+      (drop-enforcement-from-config! dir)
+      ;; Break the subjects glossary path — the runner loads it on every
+      ;; run (sl-6wh9), so orientation fails exactly as the run would; the
+      ;; old vanilla-honesty :warn fallback is retired.
       (fs/delete (fs/path dir "sl" "glossary" "subjects.edn"))
       (let [p (projection/build-projection (project-context dir)
                                            {:source :working-tree})]
-        (is (= :vanilla (:mode p)))
-        (is (= :ok (:status p)))
-        (is (some #(and (= :glossary (:stage %)) (= :warn (:severity %)))
-                  (:diagnostics p)))
-        ;; Framework-default verbs still projected for inventory
-        (is (seq (:verbs p)))))))
+        (is (= :error (:status p)))
+        (is (some #(and (= :glossary (:stage %)) (= :error (:severity %)))
+                  (:diagnostics p)))))))
 
-(deftest projection-shifted-glossary-failure-still-errors
+(deftest projection-glossary-failure-errors-with-enforcement-block
   (with-temp-project
     (fn [dir]
       (make-basic-project! dir)
       (fs/delete (fs/path dir "sl" "glossary" "subjects.edn"))
       (let [p (projection/build-projection (project-context dir)
                                            {:source :working-tree})]
-        (is (= :shifted (:mode p)))
         (is (= :error (:status p)))
         (is (some #(and (= :glossary (:stage %)) (= :error (:severity %)))
                   (:diagnostics p)))))))
@@ -621,7 +620,7 @@ steps =
                   {:runner {:step-paths ["steps/"] :macros {:enabled? false}}
                    :glossaries {:subjects "glossary/subjects.edn"}
                    :interfaces {:storefront {:type :web :adapter :etaoin}}
-                   :svo {:unknown-subject :error}})
+                   :enforcement {:unknown-subject :error}})
       (let [p (projection/build-projection (project-context dir))
             unknown-verb-issues (filter #(= :stepdef/unknown-verb (:type %))
                                         (:diagnostics p))]

@@ -2,12 +2,12 @@
 
 When built-in steps aren't enough, write your own in Clojure.
 
-> **Mode: Vanilla** — standard Cucumber-style steps that work exactly like
-> you'd expect from any Gherkin runner; there is no `:svo` in the config, so
-> no vocabulary validation runs (`sl orient` will say `Mode: Vanilla`).
-> ShiftLefter's **Shifted mode** adds subject-verb-object validation and
-> multi-actor scenarios — [`02b`](../02b-browser-multi-actor/) is the first
-> Shifted example, and [the examples index](../README.md) has the full path.
+> **Two typed steps and one untyped one — on purpose.** A typed step carries
+> `:svo` metadata, so its subject is checked against the glossary before
+> anything runs. The third step is left untyped to show what the planner says
+> about it: it binds and runs, with a warning. Multi-actor browser scenarios
+> are [`02b`](../02b-browser-multi-actor/); [the examples index](../README.md)
+> has the full path.
 
 ## The Feature File
 
@@ -16,13 +16,13 @@ When built-in steps aren't enough, write your own in Clojure.
 Feature: Cucumber basket
 
   Scenario: Eating cucumbers
-    Given I have 12 cucumbers
-    When I eat 5 cucumbers
+    Given :user has 12 cucumbers
+    When :user eats 5 cucumbers
     Then I should have 7 cucumbers
 
   Scenario: Eating too many
-    Given I have 3 cucumbers
-    When I eat 5 cucumbers
+    Given :user has 3 cucumbers
+    When :user eats 5 cucumbers
     Then I should have -2 cucumbers
 ```
 
@@ -33,14 +33,17 @@ Feature: Cucumber basket
 (ns steps.cucumbers
   (:require [shiftlefter.stepengine.registry :refer [defstep]]))
 
-(defstep #"I have (\d+) cucumbers"
-  [ctx n]
+(defstep #"^:(\S+) has (\d+) cucumbers$"
+  {:svo {:subject :$1 :verb :have :frame :count}}
+  [ctx _subject n]
   (assoc ctx :cucumbers (parse-long n)))
 
-(defstep #"I eat (\d+) cucumbers"
-  [ctx n]
+(defstep #"^:(\S+) eats (\d+) cucumbers$"
+  {:svo {:subject :$1 :verb :eat :frame :count}}
+  [ctx _subject n]
   (update ctx :cucumbers - (parse-long n)))
 
+;; Untyped on purpose — see below.
 (defstep #"I should have (-?\d+) cucumbers"
   [ctx n]
   (let [expected (parse-long n)
@@ -50,6 +53,39 @@ Feature: Cucumber basket
                        {:expected expected :actual actual})))
     ctx))
 ```
+
+The first two steps are **typed**: `:svo` maps the first capture to the
+subject (`:$1`), and the subject capture sits after the colon — `:(\S+)` —
+so `:user` in the feature becomes the subject `:user`, which is checked
+against `sl/glossary/subjects.edn`. A typo like `:usr` is caught at planning
+time. These steps declare no `:interface` (a basket is not a browser), so
+their subject is checked but their verb is not — verbs are checked against
+an interface's verb glossary, and there is none here.
+
+The third step is **untyped**. It still binds and runs, but the planner
+reports it:
+
+```
+SVO validation warnings:
+  WARNING: Untyped step "I should have 7 cucumbers"
+         at sl/features/cucumbers.feature:6
+         matched stepdef "I should have (-?\\d+) cucumbers", which declares no :svo — no subject, verb, or object was checked
+```
+
+That warning (`:stepdef/untyped`) is the lesson: nothing about the step went
+through the type system. A real step library types every step; set
+`:enforcement {:untyped-stepdef :error}` in `shiftlefter.edn` to make it a
+planning error instead of a warning.
+
+## The Glossary File
+
+```clojure
+;; sl/glossary/subjects.edn
+{:subjects
+ {:user {:desc "The person holding the cucumber basket"}}}
+```
+
+Discovered automatically at the conventional path next to the config.
 
 ## The Config File
 
@@ -86,6 +122,10 @@ sl run sl/features/
 ```
 
 - **Pattern**: A regex that matches step text. Capture groups become arguments.
+- **Metadata** (optional map before the argument vector): `:svo` names which
+  capture is the subject (`:$1`), the verb, and the frame; add `:interface`
+  when the step drives an interface (`:web`, `:sms`, …) so the verb is
+  checked too.
 - **ctx**: The scenario context — a map that accumulates state across steps.
 - **Arguments**: Strings captured from the regex (you parse them as needed).
 - **Return**: The (possibly updated) ctx for the next step.

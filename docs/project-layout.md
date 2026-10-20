@@ -38,8 +38,8 @@ otherwise.
 | `shiftlefter.edn` | effectively yes | any real run (`sl orient` works without) | `sl/shiftlefter.edn` — the only discovered location; discovery walks parent dirs up to the git boundary | `-c FILE` (exotic layouts) |
 | launcher + jar | yes, to run | always | `sl/` (installer default) | installer `--dir`; the wrapper finds any sibling `shiftlefter*.jar` |
 | feature files | yes | always | **no `setup.clj`:** `[:runner :features]`, default `["features/"]` → `sl/features/`; bare `sl run` runs the corpus. **with `setup.clj`:** the declared plan IS the corpus; bare `sl run` runs the full plan | config key, or CLI paths (under `setup.clj` they must be a subset of the declared plan) |
-| `glossary/subjects.edn` | yes in Shifted mode (`:svo` in config) | actors exist | probed at `glossary/subjects.edn` | `:glossaries {:subjects …}` — an explicit `:glossaries`, *including nil*, is used as written |
-| intents | yes in practice, in Shifted mode | any intent-addressed step (all real web use) | probed at `glossary/intents/` | `:glossaries {:intents …}` |
+| `glossary/subjects.edn` | in practice yes — glossaries always load; with none, every actor is an unknown subject (`:warn` by default) | actors exist | probed at `glossary/subjects.edn` | `:glossaries {:subjects …}` — an explicit `:glossaries`, *including nil*, is used as written |
+| intents | yes in practice | any intent-addressed step (all real web use) | probed at `glossary/intents/` | `:glossaries {:intents …}` |
 | verb glossaries | no — built-ins cover the normal path | extending vocabulary | probed at `glossary/verbs/*.edn` (each file's `:type` is its mount key) | `:glossaries {:verbs [paths]}` |
 | dev steps (`.clj`) | no | custom step definitions | `[:runner :step-paths]`, default `["steps/"]` | config key, or `--step-paths` (resolved against your shell's cwd) |
 | `setup.clj` | no | orchestration: standing SUT, groups, custom adapter registries | sibling of the active config, fixed name | none — fixed by design |
@@ -51,7 +51,7 @@ otherwise.
 
 Notes the table can't hold:
 
-- **Features, both modes.** Without `setup.clj`, the corpus is config-pointed
+- **Features, with and without `setup.clj`.** Without `setup.clj`, the corpus is config-pointed
   with a conventional default — bare `sl run` is well-defined and runs
   `sl/features/`. With `setup.clj`, the union of the groups' `:features` IS
   the plan: files on disk but not declared are ignored, CLI paths outside the
@@ -235,29 +235,29 @@ with the line it moved to, and a pin without an anchor is refused. Re-pinned
 | Claim | Evidence |
 |---|---|
 | config discovery: `sl/shiftlefter.edn` only, git-bounded walk-up | `src/shiftlefter/project_context.clj:61-63` (`sl-config-path`) (single layout); `src/shiftlefter/project_context.clj:41-49` (`git-worktree-root`) (git boundary); `src/shiftlefter/project_context.clj:50-60` (`ancestors-through-boundary`) (walk); `src/shiftlefter/project_context.clj:169-216` (`defn resolve`) |
-| `-c FILE` escape | `src/shiftlefter/core.clj:57` (`--config FILE`); explicit branch `src/shiftlefter/project_context.clj:82-91` (`standard-explicit-layout`) |
+| `-c FILE` escape | `src/shiftlefter/core.clj:58` (`--config FILE`); explicit branch `src/shiftlefter/project_context.clj:82-91` (`standard-explicit-layout`) |
 | launcher/jar convention; installer target `sl/`, `--dir` override; jar glob | `release/install.sh:39` (`TARGET_DIR="sl"`); `release/install.sh:51` (`--dir)`); `bin/sl:54-56` (`shiftlefter*.jar`) |
-| features default `["features/"]`, config-root-relative; no fallback without real config | `src/shiftlefter/config.clj:229-230` (`:features ["features/"]`); `src/shiftlefter/config.clj:519-525` (`get-features`); `src/shiftlefter/runner/core.clj:725-730` (`[:runner :features]`); `src/shiftlefter/project_context.clj:235-242` (`require-real-config`) |
+| features default `["features/"]`, config-root-relative; no fallback without real config | `src/shiftlefter/config.clj:261-262` (`:features ["features/"]`); `src/shiftlefter/config.clj:579-585` (`get-features`); `src/shiftlefter/runner/core.clj:804-808` (`[:runner :features]`); `src/shiftlefter/project_context.clj:235-242` (`require-real-config`) |
 | setup.clj owns the plan; bare `sl run` = full declared plan; CLI subset rule | `src/shiftlefter/runner/setup.clj:76-90` (`## Pure-mode invariant`); `src/shiftlefter/runner/setup.clj:534-545` (`validate-cli-paths`); demonstrated: `sl run` / `sl run --dry-run` in `examples/04-sms-2fa` |
-| plan-shape lints (dead group, duplicate label, shared-feature warning) | `src/shiftlefter/runner/setup.clj:732-754` (`lint-setups`); wired `src/shiftlefter/runner/core.clj:1955-1965` (`setup/lint-setups`) |
-| glossary probes + explicit-wins-including-nil | `src/shiftlefter/config.clj:316-330` (`probe-conventional-glossaries`); `src/shiftlefter/config.clj:325-332` (`including nil`) |
-| step-paths default `["steps/"]`; `--step-paths` cwd-anchored | `src/shiftlefter/config.clj:229` (`:step-paths ["steps/"]`); `src/shiftlefter/config.clj:514-517` (`get-step-paths`); `src/shiftlefter/runner/core.clj:675-685` (`:step-paths opts`) |
+| plan-shape lints (dead group, duplicate label, shared-feature warning) | `src/shiftlefter/runner/setup.clj:732-754` (`lint-setups`); wired `src/shiftlefter/runner/core.clj:2395-2405` (`setup/lint-setups`) |
+| glossary probes + explicit-wins-including-nil | `src/shiftlefter/config.clj:339-353` (`probe-conventional-glossaries`); `src/shiftlefter/config.clj:358-365` (`including nil`) |
+| step-paths default `["steps/"]`; `--step-paths` cwd-anchored | `src/shiftlefter/config.clj:261` (`:step-paths ["steps/"]`); `src/shiftlefter/config.clj:574-577` (`get-step-paths`); `src/shiftlefter/runner/core.clj:732-742` (`:step-paths opts`) |
 | setup.clj / hooks.clj sibling-of-config, fixed names | `src/shiftlefter/runner/setup.clj:200-215` (`"setup.clj"`); `src/shiftlefter/runner/hooks.clj:107-125` (`sibling-of-config`) |
-| macro registry paths: required-when-enabled; file-or-directory form | `src/shiftlefter/config.clj:69-72` (`::registry-paths`); `src/shiftlefter/config.clj:531-534` (`macros-enabled?`); `src/shiftlefter/stepengine/macros.clj:67-75` (`fs/directory?`) |
+| macro registry paths: required-when-enabled; file-or-directory form | `src/shiftlefter/config.clj:76-78` (`::registry-paths`); `src/shiftlefter/config.clj:591-594` (`macros-enabled?`); `src/shiftlefter/stepengine/macros.clj:67-75` (`fs/directory?`) |
 | `sl/lib/*.jar` on the classpath, cold and warm; lib-sig bounce | `bin/sl:256-262` (`-cp "$LIB_CP"`) (classpath); `bin/sl:296-306` (`lib_sig()`); `bin/sl:350-360` (`lib-sig`) (bounce); `bin/sl:420-430` (`lib_sig "$LIB_DIR"`) (warm) |
 | AGENTS.md stanza printed by default, written only on explicit `--write-agents` | `release/install.sh:132-145` (`[y/N]`) (consent block); `src/shiftlefter/init.clj` (`scaffold!` `:write-agents?`); stanza source `resources/shiftlefter/onramp/agents-breadcrumb.md` |
 | machine config fixed at `~/.shiftlefter/config.edn` | `src/shiftlefter/config/user.clj:50-55` (`user-config-path`) (no override path exists) |
-| `shiftlefter.edn` is data-only (no code-bearing config keys) | `src/shiftlefter/config.clj:633` (`known-top-level-keys`) — every species file cited above is the only code entry |
+| `shiftlefter.edn` is data-only (no code-bearing config keys) | `src/shiftlefter/config.clj:693` (`known-top-level-keys`) — every species file cited above is the only code entry |
 | results dir contract: stamp, per-group dirs, self-ignoring, defaults-run opt-out | `src/shiftlefter/runner/results.clj:1-33` (`directory-of-stamped-runs`); `src/shiftlefter/runner/results.clj:54-63` (`defn stamp`); `src/shiftlefter/runner/results.clj:65-70` (`results-root`); `src/shiftlefter/runner/results.clj:71-82` (`gitignore-content`); `src/shiftlefter/runner/results.clj:98-125` (`ensure-group-dir!`) |
 | attachments per-scenario dirs + path portability | `src/shiftlefter/attachments.clj:10-17` (`Path portability contract`); `src/shiftlefter/attachments.clj:196-200` (`ensure-scenario-dir!`) |
-| report path anchoring (flag = cwd, config = config-root, flag wins) | `src/shiftlefter/runner/core.clj:183-195` (`resolve-config-declared-paths`); `src/shiftlefter/runner/core.clj:229-245` (`--junit-xml flag wins`); `src/shiftlefter/config.clj:81-88` (`::report`) |
-| HTML dual-write; JUnit configured-path-only | `src/shiftlefter/runner/report/html.clj:250-256` (`report.html`); `src/shiftlefter/runner/core.clj:229-238` (`--junit-xml flag wins`) |
+| report path anchoring (flag = cwd, config = config-root, flag wins) | `src/shiftlefter/runner/core.clj:197-209` (`resolve-config-declared-paths`); `src/shiftlefter/runner/core.clj:229-245` (`--junit-xml flag wins`); `src/shiftlefter/config.clj:95-102` (`::report`) |
+| HTML dual-write; JUnit configured-path-only | `src/shiftlefter/runner/report/html.clj:281-287` (`report.html`); `src/shiftlefter/runner/core.clj:243-252` (`--junit-xml flag wins`) |
 | wardrobe fixed path, no config key, gitignore line on init | `src/shiftlefter/costume/wardrobe.clj:54-66` (`wardrobe-dir`); `src/shiftlefter/costume/wardrobe.clj:135-171` (`ensure-gitignored!`); absent from `known-top-level-keys` |
 | daemon.edn / daemon.log / lib-sig / spawn.lock lifecycles | `src/shiftlefter/daemon.clj:228-243` (`write-edn!`); `src/shiftlefter/daemon.clj:279-305` (`stop-daemon!`); `bin/sl:393-431` (`spawn.lock`); `bin/sl:396-403` (`daemon.log`) |
-| dirty-teardown.edn append/announce/clear (dry-run keeps) | `src/shiftlefter/runner/teardown_marker.clj:1-21` (`dirty-teardown.edn`); `src/shiftlefter/runner/teardown_marker.clj:34-75` (`defn append!`); `src/shiftlefter/runner/core.clj:1513-1520` (`announce-prior-teardown!`); `src/shiftlefter/runner/core.clj:2195-2200` (`on real runs, clear`) |
+| dirty-teardown.edn append/announce/clear (dry-run keeps) | `src/shiftlefter/runner/teardown_marker.clj:1-21` (`dirty-teardown.edn`); `src/shiftlefter/runner/teardown_marker.clj:34-75` (`defn append!`); `src/shiftlefter/runner/core.clj:1916-1923` (`announce-prior-teardown!`); `src/shiftlefter/runner/core.clj:2841-2844` (`on real runs, clear`) |
 | sieve store location | `src/shiftlefter/sieve/store.clj:10` (`default-root`); `src/shiftlefter/sieve/store.clj:17-22` (`ensure-parent!`) |
 | env vars incl. the `SHIFTLEFTER_*` prefix rule | `bin/sl:500-505` (`SHIFTLEFTER_`); `docs/daemon.md` § env; `src/shiftlefter/runner/report/console.clj:50` (`NO_COLOR`); `src/shiftlefter/adapters/twilio.clj:26-27` (`TWILIO_ACCOUNT_SID`) |
-| EDN summary + form-stream contract (the locked data contract) | `src/shiftlefter/runner/report/edn.clj:5-77` (`## Summary Shape`); `src/shiftlefter/runner/report/edn.clj:99` (`The form stream`) |
+| EDN summary + form-stream contract (the locked data contract) | `src/shiftlefter/runner/report/edn.clj:5-92` (`## Summary Shape`); `src/shiftlefter/runner/report/edn.clj:150` (`The form stream`) |
 | bus event envelope spec | `src/shiftlefter/events.clj:56-70` (`::event-envelope`) |
 
 Related pages: [Hooks](hooks.md) · [Costumes](COSTUMES.md) ·

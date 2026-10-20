@@ -4,11 +4,12 @@ Run browser automation tests without writing any step definitions. ShiftLefter
 includes built-in steps for common web interactions — the feature file below is
 the *entire* test.
 
-> **Mode: Vanilla** — deliberately. There is no `:svo` in the config, so any
-> subject name is accepted and ShiftLefter behaves like a standard Gherkin
-> runner (`sl orient` will say so). That's the zero-setup entry point; the
-> next example, [`02b`](../02b-browser-multi-actor/), adds the glossary and
-> runs Shifted.
+> **Zero code, one glossary file.** Every step below is a builtin acting as
+> `:user`, and `sl/glossary/subjects.edn` is the whole project vocabulary:
+> one subject, discovered automatically beside the config. That is the
+> minimum a ShiftLefter project carries — without it `:user` is an unknown
+> subject and planning warns. The next example,
+> [`02b`](../02b-browser-multi-actor/), grows the glossary to two actors.
 
 > **Fully offline.** The app under test is ShiftLefter's bundled fixture
 > server — `setup.clj` starts it on `127.0.0.1` before the run and stops it
@@ -74,6 +75,18 @@ This tells ShiftLefter to auto-provision a Chrome browser when steps need
 one. (The `:etaoin` adapter suppresses Chrome's native password popups by
 default — automation hygiene; override via `:adapter-opts {:prefs {...}}`,
 see `docs/INSTALL-TIERS.md`.)
+
+## The Glossary File
+
+```clojure
+;; sl/glossary/subjects.edn
+{:subjects
+ {:user {:desc "The one person driving the browser"}}}
+```
+
+Sitting at the conventional path next to `shiftlefter.edn`, it is picked up
+without a `:glossaries` key. It declares the one actor the feature uses;
+every `:user` step is checked against it at planning time.
 
 ## Prerequisites
 

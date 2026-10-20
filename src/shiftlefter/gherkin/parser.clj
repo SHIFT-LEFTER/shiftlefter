@@ -24,7 +24,9 @@
 (defrecord Scenario [type name description tags steps examples keyword-text location source-text leading-ws span])
 (defrecord ScenarioOutline [type name description tags steps examples keyword-text location source-text leading-ws span])
 (defrecord Background [type name description steps tags keyword-text location source-text leading-ws span])
-(defrecord Step [type keyword keyword-text text argument location source-text leading-ws span])
+;; `arguments` (sl-8nku, Gherkin 42): a vector of 0–2 DataTable/Docstring
+;; records in source order — a step may carry both (cucumber/gherkin #599).
+(defrecord Step [type keyword keyword-text text arguments location source-text leading-ws span])
 (defrecord Examples [type name description tags table location source-text leading-ws span])
 (defrecord Docstring [type content fence mediaType location source-text leading-ws span])
 (defrecord DataTable [type rows location source-text leading-ws span])
@@ -120,20 +122,25 @@
 (s/def ::end-idx nat-int?)
 (s/def ::span (s/keys :req-un [::start-idx ::end-idx]))
 
-(s/def ::argument
+(s/def ::argument-node
   (s/with-gen
     (s/or :docstring (s/and (partial instance? Docstring)
                             (s/keys :req-un [::type ::content ::fence ::mediaType ::location ::source-text]))
-          :data-table ::data-table
-          :nil nil?)
-    ;; Generator produces nil for simplicity; Docstring/DataTable generators work independently
-    #(gen/return nil)))
+          :data-table ::data-table)
+    ;; Generates DataTables only; Docstring construction is exercised by the parser tests
+    #(s/gen ::data-table)))
+
+(s/def ::arguments
+  (s/with-gen
+    (s/coll-of ::argument-node :kind vector? :max-count 2)
+    ;; Generator produces no arguments for simplicity; Docstring/DataTable generators work independently
+    #(gen/return [])))
 
 (s/def ::step
   (s/with-gen
-    (s/and (partial instance? Step) (s/keys :req-un [::type ::keyword ::text ::argument ::location ::source-text]))
+    (s/and (partial instance? Step) (s/keys :req-un [::type ::keyword ::text ::arguments ::location ::source-text]))
     #(gen/fmap (fn [[kw txt loc src]]
-                 (->Step :step kw (str kw " ") txt nil loc src "" nil))
+                 (->Step :step kw (str kw " ") txt [] loc src "" nil))
                (gen/tuple (s/gen ::keyword) (s/gen ::text) (s/gen ::location) (s/gen ::source-text)))))
 
 (s/def ::steps (s/coll-of ::step))
@@ -179,7 +186,7 @@
     #(gen/fmap (fn [[nm desc tags loc src]]
                  (->Feature :feature nm desc tags [] "Feature" nil loc src "" nil))
                (gen/tuple (s/gen ::name) (s/gen ::description) (s/gen ::tags) (s/gen ::location) (s/gen ::source-text)))))
-(s/def ::ast-node (s/or :feature ::feature :background ::background :scenario ::scenario :scenario-outline ::scenario-outline :step ::step :docstring ::argument :data-table ::data-table :table-row ::table-row :blank ::blank :comment ::comment))
+(s/def ::ast-node (s/or :feature ::feature :background ::background :scenario ::scenario :scenario-outline ::scenario-outline :step ::step :docstring ::argument-node :data-table ::data-table :table-row ::table-row :blank ::blank :comment ::comment))
 (s/def ::ast (s/coll-of ::ast-node))
 (s/def ::error (s/keys :req-un [::type ::location] :opt-un [::message ::token]))
 (s/def ::errors (s/coll-of ::error))
@@ -376,37 +383,62 @@
         ;; Reconstruct full text for source-text field
         full-text (str (or (:keyword-text token) "") step-text-raw)
         remaining (rest ts)
-        [argument remaining2 arg-errors] (parse-argument remaining)
+        [arguments remaining2 arg-errors] (parse-argument remaining)
         end-idx (or (token-idx (first remaining2)) (inc start-idx))
         span (make-span start-idx end-idx)]
-    [(->Step :step keyword-str (:keyword-text token) step-text-raw argument (:location token) full-text (:leading-ws token) span)
+    [(->Step :step keyword-str (:keyword-text token) step-text-raw arguments (:location token) full-text (:leading-ws token) span)
      remaining2 arg-errors]))
 
-(defn- parse-argument [ts]
+(defn- parse-one-argument
+  "Parse at most one step argument whose kind is in `allowed`
+   (#{:docstring :data-table}). Returns [argument remaining errors], or
+   [nil ts []] when none of an allowed kind is ahead.
+
+   sl-ur58: comments/blanks between a step (or a preceding argument) and a
+   table's first row are non-structural in upstream Gherkin — attach the
+   table iff one follows. Parsing from the trimmed stream keeps the
+   DataTable's location/span anchored at the first real row; anything other
+   than a table-row past the trim returns the ORIGINAL ts so the
+   between-steps comment path is unchanged."
+  [ts allowed]
   (if (empty? ts)
     [nil ts []]
-    (let [token (first ts)]
+    (let [kind (:type (first ts))]
       (cond
-        (= (:type token) :docstring-separator)
-        (let [[docstring remaining errors] (parse-docstring ts)]
-          [docstring remaining errors])
-        (= (:type token) :table-row)
-        (let [[table remaining errors] (parse-table ts)]
-          [table remaining errors])
-        ;; sl-ur58: comments/blanks between a step and its table's first row
-        ;; are non-structural in upstream Gherkin — attach the table iff one
-        ;; follows. Parsing from the trimmed stream keeps the DataTable's
-        ;; location/span anchored at the first real row; anything other than
-        ;; a table-row past the trim returns the ORIGINAL ts so the
-        ;; between-steps comment path is unchanged.
-        (#{:comment :blank} (:type token))
+        (and (= kind :docstring-separator) (allowed :docstring))
+        (parse-docstring ts)
+
+        (and (= kind :table-row) (allowed :data-table))
+        (parse-table ts)
+
+        (and (#{:comment :blank} kind) (allowed :data-table))
         (let [t (drop-while #(#{:comment :blank} (:type %)) ts)]
           (if (= (:type (first t)) :table-row)
-            (let [[table remaining errors] (parse-table t)]
-              [table remaining errors])
+            (parse-table t)
             [nil ts []]))
+
         :else
         [nil ts []]))))
+
+(defn- argument-kind [argument]
+  (if (instance? Docstring argument) :docstring :data-table))
+
+(defn- parse-argument
+  "Parse a step's arguments: none, one, or — Gherkin 42 (cucumber/gherkin
+   #599, sl-8nku) — a DataTable and a Docstring in either order. Returns
+   [arguments remaining errors] with `arguments` a vector in source order.
+   The second argument must be the OTHER kind: a repeat of the same kind is
+   left in the stream for the scenario-level parse to reject
+   (testdata/bad/repeated_step_docstring.feature)."
+  [ts]
+  (let [[first-arg remaining errors] (parse-one-argument ts #{:docstring :data-table})]
+    (if (nil? first-arg)
+      [[] ts []]
+      (let [other (disj #{:docstring :data-table} (argument-kind first-arg))
+            [second-arg remaining2 errors2] (parse-one-argument remaining other)]
+        (if (nil? second-arg)
+          [[first-arg] remaining errors]
+          [[first-arg second-arg] remaining2 (into errors errors2)])))))
 
 (defn- parse-docstring [ts]
   (let [sep-token (first ts)

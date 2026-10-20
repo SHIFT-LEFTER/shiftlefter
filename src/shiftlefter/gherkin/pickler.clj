@@ -22,21 +22,54 @@
   (:require [clojure.string :as str]
             [cheshire.core :as json]
             [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen]
             [shiftlefter.gherkin.parser :as parser]))
 
 ;; -----------------------------------------------------------------------------
 ;; Helpers
 ;; -----------------------------------------------------------------------------
 
-(defn- argument->pickle-arguments
-  "Extract argument data (table or docstring) in pickle format."
+(defn- argument->pickle-argument
+  "One AST argument in pickle shape: a DataTable is its rows as cell vectors,
+   a Docstring is {:content :mediaType}."
   [argument]
   (cond
     (instance? shiftlefter.gherkin.parser.DataTable argument)
     (mapv :cells (:rows argument))
     (instance? shiftlefter.gherkin.parser.Docstring argument)
     {:content (:content argument), :mediaType (:mediaType argument)}
-    :else []))
+    :else nil))
+
+(defn- arguments->pickle-arguments
+  "A step's `:step/arguments` from its AST `:arguments` vector: [] for none,
+   the single argument's own shape for one, and — Gherkin 42 (sl-8nku), a
+   step with both a DataTable and a Docstring — a 2-vector of both shapes in
+   source order. The single-argument shapes are the documented stepdef
+   contract (shiftlefter.step/arguments) and do not change."
+  [arguments]
+  (let [args (mapv argument->pickle-argument arguments)]
+    (case (count args)
+      0 []
+      1 (first args)
+      args)))
+
+(defn table-argument?
+  "A DataTable in pickle shape: a vector of cell vectors (non-empty)."
+  [x]
+  (and (vector? x) (seq x) (every? vector? x)))
+
+(defn docstring-argument?
+  "A Docstring in pickle shape: a map carrying :content."
+  [x]
+  (and (map? x) (contains? x :content)))
+
+(defn both-arguments?
+  "A Gherkin 42 step's two arguments: exactly one table and one docstring
+   shape, in source order."
+  [x]
+  (and (vector? x) (= 2 (count x))
+       (= 1 (count (filter table-argument? x)))
+       (= 1 (count (filter docstring-argument? x)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Specs - Pipeline Data Structures
@@ -88,7 +121,26 @@
 (s/def :step/keyword string?)
 (s/def :step/location map?)
 (s/def :step/origin #{:scenario :feature-background :rule-background})
-(s/def :step/arguments any?)
+;; sl-8nku (C1): the runtime argument contract, pinned. Single-argument shapes
+;; are what stepdefs read today; a Gherkin 42 step with both arguments carries
+;; a 2-vector in source order. (A typed-vector-for-every-step API is sl-cj9b.)
+(s/def ::cell-vectors (s/coll-of (s/coll-of string? :kind vector?) :kind vector?))
+(s/def ::table-argument
+  (s/with-gen
+    (s/and ::cell-vectors seq)
+    #(gen/vector (gen/vector (gen/string-alphanumeric) 1 3) 1 3)))
+(s/def ::content string?)
+(s/def ::mediaType (s/nilable string?))
+(s/def ::docstring-argument (s/keys :req-un [::content] :opt-un [::mediaType]))
+(s/def ::both-arguments
+  (s/with-gen
+    (s/and vector? both-arguments?)
+    #(gen/fmap vec (gen/tuple (s/gen ::table-argument) (s/gen ::docstring-argument)))))
+(s/def ::no-arguments (s/with-gen (s/and vector? empty?) #(gen/return [])))
+(s/def :step/arguments (s/or :none ::no-arguments
+                             :table ::table-argument
+                             :docstring ::docstring-argument
+                             :both ::both-arguments))
 
 (s/def ::pickle-step
   (s/keys :req [:step/id :step/text :step/keyword :step/location :step/origin :step/arguments]
@@ -150,6 +202,12 @@
     ;; No row-map, return as-is
     (nil? row-map) arguments
 
+    ;; Both (Gherkin 42): substitute in each, order kept. Checked BEFORE the
+    ;; table branch — a 2-vector whose first element is a table would
+    ;; otherwise read as a table.
+    (both-arguments? arguments)
+    (mapv #(substitute-arguments % row-map) arguments)
+
     ;; DataTable: vector of cell vectors
     (and (vector? arguments) (seq arguments) (vector? (first arguments)))
     (mapv (fn [cells]
@@ -182,7 +240,7 @@
       :text txt
       :location (:location step)
       :origin origin
-      :arguments (argument->pickle-arguments (:argument step))})))
+      :arguments (arguments->pickle-arguments (:arguments step))})))
 
 (defn- scenario->scenario-plan
   "Convert an AST scenario to a scenario-plan.

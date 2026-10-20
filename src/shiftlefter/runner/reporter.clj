@@ -72,6 +72,7 @@
   (:require [clojure.edn :as edn]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
+            [clojure.string :as str]
             [shiftlefter.runner.verdict :as verdict]))
 
 ;; -----------------------------------------------------------------------------
@@ -82,9 +83,10 @@
 
 (s/def ::run-id string?)
 ;; :error (sl-esq, family widened sl-7c7i): infrastructure failure — a
-;; lifecycle hook threw, capability provisioning failed, capture failed, or
-;; the harness crashed — distinct from :failed (a step assertion; valid
-;; test, app wrong). Scenario-level only; steps never carry it.
+;; lifecycle hook threw, capability provisioning failed, or capture failed
+;; — distinct from :failed (a step assertion; valid test, app wrong).
+;; Scenario-level only; steps never carry it. The RUNNER's own crash is
+;; never a scenario status: it is exit 3 (sl-io05).
 (s/def ::status #{:passed :failed :pending :skipped :error})
 (s/def ::exit-code int?)
 (s/def ::counts (s/map-of keyword? int?))
@@ -95,7 +97,6 @@
 ;; "ran 12 of 40; filter: @smoke".
 (s/def ::started-at string?)          ; ISO-8601, no offset
 (s/def ::version string?)
-(s/def ::mode #{:shifted :vanilla})
 (s/def ::project-name string?)
 (s/def ::selected int?)
 (s/def ::filtered-out int?)
@@ -116,7 +117,7 @@
 
 (s/def ::run-ctx
   (s/keys :req-un [::run-id]
-          :opt-un [::started-at ::version ::mode ::project-name ::selection
+          :opt-un [::started-at ::version ::project-name ::selection
                    ::results-dir ::artifacts-root ::seed]))
 
 (s/def ::scenario-result
@@ -144,8 +145,46 @@
 ;; sl-kowi (Ruling 4): the halt record — present only when
 ;; :halt-on-observation-failure fired: `{:after-scenario N :scenario name}`,
 ;; N = 1-based plan index of the first observation-class finalization.
-(s/def ::after-scenario pos-int?)
-(s/def ::halted (s/keys :req-un [::after-scenario]))
+;; sl-617t: the run abort fills the SAME slot with `{:reason :aborted
+;; :after-scenario N}`, N = scenarios that reached a verdict before the
+;; gate closed (0 when the abort landed before the first one).
+(s/def ::after-scenario nat-int?)
+(s/def ::reason #{:aborted})
+(s/def ::halted (s/keys :req-un [::after-scenario] :opt-un [::reason]))
+
+(defn blocked-held-phrase
+  "The one phrase every surface uses for a @blocked scenario held as its
+   tag claims (sl-190x C2): `blocked by REF — unobserved at step 2:
+   connection refused`. Reads the :held record's :ref and :outcome
+   {:status :at-step :message}; a bare @blocked says `blocked` alone. The
+   row says what was measured, never 'as expected'."
+  [{:keys [ref outcome]}]
+  (let [{:keys [status at-step message]} outcome]
+    (str "blocked" (when ref (str " by " ref))
+         " — " (name status)
+         (when at-step (str " at step " at-step))
+         (when message (str ": " message)))))
+
+(defn binding-errors-phrase
+  "The segment every surface appends to an --hold-unplannable held phrase
+   when data-plane lint errors held the scenario (sl-8ezu): `2 binding
+   error(s): element-has-no-shape, consumed-without-producer` — the count is
+   the error count, the names are the issue types (name part only),
+   distinct, first-seen order. nil when the entry carries no
+   :binding-errors, so the undefined/ambiguous-only phrase stays
+   byte-identical."
+  [{:keys [binding-errors]}]
+  (when (seq binding-errors)
+    (str (count binding-errors) " binding error(s): "
+         (str/join ", " (distinct (map (comp name :type) binding-errors))))))
+
+(defn planning-held
+  "The run-level :held entries for scenarios that never ran (sl-6wh9
+   --hold-unplannable, sl-190x @wip/@skip) — the ones a reporter renders
+   from the record. The engine's holds (:aborted, :blocked) are scenario
+   envelopes with their own rows and are excluded here."
+  [held]
+  (remove #(#{:aborted :blocked} (:reason %)) held))
 
 (s/def ::run-summary
   (s/keys :req-un [::run-id ::exit-code ::counts
@@ -300,6 +339,11 @@
                                      :status  (:status step-result)}
                               (:duration-ms step-result)
                               (assoc :duration-ms (:duration-ms step-result))
+                              ;; Poll digest (sl-tcsq): four integers,
+                              ;; EDN-native; absent when the step never
+                              ;; polled.
+                              (:poll-counts step-result)
+                              (assoc :poll-counts (:poll-counts step-result))
                               (:error step-result)
                               (assoc :error (error-envelope (:error step-result)))
                               ;; Attachment refs (sl-l9nj) — pure data by
@@ -313,10 +357,19 @@
      (:duration-ms scenario-result)
      (assoc :duration-ms (:duration-ms scenario-result))
      ;; Scenario-level :error (sl-esq/sl-7c7i): the infrastructure-failure
-     ;; family (hook/provisioning/capture/harness). Lives on the scenario,
+     ;; family (hook/provisioning/capture). Lives on the scenario,
      ;; never on a step; absent everywhere else.
      (:error scenario-result)
      (assoc :error (error-envelope (:error scenario-result)))
+     ;; Held record (sl-617t): a scenario the run abort kept from running
+     ;; (`{:reason :aborted}`) or stopped at a step boundary (`:after-step
+     ;; k`). Pure data; absent on every scenario that ran to a verdict.
+     (:held scenario-result)
+     (assoc :held (:held scenario-result))
+     ;; XPASS record (sl-190x): a @blocked scenario that passed — the tag,
+     ;; the ref and the imperative. Pure data; absent everywhere else.
+     (:xpass scenario-result)
+     (assoc :xpass (:xpass scenario-result))
      ;; Derived-scheduling surfacing (sl-esq round-5 unification): effective
      ;; non-default scheduling with its reason — {:serial? true :reason
      ;; :costume|:shared-impl|[:hook name]|:tag} — so a report reader can

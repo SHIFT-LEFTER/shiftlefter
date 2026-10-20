@@ -73,9 +73,9 @@
             scenario (first (parser/get-scenarios feature))
             steps (:steps scenario)
             doc-step (first steps)
-            doc-arg (:argument doc-step)
+            doc-arg (first (:arguments doc-step))
             table-step (second steps)
-            table-arg (:argument table-step)]
+            table-arg (first (:arguments table-step))]
         (is (instance? shiftlefter.gherkin.parser.Docstring doc-arg))
         (is (= "" (:content doc-arg)))
         (is (instance? shiftlefter.gherkin.parser.DataTable table-arg))
@@ -588,7 +588,7 @@
           result (parser/parse (lexer/lex input))]
       (is (empty? (:errors result)) "No parse errors")
       (let [step (first (:steps (first (:children (first (:ast result))))))
-            table (:argument step)
+            table (first (:arguments step))
             rows (:rows table)]
         (is (= 3 (count rows)) "Should have 3 rows despite blanks and comments")
         (is (= ["a" "b"] (:cells (first rows))))
@@ -632,7 +632,7 @@
           result (parser/parse (lexer/lex input))]
       (is (empty? (:errors result)) "No parse errors")
       (let [step (first (:steps (first (:children (first (:ast result))))))
-            table (:argument step)
+            table (first (:arguments step))
             cells (:cells (first (:rows table)))]
         (is (= ["a|b" "c"] cells) "Escaped pipe should become literal pipe in cell")))))
 
@@ -642,7 +642,7 @@
           result (parser/parse (lexer/lex input))]
       (is (empty? (:errors result)) "No parse errors")
       (let [step (first (:steps (first (:children (first (:ast result))))))
-            table (:argument step)
+            table (first (:arguments step))
             cells (:cells (first (:rows table)))]
         (is (= ["a\\b" "c"] cells) "Escaped backslash should become single backslash")))))
 
@@ -652,7 +652,7 @@
           result (parser/parse (lexer/lex input))]
       (is (empty? (:errors result)) "No parse errors")
       (let [step (first (:steps (first (:children (first (:ast result))))))
-            table (:argument step)
+            table (first (:arguments step))
             cells (:cells (first (:rows table)))]
         (is (= ["a\nb" "c"] cells) "Escaped n should become newline")))))
 
@@ -662,7 +662,7 @@
           result (parser/parse (lexer/lex input))]
       (is (empty? (:errors result)) "No parse errors")
       (let [step (first (:steps (first (:children (first (:ast result))))))
-            table (:argument step)
+            table (first (:arguments step))
             cells (:cells (first (:rows table)))]
         (is (= ["a" "b"] cells) "Extra content after last pipe should be ignored")))))
 
@@ -751,7 +751,7 @@
           result (parser/parse (lexer/lex input))]
       (is (empty? (:errors result)))
       (let [step (first (:steps (first (:children (first (:ast result))))))
-            docstring (:argument step)]
+            docstring (first (:arguments step))]
         (is (some? docstring) "Step should have docstring argument")
         (is (not (str/includes? (:content docstring) "\r"))
             (str "Docstring content should not contain CR: " (pr-str (:content docstring))))))))

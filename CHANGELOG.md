@@ -1,3 +1,693 @@
+# Changelog: 0.5.7
+
+**Release Date:** 2026-10-20
+
+The theme of this release is **just one more fix** — the small refusals
+that make the planning exit trustworthy. Before anything runs, every
+reason a scenario cannot plan is on the page at once, each with the file
+and line that declared it, and a held scenario says what held it. The
+pattern a message must match lives on the intent element that owns it, so
+a scenario reads end to end without opening the glossary. The dry-run plan
+reads as sentences. `@wip`, `@skip=REASON` and `@blocked=REF` are counted
+holds, never silent skips. A Ctrl-C is exit 4 with every report written,
+and a runner crash is exit 3 on every route, with report files that say
+so. And there is one execution mode: ShiftLefter parses all Gherkin and
+executes only typed steps.
+
+## Stats
+
+```
+2648 tests, 11005 assertions, 0 failures (./bin/kaocha unit — the fast suite)
+35 tests, 248 assertions, 0 failures (./bin/kaocha daemon — warm-path shell E2E through the built jar, foreground, 0 pending)
+13 tests, 55 assertions, 0 failures (SHIFTLEFTER_LIVE_WEBDRIVER=1 ./bin/kaocha e2e — live-browser example validators)
+Cucumber compliance: 50/50 good, 12/12 bad (100%) at cucumber/gherkin@33693f4b
+Verified against Chrome 154.0.8037.100 / ChromeDriver 154.0.8037.92
+The counts assume the Cucumber corpus fetched and the jar built; a cold clone reports 3 pending.
+```
+
+## Highlights
+
+- **Every planning failure at once, each with its def-site.** A binding
+  error (the `:shape` family, a consumed-without-producer token) no longer
+  hides behind an unknown-step exit; a `--hold-unplannable` hold names
+  what held it; every did-you-mean says where the right thing is declared;
+  the diagnostics the planner computed and the console dropped now render
+  (sl-8ezu, sl-u2r0, sl-mk0t).
+- **The shape lives on the element.** `:shape "verification code is:
+  (\\d{6})"` on the intent element, `matching Reset.smsCode` in the step,
+  and a one-group shape binds to the element's own name: `{smsCode}`
+  (sl-ectw).
+- **The dry run shows its plan.** `sl run --dry-run -v` lists every
+  scenario, every step, the resolved triple and the stepdef's file:line;
+  `-vv` adds each pattern; `--edn` carries the same plan as data
+  (sl-xvae, sl-jima).
+- **One mode.** Vanilla execution is retired: parse all Gherkin, execute
+  only typed steps. The `:svo` config block is `:enforcement`; an untyped
+  suite is exit 2 with its inventory; `--hold-unplannable` runs the slice
+  that plans (sl-6wh9).
+- **Holds you can count.** `@wip` and `@skip=REASON` never run and are
+  counted; `@blocked=REF` runs expecting failure, and a pass is XPASS,
+  exit 1 (sl-190x).
+- **Abort is exit 4; a crash is exit 3 on every route, and both leave
+  truthful files.** Ctrl-C and `sl daemon abort` stop at the next step
+  boundary, run every teardown and write every report; a runner crash
+  under `--max-parallel` is no longer a degraded run, and the JUnit and
+  HTML files beside exit 3 carry the crash and name the scenario
+  (sl-617t, sl-io05, sl-8orx, sl-o26v, sl-n6io).
+- **Gherkin 42: 50 of 50 official files, and the corpus is pinned**
+  (sl-8nku).
+
+<!-- no-entry: sl-qz9d (v0.5.7 release prep — version bumps, dated header, Stats block, pin sweep, codox regen; no shipped surface of its own) -->
+<!-- no-entry: sl-rxrt (the v0.5.7 release gate bead — process record; the release itself is this section) -->
+<!-- no-entry: sl-wfnl (the v0.5.7 Warden batch audit — process record; the fixes it produced ship under sl-8ezu, sl-mk0t and sl-cotp) -->
+<!-- no-entry: sl-wybt (the v0.5.7 Herald release pass — this section's narrative, Breaking Changes and docs-drift fixes; no shipped behavior) -->
+<!-- no-entry: sl-yd26 (capture.sh stamps the tag — the site's dev-only capture harness; no shipped surface) -->
+<!-- no-entry: sl-0qzd (folded into the sl-mk0t entry — the assert-only formatter prints the pattern as written; Warden delta-pass D1) -->
+<!-- no-entry: sl-cotp (test harness — the daemon suite's SIGINT pins report a visible pending when SIGINT is inherited as ignored, plus a bin/kaocha foreground note; no shipped surface) -->
+<!-- no-entry: sl-4l16 (shiftlefter.com five-page restructure — site repo; the dev-repo side is capture harness + the 02b/dym capture-project glossaries, whose user-visible surface is the sl-ectw entry) -->
+<!-- no-entry: sl-f7y5 (shiftlefter.com compare page — site repo only) -->
+<!-- no-entry: sl-7aii (the SubMid archive disposition pass — wiki extraction into sl-vision (data-primary-economics page, the SubMid wiki founding, the December-2025 genealogy block); no shipped surface) -->
+<!-- no-entry: sl-927x (the birth-thread reading — a Chair×Tower archive/ratification record; its output is the SubMid archive note + rulings on sl-7aii; no shipped surface) -->
+<!-- no-entry: sl-s6or (ChromeDriver 152→154 bump on Chair's machine + the CLAUDE.md pin line; environment, no shipped surface) -->
+<!-- no-entry: sl-6woi (the homepage baseline cold read — two model readers against the served front page, scores and transcripts under notes/coldread-runs/ and the wiki instrument page; no shipped surface) -->
+<!-- no-entry: sl-r3t3 (Sol Q02, the validation-substrate portfolio — a Chair×Tower sitting note under notes/ plus six rulings; the evidence-grade rule lands in the wiki; no shipped surface) -->
+<!-- no-entry: sl-hqf7 (the Conduit pair pinned as the standing brownfield substrate — clones, recipe and seed live in notes/conduit/; no shipped surface) -->
+<!-- no-entry: sl-q0jy (the pre-0.5.7 wrap-up wave — a sequencing checklist bead; no shipped surface) -->
+<!-- no-entry: sl-dd9x (wiki page in sl-vision — philosophy/boundary-relations.md + composition-and-the-grid.md; no shipped surface) -->
+<!-- no-entry: sl-z6kt (homepage 3/5 — the site's artifact capture + the scripts/homepage harness; no shipped SL surface) -->
+<!-- no-entry: sl-a1qi (homepage 2/5 — a live verification record of two claims, banked on the bead; no shipped surface) -->
+<!-- no-entry: sl-6slw (the capability map v2 — an internal planning artifact under notes/ plus the wiki ledger refresh; the public rendering is the homepage, sl-8pqh) -->
+<!-- no-entry: sl-4f96 (Arm C of the cold-read instrument — two model runs + Tower's comparisons, archived to the wiki; instrument/process record, no shipped surface) -->
+<!-- no-entry: sl-zxm9 (merged into sl-a55s — one defect, two filings; its fix shape was rejected at the 09-21 ruling, the ruled design ships under sl-a55s; nothing ships separately) -->
+<!-- no-entry: sl-ov5i (merged into sl-xvae — the dry-run step-plan listing carries the per-step resolved SVO; nothing ships separately) -->
+<!-- no-entry: sl-brd3 (Chair's row-by-row read of the Arm B graded cold-read records — instrument/process record; the product work it produced is filed as its own beads) -->
+<!-- no-entry: sl-vcw5 (folded into sl-u2r0 — the did-you-mean family bead carries the step-text verb suggestion; nothing ships separately) -->
+<!-- no-entry: sl-g1y8 (the v0.5.6 release gate bead — process record; the release itself is the section below) -->
+<!-- no-entry: sl-tdlw (folded into sl-od2v on 09-03: the :page-load-timeout-ms knob shipped in 0.5.6 under od2v's entry; nothing separate ships) -->
+<!-- no-entry: sl-ctrl-c-honest-hint-qbww (folded into sl-617t as the fallback branch of the warm Ctrl-C trap — the honest continuation hint prints only when the abort cannot be delivered or on a second Ctrl-C) -->
+
+## Features
+
+<!-- entry: sl-ectw -->
+- **The capture pattern moves onto the intent element: `:shape`.** An
+  element can declare the shape of the text it owns, once, in the intents
+  glossary — `:smsCode {:bindings {:sms {}} :shape "verification code is:
+  (\\d{6})"}` — and a matcher slot names the element instead of carrying
+  the regex: `receives an SMS to '…' matching Reset.smsCode`, `captures
+  Checkout.total` (no clause at all: the element's shape is the pattern).
+  A shape with exactly one group binds to the element's own name, so the
+  scenario reads end to end without opening the glossary (`{smsCode}`);
+  several groups must be named and those names are the tokens. Inline
+  `matching /…/` stays as the escape hatch; both on one step is a planning
+  error naming both sites, `captures O` on an element without a shape is a
+  planning error with the element's line and both exits, and `should see O
+  matching Intent.element` asserts a declared shape without binding. The
+  matcher slot is now captured with its markers and classified in one
+  place (`bindings/resolve-matcher`) that the bindings lint and the exec
+  normalizer both call — a bare pattern without `/…/` no longer binds.
+  Element names admit lowerCamel (`smsCode`) alongside kebab; a
+  single-group shape needs a lowerCamel element name. Shape errors (bad
+  regex, zero groups, an unescaped `{token}`, a mismatched group name) fail
+  the load with the element's file:line; the `:capture` verb's frames are
+  now `:default` (`S captures O`) and `:matching` (inline). Example 04
+  carries a `Reset` intent and drops the `[:sms]` annotation (one `:sms`
+  instance — the lane is derived); `sl explain` and the projection show
+  each element's shape.
+
+<!-- entry: sl-xvae -->
+- **The dry run shows its plan: scenario → step → the stepdef it bound to.**
+  `sl run --dry-run -v` prints a `plan:` block on stderr — per scenario, one
+  line per step naming the resolved triple in ShiftLefter's own notation
+  (`:alice :fill [:with] "username" via :web`) and the matched stepdef's
+  def site (`(file:line)`); an untyped stepdef reads `(untyped)`, a macro
+  call names its macro and expansion size with the expanded steps indented
+  beneath it. Without `-v` the console is unchanged. Under `--edn` every dry-run summary now carries
+  `:plan`, the same listing as data: each bound step's **`:step/resolved`**
+  record (`:subject :verb :frame :object :interface :interface-type
+  :pattern-src :stepdef-source`), computed once at bind time — an agent
+  reads the plan without parsing prose, and `:interface-type` joins a step
+  to `sl explain`'s vocabulary without a second call — plus `:step/macro`
+  provenance (`:role`, `:call-site`, `:index`) on macro wrappers and their
+  expanded steps, the record the macro-expansion audit will read. The same
+  `:role`/`:index` keys now also ride `:step/macro` on `:failures`
+  entries. Unbound steps carry no record; their issue is the record.
+
+<!-- entry: sl-jima -->
+- **The dry-run plan reads as sentences: the resolved triple leads, the
+  regex waits behind `-vv`.** Each `plan:` line under `sl run --dry-run -v`
+  is now `<step text>  →  <resolved triple>  (<stepdef file>:<line>)` — what
+  the step resolved to and where its definition lives; the stepdef's
+  pattern source, the detail for debugging a stepdef collision, no longer
+  rides every line. `-v` is counted: `-vv` (or `-v -v`) keeps every `-v`
+  line byte-identical and adds one `pattern: <source>` sub-line beneath
+  each bound step. Without `-v` the console is unchanged, and the `--edn`
+  plan still carries `:pattern-src` on every `:step/resolved` record.
+
+<!-- entry: sl-8nku -->
+- **Gherkin 42: a step may carry both a DataTable and a DocString, and the
+  compliance corpus is pinned.** The parser now accepts a step followed by a
+  table and a docstring in either order (cucumber/gherkin #599), the AST
+  step carries both, canonical formatting renders them in source order, and
+  the pickle projection emits each argument's 1-based `argumentIndex`
+  (#643); a step that repeats the same kind is still rejected. The
+  compliance suite is verified against cucumber/gherkin **v42.0.1** —
+  50/50 official files pass and 12/12 invalid files are rejected (was
+  46/11 at a v37-era snapshot) — and `bin/compliance` now checks the
+  corpus clone out at that exact commit instead of whatever upstream HEAD
+  is today, so the published count is reproducible; a clone at any other
+  commit reads as a visible *pending* naming the fetch. Stepdefs see no
+  change: a single argument reaches `step/arguments` in its existing
+  shape; a step with both receives a two-element vector in source order.
+  **After upgrading, run `bin/compliance` once** to move an existing corpus
+  clone to the pinned commit.
+
+<!-- entry: sl-190x -->
+- **The hold family: `@wip`, `@skip=REASON`, `@blocked=REF`.** Three
+  reserved tags on the hold mechanism the vanilla retirement shipped, and
+  every hold is counted and visible on every surface. `@wip` and
+  `@skip=REASON` are never-run holds, deselected at planning like tag
+  narrowing; naming the tag in `--tags` runs them (`--tags @wip`, the
+  Cucumber `--wip` idea without its pass-fails-the-build half). `@skip`
+  requires a reason — a bare one still holds and warns on every run
+  (`Tag warning: @skip without a reason — reason-free holds rot`).
+  `@blocked=REF` **runs expecting failure**: a failed or unobserved run
+  is HELD with what was measured (`HELD (blocked by PROJ-1 — failed at
+  step 2: count mismatch)`; a harness error is never excused; `:pending`
+  stays pending), and a **pass is XPASS — exit 1** with `blocked scenario
+  passed: remove @blocked=REF or reopen REF` (a stale claim is a wrong
+  test; the ladder's row 1 says so now). The one `:held` record carries
+  every kind — `:reason :wip|:skip|:blocked|:unplannable|:aborted`, the
+  `:tag`, a `:note` or `:ref`, and for `@blocked` the `:outcome` —
+  beside `:counts :held` (and `:counts :xpass`); the verdict line reads
+  `6 scenario(s): 1 passed, 5 held (1 wip, 2 skip, 2 blocked)`; JUnit
+  says `<skipped message="held: @skip=flaky-on-ci">` / `<failure
+  type="xpass">`; the HTML page lists planning holds under the counts and
+  renders `@blocked` refs as links from the new `[:runner :ref-url
+  "https://tracker/{ref}"]` template (nothing is ever fetched — a CI
+  script reads `:ref` off the record and asks the tracker). Tag grammar
+  tightened with it: every tag splits on its first `=` (unknown keys keep
+  their value), `@` never appears inside a name (rejected on the CLI,
+  linted in a feature file with a did-you-mean), and a bare key in
+  `--tags`/`--skip-tags` matches every value-tag of that key (`--tags
+  @blocked` runs every blocked scenario, xfail kept). `sl explain` /
+  `sl glossary` say when held scenarios sit outside the run's grammar.
+  The reserved set (`@serial`, `@hook=`, `@wip`, `@skip=`, `@blocked=`)
+  is listed in the authoring agent topic. (`docs/REPORTS.md` § Holds;
+  `sl agent-doc authoring` § Reserved tags.)
+
+<!-- entry: sl-u2r0 -->
+- **Every did-you-mean names its def-site, and every exit-2 path carries
+  its did-you-mean.** A misspelled actor, verb, interface, intent ref,
+  capture or config key now says both what you probably meant AND where
+  that thing is declared — `Declared in: sl/glossary/subjects.edn:4` — on
+  the console, under `--edn` (`:suggestion` + `:def-site` on the issue) and
+  in the HTML page, at whichever level applies: owned vocabulary keeps its
+  warning, exit-2 paths keep their exit code, and the two signals never
+  travel apart again. New on this release: a misspelled verb in **step
+  text** gets an edit-distance suggestion on the undefined-step diagnostic
+  (`did you mean "clicks"? — <pattern> (sl/steps/s.clj:12)`), taken from
+  the words the candidate stepdefs can actually match and offered only
+  when the repaired text binds (never from a quoted literal, never a
+  guess); an **unresolvable intent reference** — unknown intent, unknown
+  element, or an element with no binding for the selected interface — is
+  a planning error (exit 2) with its suggestion and def-site even at
+  `:unknown-object :warn` (the run would have failed at
+  `:browser/intent-resolve-error`; the machine knew before the run), while
+  free text on an intent slot keeps the warning and names the fix
+  (`:object-kind :text` on the frame); **raw locators** ride their own
+  `:raw-locator` enforcement kind and, at `:warn` or `:error`, name the
+  intent element bound to the same locator; the config-key lint names the
+  config file. Def-site lines come from a position-tracking second read of
+  each glossary and intents file beside the unchanged EDN read; where that
+  pass cannot vouch for a file the def-site stays file-precise. Closes the
+  five cold-read findings (sl-brd3); absorbs sl-vcw5.
+  (`docs/SVO.md` § Object checking; the vocabulary agent topic.)
+
+<!-- entry: sl-617t -->
+- **A run can be aborted — and the daemon survives it.** Ctrl-C on a
+  warm or cold run, or `sl daemon abort` from another terminal, stops the
+  run **at its next step boundary**: no new scenario starts, the running
+  one finishes its current step (a step is never interrupted, and no nREPL
+  interrupt is involved), then every After hook, capability cleanup and
+  `setup.clj` `:stop` runs and every report is written. The terminal prints
+  one line the instant the trap fires — `aborting: N scenario(s) finishing
+  their current step, then Afters, cleanup, :stop; reports will land at
+  <dir>` — then the verdict. **An aborted run is exit 4**, never 130, never
+  0: the scenarios that ran keep their verdicts, the rest are **held** —
+  `HELD (aborted)` on the console, `<skipped message="held: aborted …">` in
+  JUnit, `:held {:reason :aborted}` on the scenario and `:halted {:reason
+  :aborted :after-scenario N}` on the summary, in EDN and the HTML page;
+  `:counts :held` carves them out of `:skipped`. Groups a `setup.clj` run
+  had not reached are skipped without their `:start`. Two strikes: cold, a
+  second Ctrl-C during the unwind takes the crash row (exit 3 with the
+  `sl-crash` markers — you accepted the mess and the report says so; once
+  the final report writes have begun it is a no-op and the 4 lands); warm,
+  a second Ctrl-C detaches the client (exit 130, the daemon finishes the
+  unwind on its own, reports still land). If the abort cannot be delivered
+  the client prints the honest hint (the run continues in the daemon; `sl
+  daemon stop` aborts it and takes the whole daemon) and exits 130 — 130 is
+  the platform's "interrupted" status, produced only when the process was
+  interrupted before it could reach a verdict. Before this, cold Ctrl-C was
+  the JVM's 130 with no reports and no teardowns, and warm Ctrl-C killed
+  only the client while the daemon finished the run invisibly.
+  (`docs/daemon.md` § Aborting a run; the exit-codes page.)
+
+<!-- entry: sl-l53 -->
+- **`sl init` now seeds an `:adversary` subject.** The scaffold's subject
+  glossary gains a second type beside `:user` — identity and a `:desc`
+  only, no capability bag and no personas, because the framework does not
+  know what your adversaries can do. It is a standing spur, especially for
+  agents reading the glossary: misuse cases are authored as this actor.
+  The file's comment block names the two flavors as subject types rather
+  than mechanisms — the inside job (authenticated, legitimate bag, hostile
+  intent: privilege escalation probes cells outside the bag; revocation is
+  the same subject against their own former bag, expecting denials) and
+  the outside job (unauthenticated: the guest row plus authored misuse
+  cases) — and states the limit plainly: role-level probing only, not
+  object-level (horizontal) access. A scenario authored as `:adversary`
+  binds clean from the first `sl run --dry-run`.
+
+## Fixes
+
+<!-- entry: sl-8ezu -->
+- **A binding error is never hidden behind another planning failure, and a
+  held scenario says what held it.** The data-plane lint (the `:shape`
+  family, `consumed-without-producer`) ran only after the undefined-step /
+  SVO exit, so one unknown intent reference silenced every shape error in
+  the suite — the console and `--edn` listed the SVO issue alone and the
+  hint called the rest "held by undefined or ambiguous steps" when none
+  were. The lint result now rides the first planning exit beside the other
+  issues, each with its def-site. Under `--hold-unplannable` a scenario held
+  by a binding error carries the cause: the EDN held entry gains
+  `:binding-errors [{:type … :def-site …}]`, and the held console line and
+  the JUnit `<skipped>` message read `not plannable (0 undefined, 0
+  ambiguous, 1 binding error(s): element-has-no-shape)` instead of a
+  reason that named nothing. The hint and `--help` say "undefined,
+  ambiguous or binding-error steps". Exit codes and precedence are
+  unchanged.
+
+<!-- entry: sl-mk0t -->
+- **Four diagnostics the planner computed and the render dropped now reach
+  the console and the EDN surface** (Warden batch audit W2, W3, W5, W7).
+  An intents glossary that fails to load — any `:shape` error, a bad
+  element — printed each sub-error's message with no file or line, though
+  the record carried both; `sl run` now prints *Declared at: <path>:<line>*
+  under each sub-error, and `sl orient`'s one-line *[error/intents]*
+  diagnostic names the first sub-error and its site instead of only the
+  directory. A named group inside *should see … matching* (the
+  producer-marker error) rendered as a raw EDN map with the step's UUID; it
+  has a formatter like the other binding lints — the pattern as written,
+  the names it would have bound, the pointer at *captures*, the step and
+  its line. The `--edn` dry-run `:plan`'s macro wrapper entry carries
+  `:definition {:file}` (additive), so the machine plan and `-v`'s *macro
+  "…" (file)* line agree on where the macro is defined. And the authored-tag lints
+  (*Tag warning: @skip without a reason …*) walk the run's SELECTION, not
+  the corpus: a scenario a `--tags` filter deselects no longer warns on
+  every run that excludes it; a held scenario is still in the selection
+  and still lints. `:tag-lints` on the EDN surface narrows to match.
+<!-- no-entry: sl-7drq (folded into the sl-90x5 entry — same frame, the token question answered there) -->
+<!-- entry: sl-90x5 -->
+- **The most basic built-in assertion no longer warns in a project that has
+  intents.** `:user/alice should see 'Enter Verification Code'` — the `:see`
+  verb's `:on-page` frame — declared no `:object-kind`, so the moment a
+  project configured an intents glossary (which turns `:unknown-object` on)
+  the quoted text was checked as an intent reference and every use printed
+  *Unknown object … declare :object-kind :text on the verb's frame*. Example
+  04's green run printed two. The 0.5.3 fix for `should see the title`
+  (sl-2sj6) missed this frame; it now declares `:object-kind :text` and the
+  step captures the literal with its quotes, so the engine strips and
+  undoubles it like every other text slot (`'Don''t'` still reads *Don't*).
+  The ratified grammar table gains the `should see` rows. One asymmetry is
+  ratified with its reason rather than lifted: `should see {token}` stays
+  reserved, because `{…}` in that position is the `should see {locator}`
+  slot — admitting a binding token on the text frame would make every such
+  step an ambiguous bind. Lifting it means narrowing the locator grammar to
+  `{:`, a separate question.
+
+<!-- entry: sl-d4pf -->
+- **The unshifted-suite hint names a command that works from the jar, and
+  `adoption` is a packaged topic.** When every selected step is undefined,
+  the exit-2 diagnostic used to end with *To shift this suite, see
+  docs/adoption.md* — a repo path a jar-only install does not have. It now
+  ends with *To shift this suite, run: sl agent-doc adoption*, and that
+  topic is the same text as `docs/adoption.md` (the page is now generated
+  from the packaged source, so the two cannot drift; its cross-references
+  read as `sl agent-doc <topic>` and `docs/…` paths). Also swept: the last
+  two docstrings that said "Shifted mode" (there is one mode; *Shifted* is
+  a property of a step), the examples topic's `:svo` enforcement wording
+  (the key is `:enforcement`), and the API docs under `docs/api/`
+  regenerated so they stop publishing the retired wording.
+
+<!-- entry: sl-n6io -->
+- **The JUnit and HTML crash markers say which scenario the runner crashed
+  in.** The io05 entry below said the two file surfaces did not name it yet;
+  now they do, from the same crash record. The `sl-crash` error body gains a
+  fourth line beside `run-id:` — `scenario: NAME (features/x.feature:5)`,
+  the file project-relative like every `<testcase file=…>` — and the HTML
+  report's crash line reads `runner crashed: CLASS: MESSAGE — in scenario
+  NAME (features/x.feature:5) — every later scenario and group never
+  started…`, on the single-run page and the multi-group invocation page
+  alike. A crash that did not come from a scenario (a reporter, a pipeline
+  stage, the epilogue) renders exactly as before; the `<error message=…>`
+  headline is unchanged on every surface.
+
+<!-- entry: sl-bgar -->
+- **The architecture pages cite their sources again, and four sentences
+  the old scrub had mangled read whole.** The six generated pages under
+  `docs/architecture/` used to have every `sl-xxxx` id stripped out of
+  their prose; the stripper left residue behind — `exit-codes.md` said
+  "since : one crash seam" and ": the invocation JUnit is
+  re-materialized", `repl-lifetimes.md` "— : the bare REPL mirrors",
+  `data-shapes.md` "retired at every shape carries". The derive no longer
+  strips ids: a page now reads "since sl-o26v: one crash seam", and the
+  ids are what the README's *How this project is built* says they are — a
+  citation into a private tracker, something you can ask about. Findings
+  ledgers and internal spans are still dropped; the derive's two warn-only
+  lints (yearless dates, no-users phrasing) are unchanged and the second
+  now has a test.
+
+<!-- entry: sl-6qf6 -->
+- **A classified driver failure's record carries the driver's answer, not a
+  driver dump.** A navigation the network refused or a server that never
+  answered (`SUT unreachable`, `SUT silent`) and the transport edge
+  (`:etaoin/http-ex`) rethrew with the whole etaoin ex-data merged in: the
+  chromedriver native stacktrace and the live driver map (chromedriver
+  arguments, capabilities, the process object) rode the console `Data:`
+  line and, under `--edn`, both the scenario-level and the step-level
+  `:failures` entries — several kilobytes per failure. The classification
+  site now projects the ex-data through an allowlist: what was asked
+  (`:type :status :method :path :host :port`) and what the driver answered
+  (`:response {:value {:error … :message …}}`), plus the classification
+  keys as before. Nothing else is named — a key a future driver adds is
+  dropped by omission. The transport edge's message changes with it,
+  deliberately: it used to be the driver library's own message, which is
+  the same dump pretty-printed, and is now `Driver unreachable: POST
+  session/…/url to 127.0.0.1:PORT threw — Connection refused` (the edge,
+  the request, the cause). The original exception stays the rethrow's
+  cause; the exit-codes agent-doc (Exit-4 triage) says how to reach the
+  full driver data from the REPL when you need it.
+
+<!-- entry: sl-io05 -->
+- **A runner crash is exit 3 at every `--max-parallel`, and it says which
+  scenario it crashed in.** Every piece of user code — steps, hooks, adapter
+  factories — is caught inside a scenario's execution machinery, so a
+  throwable that escapes it is a ShiftLefter defect, never a verdict about
+  your suite. The two scheduler paths disagreed about that: run one at a
+  time (or in the `@serial` tail) the escape crashed the run with exit 3,
+  but on a pool thread under `--max-parallel N` it was converted into a
+  failed scenario typed `:scenario/harness-crash` and the run carried on to
+  **exit 4** — the same defect, two exit codes. **Behavior change:** it is
+  now exit 3 on every route, through the one crash seam — the run stops
+  immediately (queued scenarios never start, in-flight workers are
+  interrupted), the JUnit and HTML crash markers are written, and no
+  scenario row is fabricated for the crashed scenario. The type
+  `:scenario/harness-crash` is gone, and exit 4's documented members are
+  the *user's* harness and environment only (hook throw, capability
+  provisioning, capture, an `:observation`-class step). The crash report
+  gains the place: a second stderr line under `Runner crash:` —
+  `  in scenario: NAME (file:line)` — and, under `--edn`, `:scenario
+  {:name :source-file :line}` on the crash form's `:error`; both are
+  absent for a crash that did not come from a scenario (a reporter, a
+  pipeline stage). The JUnit `sl-crash` body and the HTML crash line do not
+  name the scenario yet. Inside, the separate `--max-parallel 1` code path
+  is deleted: there is one scheduler, and at 1 it runs every scenario in
+  plan order on the calling thread with no thread pool — console, `--edn`,
+  JUnit and HTML output at `--max-parallel 1` are byte-identical to before.
+  Proof instrument: `--sl-internal-scenario-crash=SUBSTRING` (internal,
+  undocumented) throws from inside the machinery for the named scenario.
+
+<!-- entry: sl-a55s -->
+- **`sl orient` stays in its lane: it reports on the project, not on your
+  features, and no longer says a project is clean when `sl run --dry-run`
+  refuses it.** Under `:interfaces {}` (or `nil`) orient printed *"No
+  static-validation diagnostics. Accepted project truth loads clean."*
+  while a dry run of the same project exited 2 with a
+  `:stepdef/undefined-interface` error per browser stepdef the features
+  used. The cause was a category error, not a missing check: that lint and
+  `:stepdef/missing-capability` are facts about the *features* — each is
+  defined over a stepdef some step actually matched — and orient does not
+  read features. It ran them over every *registered* stepdef instead, got
+  false alarms for unused builtins, and hid those with a filter that hid
+  everything in exactly the zero-interfaces case. Orient now runs only the
+  checks that are true without a feature (config, glossaries, step files,
+  stepdefs against the glossary, macros, setup declarations, and
+  `:glossary/orphan-type`), and its section — renamed **Project checks** —
+  says so in two lines: what was checked, and *"Not checked: your features
+  — orient does not read them. `sl run --dry-run` … is the gate for
+  features."* The top line reads `Project checks: ok` rather than a bare
+  `Status: ok`; an empty section reads *"No diagnostics from these
+  checks."* — no sentence is a verdict on the project as a whole. The two
+  surfaces can no longer disagree because they no longer answer the same
+  question. **Two behavior changes.** (1) *Zero interfaces:* an explicit
+  `:interfaces {}` or `nil` now gets one WARN, `:config/zero-interfaces` —
+  *no interface-typed step can plan; add one, e.g.
+  `{:interfaces {:web :default}}`* — on the orientation card and in
+  `sl orient --edn`'s `:diagnostics` (`:stage :config`, `:severity :warn`).
+  A warning, never an error: a project being set up sits here legitimately,
+  so `:status` stays `:ok` and orient still exits 0. An absent
+  `:interfaces` key is not this case (it means the builtin set). (2) *A
+  stepdef whose configured adapter lacks a protocol it requires:* orient
+  used to report `:stepdef/missing-capability` and **exit 1**; it now
+  reports nothing for it and **exits 0**. `sl run --dry-run` is unchanged —
+  it still exits 2 when a feature matches that stepdef, and `sl glossary` /
+  `sl explain` still carry both lints over the bound corpus. Anything
+  reading `sl orient --edn`: the projection's `:diagnostics` never contain
+  `:stepdef/undefined-interface` or `:stepdef/missing-capability` any more.
+  The `sl init --write-agents` stanza and the agent docs describe orient
+  the same way; an `AGENTS.md` stanza written by an earlier version keeps
+  its old sentence (init never edits an existing stanza).
+
+<!-- entry: sl-v6x3 -->
+- **A cold `git clone` of the public tree runs green.** The Cucumber
+  compliance corpus and a built jar are not in the public tree, so the
+  three tests that need them — the compliance run, the corpus
+  mutation-fuzz case, and the `bin/sl --help` wiring check — ran red from
+  a fresh clone, and the published test count was reproducible only after
+  two undocumented steps. They now self-skip as visible kaocha *pending*
+  tests (yellow in the summary, listed by name, exit 0), each printing the
+  one command that makes it real (`bin/compliance`, `clojure -T:build
+  uberjar`); with both in place the same suite runs them for real. The
+  report goldens scrub the repo path before UUID-shaped segments, so a
+  checkout whose path contains a UUID no longer breaks six comparisons.
+  The release runbook's Stats block now carries the prerequisite its count
+  was measured under.
+
+<!-- entry: sl-74c2 -->
+- **A subject captured with its colon means the same subject, and every
+  `--edn` summary stays readable.** A stepdef written `(\S+)` where the
+  builtins write `:(\S+)` captured `:user` colon and all; the subject was
+  keywordized verbatim, so the glossary's own `:user` was flagged unknown
+  and the dry-run summary and the exit-2 planning block emitted `::user`,
+  a token `clojure.edn/read-string` refuses. Now `normalize-subject`
+  strips exactly one leading `:` (`:user` and `user` both mean `:user`;
+  a second colon stays visible as a string), and the compile-suite
+  diagnostics are scrubbed once at attach — the two paths that read them
+  raw can never emit an unreadable token again. The did-you-mean for a
+  misspelled `:usr` still names `:user` and its def-site.
+
+<!-- entry: sl-o26v -->
+- **A crash now leaves truthful report files beside exit 3 in every
+  pipeline, not only multi-group runs.** The classic pipeline (no
+  `setup.clj`) and a `setup.clj` run narrowed to one group build their
+  JUnit and HTML reporters with private state that only materialized at
+  run end, so a mid-run crash left both files absent on a first run or
+  stale — a previous run's, possibly green — beside exit 3, the common
+  cold-run shape and, under the daemon, the previous run's file every
+  time. The runner now has ONE crash seam: the reporters record their
+  output paths and their own state into an invocation-level context, and a
+  single crash epilogue in the runner's outer handler writes the markers
+  for whichever pipeline ran — the `sl-crash` suite appended to the JUnit
+  reporter's accumulated scenarios, and a CRASHED run page over the
+  scenarios the HTML reporter had seen, at the stable `--html` path and the
+  run-dir copy. Multi-group runs keep their 0.5.7 markers byte-for-byte;
+  exit 3 and the `Runner crash:` line are untouched; a dry run writes
+  nothing; under `--edn` the crash form still prints and the files are
+  still written. The same seam serves a cold second Ctrl-C during an abort
+  unwind, which now leaves its markers in a single-scope run too.
+
+<!-- entry: sl-8orx -->
+- **A crash leaves a truthful report.** When the runner itself crashes
+  mid-way through a multi-group (`setup.clj`) run, the report artifacts
+  now say so beside exit 3. The invocation JUnit file — written at each
+  completed group's end, so it used to sit there as a current, all-green,
+  partial run — is re-materialized with an `sl-crash` suite appended: one
+  testcase carrying `<error type="crash">` with the exception class, the
+  message and the run-id, so "at least one failure or error iff the exit
+  is nonzero" holds for a crash too. The stable `--html` path, whose
+  post-groups write never happened (a previous run's page survived
+  there), is rewritten as a CRASHED invocation TOC: the groups that
+  completed keep their verdict rows, the crashing group reads `crashed`,
+  every later group `skipped`, and the header names the crash. The HTML
+  `:crash` record and the JUnit body carry the same three fields, so the
+  two artifacts match; the `--edn` crash form carries the same run-id.
+  Under `--max-parallel` a crash on the coordinator now arms the halt
+  gate and drops the pool's queue (`shutdownNow`, best effort — an
+  interruptible wait is cut short, blocking IO finishes on its own, the
+  scenario's cleanup still runs): no queued scenario starts after the
+  crash, where before every queued scenario ran to completion with
+  nobody left to report it. A marker write that itself fails is one
+  stderr line per surface (`Crash marker not written (junit|html): …`);
+  exit 3 and the `Runner crash:` line are untouched. Single-scope runs
+  (no `setup.clj`, or a single filtered group) get the same markers in
+  this release (the one-crash-seam entry below). Proof instrument: `--sl-internal-crash=NAME`
+  (undocumented, the existing internal-flag convention) crashes the
+  coordinator when the scenario whose name contains `NAME` completes.
+
+<!-- entry: sl-tcsq -->
+- **A passing oracle now says how many times it polled.** The
+  `:poll-counts` digest (`{:attempts :answered :threw :observation-throws}`)
+  that 0.5.6 put on poll-timeout records now rides the step record of every
+  step whose oracle polled — passing or not, summed across the step's polls —
+  and the report surfaces render it: the `--verbose` console step line gains
+  a `(N polls)` suffix when an oracle needed more than one poll, the HTML
+  report's step row shows the same count beside its duration, and a
+  `--edn` `:failures` entry carries the key beside its error. Additive and
+  absent when a step never polled; steps that answered on the first poll
+  render exactly as before. Until now the run reported per-step timing but
+  not the retries behind it — the two cold-read findings that asked for
+  both get the second half.
+
+<!-- entry: sl-02cl -->
+- **The docs say one mode, everywhere.** After the vanilla retirement the
+  public docs still described two modes, an "SVO Validation (Optional)"
+  section, and steps "in Shifted mode" — and still taught what the same
+  retirement renamed: a `:svo` config block (now `:enforcement`; the old
+  key is ignored with a lint, so `shiftlefter.edn.example` was handing
+  readers a block that did nothing), the dropped `:strict` alias, the
+  REPL's `shifted!`, and "`sl orient` will say `Mode: Shifted`". All made
+  true across the README, ARCHITECTURE, the docs pages, the examples index
+  and READMEs (the Mode column is gone), the agent docs, and the
+  architecture maps. `docs/adoption.md` is rewritten in place as *Bring
+  Existing Gherkin* — what parses today with no config, what `sl run`
+  reports on an untyped suite (exit 2 and the inventory line), what
+  shifting means, and `--hold-unplannable` as the slice-by-slice path —
+  and its "46 official test files" is corrected to 50. "Shifted" and
+  "unshifted" survive as properties of a step or a suite, never a mode;
+  the glossary defines them. New sentences: how to inspect and clear one
+  actor's costume (COSTUMES), and why strictness tracks ownership
+  (SVO.md's `:enforcement` block). Every rewritten config snippet was
+  loaded through `sl orient` with zero lints.
+
+<!-- entry: sl-k7d3 -->
+- **The README says who the names are.** A short section near the bottom,
+  *How this project is built*, explains what the docs and this changelog
+  have always assumed: one maintainer (Chair) and four standing agent
+  roles — Tower plans and reviews, Trench writes the code, Herald writes
+  the words, Warden audits and tests — that the role is the stable part,
+  not the model filling it, and that an id like `sl-6qf6` cites a record
+  in a private tracker: a citation you can ask about, not a link.
+  CONTRIBUTING points at it. Role names and bare bead ids are no longer
+  treated as leaks in public prose; process narrative, dev-repo-only paths
+  and user-count claims still are.
+
+## Breaking Changes
+
+<!-- entry: sl-drop-vanilla-exec-6wh9 -->
+- **Vanilla execution is retired: ShiftLefter parses all Gherkin and
+  executes only typed steps.** There is no mode switch any more. The
+  planner binds every step as it always did; glossaries load on every run
+  (an absent or `nil` `:glossaries` is an empty project glossary over the
+  framework defaults — the old `:svo/missing-glossaries-config` error is
+  gone; an explicit path that is missing stays a hard error); the
+  annotation pass, suite-lint, and the stepdef/glossary cross-check run on
+  every compile, and `sl orient`, `sl glossary`, `sl explain`, the run-ctx,
+  and the JUnit properties no longer carry a `mode`. A Cucumber corpus
+  copied into `sl/features/` is not a mode but a planning result: every
+  step undefined, exit 2, plus one summary line with the inventory
+  (`--edn`: a top-level `:unshifted-suite {:features N :scenarios M
+  :distinct-steps K}` beside `:planning`, present only when it fired). A
+  suite where some scenarios plan and some do not gets a hint on the exit-2
+  diagnostic (`:planning :plannability`) naming the new
+  **`--hold-unplannable`** flag — CLI only, never a config key — which
+  deselects at planning every scenario an undefined/ambiguous step or a
+  consumed-without-producer binding would fail, runs the rest with its
+  ordinary verdict, and counts the held ones on every surface (`:held`
+  records + `:counts :held` in the EDN summary, `N held` on the console
+  verdict line, `<skipped message="held: …">` testcases in JUnit).
+  Enforcement levels are unchanged, and the retired mode's contradiction
+  is resolved in their favor: a user stepdef that declares an unknown verb
+  now warns and executes (`:unknown-verb`, `:warn` by default) instead of
+  failing planning as it did under the old Shifted-only cross-check;
+  unknown frames/args on a known verb stay hard errors. Two things this
+  makes visible: a matched user `defstep` with no `:svo` metadata is
+  reported as **`:stepdef/untyped`** (new `:untyped-stepdef` level, `:warn`
+  by default, `:error` to forbid), and **the config block is renamed:
+  `:svo` → `:enforcement`** (stepdef metadata keeps `:svo` — there it IS
+  the triple). The block holds nothing but levels and is always present
+  once loaded; it gains an **`:all` umbrella** (sets every kind; a named
+  key overrides it; `:unknown-interface` stays `:error` regardless), the
+  new `:untyped-stepdef` and `:raw-locator` kinds (the latter follows
+  `:unknown-object`'s intents-conditional default — the key and default
+  ship here, the check itself grooms at sl-u2r0), and drops the deprecated
+  `:strict` alias. No alias for the old block name: a top-level `:svo` is
+  ignored and the config lint says *did you mean `[:enforcement]`?*. The
+  REPL's `shifted!`/`vanilla!`/`shifted?` become `load-config!` /
+  `reset-config!` (a bare REPL runs under the built-in defaults, exactly as
+  `sl run` does with no config file); `sl init`'s scaffold shows the
+  `:enforcement` defaults. Examples 02 and 03 are re-homed with a one-file
+  subject glossary (03 keeps one deliberately untyped step to teach the
+  warning); 02b's vanilla-contrast config is deleted.
+
+The rest of what a 0.5.6 project can trip on, each verified against the
+code that ships and described in full under its entry above:
+
+- **`@wip`, `@skip` and `@blocked` are reserved** (sl-190x). A suite that
+  used `@wip` as an ordinary tag now has those scenarios deselected and
+  counted `held`; `@skip` without a reason warns on every run; a
+  `@blocked=REF` scenario runs expecting failure, and a pass is XPASS —
+  exit 1. Tag grammar: every tag splits on its first `=`, `@` may not
+  appear inside a tag name (rejected on the CLI, linted in a file), and a
+  bare key in `--tags`/`--skip-tags` (`@env`) matches every `@env=VALUE`.
+- **A runner crash is exit 3 at every `--max-parallel`** (sl-io05). A
+  throwable escaping a scenario on a pool thread was exit 4 with a
+  fabricated failed scenario typed `:scenario/harness-crash`; that type is
+  gone, and exit 4's members are the user's harness and environment only.
+  Beside exit 3 the JUnit file now carries an `sl-crash` suite and the HTML
+  page reads CRASHED (sl-8orx, sl-o26v, sl-n6io) — a parser that read the
+  partial file as a green run now sees the error it should have.
+- **Ctrl-C is exit 4 with reports, not 130** (sl-617t). A cold or warm
+  abort stops at the next step boundary, runs every After, cleanup and
+  `:stop`, writes every report, and exits 4 with the scenarios that did
+  not run held `:aborted` (`<skipped>` in JUnit). 130 remains only for an
+  interrupt before execution began, a warm second Ctrl-C (the client
+  detaches), or an abort that could not be delivered. A CI wrapper that
+  gated on 130 gates on 4.
+- **An unresolvable intent reference is exit 2 at every `:unknown-object`
+  level** (sl-u2r0). An unknown intent, an unknown element, or an element
+  with no binding for the selected interface used to pass planning under
+  `:warn` and fail at run time; it is a planning error now, with its
+  suggestion and def-site. Raw locators in step text ride their own
+  `:raw-locator` enforcement kind (`:off` by default; `:warn` once intents
+  are configured, like `:unknown-object`).
+- **The matcher slot and the `:capture` verb's frames** (sl-ectw). A
+  matcher must be `/…/` or an `Intent.element` with a declared `:shape` —
+  a bare quoted pattern no longer binds. The verb's `:default` frame is now
+  `S captures O` (the element's shape is the pattern) and the inline form
+  is the `:matching` frame; a user stepdef whose `:svo` metadata named
+  `:capture`'s `:default` frame with a matcher argument fails the
+  stepdef/glossary cross-check until it names `:matching`.
+- **`sl orient` exits 0 where it exited 1 for a stepdef missing an adapter
+  capability** (sl-a55s). That lint and `:stepdef/undefined-interface` are
+  facts about the features, so orient no longer reports them; `sl run
+  --dry-run` still exits 2 on them. An explicit `:interfaces {}` or `nil`
+  now draws a `:config/zero-interfaces` warning (exit 0).
+- **A classified driver failure carries less, and says it differently**
+  (sl-6qf6). The transport edge's message is now `Driver unreachable: <op>
+  to <host:port> threw — <cause>` where it was the driver library's own
+  dump, and the ex-data on the console `Data:` line and under `--edn` is
+  an allowlist (what was asked, what the driver answered) — a consumer
+  that read the live driver map or the native stacktrace off the record
+  reaches them from the REPL instead (the exit-codes agent topic says
+  how).
+- **`:tag-lints` covers the selection** (sl-mk0t). A scenario a `--tags`
+  filter deselects no longer contributes its authored-tag warning to the
+  console or to `:diagnostics :tag-lints`.
+- **Contributors: run `bin/compliance` once after upgrading** (sl-8nku) to
+  move an existing Cucumber corpus clone to the pinned commit; a clone at
+  any other commit reports the compliance tests as pending, not red.
+
+---
+
 # Changelog: 0.5.6
 
 **Release Date:** 2026-09-08

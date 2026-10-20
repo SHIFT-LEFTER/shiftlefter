@@ -63,8 +63,8 @@ Per project, under the instance root (the nearest ancestor with
   daemon.log    # the daemon's own stdout/stderr (auto-spawn only): 0 bytes = healthy;
                 # a crash trace, or — rarely, a minor sign of ill health — one
                 # `reaped orphaned session <id>` line per client that died
-                # mid-run without closing its session (Ctrl-C, killed process,
-                # cancelled CI job)
+                # mid-run without closing its session (a second Ctrl-C, a
+                # killed process, a cancelled CI job)
   spawn.lock    # transient; prevents two callers racing to spawn
 ```
 
@@ -113,38 +113,67 @@ the answer into doctor's healthy/issues verdict (sl-afsp).
 
 ## Aborting a run
 
-There is no first-class abort today (design bead: sl-617t). What actually
-happens, verified live (2026-08-11):
+A run can be aborted without stopping the daemon (sl-617t). The contract
+is the same cold and warm: **an aborted run is exit 4** with
+`:halted {:reason :aborted :after-scenario N}` in every report, never
+130, never 0, never 3.
 
-- **Ctrl-C does not stop a warm run.** It kills only the dispatch client in
-  your terminal; the run keeps executing to completion inside the daemon,
-  invisibly (nREPL swallows output writes to the dead session rather than
-  aborting the eval — re-verified live under streaming, 2026-08-21, sl-qwf).
-  This holds even when the interrupted call is the one that spawned the
-  daemon. Since streaming (sl-qwf), everything printed **before** the Ctrl-C
-  is already on your terminal; only output produced after the kill is lost.
-  End-of-run file artifacts (reports, run dir) are still written when the run
-  finishes. An immediate retry after Ctrl-C gets the `:daemon/busy` rejection
-  until the abandoned run completes. The killed client's abandoned nREPL
-  session is reaped daemon-side by a periodic orphan sweep (sl-ntlx) — within
-  ~10 minutes of its run completing, never while the run executes — so
-  repeated Ctrl-Cs don't accumulate sessions in a long-lived daemon. Each
-  reap writes one `sl daemon: reaped orphaned session <id>` line to
-  `daemon.log`. Any other nREPL session on the daemon port — a hand-connected
-  REPL included — is reaped the same way once it has sat through two idle
-  sweep ticks, mid-eval or not: the port is the warm client's, not a REPL
-  host.
-- **The only real abort is `sl daemon stop`** (or killing the daemon pid) —
-  and it takes the whole daemon. The graceful half waits for the in-flight
-  run to finish; the wrapper then escalates SIGTERM → SIGKILL, which does not
-  wait.
-- **A killed run keeps its run directory** with whatever evidence was captured
-  up to the kill — deliberate: partial evidence is evidence, nothing
-  auto-cleans it. It gets **no reports** (HTML/JUnit/EDN summary are all
-  written at run end), and its `setup.clj` `:stop` teardowns never ran — user
-  fixture resources may need manual cleanup. The dirty-teardown marker only
-  records teardowns that *threw*, not runs that were killed, so the next run
-  gets no warning. (Driver processes leaked by a kill are sl-34fu.)
+- **Ctrl-C aborts the run.** The client traps it and sends the daemon an
+  abort. The instant the trap fires your terminal prints one line —
+  `aborting: N scenario(s) finishing their current step, then Afters,
+  cleanup, :stop; reports will land at <dir>` — and then **waits**. Inside
+  the daemon no not-yet-started scenario starts; a scenario already running
+  stops at its **next step boundary** (a step is never interrupted, and no
+  nREPL interrupt is involved); every After hook, capability cleanup and
+  `setup.clj` `:stop` runs; every report is written. The scenarios that ran
+  keep their verdicts, the rest are **held** (`HELD (aborted)` on the
+  console, `<skipped message="held: aborted …">` in JUnit, `:held {:reason
+  :aborted}` in EDN and the HTML page). When the wind-down is done the
+  client prints the verdict and exits 4. The daemon survives — `sl daemon
+  status` still shows it, the next run is warm.
+- **`sl daemon abort`** does the same from a second terminal or a CI
+  wrapper: it asks the daemon to abort the run in flight, prints the same
+  immediate line (naming the results directory), and returns as soon as the
+  request is accepted — exit 0; exit 1 when no run is in flight, no daemon
+  is running, or it is unreachable. The attached client is the one that
+  waits and prints the verdict.
+- **A second Ctrl-C detaches.** The client prints `sl: detached; the daemon
+  is finishing the unwind; reports will land at <dir>` and exits **130**;
+  the daemon finishes the unwind on its own — teardowns and reports still
+  land. An immediate retry gets the `:daemon/busy` rejection until it has.
+- **If the abort cannot be delivered** (the daemon unreachable, the abort
+  op failed) the client prints the honest hint — the run continues in the
+  daemon; `sl daemon status` shows it, `sl daemon stop` aborts it and takes
+  the whole daemon — and exits **130**. This is the only path on which a
+  run keeps executing invisibly after Ctrl-C, and it is the pre-sl-617t
+  behavior: nREPL sessions persist across a dead transport and output
+  writes to the dead session are swallowed rather than aborting the eval,
+  so the run completes server-side and its end-of-run artifacts are still
+  written. The abandoned nREPL session is reaped daemon-side by a periodic
+  orphan sweep (sl-ntlx) — within ~10 minutes of its run completing, never
+  while the run executes. Each reap writes one `sl daemon: reaped orphaned
+  session <id>` line to `daemon.log`. Any other nREPL session on the daemon
+  port — a hand-connected REPL included — is reaped the same way once it
+  has sat through two idle sweep ticks, mid-eval or not: the port is the
+  warm client's, not a REPL host.
+- **130 is the platform's "interrupted" status**, outside the exit-code
+  table by design: it is produced only when the process was interrupted
+  before it could reach a verdict — the two warm cases above, and a cold
+  Ctrl-C before execution began. Everything that reaches a verdict is in
+  the table (the [exit-codes page](architecture/exit-codes.md)): an abort
+  is 4, an abandoned unwind is 3.
+- **Cold runs (`--no-daemon`)** abort the same way: one Ctrl-C prints the
+  immediate line, winds down, writes the reports, exits 4. A **second
+  Ctrl-C during the unwind takes the crash row** — exit 3, the `sl-crash`
+  markers in the multi-group report surfaces — you accepted the mess and
+  the report says so. Once the final report writes have begun a second
+  Ctrl-C is a no-op (one line; the exit-4 verdict lands moments later).
+- **`sl daemon stop`** still exists and still takes the whole daemon: the
+  graceful half waits for the in-flight run to finish; the wrapper then
+  escalates SIGTERM → SIGKILL, which does not wait. A killed run keeps its
+  run directory with whatever evidence was captured (nothing auto-cleans
+  it) but gets no reports and no `:stop` teardowns. Prefer `sl daemon
+  abort`.
 
 ## CI
 

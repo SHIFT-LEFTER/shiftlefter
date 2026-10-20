@@ -19,13 +19,13 @@
 ;;
 ;; Frames may declare :object-kind, the accepted value kind for the O slot
 ;; (sl-rlxa). Absent means :intent — the object must be an intent reference
-;; and is validated against the intent glossary under :svo {:unknown-object ...}.
+;; and is validated against the intent glossary under :enforcement {:unknown-object ...}.
 ;; :location means the slot accepts a literal URL (mirroring the raw-EDN-locator
 ;; doctrine: allowed, never an :unknown-object error). A :location frame may
 ;; additionally declare :location-refs? true (sl-3jr4): the slot then also
 ;; accepts a bare PascalCase intent name, resolved via the intent's :location
 ;; root binding + the interface's :config :base-url — and under
-;; :svo {:unknown-object ...} a bare-name ref that doesn't resolve IS an
+;; :enforcement {:unknown-object ...} a bare-name ref that doesn't resolve IS an
 ;; :unknown-object issue (literals stay exempt). Assertion frames stay
 ;; literal-only pending the sl-q81m frame-semantics ruling.
 ;;
@@ -178,8 +178,15 @@
   {:desc "Observe an element or page property"
    :frames {:visible          {:args []
                                :pattern "S sees O"}
+            ;; :object-kind :text (sl-90x5, the :title fix of sl-2sj6 applied
+            ;; to the frame it missed): O is free page text, content-only —
+            ;; never an intent ref. Quoted-literal ONLY at this surface: a
+            ;; {token} in the `should see O` position already matches the
+            ;; :visible locator stepdef (locator-re admits any {...}), so
+            ;; admitting it here would make every token an ambiguous bind.
             :on-page          {:args []
-                               :pattern "S sees O on the page"}
+                               :pattern "S sees O on the page"
+                               :object-kind :text}
             :text             {:args [:text]
                                :arg-kinds {:text :value}
                                :pattern "S sees O with text TEXT"}
@@ -230,11 +237,19 @@
   ;; its named groups PRODUCE bindings statically (dry-run enumerates them from
   ;; the step-text literal, interface-blind) and embedded {binding} tokens
   ;; interpolate as regex-quoted literals.
+  ;; sl-ectw: the declared shape is the primary form — `captures O` reads
+  ;; O's :shape from the intents glossary (:default); the inline MATCH is
+  ;; the escape hatch (:matching, mirroring :see :matching). A :matching
+  ;; step on an element that declares a :shape is a plan error (two
+  ;; declarations of one shape); a :default step on an element without
+  ;; one is a plan error pointing at the def-site.
   :capture
-  {:desc "Observe an element's text and bind named-group matches"
-   :frames {:default {:args [:match]
-                      :arg-kinds {:match :matcher}
-                      :pattern "S captures O matching MATCH"}}}
+  {:desc "Observe an element's text and bind its declared shape's named groups"
+   :frames {:default  {:args []
+                       :pattern "S captures O"}
+            :matching {:args [:match]
+                       :arg-kinds {:match :matcher}
+                       :pattern "S captures O matching MATCH"}}}
 
   ;; ---------------------------------------------------------------------------
   ;; State-assertion verbs — assert properties of the subject or page that

@@ -59,7 +59,14 @@
           (is (str/includes? out "## Project context"))
           (is (str/includes? out "config-source: :discovered"))
           (is (str/includes? out "## Counts"))
-          (is (str/includes? out "## What would fail"))
+          (is (str/includes? out "## Project checks"))
+          (is (str/includes? out "Project checks: ok")
+              "the top line names the section it summarizes — never a bare 'Status'")
+          (is (str/includes? out "Checked: config, glossaries, step files"))
+          (is (str/includes? out "Not checked: your features — orient does not read them."))
+          (is (str/includes? out "No diagnostics from these checks."))
+          (is (not (str/includes? out "loads clean"))
+              "no sentence reads as a verdict on the whole project (sl-a55s)")
           (is (str/includes? out "## Validate / run"))
           (is (str/includes? out "sl agent-doc builtins")))
         (testing "stays thin: no vocabulary/stepdef inventories or doctrine prose"
@@ -69,41 +76,102 @@
           (is (not (str/includes? out "S clicks O"))))))))
 
 ;; -----------------------------------------------------------------------------
-;; Mode line (sl-hjnp)
+;; Orient's lane (sl-a55s, Chair ruling 2026-09-21): the project WITHOUT the
+;; features. Corpus-free checks stay; corpus-relative ones are dry-run's.
 ;; -----------------------------------------------------------------------------
 
-(deftest mode-line-vanilla-test
-  (with-temp-project
-    (fn [dir]
-      (make-project! dir)  ; make-project!'s config has no :svo → vanilla
-      (let [out (with-out-str
-                  (is (= 0 (orient/orient-cmd ["orient"] {} (context dir)))))]
-        (is (str/includes? out "Mode: Vanilla — SVO validation OFF"))
-        (is (str/includes? out "add :svo to enable"))
-        (is (not (str/includes? out "Mode: Shifted")))))))
+(defn- orient-of [dir]
+  (let [code (atom nil)
+        out (with-out-str (reset! code (orient/orient-cmd ["orient"] {} (context dir))))]
+    {:code @code :out out
+     :projection (projection/build-projection (context dir))}))
 
-(deftest mode-line-shifted-test
+(deftest orphan-glossary-type-still-surfaces-test
+  (testing "AC1: :glossary/orphan-type needs no features — it stays in orient"
+    (with-temp-project
+      (fn [dir]
+        (make-project! dir)
+        (write-edn! (fs/path dir "sl" "glossary" "verbs-github.edn")
+                    {:type :github/web
+                     :verbs {:fork {:desc "Fork a repository"
+                                    :frames {:default {:args [] :pattern "S forks O"}}}}})
+        (write-edn! (fs/path dir "sl" "shiftlefter.edn")
+                    {:runner {:step-paths ["steps/"] :macros {:enabled? false}}
+                     :glossaries {:subjects "glossary/subjects.edn"
+                                  :verbs ["glossary/verbs-github.edn"]}
+                     :interfaces {:web {:type :web :adapter :etaoin}}})
+        (let [{:keys [code out projection]} (orient-of dir)]
+          (is (= [:glossary/orphan-type]
+                 (mapv :type (filter #(= :suite-lint (:stage %)) (:diagnostics projection)))))
+          (is (= :error (:status projection)))
+          (is (= 1 code) "orient's exit ladder is unchanged")
+          (is (str/includes? out ":glossary/orphan-type"))
+          (is (str/includes? out "Project checks: error")))))))
+
+(deftest api-only-project-sees-no-noise-test
+  (testing "AC3: browser builtins are REGISTERED but unused and no :web
+            interface is configured — orient says nothing about them (the
+            old sl-s2oa filter existed only to hide these false alarms; with
+            the corpus-relative checks gone there is nothing to hide)"
+    (with-temp-project
+      (fn [dir]
+        (make-project! dir)
+        (write-edn! (fs/path dir "sl" "shiftlefter.edn")
+                    {:runner {:step-paths ["steps/"] :macros {:enabled? false}}
+                     :glossaries {:subjects "glossary/subjects.edn"}
+                     :interfaces {:sms {:type :sms :adapter :sms-mock}}})
+        (let [{:keys [code out projection]} (orient-of dir)]
+          (is (some #(= :web (get-in % [:metadata :interface])) (:stepdefs projection))
+              "precondition: browser stepdefs are registered")
+          (is (= [] (:diagnostics projection)))
+          (is (= 0 code))
+          (is (str/includes? out "No diagnostics from these checks.")))))))
+
+(deftest missing-capability-is-not-orients-to-report-test
+  (testing "J-d, the ruling applied: :stepdef/missing-capability is defined
+            over a MATCHED stepdef — a fact about the features. A stepdef
+            whose configured adapter lacks its protocol made orient exit 1;
+            orient does not read features, so it now exits 0 (sl run
+            --dry-run still exits 2 when a feature matches that stepdef)"
+    (with-temp-project
+      (fn [dir]
+        (make-project! dir)
+        (write-text! (fs/path dir "sl" "steps" "frobs.clj")
+                     "(ns frobs.steps
+                        (:require [shiftlefter.stepengine.registry :refer [defstep]]))
+                      (defstep #\"a step needing a protocol nobody provides\"
+                        {:interface :web
+                         :requires-protocols [:nowhere.protocol/INope]}
+                        [ctx] ctx)")
+        (let [{:keys [code projection]} (orient-of dir)]
+          (is (not-any? #(#{:stepdef/missing-capability :stepdef/undefined-interface} (:type %))
+                        (:diagnostics projection)))
+          (is (= :ok (:status projection)))
+          (is (= 0 code)))))))
+
+;; -----------------------------------------------------------------------------
+;; No mode line, no :mode key (sl-6wh9 — the sl-hjnp mode line is retired)
+;; -----------------------------------------------------------------------------
+
+(deftest no-mode-line-test
   (with-temp-project
     (fn [dir]
       (make-project! dir)
-      (write-edn! (fs/path dir "sl" "shiftlefter.edn")
-                  {:runner {:step-paths ["steps/"] :macros {:enabled? false}}
-                   :glossaries {:subjects "glossary/subjects.edn"}
-                   :interfaces {:web {:type :web :adapter :etaoin :config {:headless true}}}
-                   :svo {:unknown-subject :warn}})
       (let [out (with-out-str
                   (is (= 0 (orient/orient-cmd ["orient"] {} (context dir)))))]
-        (is (str/includes? out "Mode: Shifted — SVO validation ON"))
-        (is (not (str/includes? out "Mode: Vanilla")))))))
+        (is (not (str/includes? out "Mode:")))
+        (is (not (str/includes? out "Vanilla")))))))
 
-(deftest mode-in-edn-test
+(deftest enforcement-effective-in-edn-test
   (with-temp-project
     (fn [dir]
       (make-project! dir)
       (let [out (with-out-str
                   (is (= 0 (orient/orient-cmd ["orient"] {:edn true} (context dir)))))
             value (edn/read-string out)]
-        (is (= :vanilla (:mode value)))))))
+        (is (not (contains? value :mode)))
+        (is (= :warn (get-in value [:enforcement-effective :unknown-subject]))
+            "the effective levels are always present, block or no block")))))
 
 ;; -----------------------------------------------------------------------------
 ;; --edn full projection (AC4) + shared zvo source
@@ -242,3 +310,36 @@
                       edn/read-string :fingerprint)]
           (is (not= fp1 fp2)
               "fingerprint must change when accepted truth changes"))))))
+
+;; -----------------------------------------------------------------------------
+;; sl-mk0t (Warden W2): the thin render surfaces the intents sub-error
+;; -----------------------------------------------------------------------------
+
+(deftest intents-load-error-surfaces-the-first-sub-error-test
+  (testing "the [error/intents] line carries the first sub-error's message and
+            def-site, not only 'Failed to load intents from <dir>'"
+    (with-temp-project
+      (fn [dir]
+        (make-project! dir)
+        (write-text! (fs/path dir "sl" "glossary" "intents" "login.edn")
+                     (str "{:intent \"Login\"\n"
+                          " :elements\n"
+                          " {:submit {:bindings {:web {:css \"#submit\"}}}\n"
+                          "  :code {:bindings {:web {:css \"#code\"}}\n"
+                          "         :shape \"code is (?<x>\\\\d+)\"}}}"))
+        (write-edn! (fs/path dir "sl" "shiftlefter.edn")
+                    {:runner {:step-paths ["steps/"] :macros {:enabled? false}}
+                     :glossaries {:subjects "glossary/subjects.edn"
+                                  :intents "glossary/intents"}
+                     :interfaces {:web {:type :web :adapter :etaoin}}})
+        (let [{:keys [code out]} (orient-of dir)
+              line (first (filter #(str/includes? % "[error/intents]") (str/split-lines out)))]
+          (is (= 1 code) "orient's exit ladder is unchanged")
+          (is (some? line))
+          (is (str/includes? line ":intent/load-failed — Failed to load intents from"))
+          (is (str/includes? line ":shape on element code names its one group \"x\"")
+              "the first sub-error's message rides the line")
+          (is (re-find #"\(Declared at: \S+/sl/glossary/intents/login\.edn:4\)" line)
+              "and its def-site")
+          (is (not (str/includes? line "more;"))
+              "one sub-error, no remainder count"))))))

@@ -11,6 +11,8 @@
 (def topics
   [{:topic "intro"
     :summary "What ShiftLefter is, the agent surface, and project-fit pointer."}
+   {:topic "adoption"
+    :summary "Bring existing Gherkin: what parses today, what `sl run` reports, what shifting a suite means."}
    {:topic "overview"
     :summary "Operating model and command map for fresh agents."}
    {:topic "layout"

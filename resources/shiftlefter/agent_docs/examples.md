@@ -12,7 +12,7 @@ source example and regenerate with `clojure -T:build gen-examples`.
 
 ## Minimal config
 
-The smallest useful config. It lives at `sl/shiftlefter.edn` — the ONLY discovered location; everything ShiftLefter (config, glossaries, features, steps) lives under `sl/`. Everything beyond the interface map (glossaries, `:svo` enforcement, step paths) is opt-in.
+The smallest useful config. It lives at `sl/shiftlefter.edn` — the ONLY discovered location; everything ShiftLefter (config, glossaries, features, steps) lives under `sl/`. Everything beyond the interface map (glossaries, `:enforcement`, step paths) is opt-in.
 
 _Verbatim from `examples/02-browser-zero-code/sl/shiftlefter.edn`._
 
@@ -29,7 +29,7 @@ _Verbatim from `examples/02-browser-zero-code/sl/shiftlefter.edn`._
 
 ## Config with glossaries wired
 
-The canonical glossary layout: `glossary/` next to the config (so `sl/glossary/`), subjects in `glossary/subjects.edn`, plus `:svo` enforcement levels and a macro registry under `:runner :macros`. The glossary path is CONVENTIONAL — a config with no `:glossaries` key discovers it automatically; this example spells it explicitly for teaching. Note there is no project verbs glossary: the built-in interface verbs cover the example, which is the normal case.
+The canonical glossary layout: `glossary/` next to the config (so `sl/glossary/`), subjects in `glossary/subjects.edn`, plus `:enforcement` levels and a macro registry under `:runner :macros`. The glossary path is CONVENTIONAL — a config with no `:glossaries` key discovers it automatically; this example spells it explicitly for teaching. Note there is no project verbs glossary: the built-in interface verbs cover the example, which is the normal case.
 
 _Verbatim from `examples/svo-demo/sl/shiftlefter.edn`._
 
@@ -91,7 +91,7 @@ _Verbatim from `examples/svo-demo/sl/shiftlefter.edn`._
  ;; - :error — fail at bind time (before execution)
  ;; :unknown-object is deliberately unset: it defaults :warn once an
  ;; :intents glossary exists, :off without one (nothing to validate against).
- :svo {:unknown-subject :warn    ; Typos in subject names
+ :enforcement {:unknown-subject :warn    ; Typos in subject names
        :unknown-verb :warn       ; Unknown verbs for interface type
        :unknown-interface :error}} ; Misconfigured interfaces
 ```
@@ -188,7 +188,7 @@ _Verbatim from `examples/06-nested-parent-anchored/sl/shiftlefter.edn`._
 ;; Dashboard.featured[1].rating.stars against this example's own intents.
 ;; setup.clj stands up the fixture server.
 {:interfaces {:web {:type :web :adapter :etaoin :config {}}}
- :svo        {:unknown-subject :error
+ :enforcement        {:unknown-subject :error
               :unknown-verb    :warn
               :unknown-interface :error}}
 ```

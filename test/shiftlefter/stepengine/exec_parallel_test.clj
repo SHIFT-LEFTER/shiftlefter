@@ -152,17 +152,137 @@
 ;; Catastrophic escape: coordinator must never hang
 ;; -----------------------------------------------------------------------------
 
-(deftest escaped-throwable-becomes-failed-result
-  (testing "a Throwable escaping scenario execution converts to a failed
-            result instead of swallowing the completion"
-    (let [plans [(et/make-plan [(et/make-bound-step (fn [] {:ok 1}) 0 [])])]]
-      (with-redefs [step-loop/execute-scenario
-                    (fn [& _] (throw (OutOfMemoryError. "simulated harness crash")))]
-        (let [result (exec/execute-suite plans {:max-parallel 2})]
-          (is (= :failed (:status result)) "Suite completes; no hang")
-          (is (= :scenario/harness-crash
-                 (-> result :scenarios first :steps first :error :type))
-              "First step bears the harness-crash error"))))))
+(defn- escape-outcome
+  "Run execute-suite under a timeout with step-loop/execute-scenario
+   redefined to throw `boom` for the plan tagged :kaboom (a JVM-fatal Error
+   on purpose — the guard catches Throwable, J-d). Returns the Throwable
+   that propagated, ::returned when the suite returned normally, or ::hung."
+  [plans opts boom]
+  (let [real step-loop/execute-scenario]
+    (with-redefs [step-loop/execute-scenario
+                  (fn [plan & more]
+                    (if (= :kaboom (::tag plan))
+                      (throw boom)
+                      (apply real plan more)))]
+      (let [run (future (try (exec/execute-suite plans opts)
+                             ::returned
+                             (catch Throwable t t)))
+            outcome (deref run 20000 ::hung)]
+        (when (= ::hung outcome) (future-cancel run))
+        outcome))))
+
+(defn- kaboom-plan [& {:keys [serial?]}]
+  (cond-> (assoc (et/make-plan [(et/make-bound-step (fn [] {:ok 1}) 0 [])])
+                 ::tag :kaboom)
+    serial? (assoc :plan/schedule {:serial? true :reason :tag})))
+
+(deftest escaped-throwable-is-a-runner-crash
+  (testing "sl-io05: a Throwable escaping the per-scenario machinery is a
+            RUNNER CRASH on every scheduler route — the ORIGINAL throwable
+            propagates out of execute-suite (never a fabricated scenario
+            verdict, never a wrapper), the gate is armed {:reason :crash},
+            and the coordinator does not hang"
+    (doseq [[route opts plans]
+            [["max-parallel 1" {:max-parallel 1}
+              [(sleeping-plan (atom []) :a 0) (kaboom-plan)]]
+             ["a pool task" {:max-parallel 2}
+              [(sleeping-plan (atom []) :a 0) (kaboom-plan)]]
+             ["the @serial tail" {:max-parallel 2}
+              [(sleeping-plan (atom []) :a 0) (kaboom-plan :serial? true)]]]]
+      (testing route
+        (let [boom (OutOfMemoryError. "simulated weave defect")
+              gate (atom nil)
+              crashed (atom [])
+              outcome (escape-outcome
+                       plans
+                       (assoc opts
+                              :halt-gate gate
+                              :on-scenario-crash #(swap! crashed conj %))
+                       boom)]
+          (is (not= ::hung outcome) "no coordinator hang")
+          (is (identical? boom outcome)
+              "the original throwable itself — identity, not a cause chain")
+          (is (= :crash (:reason @gate)) "the gate is armed with the crash reason")
+          (is (= 1 (count @crashed))
+              ":on-scenario-crash fired exactly once, before the rethrow")
+          (is (= (-> plans second :plan/pickle :pickle/name)
+                 (:name (first @crashed)))
+              "…with the crashed scenario's identity"))))))
+
+(defn- blocking-plan
+  "A plan whose single step records `tag` into `log` then BLOCKS on `latch`
+   (interruptibly) — how many of these ever started is measured without a
+   sleep race."
+  [log latch tag]
+  (et/make-plan
+   [(et/make-bound-step
+     (fn []
+       (swap! log conj tag)
+       (deref latch 10000 :timeout)
+       {:tag tag})
+     0 [])]))
+
+(defn- settle
+  "Poll `pred` for up to `ms`; returns as soon as it is true. Used only to
+   give the OLD behavior (queued tasks still running after the coordinator
+   is gone) time to show itself — never to assert timing."
+  [pred ms]
+  (let [deadline (+ (System/currentTimeMillis) ms)]
+    (loop []
+      (cond (pred) true
+            (> (System/currentTimeMillis) deadline) false
+            :else (do (Thread/sleep 25) (recur))))))
+
+(deftest pool-escape-crashes-now-and-drains-the-queue
+  (testing "sl-io05 AC2: crash NOW, not after the pool drains — queued
+            scenarios never start (shutdownNow), in-flight ones are
+            interrupted"
+    (let [log (atom [])
+          latch (promise)
+          total 6
+          plans (into [(kaboom-plan)]
+                      (map #(blocking-plan log latch %) [:a :b :c :d :e]))
+          boom (ex-info "simulated weave defect" {})
+          outcome (try
+                    (escape-outcome plans {:max-parallel 2} boom)
+                    (finally (deliver latch :go)))]
+      (is (identical? boom outcome))
+      (settle #(>= (count @log) (dec total)) 1000)
+      (let [started (count @log)]
+        (is (<= started 2) (str "at most max-parallel blocking plans ever started; saw " started))
+        (is (< started (dec total)) (str "the queue was drained, not run; saw " started))))))
+
+(deftest coordinator-crash-arms-gate-and-drains-queue
+  (testing "sl-8orx: a Throwable escaping the coordinator's body (an
+            on-complete callback throwing — the report plane's loud
+            failure) arms the halt gate {:reason :crash} and shutdownNow
+            drains the queue: no queued scenario starts after the crash,
+            and the throw itself propagates unchanged"
+    (let [log (atom [])
+          latch (promise)
+          gate (atom nil)
+          total 6
+          plans (into [(sleeping-plan log :first 0)]
+                      (map #(blocking-plan log latch %) [:a :b :c :d :e]))
+          crashed (atom [])
+          on-complete (fn [_] (throw (ex-info "coordinator crash" {:seam :test})))]
+      (try
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"coordinator crash"
+                              (exec/execute-suite plans {:max-parallel 2
+                                                         :halt-gate gate
+                                                         :on-scenario-crash #(swap! crashed conj %)
+                                                         :on-scenario-complete on-complete})))
+        (finally
+          (deliver latch :go)))
+      ;; Under the old graceful .shutdown every queued plan would start once
+      ;; the latch opened; give that (absent) behavior a moment to show.
+      (settle #(>= (count (filter keyword? @log)) (dec total)) 1000)
+      (let [started (count (filter keyword? @log))]
+        (is (= :crash (:reason @gate)) "the gate is armed with the crash reason")
+        (is (= [] @crashed)
+            "sl-io05: a report-plane throw is no scenario's crash — :on-scenario-crash stays silent")
+        (is (<= started 2) (str "at most max-parallel blocking plans ever started; saw " started))
+        (is (< started (dec total)) (str "the queue was drained, not run; saw " started))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Costume auto-serial gate, end to end (acceptance 4)

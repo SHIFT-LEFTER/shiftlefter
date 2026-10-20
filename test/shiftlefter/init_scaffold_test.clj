@@ -94,6 +94,43 @@
                 (pr-str (:config-lints diagnostics)))
             (is (empty? (:svo-issues diagnostics)))))))))
 
+(deftest scaffold-seeds-a-bagless-adversary
+  ;; sl-l53: :adversary ships in the default subject glossary as a standing
+  ;; spur — identity + :desc ONLY. No capability bag, no personas: the
+  ;; framework must not imply it knows what adversaries can do. Proof that
+  ;; the spur is usable, not decorative: a scenario authored as :adversary
+  ;; binds clean through the real planning path in Shifted mode.
+  (with-temp-root
+    (fn [root]
+      (init/scaffold! root)
+      (let [subjects (-> (slurp (fs/file root "sl" "glossary" "subjects.edn"))
+                         edn/read-string
+                         :subjects)
+            adversary (:adversary subjects)]
+        (testing "present, documented, and nothing but identity + :desc"
+          (is (= #{:user :adversary} (set (keys subjects))))
+          (is (= [:desc] (keys adversary)))
+          (is (str/includes? (:desc adversary) "misuse cases"))
+          (is (str/includes? (:desc adversary) "No capability bag")
+              "the :desc says the bag is the project's to declare")
+          (is (str/includes? (:desc adversary) "object-level")
+              "the P7 guardrail: names what it does NOT cover"))
+        (testing "the flavors ride the file's comment block, as subject types"
+          (let [text (slurp (fs/file root "sl" "glossary" "subjects.edn"))]
+            (is (str/includes? text "inside job"))
+            (is (str/includes? text "outside job"))
+            (is (str/includes? text "AD authenticated them; it didn't authorize them."))))
+        (testing "a misuse case authored as :adversary binds clean"
+          (let [feature (fs/file root "sl" "features" "login.feature")]
+            (spit feature (str (slurp feature)
+                               "\n  Scenario: An outsider probes the login page\n"
+                               "    When :adversary opens the browser to 'https://example.invalid/admin'\n"
+                               "    Then :adversary should see the title 'Login'\n"))
+            (is (= [] (dry-run-scaffold-diagnostics root)))
+            (let [{:keys [exit plan-count]} (dry-run-scaffold root)]
+              (is (= 0 exit))
+              (is (= 2 plan-count)))))))))
+
 (deftest example-intent-is-loader-invisible
   ;; The .example suffix keeps the worked intent out of the *.edn glob
   ;; (loader.clj) — the scaffold must never ship an ACTIVE intent whose
@@ -125,9 +162,23 @@
         (is (= "And :user/alice fills Login.username with 'alice'" worked-step)
             "the header's worked line is the intent-reference shape")
         (spit feature (str (slurp feature) "    " worked-step "\n"))
-        (testing "control: before activation the name is an unknown intent (warn)"
-          (is (= [:svo/unknown-object]
-                 (mapv :type (dry-run-scaffold-diagnostics root)))))
+        (testing "control: before activation the name is an unresolvable
+                  intent ref — a planning ERROR (exit 2) since sl-u2r0, the
+                  issue under the exit-2 :planning block, naming where
+                  intents are declared"
+          (let [summary (edn/read-string
+                         (with-out-str
+                           (rc/execute! {:paths []
+                                         :project-context (pc/resolve
+                                                           {:config-path (str root "/sl/shiftlefter.edn")})
+                                         :dry-run true
+                                         :edn true})))
+                issue (-> summary :planning :svo-issues first)]
+            (is (= 2 (:run/exit-code summary)))
+            (is (= [:svo/unknown-object] (mapv :type (-> summary :planning :svo-issues))))
+            (is (= :error (:severity issue)))
+            (is (str/ends-with? (str (-> issue :def-site :file)) "sl/glossary/intents")
+                "no suggestion possible (nothing loaded): the def-site is the intents dir")))
         (fs/move (fs/path intents "login.edn.example") (fs/path intents "login.edn"))
         (testing "activated: the worked step resolves through the intent, zero diagnostics"
           (is (= [] (dry-run-scaffold-diagnostics root)))

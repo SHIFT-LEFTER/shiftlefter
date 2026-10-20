@@ -13,6 +13,6 @@
 ;; file is replaced wholesale, not merged).
 {:interfaces {:web {:type :web :adapter :etaoin
                     :config {:base-url "http://localhost:9092"}}}
- :svo        {:unknown-subject :error
+ :enforcement        {:unknown-subject :error
               :unknown-verb    :warn
               :unknown-interface :error}}

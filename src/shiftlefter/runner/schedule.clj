@@ -30,8 +30,8 @@
    (explicit declarations before inferred sources). A scenario matching
    several reasons is serialized once; the reason is cosmetic.
 
-   At :max-parallel 1 (or unset) the facet is inert: the sequential path
-   never reads it."
+   At :max-parallel 1 (or unset) the facet is inert: the scheduler runs
+   every plan inline in plan order and never reads it."
   (:require [clojure.spec.alpha :as s]
             [shiftlefter.runner.tag-disposition :as tagd]
             [shiftlefter.stepengine.exec.provisioning :as prov]))

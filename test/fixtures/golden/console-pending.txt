@@ -9,3 +9,17 @@ PENDING Step returns pending
 
 
 1 scenario(s): 1 pending
+
+SVO validation warnings:
+  WARNING: Untyped step "I have 5 items in my cart"
+         at ROOT/test/fixtures/features/pending.feature:4
+         matched stepdef "I have (\\d+) items in my cart", which declares no :svo — no subject, verb, or object was checked
+
+  WARNING: Untyped step "I return pending"
+         at ROOT/test/fixtures/features/pending.feature:5
+         matched stepdef "I return pending", which declares no :svo — no subject, verb, or object was checked
+
+  WARNING: Untyped step "I should have 5 items total"
+         at ROOT/test/fixtures/features/pending.feature:6
+         matched stepdef "I should have (\\d+) items total", which declares no :svo — no subject, verb, or object was checked
+

@@ -85,15 +85,15 @@ produced by a live run.
 | `gherkin ddmin` | `ddmin-cmd` core.clj:597 | parser shrink loop | minimized `<file>.min` | 0 wrote minimal ✓ · 2 no path. Framework-dev tool |
 | `verify` | `verify-cmd` core.clj:673 | validator battery (framework repo only) | check report | 0 · 1 failures · 2 outside framework repo ✓ |
 | `agent-doc` | `agent_doc.clj:98` | resource print (no project context — the one context-free verb, core.clj:912) | packaged doctrine topic | 0 ✓ |
-| `orient` | `orient.clj:178` | projection (no corpus bind) | orientation card; `--edn` full projection | 0 ✓ · 1 projection load failure · 2 ambiguous config |
-| `glossary` | `resolution.clj:531` | projection + corpus bind (usage markers; `duplicates` section skips the corpus) | listing with provenance + usage markers; `--edn` | 0 listed/honest-vanilla/no-project ✓ · 1 load failure · 2 bad section/ambiguous config |
+| `orient` | `orient.clj:185` | projection (no corpus bind) | orientation card — the project WITHOUT the features: what was checked, what was not, and `sl run --dry-run` named as the gate for features (sl-a55s); `--edn` full projection | 0 ✓ · 1 projection load failure · 2 ambiguous config |
+| `glossary` | `resolution.clj:531` | projection + corpus bind (usage markers; `duplicates` section skips the corpus) | listing with provenance + usage markers; `--edn` | 0 listed/no-project ✓ · 1 load failure · 2 bad section/ambiguous config |
 | `explain` | `resolution.clj:943` | projection + corpus bind; `{…}` arg → locator reverse index only | per-kind resolution + usage; owners for a locator | 0 found ✓ · 1 miss ✓ · 2 malformed ✓ |
 | `costume init` | core.clj:719 | wardrobe + real Chrome launch | profile dir + live browser for one-time login | 0 · 1 launch failure · 2 usage (code-read; not live-run — launches a real browser) |
 | `costume relaunch` | core.clj:733 | wardrobe + Chrome relaunch | relaunched browser on the costume profile | as init (code-read) |
 | `costume list` | core.clj:751 | wardrobe read | costume table + liveness | 0 ✓ |
 | `costume destroy` | core.clj:772 | wardrobe delete (refuses while live unless `--force`) | removal confirmation | 0 · 1 refused/failed · 2 usage (code-read) |
 | `doctor` | `doctor.clj:629` | probe registry (machine pre-flight; no feature corpus) | probe table; `--list`; `--edn` | 0 all ok · 1 issues found ✓ |
-| `init` | `init/init-cmd` init.clj:206 (branch core.clj:1021) | scaffold write: `sl/` config + glossary + starter feature; AGENTS.md only on `--write-agents` (marker-guarded; the default prints the offer); bails touch-nothing if `sl/shiftlefter.edn` exists, except the explicit `--write-agents` ask still lands | one line per artifact; AGENTS.md offer or outcome | 0 scaffolded AND 0 bailed (code-read; deliberately absent from `--help` until system-wide distribution) |
+| `init` | `init/init-cmd` init.clj:206 (branch core.clj:1021) | scaffold write: `sl/` config + glossary + starter feature; AGENTS.md only on `--write-agents` (marker-guarded; the default prints the offer); bails touch-nothing if `sl/shiftlefter.edn` exists, except the explicit `--write-agents` ask still lands | one line per artifact; AGENTS.md offer or outcome | 0 scaffolded AND 0 bailed (code-read; deliberately absent from `--help` until system-wide distribution, sl-f1ir) |
 | `daemon serve` | `daemon-cmd` core.clj:810 | long-lived JVM serving `dispatch` over the wire (auto-spawned by `bin/sl`) | socket + port file | blocks; lifecycle codes on the client side |
 | `daemon status` | core.clj:810 | registry read | daemon record (port/pid/jar) | 0 ✓ |
 | `daemon stop` | core.clj:810 | signal + reap | stopped confirmation | 0 ✓ |
@@ -103,7 +103,7 @@ produced by a live run.
 | *(parse error)* | core.clj:922 | immediate | errors on stderr | 2 — a typo'd flag never executed anything |
 | *(unknown command)* | core.clj:1019 | immediate | hint on stderr, stdout clean | 2 ✓ |
 
-## Exit codes: the verdict contract
+## Exit codes: the verdict contract (sl-7c7i)
 
 The run family's column is one table, owned by `runner/verdict.clj` and
 guard-tested against the docs (`exit-contract-guard-test`):
@@ -111,10 +111,10 @@ guard-tested against the docs (`exit-contract-guard-test`):
 | Code | Status | Meaning |
 |---|---|---|
 | 0 | `:passed` | existential pass — ≥1 scenario selected, none failed/errored |
-| 1 | `:failed` | ≥1 scenario failed (valid tests, app wrong) |
+| 1 | `:failed` | ≥1 scenario failed (valid tests, app wrong), or a stale `@blocked` claim (XPASS — the test's claim is what is wrong) |
 | 2 | `:planning-failed` | invalid before execution — nothing ran (config/parse/discovery/binding, un-runnable invocation, empty selection) |
 | 3 | `:crashed` | runner crash; wins over everything (cold and warm paths both map Throwable → 3) |
-| 4 | `:degraded` | ≥1 scenario `:error` — the harness family (counted `error`) or a step classified `:error/class :observation` by its adapter (counted `unobserved`); verdict about the app unavailable for those scenarios |
+| 4 | `:degraded` | ≥1 scenario `:error` — the harness family (counted `error`) or a step classified `:error/class :observation` by its adapter (counted `unobserved`, sl-kowi); verdict about the app unavailable for those scenarios |
 
 Precedence: 3 anywhere; 2 pre-execution exclusive; execution worst-wins
 4 > 1 > 0. The axis: 0/1 are verdicts about the app; 2/3/4 are three ways

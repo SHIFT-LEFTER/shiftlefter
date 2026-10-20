@@ -15,8 +15,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import sun.misc.Signal;
 
 /**
  * ShiftLefter warm-path dispatch client (sl-x6r; streaming restored sl-qwf).
@@ -51,6 +54,21 @@ import java.util.regex.Pattern;
  * cold. 69 is only returned while NOTHING has been streamed yet (connect/clone
  * phase); once any output byte has been written, a transport failure exits 3
  * (crash) instead — a cold retry would duplicate the already-streamed output.
+ *
+ * <p>Ctrl-C (sl-617t): the normal dispatch path traps SIGINT. The FIRST
+ * keypress sends the daemon an abort on a second connection (a fresh nREPL
+ * session evaluating {@code shiftlefter.daemon/abort!}), streams the daemon's
+ * immediate line to stderr, and keeps waiting: the run winds down at its next
+ * step boundary (Afters, cleanup, :stop, reports) and the dispatch eval then
+ * returns {@code {:exit 4}} — that return IS the wind-down signal, so the
+ * verdict prints and the client exits 4 with the daemon alive. A SECOND
+ * keypress detaches: the client prints where reports will land and exits 130
+ * while the daemon finishes the unwind on its own. If the abort cannot be
+ * delivered (daemon unreachable, the op failed) the client prints the honest
+ * continuation hint (the sl-qbww fallback: the run continues in the daemon;
+ * {@code sl daemon stop} aborts it, taking the whole daemon) and exits 130.
+ * 130 is the platform's "interrupted" status, used only where the client
+ * never received a verdict; the abort verdict itself is always 4.
  */
 public final class NreplClient {
 
@@ -59,6 +77,13 @@ public final class NreplClient {
 
     /** Crash exit (matches the daemon/runner verdict contract's code 3). */
     private static final int EX_CRASH = 3;
+
+    /**
+     * The platform's "interrupted" status (sl-617t): the client left without a
+     * verdict — detached on a second Ctrl-C, or the abort was undeliverable.
+     * Outside the 0–4 table by design; never the abort verdict (that is 4).
+     */
+    private static final int EX_INTERRUPTED = 130;
 
     /**
      * True once any out/err byte has been written to this process's streams.
@@ -127,6 +152,130 @@ public final class NreplClient {
         + "          (catch Throwable t (.printStackTrace t *err*) {:exit 3}))]"
         + "  (flush) (.flush ^java.io.Writer *err*) {:exit (:exit r)})";
 
+    /**
+     * Internal sentinel (sl-617t): {@code sl daemon abort} routes here, and the
+     * Ctrl-C trap sends the same form on its own connection. A plain eval of
+     * {@code shiftlefter.daemon/abort!} on a fresh session — never the
+     * dispatch path (no registry reset) and never queued behind the in-flight
+     * dispatch eval (its own SessionThread). The value keeps the whole map so
+     * {@code :results-dir} can be read back for the detach hint.
+     */
+    private static final String ABORT_SENTINEL = "--sl-internal-abort";
+
+    private static final String ABORT_CODE =
+        "(let [r (try (shiftlefter.daemon/abort!)"
+        + "          (catch Throwable t (.printStackTrace t *err*) {:exit 3}))]"
+        + "  (flush) (.flush ^java.io.Writer *err*) r)";
+
+    /** Ctrl-C strikes on the normal dispatch path (sl-617t): 1 = abort, 2 = detach. */
+    private static final AtomicInteger strikes = new AtomicInteger();
+
+    /** The results dir the daemon named when the abort was accepted, for the detach hint. */
+    private static volatile String abortResultsDir = null;
+
+    private static final Pattern RESULTS_DIR_RE = Pattern.compile(":results-dir\\s+\"([^\"]*)\"");
+
+    /**
+     * Replace the JVM's default SIGINT action (die, 130) with the abort trap —
+     * only on the normal dispatch path. An ignored or VM-owned signal throws
+     * IllegalArgumentException; then the default stays (Ctrl-C kills the
+     * client as before, the daemon finishes the run — docs/daemon.md).
+     */
+    private static void installAbortTrap(final int port) {
+        try {
+            Signal.handle(new Signal("INT"), sig -> onInterrupt(port));
+        } catch (IllegalArgumentException e) {
+            // keep the default action
+        }
+    }
+
+    private static void onInterrupt(int port) {
+        int n = strikes.incrementAndGet();
+        if (n == 1) {
+            try {
+                String dir = sendAbort(port);
+                if (dir != null) {
+                    abortResultsDir = dir;
+                }
+            } catch (IOException e) {
+                System.err.println("sl: could not deliver the abort (" + e.getMessage()
+                                   + "); the run continues in the daemon — `sl daemon status`"
+                                   + " shows it, `sl daemon stop` aborts it (takes the whole daemon)");
+                System.err.flush();
+                System.exit(EX_INTERRUPTED);
+            }
+            return;
+        }
+        if (n == 2) {
+            System.err.println("sl: detached; the daemon is finishing the unwind; reports will land at "
+                               + (abortResultsDir != null ? abortResultsDir
+                                                          : "the configured report paths"));
+            System.err.flush();
+            System.exit(EX_INTERRUPTED);
+        }
+        // n >= 3: the detach exit is already in progress.
+    }
+
+    /**
+     * Deliver the abort on a second connection: clone, eval {@link #ABORT_CODE},
+     * stream the daemon's immediate line (its :out AND :err) to THIS process's
+     * stderr — never stdout, which is reserved for machine output — and read
+     * the value back. Returns the results dir the daemon named, or null.
+     * {@code {:exit 1}} (no run in flight — it finished just now) is not an
+     * error: the main loop is about to return. Anything else abnormal is an
+     * IOException so the caller prints the undeliverable hint.
+     */
+    private static String sendAbort(int port) throws IOException {
+        try (Socket sock = new Socket()) {
+            sock.connect(new InetSocketAddress("127.0.0.1", port), CONNECT_TIMEOUT_MS);
+            OutputStream out = sock.getOutputStream();
+            PushbackInputStream in =
+                new PushbackInputStream(new BufferedInputStream(sock.getInputStream()), 1);
+            sendDict(out, "op", "clone", "id", "a1");
+            String session = awaitSession(in);
+            sendDict(out, "op", "eval", "session", session, "id", "a2", "code", ABORT_CODE);
+            String value = null;
+            while (true) {
+                Object msg = readBencode(in);
+                if (!(msg instanceof Map)) {
+                    continue;
+                }
+                Map<?, ?> m = (Map<?, ?>) msg;
+                Object o = m.get("out");
+                if (o instanceof byte[]) {
+                    System.err.write((byte[]) o);
+                    System.err.flush();
+                }
+                Object e = m.get("err");
+                if (e instanceof byte[]) {
+                    System.err.write((byte[]) e);
+                    System.err.flush();
+                }
+                Object v = m.get("value");
+                if (v instanceof byte[]) {
+                    value = new String((byte[]) v, StandardCharsets.UTF_8);
+                }
+                if (statusContains(m.get("status"), "done")) {
+                    break;
+                }
+            }
+            closeSession(sock, out, in, session);
+            if (value == null) {
+                throw new IOException("abort op returned no value");
+            }
+            Matcher exit = Pattern.compile(":exit\\s+(-?\\d+)").matcher(value);
+            if (!exit.find()) {
+                throw new IOException("unparseable abort response");
+            }
+            int rc = Integer.parseInt(exit.group(1));
+            if (rc != 0 && rc != 1) {
+                throw new IOException("abort op failed (exit " + rc + ")");
+            }
+            Matcher dir = RESULTS_DIR_RE.matcher(value);
+            return dir.find() ? dir.group(1) : null;
+        }
+    }
+
     private static int dispatch(int port, String cwd, String[] argv) throws IOException {
         try (Socket sock = new Socket()) {
             sock.connect(new InetSocketAddress("127.0.0.1", port), CONNECT_TIMEOUT_MS);
@@ -156,7 +305,19 @@ public final class NreplClient {
                 return statusRc;
             }
 
-            // 2b. normal: eval the streaming dispatch form.
+            // 2a''. abort (sl-617t): `sl daemon abort` — plain eval on this fresh
+            //       session + the W5 close; the daemon prints the immediate line.
+            if (argv.length == 1 && ABORT_SENTINEL.equals(argv[0])) {
+                sendDict(out, "op", "eval", "session", session, "id", "2",
+                         "code", ABORT_CODE);
+                int abortRc = awaitResult(in);
+                closeSession(sock, out, in, session);
+                return abortRc;
+            }
+
+            // 2b. normal: trap Ctrl-C (sl-617t), then eval the streaming
+            //     dispatch form.
+            installAbortTrap(port);
             sendDict(out, "op", "eval", "session", session, "id", "2",
                      "code", buildCode(cwd, argv));
             int rc = awaitResult(in);

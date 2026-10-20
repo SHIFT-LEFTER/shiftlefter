@@ -6,4 +6,14 @@ run seed: 42
 Undefined steps:
   - I do something undefined (ROOT/test/fixtures/features/undefined.feature:5:5)
 
-1 binding issue(s) found. Cannot execute.
+SVO validation issues:
+  WARNING: Untyped step "I have 5 items in my cart"
+         at ROOT/test/fixtures/features/undefined.feature:4
+         matched stepdef "I have (\\d+) items in my cart", which declares no :svo — no subject, verb, or object was checked
+
+  WARNING: Untyped step "I should have 5 items total"
+         at ROOT/test/fixtures/features/undefined.feature:6
+         matched stepdef "I should have (\\d+) items total", which declares no :svo — no subject, verb, or object was checked
+
+
+3 binding issue(s) found. Cannot execute.

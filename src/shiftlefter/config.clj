@@ -29,13 +29,19 @@
                        :config {:headless true}}} ; defaults wholesale; an
                                          ; entry value :default re-includes
                                          ; the builtin def verbatim (sl-g2lj)
-    :svo {:unknown-subject :warn
-          :unknown-verb :warn
-          :unknown-interface :error
-          :unknown-object :off}}   ; :warn when an :intents glossary is
-                                   ; configured (sl-femd); :error blocks
-                                   ; (:strict = deprecated alias)
+    :enforcement {:all :warn            ; optional umbrella: sets every kind;
+                  :unknown-subject :warn ; a named key overrides it;
+                  :unknown-verb :warn    ; :unknown-interface ignores it
+                  :unknown-interface :error
+                  :unknown-object :off   ; :warn once an :intents glossary is
+                  :untyped-stepdef :warn ; configured (sl-femd); :raw-locator
+                  :raw-locator :off}}    ; follows the same conditional rule
    ```
+
+   There is ONE mode (sl-6wh9): the planner binds every step; the
+   :enforcement block holds nothing but levels and is always present in a
+   loaded config — its absence means the defaults, its presence means
+   nothing.
 
    ## Usage
 
@@ -46,6 +52,7 @@
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
             [clojure.spec.alpha :as s]
+            [clojure.spec.gen.alpha :as gen]
             [clojure.string :as str]
             [shiftlefter.gherkin.io :as io]
             [shiftlefter.project-context :as project-context]
@@ -120,10 +127,19 @@
 ;; one says nothing about the others — siblings run to completion).
 (s/def ::halt-on-observation-failure
   (s/or :off false? :on true? :scope #{:group :run}))
+;; sl-190x: the tracker link template for @blocked=REF holds —
+;; [:runner :ref-url "https://tracker/{ref}"]. `{ref}` is substituted into
+;; the :held record (:ref-url) and rendered as a link in the HTML report;
+;; nothing is ever fetched (no tracker integration — a CI script reads
+;; the record and asks the tracker itself). Absent = no link.
+(s/def ::ref-url
+  (s/with-gen (s/and string? #(str/includes? % "{ref}"))
+    #(gen/fmap (fn [host] (str "https://" host "/browse/{ref}"))
+               (gen/not-empty (gen/string-alphanumeric)))))
 (s/def ::runner (s/keys :req-un [::step-paths ::allow-pending?]
                         :opt-un [::features ::macros ::provisioning ::report
                                  ::max-parallel ::capture ::seed
-                                 ::halt-on-observation-failure]))
+                                 ::halt-on-observation-failure ::ref-url]))
 
 ;; Timing sub-config (sl-99u2) — the deadline substrate. Appears at the top
 ;; level (global rung) and as a sibling key on interface entries (instance/
@@ -165,14 +181,25 @@
 (s/def ::costume-def (s/keys :req-un [::interface]))
 (s/def ::costumes (s/map-of keyword? ::costume-def))
 
-;; SVO enforcement sub-config
-(s/def ::unknown-subject #{:warn :error :off})
-(s/def ::unknown-verb #{:warn :error :off})
-(s/def ::unknown-interface #{:warn :error :off})
-;; :error is the canonical blocking level (sl-femd, harmonized with the
-;; siblings above); :strict is a deprecated alias kept for existing configs.
-(s/def ::unknown-object #{:error :strict :warn :off})
-(s/def ::svo (s/keys :opt-un [::unknown-subject ::unknown-verb ::unknown-interface ::unknown-object]))
+;; Enforcement sub-config (sl-6wh9: renamed from :svo — that word names the
+;; triple on stepdef metadata; this block holds nothing but levels). One
+;; closed level set for every kind; the :strict alias retired with the rename.
+(s/def ::level #{:warn :error :off})
+(s/def ::all ::level)
+(s/def ::unknown-subject ::level)
+(s/def ::unknown-verb ::level)
+(s/def ::unknown-interface ::level)
+(s/def ::unknown-object ::level)
+;; sl-6wh9: a matched user defstep with no :svo metadata at all — nothing
+;; ran through the type system for that step.
+(s/def ::untyped-stepdef ::level)
+;; sl-6wh9: the knob for a '{'-prefixed raw locator in an intent slot. The
+;; key and its conditional default ship here; the issue itself grooms at
+;; sl-u2r0 (today the check keys on :unknown-object :error).
+(s/def ::raw-locator ::level)
+(s/def ::enforcement (s/keys :opt-un [::all ::unknown-subject ::unknown-verb
+                                      ::unknown-interface ::unknown-object
+                                      ::untyped-stepdef ::raw-locator]))
 
 ;; Glossaries sub-config
 (s/def ::subjects (s/nilable string?))
@@ -188,7 +215,7 @@
 ;; Top-level config
 (s/def ::config
   (s/keys :opt-un [::parser ::runner ::glossaries ::interfaces ::costumes
-                   ::svo ::timing]))
+                   ::enforcement ::timing]))
 
 ;; load-config-safe result
 (s/def ::status #{:ok :error})
@@ -217,14 +244,19 @@
   "Set of known interface types that have verb glossaries."
   #{:web :api :sms :email})
 
+(def enforcement-kinds
+  "The enforcement kinds, in display order. `:all` is the umbrella, not a
+   kind (sl-6wh9)."
+  [:unknown-subject :unknown-verb :unknown-interface :unknown-object
+   :untyped-stepdef :raw-locator])
+
 (def default-config
   "Built-in default configuration.
 
-   NOTE: the :svo block documents the enforcement defaults that apply once
-   a user OPTS IN to Shifted mode by putting an :svo key in their config.
-   `load-config` strips :svo from its result when the user's config lacks
-   the key — presence of :svo in a loaded config therefore means the user
-   asked for Shifted mode (sl-ieie; ARCHITECTURE.md ':svo absent = Vanilla')."
+   The :enforcement block is the built-in level of every kind (sl-6wh9).
+   `load-config` always carries the block through — see `resolve-enforcement`
+   for how a user's named keys, the :all umbrella, and the conditional
+   defaults combine."
   {:parser {:dialect "en"}
    :runner {:step-paths ["steps/"]
             :features ["features/"]
@@ -239,15 +271,16 @@
    :interfaces {:web {:type :web
                       :adapter :etaoin
                       :config {}}}
-   ;; SVO enforcement settings (Shifted mode opt-in defaults — see docstring).
-   ;; :unknown-object's :off here is the NO-INTENTS default only: load-config
-   ;; flips the effective default to :warn when an :intents glossary is
-   ;; configured and the user didn't set the key (sl-femd,
-   ;; apply-conditional-object-default).
-   :svo {:unknown-subject :warn
-         :unknown-verb :warn
-         :unknown-interface :error
-         :unknown-object :off}})
+   ;; Enforcement levels. :unknown-object's and :raw-locator's :off here are
+   ;; the NO-INTENTS defaults only: load-config flips the effective default
+   ;; to :warn when an :intents glossary is configured and the user set
+   ;; neither the key nor :all (sl-femd, resolve-enforcement).
+   :enforcement {:unknown-subject :warn
+                 :unknown-verb :warn
+                 :unknown-interface :error
+                 :unknown-object :off
+                 :untyped-stepdef :warn
+                 :raw-locator :off}})
 
 ;; -----------------------------------------------------------------------------
 ;; Config Loading
@@ -346,20 +379,47 @@
         (seq verbs) (assoc :verbs verbs)
         intents (assoc :intents intents)))))
 
-(defn- apply-conditional-object-default
-  "sl-femd: :unknown-object's default is CONDITIONAL — :warn when an :intents
-   glossary is configured (there is something to validate against), :off
-   otherwise (default-config's static value). Applies only when the user
-   didn't set the key themselves; evaluated on the MERGED config so
-   conventionally probed glossaries (sl-fcjm) count as configured.
-   Shifted-mode-only by construction: the caller only reaches this when the
-   user's config carries :svo (sl-ieie)."
-  [merged user-config]
-  (let [user-svo (:svo user-config)]
-    (if (and (get-in merged [:glossaries :intents])
-             (not (and (map? user-svo) (contains? user-svo :unknown-object))))
-      (assoc-in merged [:svo :unknown-object] :warn)
-      merged)))
+(def ^:private intents-conditional-kinds
+  "Kinds whose built-in default is CONDITIONAL on an :intents glossary
+   (sl-femd, extended to :raw-locator at sl-6wh9): :warn when one is
+   configured — there is something to validate against — and :off
+   otherwise (default-config's static value)."
+  #{:unknown-object :raw-locator})
+
+(def ^:private umbrella-exempt-kinds
+  "Kinds the :all umbrella never touches (sl-6wh9 ruling #1/#6):
+   :unknown-interface is infrastructure — nothing can be provisioned for an
+   unknown instance — so it stays :error under any umbrella. A NAMED key
+   still sets it (the spec is unchanged)."
+  #{:unknown-interface})
+
+(defn- level? [v] (s/valid? ::level v))
+
+(defn- resolve-enforcement
+  "The effective :enforcement block (sl-6wh9). Per kind, first hit wins:
+   the user's named key → the :all umbrella (exempt kinds skip it; an
+   invalid :all value is ignored here so `normalize` can name it) → the
+   conditional default (:warn for the intents-conditional kinds when an
+   :intents glossary is configured, explicit or conventionally probed —
+   evaluated on the MERGED config) → default-config's built-in level. The
+   user's :all is carried through verbatim so `normalize` validates it."
+  [merged user-enforcement]
+  (let [user-enf (when (map? user-enforcement) user-enforcement)
+        all (:all user-enf)
+        intents? (some? (get-in merged [:glossaries :intents]))
+        effective (into {}
+                        (map (fn [k]
+                               [k (or (get user-enf k)
+                                      (when (and (level? all)
+                                                 (not (umbrella-exempt-kinds k)))
+                                        all)
+                                      (when (and intents? (intents-conditional-kinds k))
+                                        :warn)
+                                      (get-in default-config [:enforcement k]))]))
+                        enforcement-kinds)]
+    (assoc merged :enforcement
+           (cond-> effective
+             (contains? user-enf :all) (assoc :all all)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Public API
@@ -402,18 +462,18 @@
 
    Returns merged config map.
 
-   Mode invariant (sl-ieie): the result contains :svo iff the USER's config
-   contained :svo. Shifted mode is explicit opt-in — when the user's config
-   has :svo, the default enforcement levels are deep-merged under it; when
-   it doesn't (or no config file exists), :svo is absent from the result and
-   the run is Vanilla. `stepengine.compile/shifted-mode?` keys on this.
+   Enforcement invariant (sl-6wh9): the result ALWAYS carries a complete
+   :enforcement block — one level per kind in `enforcement-kinds` — whether
+   or not the user's config had the key. There is no mode: presence means
+   nothing, absence means the defaults. `resolve-enforcement` combines the
+   user's named keys, the :all umbrella, and the conditional defaults.
 
-   Conditional default (sl-femd): in Shifted mode, :unknown-object defaults
+   Conditional default (sl-femd): :unknown-object and :raw-locator default
    :warn when an :intents glossary is configured (explicit or conventionally
-   probed) and :off otherwise; an explicit user value always wins. This is
-   the ONE place the effective default is computed — downstream :off
-   fallbacks (stepengine.bind, svo.validate) are nothing-configured safety
-   nets, not defaults.
+   probed) and :off otherwise; an explicit user value or :all always wins.
+   This is the ONE place the effective default is computed — downstream
+   :off fallbacks (stepengine.bind, svo.validate) are nothing-configured
+   safety nets, not defaults.
 
    Interface invariant (sl-g2lj, Design A): the result's :interfaces is the
    builtin default set iff the USER's config has no :interfaces key. When the
@@ -453,41 +513,41 @@
            (let [user-config (:config result)
                  merged (deep-merge default-config user-config)
                  ;; Conventional glossary defaults (sl-fcjm): only when the
-                 ;; user's config has NO :glossaries key — same contains?-on-
-                 ;; user-config pattern as :svo below. Real-config path only;
-                 ;; the defaults context never probes.
+                 ;; user's config has NO :glossaries key (contains?-on-
+                 ;; user-config: an explicit nil is "empty on purpose").
+                 ;; Real-config path only; the defaults context never probes.
                  merged (if (contains? user-config :glossaries)
                           merged
                           (assoc merged :glossaries
                                  (probe-conventional-glossaries context)))
                  ;; User :interfaces replaces the builtin set WHOLESALE
-                 ;; (sl-g2lj, Design A — the :glossaries/:svo whole-key
+                 ;; (sl-g2lj, Design A — the :glossaries whole-key
                  ;; pattern): presence of the key makes the user's map the
                  ;; complete set. :default entries expand to the builtin defs
                  ;; verbatim; an explicit nil means zero interfaces and is
                  ;; normalized to {} HERE (sl-a7sx, Warden W-B1) so every
                  ;; downstream consumer sees ONE zero-interfaces shape —
-                 ;; the suite-lint truthiness gate (stepengine.compile) and
-                 ;; the projection's configured-types both read {} as
-                 ;; "present, complete, empty" and nil as "exempt".
+                 ;; the suite-lint truthiness gate (stepengine.compile) reads
+                 ;; {} as "present, complete, empty" and nil as "exempt"; the
+                 ;; projection's zero-interfaces WARN (sl-a55s) keys on it.
                  merged (if (contains? user-config :interfaces)
                           (assoc merged :interfaces
                                  (expand-interface-defaults
                                   (let [ifaces (:interfaces user-config)]
                                     (if (nil? ifaces) {} ifaces))))
                           merged)]
-             ;; Shifted mode is user opt-in: keep :svo (with defaults merged
-             ;; under it) only when the user's config has the key (sl-ieie).
-             (if (contains? user-config :svo)
-               (apply-conditional-object-default merged user-config)
-               (dissoc merged :svo)))
+             ;; The effective enforcement block is computed from the USER's
+             ;; block (not the deep-merge, whose per-key merge would let a
+             ;; named key shadow :all incorrectly) — sl-6wh9.
+             (resolve-enforcement merged (:enforcement user-config)))
            (throw (ex-info (:message result)
                            {:type (:type result)
                             :path config-path}))))
 
-       ;; No config file, use defaults — no user :svo, so Vanilla (sl-ieie)
+       ;; No config file: the built-in defaults, enforcement block included
+       ;; (sl-6wh9 — the no-config run is an ordinary run).
        :else
-       (dissoc default-config :svo)))))
+       (resolve-enforcement default-config nil)))))
 
 (defn load-config-safe
   "Like load-config but returns error map instead of throwing.
@@ -638,7 +698,7 @@
    with the default). :webdriver/:webdriver-url are deliberately NOT here
    (sl-7kct): `normalize` validates them on the projection path but nothing
    consumes the result, so to `sl run` they are ignored keys like any other."
-  #{:parser :runner :glossaries :interfaces :costumes :svo :timing})
+  #{:parser :runner :glossaries :interfaces :costumes :enforcement :timing})
 
 (def ^:private misplaced-key-paths
   ;; Known NESTED keys users plausibly write at the top level, mapped to the
@@ -654,6 +714,7 @@
    :halt-on-observation-failure [:runner :halt-on-observation-failure]
    :seed              [:runner :seed]
    :capture           [:runner :capture]
+   :ref-url           [:runner :ref-url]
    :junit-xml         [:runner :report :junit-xml]
    :html              [:runner :report :html]
    :dialect           [:parser :dialect]
@@ -662,10 +723,15 @@
    :intents           [:glossaries :intents]
    :deadline-ms       [:timing :deadline-ms]
    :interval-ms       [:timing :interval-ms]
-   :unknown-subject   [:svo :unknown-subject]
-   :unknown-verb      [:svo :unknown-verb]
-   :unknown-interface [:svo :unknown-interface]
-   :unknown-object    [:svo :unknown-object]})
+   :unknown-subject   [:enforcement :unknown-subject]
+   :unknown-verb      [:enforcement :unknown-verb]
+   :unknown-interface [:enforcement :unknown-interface]
+   :unknown-object    [:enforcement :unknown-object]
+   :untyped-stepdef   [:enforcement :untyped-stepdef]
+   :raw-locator       [:enforcement :raw-locator]
+   ;; sl-6wh9: the retired block name. No alias — an old :svo block is
+   ;; ignored and this did-you-mean names the rename.
+   :svo               [:enforcement]})
 
 (defn lint-config
   "Lint a loaded (merged) config map for silently-ignored TOP-LEVEL keys
@@ -978,50 +1044,51 @@
               (validate-single-costume (:interfaces config) name def))
             costumes))))
 
-(def svo-levels
-  "The framework-owned CLOSED set of :svo enforcement levels (sl-3bqv,
-   doctrine bullet 9: a closed set has no leniency knob — it errors, it
-   never ignores). :unknown-object additionally accepts :strict, the
-   deprecated alias for :error (sl-femd)."
+(def enforcement-levels
+  "The framework-owned CLOSED set of enforcement levels (sl-3bqv, doctrine
+   bullet 9: a closed set has no leniency knob — it errors, it never
+   ignores). The :strict alias retired with the :enforcement rename
+   (sl-6wh9)."
   #{:warn :error :off})
 
-(def ^:private svo-keys
-  #{:unknown-subject :unknown-verb :unknown-interface :unknown-object})
+(def ^:private enforcement-keys
+  (into [:all] enforcement-kinds))
 
-(defn- validate-svo-config
-  "Validate the :svo enforcement LEVELS at load (sl-3bqv). The ::svo enum
-   specs sat under a ::config spec nothing gated, so a typo'd level
-   (:warm) flowed through compute-severity as a non-:error value —
-   silently non-blocking. Every non-nil :svo map's known keys must hold a
-   level from `svo-levels` (:unknown-object also :strict); anything else
-   is a HARD planning error with a did-you-mean over the enum. Unknown
-   keys inside :svo stay lint-config's business (top-level scope) — this
-   validator is about the VALUES. Returns a seq of errors (nil when clean)."
+(defn- validate-enforcement-config
+  "Validate the :enforcement LEVELS at load (sl-3bqv). The enum specs sat
+   under a ::config spec nothing gated, so a typo'd level (:warm) flowed
+   through compute-severity as a non-:error value — silently non-blocking.
+   Every non-nil :enforcement map's known keys (the kinds and :all) must
+   hold a level from `enforcement-levels`; anything else is a HARD planning
+   error with a did-you-mean over the enum. Unknown keys inside the block
+   stay lint-config's business (top-level scope) — this validator is about
+   the VALUES. Returns a seq of errors (nil when clean)."
   [config]
-  (let [svo (:svo config)]
+  (let [enf (:enforcement config)
+        allowed (vec (sort enforcement-levels))]
     (cond
-      (nil? svo) nil
+      (nil? enf) nil
 
-      (not (map? svo))
-      [{:type :config/invalid-svo-level
-        :message (str ":svo must be a map of enforcement levels, got: " (pr-str svo))
-        :data {:definition svo}}]
+      (not (map? enf))
+      [{:type :config/invalid-enforcement-level
+        :message (str ":enforcement must be a map of enforcement levels, got: "
+                      (pr-str enf))
+        :data {:definition enf}}]
 
       :else
       (keep (fn [k]
-              (let [level (get svo k)
-                    allowed (cond-> svo-levels (= k :unknown-object) (conj :strict))]
-                (when (and (contains? svo k) (not (contains? allowed level)))
-                  (let [suggestion (text/suggest-similar level (vec (sort allowed)) 2)]
-                    {:type :config/invalid-svo-level
-                     :message (str "[:svo " k "] must be one of "
-                                   (pr-str (vec (sort allowed)))
+              (let [level (get enf k)]
+                (when (and (contains? enf k) (not (contains? enforcement-levels level)))
+                  (let [suggestion (text/suggest-similar level allowed 2)]
+                    {:type :config/invalid-enforcement-level
+                     :message (str "[:enforcement " k "] must be one of "
+                                   (pr-str allowed)
                                    ", got: " (pr-str level)
                                    (when suggestion
                                      (str " — did you mean " (pr-str suggestion) "?")))
-                     :data (cond-> {:key k :level level :allowed (vec (sort allowed))}
+                     :data (cond-> {:key k :level level :allowed allowed}
                              suggestion (assoc :suggestion suggestion))}))))
-            (sort svo-keys)))))
+            enforcement-keys))))
 
 (def ^:private glossaries-shape-hint
   "The one sentence every :config/invalid-glossaries error carries — names
@@ -1092,8 +1159,9 @@
    - :glossaries, when present and non-nil, must be a map whose :verbs is
      a list of path strings and whose :subjects/:intents are single path
      strings (:config/invalid-glossaries, sl-a7sx)
-   - :svo enforcement levels must be from the closed set `svo-levels`
-     (:config/invalid-svo-level with did-you-mean, sl-3bqv)
+   - :enforcement levels (every kind and :all) must be from the closed set
+     `enforcement-levels` (:config/invalid-enforcement-level with
+     did-you-mean, sl-3bqv)
    - Empty config is valid
 
    Top-level :webdriver/:webdriver-url are NOT validated or normalized here —
@@ -1103,13 +1171,13 @@
   (let [interface-errors (validate-interfaces-config config)
         costume-errors (validate-costumes-config config)
         glossary-errors (validate-glossaries-config config)
-        svo-errors (validate-svo-config config)
+        enforcement-errors (validate-enforcement-config config)
         errors (concat (keep identity [(validate-macro-config config)
                                        (validate-timing-config config)])
                        interface-errors
                        costume-errors
                        glossary-errors
-                       svo-errors)]
+                       enforcement-errors)]
     (if (seq errors)
       (assoc config :errors (vec errors))
       config)))
@@ -1209,31 +1277,19 @@
   (get config :costumes {}))
 
 ;; -----------------------------------------------------------------------------
-;; SVO Config Accessors
+;; Enforcement Config Accessors
 ;; -----------------------------------------------------------------------------
 
-(defn get-svo-settings
-  "Get SVO enforcement settings.
-
-   Returns map with enforcement levels:
-   - :unknown-subject — :warn, :error, or :off
-   - :unknown-verb — :warn, :error, or :off
-   - :unknown-interface — :warn, :error, or :off
-   - :unknown-object — :error, :warn, or :off (:strict = deprecated alias
-     for :error; effective default computed by load-config — :warn when an
-     :intents glossary is configured, :off otherwise, sl-femd)"
+(defn get-enforcement
+  "The effective enforcement levels of a LOADED config: one entry per kind
+   in `enforcement-kinds` (the :all umbrella is already folded in by
+   load-config and is not returned). Each value is :warn, :error, or :off.
+   Falls back to default-config's block for a raw (unloaded) map."
   [config]
-  (:svo config))
+  (select-keys (or (:enforcement config) (:enforcement default-config))
+               enforcement-kinds))
 
-(defn svo-enforcement
-  "Get the enforcement level for a specific SVO check.
-
-   check should be one of:
-   - :unknown-subject — :warn, :error, or :off
-   - :unknown-verb — :warn, :error, or :off
-   - :unknown-interface — :warn, :error, or :off
-   - :unknown-object — :error, :warn, or :off (:strict = deprecated alias)
-
-   Returns the configured enforcement level."
-  [config check]
-  (get-in config [:svo check]))
+(defn enforcement-level
+  "The effective level for one enforcement kind (see `enforcement-kinds`)."
+  [config kind]
+  (get (get-enforcement config) kind))

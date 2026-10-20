@@ -1,0 +1,4 @@
+;; sl-xvae fixture subjects: one user type with the instance the feature uses.
+{:subjects
+ {:user {:desc "Standard application user"
+         :instances [:alice]}}}

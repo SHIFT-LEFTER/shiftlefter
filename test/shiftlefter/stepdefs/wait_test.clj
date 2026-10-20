@@ -319,7 +319,7 @@
                     :verbs    {:web (:verbs web-glossary)}}
           opts {:glossary glossary
                 :interfaces {:web {:type :web :adapter :etaoin}}
-                :svo {:unknown-subject :error
+                :enforcement {:unknown-subject :error
                       :unknown-verb    :error
                       :unknown-interface :error}}
           result (bind/bind-suite [pickle] (registry/all-stepdefs) opts)]

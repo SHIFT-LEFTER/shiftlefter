@@ -1,10 +1,10 @@
 # SVO Validation
 
 Subject–Verb–Object (SVO) validation catches mistakes in your Gherkin steps
-**at bind time** — before any browser launches or scenario runs. In Shifted
-mode, a step's metadata resolves it to a `(Subject, Verb, Object)` triple, and
-the framework checks that triple against your project vocabulary while it loads
-the suite.
+**at bind time** — before any browser launches or scenario runs. A step's
+metadata resolves it to a `(Subject, Verb, Object)` triple, and the framework
+checks that triple against your project vocabulary while it loads the suite.
+This runs on every compile: there is no mode to turn on.
 
 ```clojure
 ;; Without SVO (plain step)
@@ -131,9 +131,9 @@ turns glossaries off):
         :adapter :etaoin
         :config {:headless true}}}
 
- :svo
- {:unknown-subject :warn       ; :warn or :error
-  :unknown-verb    :warn       ; :warn or :error
+ :enforcement                           ; optional — these ARE the defaults
+ {:unknown-subject :warn       ; :warn | :error | :off
+  :unknown-verb    :warn       ; :warn | :error | :off
   :unknown-object  :warn       ; :error | :warn | :off — defaults :warn when
                                ; :intents is configured, :off otherwise
   :unknown-interface :error}}
@@ -317,16 +317,26 @@ Subjects normalize to keywords: `"Alice"` → `:alice`, `"System Admin"` →
 
 When you configure `:intents`, the **Object** is validated too. Intent regions
 (under `glossary/intents/`) name the things a subject can act on — and
-`:svo {:unknown-object …}` controls how strictly the object in a step is checked
+`:enforcement {:unknown-object …}` controls how strictly the object in a step is checked
 against them:
 
-- `:error` — an object outside the loaded regions is a planning error, and raw
-  locators are disallowed. (`:strict` is a deprecated alias — same behavior.)
-- `:warn` — an unresolvable intent reference warns at planning time, with the
-  name and a did-you-mean; raw locators and quoted literals stay exempt (the
-  locator-policy escape hatch). The warning never blesses success — an
-  unresolvable name still fails at runtime; it just fails *before* the run too.
+- `:error` — every object issue on an intent slot is a planning error.
+- `:warn` — **an unresolvable intent reference is a planning error (exit 2)
+  at this level too**: an unknown intent, an unknown element, or an element
+  with no binding for the selected interface fails at planning with the
+  did-you-mean and the def-site (`Declared in: sl/glossary/intents/login.edn:4`)
+  — the machine knew before the run, and the run would fail at
+  `:browser/intent-resolve-error` anyway. What `:warn` governs is content
+  that merely does not look like a reference — free text (a space, a
+  lowercase start) on a slot whose frame defaults to `:intent` warns and
+  names the fix: declare `:object-kind :text` on the verb's frame.
 - `:off` — no object checking.
+
+Raw locators (`{:css "…"}` in an intent slot) ride their own kind,
+`:raw-locator`, with the same conditional default (`:off` without an intents
+glossary, `:warn` with one, `:error` to forbid): at `:warn` or `:error` the
+issue names the intent element that binds the same locator when one does
+(`Did you mean: Login.submit?`) and where it is declared.
 
 **The default is conditional:** `:warn` when an `:intents` glossary is
 configured (declared in `:glossaries` or found conventionally under
@@ -359,7 +369,7 @@ stepdefs of that type, and the same 0/1/2+ rule applies within it. The bound
 step executes on the named instance's capability.
 
 ```gherkin
-Then [:sms] :user/alice receives a message containing '(\d{6})'
+Then [:sms] :user/alice receives an SMS to '+15550001111' matching /(?<code>\d{6})/
 When [:admin-console] :user/alice opens the browser to Dashboard
 ```
 
@@ -368,8 +378,8 @@ The annotation is also an assertion: if the name isn't configured under
 catching typos and missing config early. Use it to cross channel types
 (`[:sms]` on a step between browser steps) and to pick one of several
 same-type instances (`[:admin-console]` vs `[:storefront]` — both speak the
-full `:web` vocabulary). Annotations are a Shifted-mode feature; without
-Shifted's `:svo` configuration, `[:foo]` is just literal text. When the
+full `:web` vocabulary). The annotation pass runs on every compile — no
+configuration turns it on. When the
 annotation filters everything out, the planning diagnostic surfaces the
 resolution chain: `No [:admin] (type :web) stepdef matches, but type :sms
 does.`
@@ -435,22 +445,32 @@ browser instance:
                                                  ; builtin :web vocabulary
 ```
 
-### `:svo`
+### `:enforcement`
 
 ```clojure
-{:svo
- {:unknown-subject :warn       ; :warn | :error
-  :unknown-verb    :warn       ; :warn | :error
-  :unknown-object  :warn       ; :error | :warn | :off (see below)
-  :unknown-interface :error}}  ; :warn | :error
+{:enforcement
+ {:unknown-subject   :warn     ; :warn | :error | :off
+  :unknown-verb      :warn     ; :warn | :error | :off
+  :unknown-object    :warn     ; :warn | :error | :off (see below)
+  :unknown-interface :error    ; :warn | :error — :all does not touch it
+  :untyped-stepdef   :warn     ; a matched defstep with no :svo metadata
+  :raw-locator       :off}}    ; follows :unknown-object's conditional default
 ```
 
-`:warn` logs and continues; `:error` fails at bind time, before execution.
+The block holds nothing but levels, and these are the defaults: leaving it out
+means exactly this, and its presence turns nothing on. `:warn` logs and
+continues; `:error` fails at bind time, before execution. `:all` is an
+umbrella — `{:all :error}` sets every kind, a named key overrides it, and
+`:unknown-interface` stays `:error` regardless.
 
-`:unknown-object` defaults `:warn` when an `:intents` glossary is configured
-and `:off` otherwise (an explicit value always wins). Its blocking level is
-spelled `:error` like the siblings; `:strict` remains accepted as a deprecated
-alias.
+Strictness tracks ownership, not a global dial — ask who owns the word.
+Vocabulary you own warns by default, because today's unknown subject may be
+tomorrow's glossary entry; an interface is infrastructure config, so a wrong
+one is an error; and framework-owned closed sets have no knob at all. Binding
+errors — an undefined or ambiguous step — block unconditionally.
+
+`:unknown-object` and `:raw-locator` default `:warn` when an `:intents`
+glossary is configured and `:off` otherwise (an explicit value always wins).
 
 ---
 
@@ -521,7 +541,8 @@ restating an entry is how you replace one.
   <body>)
 ```
 
-Metadata is entirely optional. Recognized keys:
+Metadata is syntactically optional — a `defstep` without `:svo` binds and runs,
+and is reported as `:stepdef/untyped`. Recognized keys:
 
 | Key | Type | Description |
 |---|---|---|
@@ -543,8 +564,8 @@ Adopt SVO incrementally:
    built-in interface verbs as-is; turn recurring domain actions ("checks out") into
    macros, not verbs (see [Add Domain Language](extending-vocabulary.md)).
 3. **Configure enforcement permissively** — `:warn` for subjects and verbs.
-4. **Annotate one step at a time.** Add the `:svo` map; nothing forces you to
-   convert the rest.
+4. **Annotate one step at a time.** Add the `:svo` map; a step you haven't
+   reached still runs, reported as `:stepdef/untyped` (a warning by default).
 5. **Fix what the validator reports** — missing subjects/verbs, typos.
 6. **Tighten** to `:error` once clean.
 

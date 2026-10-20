@@ -94,9 +94,12 @@
              errors (vec (mapcat (fn [r] (map #(assoc % :path (:path r)) (:errors r)))
                                  (filter #(= :error (:status %)) parsed)))
              pickles (vec (mapcat :pickles (filter #(= :ok (:status %)) parsed)))
-             pickles (if-let [rules (:tag-filter selection)]
-                       (:selected (tagd/apply-dispositions rules pickles))
-                       pickles)
+             ;; The run's own selection semantics, always (sl-190x): a
+             ;; @wip/@skip hold is outside the run's grammar even with no
+             ;; tag rules — and the count rides the result so the listing
+             ;; SAYS so (C5), the way tag filtering shows in the header.
+             {pickles :selected held :held}
+             (tagd/apply-dispositions (:tag-filter selection) pickles)
              result (compile/compile-suite cfg pickles (registry/all-stepdefs)
                                            {:adapter-registry (:adapter-registry opts)
                                             :suite-lint-mode :warn})
@@ -108,6 +111,7 @@
           :parse-errors errors
           :feature-count (count (:files disc))
           :scenario-count (count plans)
+          :held-count (count held)
           :unmatched-step-count unmatched
           :selection selection
           :suite-lint-issues (vec (get-in result [:diagnostics :suite-lint-issues]))})))))
